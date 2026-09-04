@@ -41,7 +41,12 @@ def test_embedded_creative_surfaces_keep_prompts_and_outputs_out_of_persistent_b
 
 def test_media_playback_proxies_never_cache_decrypted_images_or_videos() -> None:
     gateway_root = ROOT / "packages" / "media-gateway"
-    python_gateway = (gateway_root / "app.py").read_text(encoding="utf-8")
+    # The gateway is app.py plus the modules under gateway/; reading only the
+    # entry point would keep passing after the header it asserts on moved.
+    python_gateway = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [gateway_root / "app.py", *sorted((gateway_root / "gateway").glob("*.py"))]
+    )
     next_proxy = (gateway_root / "app" / "comfy" / "[[...path]]" / "route.js").read_text(encoding="utf-8")
 
     assert '"Cache-Control", "private, no-store, max-age=0"' in python_gateway

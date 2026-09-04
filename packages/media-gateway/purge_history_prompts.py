@@ -43,7 +43,7 @@ def scrub_line(gw, raw: str):
     if not isinstance(record, dict):
         return raw, False
     before = json.dumps(record, ensure_ascii=False, sort_keys=True)
-    cleaned = gw.private_rec(record)
+    cleaned = gw.history.private_rec(record)
     after = json.dumps(cleaned, ensure_ascii=False, sort_keys=True)
     return json.dumps(cleaned, ensure_ascii=False), before != after
 

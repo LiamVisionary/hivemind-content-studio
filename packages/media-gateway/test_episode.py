@@ -20,7 +20,7 @@ from test_app import load_app
 class EpisodeRouteTest(unittest.TestCase):
     def test_route_stages_the_joined_clip_and_dispatches(self):
         app = load_app()
-        completed = app.threading.Event()
+        completed = app.jobs.threading.Event()
         captured = {}
 
         def fake_run(job_id, video_path, options):
@@ -31,15 +31,15 @@ class EpisodeRouteTest(unittest.TestCase):
         with TemporaryDirectory() as td:
             out_dir = Path(td) / "out"
             out_dir.mkdir()
-            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
-            server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
-            with patch.object(app, "TOKEN", "test-token"), \
-                 patch.object(app, "OUT_DIR", out_dir), \
-                 patch.object(app, "jobs", {}), \
-                 patch.object(app, "run_episode_save", side_effect=fake_run):
+            server = app.runtime.ThreadingHTTPServer(("127.0.0.1", 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, "TOKEN", "test-token"), \
+                 patch.object(app.config, "OUT_DIR", out_dir), \
+                 patch.object(app.jobs, "jobs", {}), \
+                 patch.object(app.runners, "run_episode_save", side_effect=fake_run):
                 server_thread.start()
                 try:
-                    request = app.Request(
+                    request = app.net.Request(
                         f"http://127.0.0.1:{server.server_port}/api/episode",
                         data=json.dumps({
                             "video_base64": "data:video/mp4;base64," + base64.b64encode(b"episodebytes").decode(),
@@ -48,7 +48,7 @@ class EpisodeRouteTest(unittest.TestCase):
                         headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
                         method="POST",
                     )
-                    with app.urlopen(request, timeout=5) as response:
+                    with app.net.urlopen(request, timeout=5) as response:
                         payload = json.loads(response.read().decode("utf-8"))
                         self.assertEqual(response.status, 202)
                     self.assertTrue(completed.wait(1))
@@ -65,21 +65,21 @@ class EpisodeRouteTest(unittest.TestCase):
     def test_route_rejects_a_request_with_no_clip(self):
         app = load_app()
         with TemporaryDirectory() as td:
-            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
-            server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
-            with patch.object(app, "TOKEN", "test-token"), \
-                 patch.object(app, "OUT_DIR", Path(td)), \
-                 patch.object(app, "jobs", {}):
+            server = app.runtime.ThreadingHTTPServer(("127.0.0.1", 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, "TOKEN", "test-token"), \
+                 patch.object(app.config, "OUT_DIR", Path(td)), \
+                 patch.object(app.jobs, "jobs", {}):
                 server_thread.start()
                 try:
-                    request = app.Request(
+                    request = app.net.Request(
                         f"http://127.0.0.1:{server.server_port}/api/episode",
                         data=json.dumps({"shots": 2}).encode("utf-8"),
                         headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
                         method="POST",
                     )
-                    with self.assertRaises(app.HTTPError) as raised:
-                        app.urlopen(request, timeout=5)
+                    with self.assertRaises(app.http.HTTPError) as raised:
+                        app.net.urlopen(request, timeout=5)
                     self.assertEqual(raised.exception.code, 400)
                 finally:
                     server.shutdown()
@@ -110,12 +110,12 @@ class EpisodeRouteTest(unittest.TestCase):
                     sealed.append(str(envelope))
                 return sealed
 
-            with patch.object(app, "COMFY_OUTPUT_DIR", comfy_out), \
-                 patch.object(app, "jobs", {}), \
-                 patch.object(app, "encrypt_outputs", side_effect=fake_encrypt), \
-                 patch.object(app, "append_history", lambda rec: None):
-                app.run_episode_save("job123", staged, {"shots": 3})
-                record = app.jobs["job123"]
+            with patch.object(app.config, "COMFY_OUTPUT_DIR", comfy_out), \
+                 patch.object(app.jobs, "jobs", {}), \
+                 patch.object(app.media, "encrypt_outputs", side_effect=fake_encrypt), \
+                 patch.object(app.history, "append_history", lambda rec: None):
+                app.runners.run_episode_save("job123", staged, {"shots": 3})
+                record = app.jobs.jobs["job123"]
 
         self.assertEqual(record["status"], "success")
         self.assertEqual(record["backend"], "episode-join")
@@ -129,11 +129,11 @@ class EpisodeRouteTest(unittest.TestCase):
         with TemporaryDirectory() as td:
             comfy_out = Path(td) / "comfy-out"
             comfy_out.mkdir()
-            with patch.object(app, "COMFY_OUTPUT_DIR", comfy_out), \
-                 patch.object(app, "jobs", {}), \
-                 patch.object(app, "append_history", lambda rec: None):
-                app.run_episode_save("job404", Path(td) / "gone.mp4", {"shots": 2})
-                record = app.jobs["job404"]
+            with patch.object(app.config, "COMFY_OUTPUT_DIR", comfy_out), \
+                 patch.object(app.jobs, "jobs", {}), \
+                 patch.object(app.history, "append_history", lambda rec: None):
+                app.runners.run_episode_save("job404", Path(td) / "gone.mp4", {"shots": 2})
+                record = app.jobs.jobs["job404"]
             # Read the directory while the temp tree still exists.
             leftovers = list(comfy_out.iterdir())
 

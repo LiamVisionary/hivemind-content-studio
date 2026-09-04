@@ -104,6 +104,13 @@ dev = [
 # before importing `app`, which is what E402 flags.
 "archive/moneyprinterturbo/webui/Main.py" = ["E402"]
 "archive/moneyprinterturbo/main.py" = ["E402"]
+# The media gateway's config module imports the vendored workflow builders
+# that sit beside app.py (krea2_identity_workflow, strength_hunt,
+# klein_character_sheet, smart_mask, ltx_director_*, video_restore,
+# cloud_restore) and re-exports them: every other module in the package reaches
+# them as `config.<name>`, so one file says where they come from and a test has
+# one seam to patch. Pyflakes sees imports that this file itself never calls.
+"packages/media-gateway/gateway/config.py" = ["F401"]
 
 [tool.coverage.run]
 # 统计分支覆盖率可以识别“代码行执行了，但条件的另一条分支从未验证”的情况，
