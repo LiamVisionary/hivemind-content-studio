@@ -8,7 +8,7 @@
 // module-level buffer registered before React mounts.
 import { useEffect, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { subscribeRecoveryKey, clearBufferedRecoveryKey } from './recoveryKeyBuffer.js';
+import { subscribeRecoveryKey, clearBufferedRecoveryKey, bufferedRecoveryReason } from './recoveryKeyBuffer.js';
 import { zh } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button } from '../ui/kit.jsx';
@@ -22,6 +22,10 @@ export function VaultRecoveryModal() {
   useEffect(() => subscribeRecoveryKey(setRecoveryKey), []);
 
   if (!recoveryKey) return null;
+
+  // A replacement key is a different sentence from a first one: the old key
+  // stopped working the moment this one was stored, and nothing was re-encrypted.
+  const rotated = bufferedRecoveryReason() === 'rotated';
 
   const copy = async () => {
     try {
@@ -55,16 +59,29 @@ export function VaultRecoveryModal() {
   };
 
   return (
-    <Modal open title={zh() ? '保存你的恢复密钥' : 'Save your recovery key'} size="md" dismissable={false}>
+    <Modal
+      open
+      title={rotated
+        ? (zh() ? '保存你的新恢复密钥' : 'Save your new recovery key')
+        : (zh() ? '保存你的恢复密钥' : 'Save your recovery key')}
+      size="md"
+      dismissable={false}
+    >
       <div className="flex flex-col gap-4">
         <div className="flex items-start gap-3 rounded-md border border-warn/30 bg-warn/10 px-3.5 py-3">
           <Icon name="shield" size={18} className="mt-0.5 shrink-0 text-warn" />
           <p className="text-[13px] leading-relaxed text-ink1">
-            {zh()
-              ? <>你的私人保险库刚刚创建。此密钥<strong>只显示一次</strong> — 如果你忘记口令，它是恢复加密媒体和草稿的唯一途径。任何内容都不会以明文发送到服务器。</>
-              : <>Your private vault was just created. This key is shown <strong>only once</strong> — it is the only
-                way to recover your encrypted media and drafts if you forget your passphrase. Nothing is ever sent
-                to a server in plain text.</>}
+            {rotated
+              ? (zh()
+                ? <>这是你的新恢复密钥。旧密钥已失效。此密钥<strong>只显示一次</strong> — 如果你忘记密码，它是恢复加密媒体和草稿的唯一途径。你已有的内容没有任何改动。</>
+                : <>This is your new recovery key, and the old one stopped working. It is shown <strong>only
+                  once</strong> — it is the only way back into your library if you forget your password. Nothing
+                  you have already made was changed.</>)
+              : (zh()
+                ? <>你的私人保险库刚刚创建。此密钥<strong>只显示一次</strong> — 如果你忘记口令，它是恢复加密媒体和草稿的唯一途径。任何内容都不会以明文发送到服务器。</>
+                : <>Your private vault was just created. This key is shown <strong>only once</strong> — it is the only
+                  way to recover your encrypted media and drafts if you forget your passphrase. Nothing is ever sent
+                  to a server in plain text.</>)}
           </p>
         </div>
         <code className="select-all break-all rounded-md border border-line1 bg-bg0 px-4 py-3.5 text-center font-mono text-[15px] font-semibold tracking-wider text-honey">

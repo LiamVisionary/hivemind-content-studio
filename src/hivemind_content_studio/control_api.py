@@ -96,8 +96,10 @@ from .accounts import (
     RelyingParty,
     WebAuthnError,
     authentication_options,
+    hash_password,
     is_legacy_password_hash,
     registration_options,
+    seal_recovery_nonce,
     verify_assertion,
     verify_password,
     verify_registration,
@@ -247,6 +249,38 @@ class AccountCreateBody(BaseModel):
     password: str = ""
 
 
+class VaultPassphraseWrap(BaseModel):
+    """The passphrase half of a vault identity, re-wrapped in the browser.
+
+    Nothing here is a secret the server can spend: `salt` is public PBKDF2
+    input and `wrapped_mk_pass` is the master key sealed under a key derived
+    from a passphrase this process never sees.
+    """
+
+    salt: str = Field(min_length=1, max_length=8192)
+    wrapped_mk_pass: str = Field(min_length=1, max_length=8192)
+    kdf: str = Field(default="", max_length=128)
+
+
+class AccountRecoveryChallengeBody(BaseModel):
+    account_id: int
+
+
+class AccountRecoveryResetBody(BaseModel):
+    account_id: int
+    challenge: str = Field(min_length=1, max_length=128)
+    # The nonce this browser decrypted with the recovered vault private key.
+    nonce: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1)
+    wrap: VaultPassphraseWrap
+
+
+class AccountPasswordChangeBody(BaseModel):
+    current_password: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+    wrap: VaultPassphraseWrap
+
+
 class AccountRenameBody(BaseModel):
     name: str = Field(min_length=1, max_length=40)
 
@@ -334,6 +368,17 @@ class StudioStateBody(BaseModel):
 class VaultIdentityBody(BaseModel):
     identity: dict[str, Any]
     allow_replace: bool = False
+
+
+class VaultRecoveryWrapBody(BaseModel):
+    """A freshly minted recovery key's copy of the master key.
+
+    Replaces only `wrapped_mk_recovery`, which is what makes "show me a new
+    recovery key" different from rotating the vault: the master key is
+    unchanged, so nothing already sealed has to be re-encrypted.
+    """
+
+    wrapped_mk_recovery: str = Field(min_length=1, max_length=8192)
 
 
 class VaultBlobBody(BaseModel):
@@ -1520,6 +1565,68 @@ def build_control_app(
     def outputs_root() -> Path:
         return workspaces.paths(scoped_account_id()).outputs_root
 
+    # ── password resets, atomic across two databases ──────────────────────────
+    #
+    # Changing a workspace password moves two things that do not share a
+    # transaction: the scrypt hash in accounts.sqlite3, and the
+    # passphrase-wrapped master key in THAT account's vault. Half of it is worse
+    # than none — a new password that cannot open the library, or a library
+    # wrapped under a passphrase the account will not accept.
+    def _apply_vault_wrap(account_id: int, wrap: dict[str, str]) -> None:
+        """Merge a new passphrase wrap into an account's vault identity.
+
+        Only the passphrase half moves. The recovery copy, the public key, the
+        sealed private key and every passkey's PRF wrap are read back and
+        written out untouched — which is exactly why passkeys and device wraps
+        survive a password change: all of them wrap the SAME master key, and
+        the master key is not what changes here.
+        """
+        store = workspaces.vault(int(account_id))
+        identity = store.get_identity()
+        if not identity:
+            raise LookupError("This workspace has no vault to re-wrap")
+        merged = dict(identity)
+        merged["salt"] = wrap["salt"]
+        merged["wrapped_mk_pass"] = wrap["wrapped_mk_pass"]
+        if wrap.get("kdf"):
+            merged["kdf"] = wrap["kdf"]
+        store.put_identity(merged, allow_replace=True)
+
+    def _commit_password_reset(account_id: int, password_hash: str, wrap: dict[str, str]) -> None:
+        """Set the password AND the vault wrap, or neither.
+
+        The journal row is the commit point. Before it, nothing has changed and
+        the old password still works. After it, every later instant is
+        recoverable: a process killed mid-write is finished by
+        `_resume_password_resets` on the next boot, because the row carries both
+        halves. An in-process failure rolls the vault back to the identity
+        snapshotted here and drops the journal, so the caller's 500 is the truth.
+        """
+        before = workspaces.vault(int(account_id)).get_identity()
+        account_store.begin_password_reset(int(account_id), password_hash, wrap)
+        try:
+            _apply_vault_wrap(account_id, wrap)
+            account_store.finish_password_reset(int(account_id))
+        except Exception:
+            if before is not None:
+                with contextlib.suppress(Exception):
+                    workspaces.vault(int(account_id)).put_identity(before, allow_replace=True)
+            account_store.cancel_password_reset(int(account_id))
+            raise
+
+    def _resume_password_resets() -> None:
+        for pending in account_store.pending_password_resets():
+            account_id = int(pending["account_id"])
+            try:
+                _apply_vault_wrap(account_id, pending["vault_wrap"])
+            except Exception:
+                log.warning("Could not finish the password reset for workspace %s", account_id)
+                continue
+            account_store.finish_password_reset(account_id)
+            log.info("Finished an interrupted password reset for workspace %s", account_id)
+
+    _resume_password_resets()
+
     def _vault_public_key() -> str | None:
         """The SIGNED-IN account's vault public key for server-side sealing, or
         None until they have created a vault in-browser. Resolving this per
@@ -1716,6 +1823,13 @@ def build_control_app(
         "/api/accounts",
         "/api/accounts/setup",
         "/api/accounts/unlock",
+        # Forgotten password. Reachable before sign-in by necessity — that is
+        # the whole situation — and safe because neither route hands out the
+        # passphrase-wrapped master key, both are throttled exactly like unlock,
+        # and the reset one only answers a nonce that had to be decrypted with
+        # the vault's own private key.
+        "/api/accounts/recovery/challenge",
+        "/api/accounts/recovery/reset",
         "/api/accounts/webauthn/authenticate/options",
         "/api/accounts/webauthn/authenticate",
         # The HivemindOS app answering a link the owner started here. It has no
@@ -2211,6 +2325,124 @@ def build_control_app(
                           "expires_in_seconds": account_access.session_seconds}),
             request, account,
         )
+
+    # ── forgotten password: recover with the recovery key ─────────────────────
+    #
+    # Possession is proved by DECRYPTION, not by a signature. The vault keypair
+    # is RSA-OAEP with encrypt/decrypt usages only and WebCrypto refuses to sign
+    # with it, so the server seals a random nonce to the public half and asks
+    # for the plaintext back. Only a browser that unwrapped the master key with
+    # the recovery key — and through it the private key — can answer.
+    _RECOVERY_UNAVAILABLE = (
+        "There is no recovery key on file for that workspace. Sign in with its password, "
+        "then use Settings → Privacy & vault to show a new recovery key."
+    )
+
+    @app.post("/api/accounts/recovery/challenge")
+    def recovery_challenge(body: AccountRecoveryChallengeBody, request: Request) -> dict:
+        """Everything a browser needs to open this vault with only the recovery key.
+
+        Deliberately ABSENT from this response: `wrapped_mk_pass`. It is the
+        master key sealed under a passphrase, and handing it to an
+        unauthenticated caller would turn a forgotten-password screen into an
+        offline password-cracking oracle for anyone who can reach the port. The
+        recovery copy is a different animal — it is sealed under 160 bits of
+        randomness this server has never held, so there is nothing to guess.
+        """
+        key = _throttle_key(request, body.account_id)
+        _guard_throttle(key, body.account_id)
+        account = account_store.get(body.account_id)
+        identity = workspaces.vault(body.account_id).get_identity() if account else None
+        if account is None or not identity:
+            _login_failed(key, body.account_id)
+            raise HTTPException(status_code=404, detail=_RECOVERY_UNAVAILABLE)
+        challenge, nonce = account_store.issue_recovery_challenge(account.id)
+        try:
+            sealed = seal_recovery_nonce(str(identity.get("public_key") or ""), nonce)
+        except Exception as exc:  # noqa: BLE001 — an unreadable key is one answer
+            raise HTTPException(status_code=409, detail=_RECOVERY_UNAVAILABLE) from exc
+        return {
+            "ok": True,
+            "challenge": challenge,
+            "nonce": sealed,
+            "kdf": identity.get("kdf") or "",
+            "salt": identity["salt"],
+            "wrapped_mk_recovery": identity["wrapped_mk_recovery"],
+            "wrapped_private_key": identity["wrapped_private_key"],
+        }
+
+    @app.post("/api/accounts/recovery/reset")
+    def recovery_reset(body: AccountRecoveryResetBody, request: Request) -> JSONResponse:
+        """One call: prove the nonce, set the password, re-wrap the vault.
+
+        Both writes land or neither does (`_commit_password_reset`), because a
+        password that opens the account but not the library is the failure this
+        whole flow exists to prevent.
+        """
+        key = _throttle_key(request, body.account_id)
+        _guard_throttle(key, body.account_id)
+        account = account_store.get(body.account_id)
+        proved = account is not None and account_store.consume_recovery_challenge(
+            body.challenge, body.nonce, body.account_id
+        )
+        if not proved:
+            _login_failed(key, body.account_id)
+            raise HTTPException(
+                status_code=401,
+                detail="That recovery key does not open this workspace. Check it for a typo — it is "
+                       "letters and digits in groups of four — and start the recovery again.",
+            )
+        assert account is not None
+        try:
+            _commit_password_reset(account.id, hash_password(body.password), body.wrap.model_dump())
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail=_RECOVERY_UNAVAILABLE) from exc
+        except Exception as exc:  # noqa: BLE001 — the rollback already ran
+            raise HTTPException(
+                status_code=500,
+                detail="The new password could not be saved, so nothing was changed — your old "
+                       "password still works. Start the recovery again.",
+            ) from exc
+        _login_succeeded(key, account.id)
+        account = account_store.get(account.id) or account
+        return _sign_in(
+            JSONResponse({"ok": True, "account": account.public(),
+                          "expires_in_seconds": account_access.session_seconds}),
+            request, account,
+        )
+
+    @app.post("/api/accounts/me/password")
+    def change_my_password(body: AccountPasswordChangeBody, request: Request) -> dict:
+        """Change the signed-in workspace's password and its vault wrap together.
+
+        The current password is verified here as well as in the browser: the
+        browser's check proves it can re-wrap, and this one stops a stolen
+        session cookie from changing the password on its own.
+        """
+        account = getattr(request.state, "account", None)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        key = _throttle_key(request, account.id)
+        _guard_throttle(key, account.id)
+        if not verify_password(account_store.password_hash(account.id), body.current_password):
+            _login_failed(key, account.id)
+            raise HTTPException(status_code=401, detail="That is not this workspace's current password.")
+        _login_succeeded(key, account.id)
+        try:
+            _commit_password_reset(account.id, hash_password(body.password), body.wrap.model_dump())
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="This workspace has no vault yet. Reload the studio so it can create one, "
+                       "then change the password.",
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 — the rollback already ran
+            raise HTTPException(
+                status_code=500,
+                detail="The new password could not be saved, so nothing was changed — your current "
+                       "password still works. Try again.",
+            ) from exc
+        return {"ok": True}
 
     @app.post("/api/accounts/sign-out")
     def sign_out() -> JSONResponse:
@@ -3666,6 +3898,32 @@ def build_control_app(
             vault().put_identity(body.identity, allow_replace=body.allow_replace)
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return {"ok": True}
+
+    @app.put("/api/vault/recovery", dependencies=[Depends(require_owner)])
+    def put_vault_recovery_wrap(body: VaultRecoveryWrapBody) -> dict:
+        """Swap in the copy of the master key held by a NEW recovery key.
+
+        Separate from put_identity for the same reason the PRF route is: that
+        call refuses to overwrite an existing vault because rotating an identity
+        re-encrypts everything, whereas minting a new recovery key adds one more
+        wrap of the SAME master key. Nothing already sealed is touched, and the
+        previous recovery key stops working the moment this lands.
+        """
+        store = vault()
+        identity = store.get_identity()
+        if not identity:
+            raise HTTPException(
+                status_code=409,
+                detail="This workspace has no vault yet. Reload the studio so it can create one, "
+                       "then ask for a recovery key.",
+            )
+        merged = dict(identity)
+        merged["wrapped_mk_recovery"] = body.wrapped_mk_recovery
+        try:
+            store.put_identity(merged, allow_replace=True)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return {"ok": True}

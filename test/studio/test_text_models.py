@@ -782,6 +782,13 @@ def test_only_the_link_callback_was_added_to_the_sign_in_gate(tmp_path, monkeypa
         # good the moment the owner holds any credential (test_account_api.py).
         "/api/accounts/setup",
         "/api/accounts/unlock",
+        # Forgotten password. Reachable before sign-in by necessity — that is
+        # the whole situation — and each half is bounded: the challenge returns
+        # the recovery-wrapped key and never the passphrase-wrapped one, and the
+        # reset only answers a nonce that had to be decrypted with the vault's
+        # own private key (test_account_recovery.py).
+        "/api/accounts/recovery/challenge",
+        "/api/accounts/recovery/reset",
         "/api/accounts/webauthn/authenticate/options",
         "/api/accounts/webauthn/authenticate",
         "/api/hivemindos/models/link-callback",

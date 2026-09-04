@@ -19,6 +19,7 @@ import { browserMuapiKey, forgetBrowserMuapiKey, storeMuapiKey } from '../lib/mu
 import { Button, Field, SectionLabel, Tabs, TextInput } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import { LocalModelManager } from './LocalModelManager.jsx';
+import { PrivacyVaultPanel } from './PrivacyVaultPanel.jsx';
 
 export function SettingsModal({ onClose }) {
   const { zh } = useLang();
@@ -39,6 +40,9 @@ export function SettingsModal({ onClose }) {
   const tabs = [
     { value: 'api', label: t('settings.apiKey') },
     ...(hasLocalAI ? [{ value: 'local', label: t('settings.localModels') }] : []),
+    // The only place a signed-in person can change their password or mint a new
+    // recovery key. Before this existed, forgetting a password lost the library.
+    { value: 'vault', label: zh ? '隐私与保险库' : 'Privacy & vault' },
   ];
 
   const hadKey = Boolean(browserMuapiKey());
@@ -149,6 +153,10 @@ export function SettingsModal({ onClose }) {
           <LocalModelManager />
         </div>
       ) : null}
+
+      {/* Mounted only while shown: it holds password fields, and there is no
+          in-flight work to keep alive across a tab switch. */}
+      {tab === 'vault' ? <PrivacyVaultPanel onDone={onClose} /> : null}
     </Modal>
   );
 }
