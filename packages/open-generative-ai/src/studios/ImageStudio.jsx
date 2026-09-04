@@ -32,6 +32,15 @@ import {
 } from '../lib/cloudCatalog.js';
 import { localAI, isHostedLocalAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { LOCAL_MODEL_CATALOG, getLocalModelById } from '../lib/localModels.js';
+
+/** A local model's human name for a given id: the discovered workflow list the
+ *  run-target picker is built from, then the static catalog, else ''. */
+function localModelDisplayName(discovered, id) {
+  const wanted = String(id || '');
+  if (!wanted) return '';
+  const hit = (discovered || []).find((model) => model?.id === wanted);
+  return String(hit?.name || hit?.label || getLocalModelById(wanted)?.name || '');
+}
 import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
 import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
@@ -2545,7 +2554,14 @@ export function ImageStudio({
       // references): what this tab is called, and the last thing it made.
       chip: () => ({
         prompt: s.prompt,
-        model: s.useLocalModel ? s.selectedLocalModel : (s.selectedModelName || s.selectedModel),
+        // The NAME, never the id. The cloud branch always resolved one; the
+        // local branch published `z-image-turbo` raw, so the tab strip was the
+        // one surface still showing a registry id while the picker beside it
+        // said "Z-Image Turbo LoRA Optimizer". Resolved against the discovered
+        // list the picker itself reads, then the static catalog.
+        model: s.useLocalModel
+          ? (localModelDisplayName(s.localImageModels, s.selectedLocalModel) || s.selectedLocalModel)
+          : (s.selectedModelName || s.selectedModel),
         previewUrl: s.history[0]?.url || '',
         previewKind: 'image',
       }),
