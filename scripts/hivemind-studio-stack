@@ -970,16 +970,25 @@ launch_start() {
 	  else
 	    launchctl unsetenv COMFY_ENABLE_LTX_LANE 2>/dev/null || true
 	  fi
-  local loaded=0
+  # The `launchctl bootout` above is ASYNCHRONOUS, so the first bootstrap here
+  # usually races it and fails with EIO ("Bootstrap failed: 5: Input/output
+  # error", plus launchd's own advice to re-run as root). That is a normal race
+  # this loop exists to absorb — it is not something the person restarting the
+  # stack has to do anything about, and telling them to try again as root sends
+  # them somewhere there is no problem. So the attempts are quiet, and only a
+  # real failure of all five speaks, carrying what launchd actually said.
+  local loaded=0 boot_error=''
   for _ in 1 2 3 4 5; do
-    if launchctl bootstrap "$DOMAIN" "$HOME/Library/LaunchAgents/$LABEL.plist"; then
+    if boot_error="$(launchctl bootstrap "$DOMAIN" "$HOME/Library/LaunchAgents/$LABEL.plist" 2>&1)"; then
       loaded=1
       break
     fi
     sleep 1
   done
   if [ "$loaded" -ne 1 ]; then
-    echo "Failed to load $LABEL" >&2
+    echo "Could not hand $LABEL to launchd after five attempts." >&2
+    [ -n "$boot_error" ] && echo "launchd said: ${boot_error//$'\n'/ }" >&2
+    echo "The old job may still be shutting down — wait a moment and run 'zimage-stack restart' again." >&2
     exit 1
   fi
   launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null || true
