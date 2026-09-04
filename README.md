@@ -40,8 +40,8 @@ compiled-in password, and no server-side copy of yours.
 
 ## Install and run
 
-**From this checkout** — the path that works today. Four install commands and a
-stack start, listed in full under
+**From this checkout** — the path that works today. Four install commands, the
+embedded build, two checks and a stack start, listed in full under
 [Developer quick start](docs/OPERATIONS.md#developer-quick-start). Then open the
 studio at the loopback address the supervisor prints, and follow
 [the guide](docs/GUIDE.md) from the setup card onward.

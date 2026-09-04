@@ -65,10 +65,10 @@ there too — see [Troubleshooting](TROUBLESHOOTING.md#i-forgot-the-passphrase).
 
 ### What runs on this Mac, and what costs money
 
-Every studio has the same chip in its prompt bar: **Runs on**. It reads out
-where the next press will land, like *"This Mac · Z-Image Turbo — free, stays
-here"*. Open it and you get one list in three groups, because there are exactly
-three bills:
+**Image**, **Video**, **Story**, **Restore** and **Sprite** all carry the same
+chip in the prompt bar: **Runs on**. It reads out where the next press will
+land, like *"This Mac · Z-Image Turbo — free, stays here"*. Open it and you get
+one list in three groups, because there are exactly three bills:
 
 | Group | What it means |
 |---|---|
@@ -87,7 +87,9 @@ Each row in the list carries its own fit label — **Good fit**, **Workable**,
 says why on hover instead of failing after the press.
 
 A rented GPU is not a fourth group. When you have one attached, it shows up as
-the place name on the readout, with its hourly price — *"RTX 5090 · $0.42/hr"*.
+the place name on the readout, with its hourly price after it — an attached
+5090 reads *RTX 5090 · $0.42/hr*, using the card's own name and the price you
+are actually paying.
 
 ### Connecting ComfyUI (optional)
 
@@ -107,12 +109,12 @@ changes a ComfyUI you installed yourself."*
 
 Open **Image** (it is the first thing under **Create**, and ⌘1 goes there).
 
-1. **Type what you want** in the big box. One line is enough to start.
-2. Optional — press **Improve** and choose *Refine with the prompt helper*. It
+1. Type what you want in the big box. One line is enough to start.
+2. Optional — press **Improve** and choose **Refine with the prompt helper**. It
    rewrites what is in the box rather than replacing your idea. Its entries are
    greyed out until you have typed something, and hovering one says why:
-   *"Type an idea below first — the helper refines what is in the box."*
-   *Add style tags* in the same menu is the other route.
+   *"Type an idea below first — the helper refines what is in the box"*.
+   **Add style tags** in the same menu is the other route.
 3. Optional — press **Starters** for quick starters, the UGC block, and any
    prompt you have saved before.
 4. Check the **Runs on** chip. Leave it on Automatic unless you have a reason.
@@ -139,11 +141,11 @@ The result opens in a viewer. Along the bottom:
 
 Everything else lives in the panel beside the canvas: **Aspect ratio**,
 **Resolution**, **How many** (*"Pictures per press — each one costs the same
-time again"*), and, under **Advanced options**, **Steps**, **Guidance scale**,
+time again"*), and, under **Advanced**, **Steps**, **Guidance scale**,
 **Seed**, **Sampler**, **Scheduler** and the negative prompt. Each field carries
 its own one-line hint — **Seed**, for instance, says *"The same seed and the
 same settings make the same picture again — leave it at -1 for a new one every
-press."*
+press"*.
 
 **Attach** is how you give the model pictures to work from. It holds the
 picker, the thumbnails, a way to say which reference is which, and **Clear**. If
@@ -171,7 +173,9 @@ The shortest path is to start from the picture you just made.
    knowing the model's own prompting guide, the cast, the lane and the clip
    length.
 4. Set **Duration**, **Aspect ratio** and **Resolution** in the panel. Some
-   models add **Quality** (*Draft* / *High* / *Best quality*) or **Refinement**.
+   models add **Quality** (**Faster** / **Best quality**) or **Refinement**; on
+   MiniMax H3 the **Resolution** dial itself reads **Draft** / **High** /
+   **Best quality**, with the megapixels and the cost of each on its hint.
 5. Check **Runs on**, then press **Generate**.
 
 You can leave the tab. The run keeps going, and coming back to the studio picks
@@ -252,7 +256,7 @@ reads **Resume from chunk N**.
 
 The panel is explicit about which of three machines it is about to use:
 
-* **This computer** — free. Chunks are kept losslessly here, so seams dissolve
+* **This Mac** — free. Chunks are kept losslessly here, so seams dissolve
   and the finish can be redone any time.
 * **Rented GPU** — billed by the hour for as long as it is rented. Chunks come
   back sealed and are joined here in the browser, so its seams are hard cuts.
@@ -270,7 +274,9 @@ have.
   own output on screen, because each one can be wrong in a way you only see by
   looking at it.
 * **Lip sync** — pairs a portrait or a source video with an audio track and
-  produces a lipsynced clip.
+  produces a lipsynced clip. It is the one studio with no **Runs on** chip:
+  every lip sync model is a cloud one, so it picks the model in its own menu and
+  bills your MUAPI account.
 
 ---
 
@@ -347,11 +353,12 @@ Collapsed by default, because none of it is needed to make something.
 * **Canvas** — the node workflow editor, for when you want to build the graph
   yourself.
 * **Agents & API** — how to point an agent at the studio.
-* **Settings** — grouped as General, Generation defaults, **Folders**, **Local
-  engines**, Workspace, **Privacy & vault**, Network and Rented GPUs. Each row
-  names where its current value came from, so a value pinned elsewhere on the
-  machine is visible rather than mysterious. Turning a local engine off *"is a
-  working studio with one fewer local lane, never an error."*
+* **Settings** — grouped as **General**, **Generation defaults**, **Folders**,
+  **Local engines**, **Workspace**, **Privacy & vault**, **Network**, **Rented
+  GPUs**, **Backup & reset** and **About**. Each row names where its current
+  value came from, so a value pinned elsewhere on the machine is visible rather
+  than mysterious. Turning a local engine off *"is a working studio with one
+  fewer local lane, never an error."*
 * **About** — version, licence, source and third-party notices.
 
 ---
@@ -387,6 +394,7 @@ to a machine that is not this one.
 | ⌘1 – ⌘4 | Image, Video, Story, Restore |
 | ⌘↵ | Generate, in any composer |
 | ⌘T / ⌘W | New studio tab / close it |
+| ⌘⇧[ / ⌘⇧] | The previous / next studio tab |
 
 The status chip at the top right is the studio's own health, in three words:
 **Ready**, **Starting**, **Not running**. If it goes red, open it — the menu
