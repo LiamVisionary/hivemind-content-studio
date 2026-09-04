@@ -31,6 +31,18 @@ export const RATING_LABELS = {
   unsupported: 'Cannot run this',
 };
 
+/** Rating to badge colour. Ordered the same way the matrix ranks them. Lives
+ *  here beside the labels because every surface that shows a verdict — the
+ *  Runs-on picker's rows, the capability-matrix reference view — needs both,
+ *  and a second table of colours is a second opinion. */
+export const RATING_TONE = Object.freeze({
+  good: 'ok',
+  workable: 'honey',
+  unmeasured: 'neutral',
+  poor: 'warn',
+  unsupported: 'danger',
+});
+
 /** How a verdict was arrived at, spelled out. The matrix would otherwise
  *  present an inference and a measured run in the same typeface. */
 export const EVIDENCE_LABELS = {

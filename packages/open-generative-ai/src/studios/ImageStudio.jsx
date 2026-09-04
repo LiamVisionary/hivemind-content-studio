@@ -41,7 +41,9 @@ function localModelDisplayName(discovered, id) {
   const hit = (discovered || []).find((model) => model?.id === wanted);
   return String(hit?.name || hit?.label || getLocalModelById(wanted)?.name || '');
 }
-import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
+import {
+  RENTED_CHANGED_EVENT, consumeRentedModeRequest, machineServesModel, rentedMachinesState, servedByAnyMachine,
+} from '../lib/rentedMachines.js';
 import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
@@ -274,12 +276,11 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // button, so a menu that cannot run anything never sits under a live press.
     localCatalogStatus: isLocalAIAvailable() ? 'discovering' : 'unreachable',
     useLocalModel,
-    // Rented source mode: local mechanically (lane rules route by model
-    // server-side); filters the menu to models an attached machine serves.
-    rentedOnly: Boolean(persistedImagePreferences?.rentedOnly && useLocalModel),
     // This tab's "Run on" pin: the rented machine (rental id) every generation
-    // it sends in Rented mode carries as run_on. Restored with the tab's other
-    // settings; '' follows the Machines default.
+    // it sends carries as run_on. It is the ONE override — there is no rented
+    // MODE beside it, because a rental was never one: the gateway's lane rules
+    // route by model server-side whether or not anything was chosen here.
+    // Restored with the tab's other settings; '' follows the Machines default.
     rentedMachineId: persistedImagePreferences?.rentedMachineId || '',
     rentedMachines: [],
     rentedPending: [],
@@ -490,8 +491,14 @@ export function ImageStudio({
   const localModelById = (id) => s.localImageModels.find((m) => m.id === id) || getLocalModelById(id);
   // Every local model is always listed; attaching an image never hides
   // text-to-image models — unsupported models simply ignore references.
-  const compatibleLocalModels = () => ((s.rentedOnly && s.rentedMachines?.length)
-    ? s.localImageModels.filter((m) => servedByAnyMachine(s.rentedMachines, m))
+  // …except while this tab is PINNED to a machine: that is a promise about
+  // where the work lands, so the menu narrows to what that machine serves
+  // rather than offering a model whose Generate could only be refused.
+  const pinnedMachine = () => (s.rentedMachineId
+    ? (s.rentedMachines || []).find((machine) => String(machine.rental_id) === String(s.rentedMachineId)) || null
+    : null);
+  const compatibleLocalModels = () => (pinnedMachine()
+    ? s.localImageModels.filter((m) => machineServesModel(pinnedMachine(), m))
     : s.localImageModels);
 
   // The routing identity of the cloud selection: the model AND the account it
@@ -500,9 +507,10 @@ export function ImageStudio({
   // account out of this studio while Story and Sprite could spend both.
   const cloudRow = () => ({ id: s.selectedModel, provider: s.selectedProvider || 'muapi', source: 'cloud' });
 
-  // The tab's "Run on" pin rides every generation this tab sends while the
-  // source is Rented; the gateway tries that machine ahead of its default order.
-  const runOn = () => (s.rentedOnly && s.rentedMachineId ? { run_on: s.rentedMachineId } : {});
+  // The tab's "Run on" pin rides every generation this tab sends; the gateway
+  // tries that machine ahead of its default order. Unpinned, the gateway routes
+  // by its own lane rules, which is what "Rented mode" always did mechanically.
+  const runOn = () => (s.rentedMachineId ? { run_on: s.rentedMachineId } : {});
   // Written by the Rented panel's picker ('' = follow the Machines default).
   const pinMachine = (rentalId) => {
     const next = rentalId || '';
@@ -786,7 +794,6 @@ export function ImageStudio({
       providerId: s.selectedProvider,
       imageMode: s.imageMode,
       useLocalModel: s.useLocalModel,
-      rentedOnly: s.rentedOnly,
       rentedMachineId: s.rentedMachineId,
       localModelId: s.selectedLocalModel,
       aspectRatio: s.selectedAr,
@@ -848,7 +855,7 @@ export function ImageStudio({
   const claimRentedHandoff = () => {
     if (!tabActiveRef.current || !consumeRentedModeRequest('image')) return;
     reconcileRentedModelRef.current = !s.rentedMachines?.length;
-    setSource(true, true);
+    setSource(true);
   };
 
   // Rented source mode: track attached machines while mounted (the studio
@@ -889,6 +896,14 @@ export function ImageStudio({
       // model then. Finish it now there is one to pick from.
       if (reconcileRentedModelRef.current && s.rentedMachines.length) {
         reconcileRentedModelRef.current = false;
+        // The handoff came from a machine card, so it is a promise about where
+        // the work lands. If the model this tab is on is not one that machine
+        // serves, move to one that is — otherwise "Use in Image Studio" lands
+        // on this Mac's GPU with the rental idling beside it.
+        if (!servedByAnyMachine(s.rentedMachines, localModelById(s.selectedLocalModel) || { id: s.selectedLocalModel })) {
+          const served = s.localImageModels.filter((model) => servedByAnyMachine(s.rentedMachines, model));
+          if (served.length) s.selectedLocalModel = (preferredLocalModel(served) || served[0]).id;
+        }
         const lm = ensureCompatibleLocalModel();
         if (lm) applyStoredModelSettings(`local:${lm.id}`, lm);
         void loadLorasForCurrentModel();
@@ -1257,7 +1272,7 @@ export function ImageStudio({
     s.runOnAutomatic = Boolean(automatic);
     if (target.place === PLACE_THIS_MAC && target.source === 'local') {
       const model = localModelById(target.id);
-      setSource(true, Boolean(target.machine));
+      setSource(true);
       if (model) selectLocalModel(model);
     } else {
       setSource(false);
@@ -1299,14 +1314,13 @@ export function ImageStudio({
     };
   };
 
-  const setSource = (nextLocal, nextRented = false) => {
-    if (nextLocal === s.useLocalModel && nextRented === s.rentedOnly) return;
+  const setSource = (nextLocal) => {
+    if (nextLocal === s.useLocalModel) return;
     snapshotCurrentModelSettings();
-    s.rentedOnly = Boolean(nextLocal && nextRented);
     s.useLocalModel = nextLocal;
-    // Entering rented with a model the machine cannot serve leaves a dead
-    // selection; ensureCompatibleLocalModel below re-picks from the filtered
-    // list, which compatibleLocalModels() narrows to served models.
+    // A pin the selected model cannot be served by leaves a dead selection;
+    // ensureCompatibleLocalModel below re-picks from the filtered list, which
+    // compatibleLocalModels() narrows to what the pinned machine serves.
     if (s.useLocalModel) {
       const lm = ensureCompatibleLocalModel();
       s.localRuntimeMode = lm?.defaultRuntimeMode || s.localRuntimeMode || 'one-off';
@@ -1958,9 +1972,10 @@ export function ImageStudio({
   };
 
   const generateNow = async () => {
-    // Rented mode is a promise about WHERE this runs. If no live machine
-    // serves the selected model, stop instead of quietly using this Mac.
-    if (s.rentedOnly && !servedByAnyMachine(s.rentedMachines, localModelById(s.selectedLocalModel) || { id: s.selectedLocalModel })) {
+    // The pin is a promise about WHERE this runs. If the machine it names
+    // cannot serve the selected model, stop instead of quietly using this Mac.
+    if (s.useLocalModel && s.rentedMachineId
+        && !servedByAnyMachine(s.rentedMachines, localModelById(s.selectedLocalModel) || { id: s.selectedLocalModel })) {
       toast.error(
         s.rentedBroken?.length
           ? 'Lost the connection to your rented machine — reconnect it from the Source panel or Machines.'
@@ -2710,15 +2725,15 @@ export function ImageStudio({
   // and re-derives from persisted dims on reload. Local-only: cloud APIs accept
   // enumerated ratios, not free sizes.
   const customDimsActive = s.useLocalModel && Boolean(s.customArOpen || (s.customWidth && s.customHeight));
-  // Rented selected with nothing to run on: every setting below is moot,
-  // so the panel collapses to the Source block and its rent/provisioning CTA.
-  const rentedBlocked = Boolean(s.rentedOnly && !s.rentedMachines?.length);
+  // Pinned to a machine that is no longer attached: every setting below is
+  // moot, so the panel collapses to the Source block and its reconnect CTA.
+  const rentedBlocked = Boolean(s.rentedMachineId && !s.rentedMachines?.length);
   // The same rule for the Local source: an engine that is not answering, or a
   // machine with nothing installed, cannot run a press. Discovery in flight is
   // not a block — it resolves in milliseconds and greying the button out on
   // every mount would be its own bug.
   const localBlocked = Boolean(
-    s.useLocalModel && !s.rentedOnly
+    s.useLocalModel && !s.rentedMachineId
     && s.localCatalogStatus !== 'ready' && s.localCatalogStatus !== 'discovering',
   );
   const localBlockedReason = localBlocked
@@ -2802,8 +2817,11 @@ export function ImageStudio({
     status: s.loraCatalogStatus,
     message: s.loraCatalogMessage,
     loras: s.availableLoras,
-    rentedOnly: Boolean(s.rentedOnly),
-    onSwitchToLocal: () => setSource(true, false),
+    // The catalog narrows to LoRAs registered for rentals only when the work
+    // actually LANDS on one: those are the only files a machine provisioned
+    // today would have. A mode nobody is in was never the right condition.
+    onRentedMachine: Boolean(s.useLocalModel && pinnedMachine()),
+    onSwitchToLocal: () => pinMachine(''),
     selection: currentLoraSelection(),
     getSelection: currentLoraSelection,
     onToggleLora: (lora) => {

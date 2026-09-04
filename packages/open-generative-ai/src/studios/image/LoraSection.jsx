@@ -72,11 +72,12 @@ export function LoraSection({
   // Strength Hunt (Mix-Studio port): present only when the selected model's
   // backend supports the sweep — the toggle marks a LoRA as a hunt axis.
   onToggleHunt,
-  // Source is "rented": the catalog narrows to LoRAs registered for rentals,
-  // because those are the only files a machine provisioned today would have.
-  rentedOnly = false,
-  // Rented mode with nothing registered has exactly one fix — look at the local
-  // catalog and mark something — so the empty state carries it.
+  // This tab's work LANDS on a rented machine: the catalog narrows to LoRAs
+  // registered for rentals, because those are the only files a machine
+  // provisioned today would have. Not a mode — the machine the pin names.
+  onRentedMachine = false,
+  // A pinned machine with nothing registered has exactly one fix — unpin and
+  // look at the local catalog — so the empty state carries it.
   onSwitchToLocal,
 }) {
   const mutedCount = selection.filter((lora) => lora.enabled === false).length;
@@ -90,7 +91,7 @@ export function LoraSection({
   // The registry answered, so this machine has the rental routes and the owner
   // can decide which adapters ride along on the next rental.
   const canManageRentals = rentalRegistry.status === 'ready';
-  const visibleLoras = rentedOnly ? filterRentalLoras(loras, rentalEntries) : loras;
+  const visibleLoras = onRentedMachine ? filterRentalLoras(loras, rentalEntries) : loras;
   // Which card is showing the rental SFW/NSFW chooser. Same one-at-a-time,
   // in-card pattern as the update menu below.
   const [rentalChoicesFor, setRentalChoicesFor] = useState('');
@@ -275,9 +276,10 @@ export function LoraSection({
               <span>{message}</span>
             </div>
           ) : null}
-          {/* Rented mode with installed LoRAs but none registered: say why the
-              grid is empty instead of looking like the collection vanished. */}
-          {rentedOnly && loras.length > 0 && visibleLoras.length === 0 ? (
+          {/* Landing on a rented machine with installed LoRAs but none
+              registered: say why the grid is empty instead of looking like the
+              collection vanished. */}
+          {onRentedMachine && loras.length > 0 && visibleLoras.length === 0 ? (
             <div className="flex flex-col items-start gap-2 rounded-md border border-line1 bg-bg2 px-3 py-2.5 text-xs text-ink3">
               <span>
                 None of your LoRAs are on rented machines yet. Mark one with its Rental

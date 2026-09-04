@@ -144,8 +144,9 @@ export function normalizeVideoPreferences(value) {
     return {
         modelId,
         localMode: typeof value.localMode === 'boolean' ? value.localMode : null,
-        rentedOnly: typeof value.rentedOnly === 'boolean' ? value.rentedOnly : null,
-        // The per-tab "Run on" pin (a rental id); '' = follow the Machines default.
+        // The per-tab "Run on" pin (a rental id); '' = follow the Machines
+        // default. The ONE override — `rentedOnly` was a mode beside it, and a
+        // rental is a property of This Mac rather than a place of its own.
         rentedMachineId: stringValue(value.rentedMachineId).slice(0, 128),
         aspectRatio: stringValue(value.aspectRatio),
         duration: Number.isFinite(duration) && duration > 0 ? duration : null,

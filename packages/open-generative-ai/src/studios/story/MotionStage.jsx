@@ -15,7 +15,7 @@ import { useRef, useState } from 'react';
 
 import { Icon } from '../../ui/icons.jsx';
 import { Button, NativeSelect, TextArea, TextInput, cx } from '../../ui/kit.jsx';
-import { ModelFitPicker } from '../ModelFitPicker.jsx';
+import { RunOnPicker } from '../../components/RunOnPicker.jsx';
 import { BOARD_FORMATS, SHOT_REASONS, boardFormat, recommendBoard } from './board.js';
 import { AUDIO_LAYERS, MOTION_LAYERS, MUSIC_RULES, relayBeats } from './motionScript.js';
 import { producerIsRunning } from './state.js';
@@ -197,7 +197,7 @@ function BoardPanel({ panel, index, specs, busy, onFill, onPatch, aspect }) {
 export function MotionStage({
   story, specs, busy, thinking, drawing, onFill, onMotion, onPatchBeat, onBoard, onPatchPanel,
   draft, onCancel, onDraftBoard, onDrawBoard, onChangeFormat, boardText, boardNotes, notes,
-  boardChoices, boardModel, onBoardModel, readinessFor, onFixReadiness, fixing, localNotice = null,
+  boardChoices, boardModel, onBoardModel, boardAutomatic, readinessFor, onFixReadiness, fixing, localNotice = null,
 }) {
   // The dragged row lives in a ref as well as in state. `drop` can land in the
   // same tick as `dragstart` — a fast flick, or anything driving the events
@@ -483,11 +483,14 @@ export function MotionStage({
         <Notes items={boardNotes} />
 
         {localNotice}
-        <ModelFitPicker
+        <RunOnPicker
           label="Board model"
-          rows={boardChoices}
+          targets={boardChoices}
           value={boardModel}
           onChange={onBoardModel}
+          automatic={boardAutomatic}
+          onAutomatic={() => onBoardModel(null)}
+          isAutomatic={boardModel === boardAutomatic?.target}
           readinessFor={readinessFor}
           onFixReadiness={onFixReadiness}
           busyAction={fixing}

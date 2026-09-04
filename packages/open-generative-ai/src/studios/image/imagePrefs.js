@@ -105,9 +105,11 @@ export function normalizeImagePreferences(value) {
         providerId: stringValue(value.providerId).slice(0, 64),
         imageMode: Boolean(value.imageMode),
         useLocalModel: Boolean(value.useLocalModel),
-        rentedOnly: Boolean(value.rentedOnly),
-        // The per-tab "Run on" pin (a rental id). Restored with the tab, and
-        // dropped by the Rented panel if that machine is no longer attached.
+        // The per-tab "Run on" pin (a rental id) — the ONE override for where
+        // work lands. There is no `rentedOnly` beside it any more: a rental was
+        // never a mode, it is the machine This Mac's work is landing on.
+        // Restored with the tab, and dropped by the Rented panel if that
+        // machine is no longer attached.
         rentedMachineId: stringValue(value.rentedMachineId).slice(0, 128),
         localModelId: stringValue(value.localModelId),
         aspectRatio: stringValue(value.aspectRatio),

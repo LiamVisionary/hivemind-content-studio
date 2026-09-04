@@ -472,9 +472,9 @@ export function VideoStudio({
   // switched itself to Rented.
   //
   // setLocalMode, not a raw commit of the flags: it is the same function the
-  // source picker calls, and the part a raw commit skipped is the part that
+  // Runs-on picker calls, and the part a raw commit skipped is the part that
   // lands on a model the machine can actually run. Skipping it is why the
-  // handoff arrived in Rented mode still pointed at a cloud model.
+  // handoff arrived pointed at a cloud model the box could not run.
   const claimRentedHandoff = () => {
     if (!tabActiveRef.current || !consumeRentedModeRequest('video')) return;
     // setLocalMode re-points the model itself when it can. It cannot yet if the
@@ -482,7 +482,7 @@ export function VideoStudio({
     // both land after mount, and in no fixed order — so mark the handoff
     // unfinished and let finishRentedHandoff close it out on their arrival.
     reconcileRentedModelRef.current = true;
-    setLocalMode(true, true);
+    setLocalMode(true);
     finishRentedHandoff();
   };
 
@@ -588,10 +588,8 @@ export function VideoStudio({
   const currentVideoPreferences = () => normalizeVideoPreferences({
     modelId: s.setup.modelId,
     localMode: s.setup.localMode,
-    // Rented is a THIRD source, not a flavour of Local: without it here the
-    // toggle reverts to Local on every reload (applyRestoredPreferences reads
-    // it back, but nothing ever wrote it).
-    rentedOnly: s.setup.rentedOnly,
+    // The per-tab "Run on" pin, and nothing beside it: a rental is a property
+    // of This Mac (the box its work lands on), never a third source.
     rentedMachineId: s.setup.rentedMachineId || '',
     duration: s.setup.duration,
     aspectRatio: s.setup.ar,
@@ -842,11 +840,10 @@ export function VideoStudio({
     // does not serve, which is exactly how the Machines handoff once landed on
     // the wrong model (rented-handoff-claim-and-model).
     if (setup?.source && hasSourceToggle) {
-      const wantsRented = setup.source === 'rented';
+      // 'rented' is a source a sender written before the pin existed may still
+      // name; it means This Mac, which is what it always meant mechanically.
       const wantsLocal = setup.source !== 'api';
-      if (wantsLocal !== Boolean(s.setup.localMode) || wantsRented !== Boolean(s.setup.rentedOnly)) {
-        setLocalMode(wantsLocal, wantsRented);
-      }
+      if (wantsLocal !== Boolean(s.setup.localMode)) setLocalMode(wantsLocal);
     }
     // …then the model the sender wrote FOR. A tab opened for the first time
     // boots into its own default, which is not what the picker was looking at:
@@ -915,7 +912,7 @@ export function VideoStudio({
    * exists to prevent.
    */
   const sendSignature = [
-    tabIdRef.current, tabActive, s.setup.modelId, s.setup.localMode, s.setup.rentedOnly,
+    tabIdRef.current, tabActive, s.setup.modelId, s.setup.localMode, s.setup.rentedMachineId,
     (s.rentedMachines || []).length, (s.rentedIdle || []).length,
     (s.rentedBroken || []).length, (s.rentedProvisioning || []).length,
     (s.catalogs?.hivemindI2V || []).length, (s.catalogs?.allT2V || []).length,
@@ -939,7 +936,7 @@ export function VideoStudio({
       index: tabIdRef.current,
       label: `${zh() ? '标签' : 'Tab'} ${tabIdRef.current || 1}`,
       active: Boolean(tabActive),
-      current: s.setup.rentedOnly ? 'rented' : s.setup.localMode ? 'local' : 'api',
+      current: s.setup.localMode ? 'local' : 'api',
       sources,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1088,9 +1085,6 @@ export function VideoStudio({
     const base = {
       ...s.setup,
       localMode: target.place === PLACE_THIS_MAC,
-      // A rental is a property of This Mac: pinned work runs there, and the
-      // generate guard keeps its promise about where.
-      rentedOnly: Boolean(target.machine),
       runOnAutomatic: Boolean(automatic),
     };
     if (isHivemindVideoModelId(entry.id)) commit(selectHivemindWorkflowTransition(base, entry, s.catalogs));
@@ -1106,15 +1100,14 @@ export function VideoStudio({
     commit({ ...s.setup, rentedMachineId: next });
   };
 
-  const setLocalMode = (local, rented = false) => {
-    const nextRented = Boolean(local && rented);
-    if (local === s.setup.localMode && nextRented === Boolean(s.setup.rentedOnly)) return;
-    const next = { ...s.setup, localMode: local, rentedOnly: nextRented };
-    // Switching INTO rented while the selected model is one the machine does
-    // not serve would leave a model the box cannot run (and the generate guard
-    // would just refuse). withServedModel is the one rule for that, shared with
-    // the Machines-view handoff so both land the same way.
-    commit(nextRented ? withServedModel(next, s.rentedMachines, s.catalogs) : next);
+  const setLocalMode = (local) => {
+    if (local === s.setup.localMode) return;
+    const next = { ...s.setup, localMode: local };
+    // Coming back to This Mac while PINNED to a machine that does not serve the
+    // selected model would leave a model the box cannot run (and the generate
+    // guard would just refuse). withServedModel is the one rule for that,
+    // shared with the Machines-view handoff so both land the same way.
+    commit(local && s.setup.rentedMachineId ? withServedModel(next, s.rentedMachines, s.catalogs) : next);
   };
   const setAr = (v) => commit({ ...s.setup, ar: v });
   const setMatchStartFrameAr = (checked) => commit({ ...s.setup, matchStartFrameAr: checked });
@@ -2907,9 +2900,9 @@ export function VideoStudio({
   /* ---------------- generation ---------------- */
 
   const generateNow = async () => {
-    // Rented mode promises WHERE this runs — refuse rather than quietly
-    // falling back to this Mac's GPU.
-    if (s.setup.rentedOnly
+    // The pin promises WHERE this runs — refuse rather than quietly falling
+    // back to this Mac's GPU.
+    if (s.setup.localMode && s.setup.rentedMachineId
         && !servedByAnyMachine(s.rentedMachines, { id: s.setup.modelId, name: s.setup.modelName })) {
       // Same honesty as the source panel: name the actual blocker.
       toast.error(
@@ -3074,7 +3067,7 @@ export function VideoStudio({
           model: setup.modelId,
           studio_lane: studioLane,
           // The tab's "Run on" pin: tried ahead of the gateway's default order.
-          ...(setup.rentedOnly && setup.rentedMachineId ? { run_on: setup.rentedMachineId } : {}),
+          ...(setup.rentedMachineId ? { run_on: setup.rentedMachineId } : {}),
           workflow_id: workflowIdFromHivemindModelId(setup.modelId),
           prompt: prompt || '',
           aspect_ratio: matchStartFrameAr ? '' : setup.ar,
@@ -4326,9 +4319,9 @@ export function VideoStudio({
     s.progressContext?.duration ? `${s.progressContext.duration}s` : null,
   ].filter(Boolean).join(' · ');
 
-  // Rented selected with nothing to run on: collapse the panel to the
-  // Source block and its rent/provisioning CTA.
-  const rentedBlocked = Boolean(s.setup.rentedOnly && !s.rentedMachines?.length);
+  // Pinned to a machine that is no longer attached: collapse the panel to the
+  // Source block and its reconnect CTA.
+  const rentedBlocked = Boolean(s.setup.rentedMachineId && !s.rentedMachines?.length);
   const offlineBlocked = apiStatus.tone === 'offline';
 
   /* ---------------- panel ---------------- */
@@ -4812,7 +4805,7 @@ export function VideoStudio({
             status={s.videoLoraCatalogStatus}
             message={s.videoLoraCatalogMessage}
             loras={s.availableVideoLoras}
-            rentedOnly={Boolean(s.setup.rentedOnly)}
+            onRentedMachine={Boolean(s.setup.localMode && s.setup.rentedMachineId)}
             selection={currentVideoLoraSelection()}
             getSelection={currentVideoLoraSelection}
             onToggleLora={(lora) => setCurrentVideoLoraSelection(toggleLoraSelection(currentVideoLoraSelection(), lora))}
@@ -5400,7 +5393,7 @@ export function VideoStudio({
             // Name the box when the run was promised to a rented one — "it
             // failed" on a rental means a different next step.
             const onRented = (() => {
-              if (!s.setup.rentedOnly) return '';
+              if (!s.setup.rentedMachineId) return '';
               const machine = servingMachineFor(s.setup, s.setup.modelId, s.rentedMachines);
               if (!machine) return zh() ? '（租用机器）' : ' on the rented machine';
               return zh()

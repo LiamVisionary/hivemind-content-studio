@@ -16,6 +16,7 @@
 // Module state, deliberately: it describes what is mounted right now. Nothing
 // here is persisted — a target that is not on screen is not a target.
 
+import { PLACE_ACCOUNTS, PLACE_THIS_MAC } from './modelRunner.js';
 import { loadTabState, saveTabState } from './studioTabs.js';
 
 const targets = new Map(); // key -> descriptor
@@ -89,6 +90,51 @@ export const SOURCE_LABELS = Object.freeze({
   local: { en: 'This Mac', zh: '这台 Mac' },
   api: { en: 'Your accounts', zh: '你的账户' },
 });
+
+/** Which of the three places each wire source IS. The menu shows the same
+ *  groups as every studio picker rather than a second control beside them. */
+export const SOURCE_PLACES = Object.freeze({
+  local: PLACE_THIS_MAC,
+  api: PLACE_ACCOUNTS,
+});
+
+/**
+ * One tab's sources, as the rows the RunOnPicker draws.
+ *
+ * The Send-to menu used to be a two-row control of its own that merely borrowed
+ * the new words. It is the picker now: same groups, same rows, same reasons —
+ * `id` stays the wire `source`, because a handoff sends that and renaming what
+ * a person reads must not rename what travels.
+ *
+ * @param {object} target one entry from useSendTargets
+ * @param {function|null} describeFor the sender's own "what would travel there"
+ */
+export function sendRunTargets(target, describeFor = null, zhLang = false) {
+  return SEND_SOURCES.map((source) => {
+    const descriptor = target?.sources?.[source] || null;
+    const available = Boolean(descriptor?.available);
+    // The consequence, on the row: a place with no model named under it is a
+    // choice made blind, and `switches` matters as much as the name — this
+    // place does not offer the model loaded now, so picking it moves the tab.
+    const consequence = available
+      ? [descriptor.note, describeFor?.(descriptor.plan) || ''].filter(Boolean).join(' · ')
+      : '';
+    const model = available ? (descriptor.modelName || descriptor.modelId) : '';
+    return {
+      id: source,
+      provider: 'send',
+      source,
+      label: available && descriptor.switches
+        ? `${zhLang ? '切换到 ' : 'switches to '}${model}`
+        : (model || SOURCE_LABELS[source][zhLang ? 'zh' : 'en']),
+      place: SOURCE_PLACES[source],
+      placeLabel: SOURCE_LABELS[source][zhLang ? 'zh' : 'en'],
+      available,
+      unavailableReason: descriptor?.reason || '',
+      reason: consequence,
+    };
+  });
+}
 
 /**
  * Ask a tab to come to the front before work is sent to it.

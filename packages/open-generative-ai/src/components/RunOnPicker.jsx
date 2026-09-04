@@ -19,40 +19,81 @@
 // line. One click overrides it, and the override is this tab's.
 import { useState } from 'react';
 
-import { RATING_LABELS } from '../lib/capabilityMatrix.js';
+import { RATING_LABELS, RATING_TONE } from '../lib/capabilityMatrix.js';
 import { PLACE_THIS_MAC, groupRunTargets, readoutText, runOnReadout } from '../lib/runTargets.js';
-import { RATING_TONE } from '../studios/ModelFitPicker.jsx';
 import { RentedSourceStatus } from '../studios/RentedSourceStatus.jsx';
 import { t, zh } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
-import { Pill, SectionLabel, cx } from '../ui/kit.jsx';
+import { Button, Pill, SectionLabel, cx } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 
 /** One row: the model, where it runs, and — when it cannot — why not, on the
  *  row rather than at the press. */
-function TargetRow({ target, selected, onSelect }) {
+function TargetRow({ target, selected, onSelect, readiness = null, onFixReadiness = null, busyAction = '' }) {
   // The place, never the provider id: "This Mac", "RTX 5090 · $0.42/hr",
   // "Your OpenAI account", "HivemindOS credits".
   const meta = target.machine
     ? `${target.placeLabel} · $${(Number(target.machine.usd_per_hour) || 0).toFixed(2)}/hr`
-    : target.placeLabel;
+    // A row that IS its own place says it once, not twice.
+    : (target.placeLabel === target.label ? '' : target.placeLabel);
+  // Why the row is rated the way it is, or why it cannot run at all. It used to
+  // live only on the fit picker's cards, and dropping it here would have made
+  // this control worse than the two it replaces in Story and Sprite.
+  const blocked = readiness && readiness.state !== 'ready';
+  // Said once. A row whose readiness block already carries the sentence must
+  // not print it again two lines above itself.
+  const note = target.ready
+    ? (target.ratingReason || '')
+    : (blocked && readiness.detail ? '' : target.reason);
+  const actionKey = readiness?.action ? `${readiness.action.kind}:${readiness.action.provider || target.key}` : '';
   return (
-    <MenuItem
-      selected={selected}
-      disabled={!target.ready}
-      meta={meta}
-      title={target.ready ? '' : target.reason}
-      onClick={() => { if (target.ready) onSelect(target); }}
-    >
-      <span className="inline-flex min-w-0 items-center gap-1.5">
-        <span className="truncate">{target.label}</span>
-        {target.rating ? (
-          <Pill tone={RATING_TONE[target.rating] || 'neutral'} className="h-4 shrink-0 px-1.5 text-[9px]">
-            {RATING_LABELS[target.rating] || target.rating}
-          </Pill>
-        ) : null}
-      </span>
-    </MenuItem>
+    <div className="flex flex-col">
+      <MenuItem
+        selected={selected}
+        disabled={!target.ready}
+        meta={meta}
+        title={note}
+        onClick={() => { if (target.ready) onSelect(target); }}
+      >
+        <span className="flex min-w-0 flex-col">
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            <span className="truncate">{target.label}</span>
+            {target.badge ? (
+              <Pill tone={target.badge.tone || 'neutral'} className="h-4 shrink-0 px-1.5 text-[9px]">
+                {target.badge.label}
+              </Pill>
+            ) : null}
+            {target.rating ? (
+              <Pill tone={RATING_TONE[target.rating] || 'neutral'} className="h-4 shrink-0 px-1.5 text-[9px]">
+                {RATING_LABELS[target.rating] || target.rating}
+              </Pill>
+            ) : null}
+          </span>
+          {note ? <span className="line-clamp-2 text-[11px] leading-snug text-ink3">{note}</span> : null}
+        </span>
+      </MenuItem>
+      {/* The state of the account, and the button that repairs it, under the row
+          that offers the model — never nested INSIDE it, because a button inside
+          a disabled button never receives a click. */}
+      {blocked ? (
+        <div className={cx('flex flex-wrap items-center gap-1.5 px-2.5 pb-1.5 text-[10px] leading-snug',
+          readiness.blocks ? 'text-warn' : 'text-ink3')}
+        >
+          <b>{readiness.label}</b>
+          {readiness.detail ? <span className="opacity-90">{readiness.detail}</span> : null}
+          {readiness.action && onFixReadiness ? (
+            <Button
+              size="sm"
+              icon={readiness.state === 'reconnect' ? 'refresh' : 'key'}
+              loading={busyAction === actionKey}
+              onClick={() => onFixReadiness(readiness.action, target)}
+            >
+              {readiness.action.label}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -66,9 +107,13 @@ function TargetRow({ target, selected, onSelect }) {
 export function RunOnList({
   targets, value, onChange, automatic = null, onAutomatic = null, isAutomatic = false, close = () => {},
   engine = null, page = '', pinned = '', onPin = null,
+  // A handful of rows is not a list to search. Restore has three lanes and the
+  // Send-to menu has two places; a search box over either is furniture.
+  searchable = true,
+  readinessFor = null, onFixReadiness = null, busyAction = '',
 }) {
   const [filter, setFilter] = useState('');
-  const query = filter.trim().toLowerCase();
+  const query = searchable ? filter.trim().toLowerCase() : '';
   const matches = (target) => !query || target.label.toLowerCase().includes(query)
     || target.placeLabel.toLowerCase().includes(query);
   const groups = groupRunTargets((targets || []).filter(matches));
@@ -76,18 +121,20 @@ export function RunOnList({
 
   return (
     <>
-      <div className="sticky top-0 z-10 -mx-1.5 -mt-1.5 mb-1 border-b border-line1 bg-bg1 p-1.5">
-        <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 px-2.5 focus-within:border-honey/60">
-          <Icon name="search" size={13} className="shrink-0 text-ink3" />
-          <input
-            type="text"
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-            placeholder={t('common.searchModels')}
-            className="h-8 w-full border-none bg-transparent text-xs text-ink1 outline-none placeholder:text-ink3"
-          />
+      {searchable ? (
+        <div className="sticky top-0 z-10 -mx-1.5 -mt-1.5 mb-1 border-b border-line1 bg-bg1 p-1.5">
+          <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 px-2.5 focus-within:border-honey/60">
+            <Icon name="search" size={13} className="shrink-0 text-ink3" />
+            <input
+              type="text"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder={t('common.searchModels')}
+              className="h-8 w-full border-none bg-transparent text-xs text-ink1 outline-none placeholder:text-ink3"
+            />
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {automatic?.target && onAutomatic ? (
         <div>
@@ -120,6 +167,9 @@ export function RunOnList({
               target={target}
               selected={!isAutomatic && value?.provider === target.provider && value?.id === target.id}
               onSelect={(chosen) => { onChange(chosen); close(); }}
+              readiness={readinessFor?.(target) || null}
+              onFixReadiness={onFixReadiness}
+              busyAction={busyAction}
             />
           ))}
           {/* The rental lives under This Mac, because that is what it is: the
@@ -155,6 +205,11 @@ export function RunOnPicker({
   // The composer wants the chip alone, on one wrapping row of chips; the
   // settings panel wants the labelled block. Same control, same list.
   compact = false,
+  // A studio with TWO of these on one stage has to be able to say which is
+  // which ("Character sheets", "The plate"). The default is the question.
+  label = '',
+  searchable = true,
+  readinessFor = null, onFixReadiness = null, busyAction = '',
 }) {
   const shown = isAutomatic ? (automatic?.target || value) : value;
   const readout = runOnReadout(shown, {
@@ -163,7 +218,7 @@ export function RunOnPicker({
   });
   return (
     <div className={cx(compact ? 'contents' : 'flex flex-col gap-2', className)}>
-      {compact ? null : <SectionLabel>{zh() ? '运行于' : 'Runs on'}</SectionLabel>}
+      {compact ? null : <SectionLabel>{label || (zh() ? '运行于' : 'Runs on')}</SectionLabel>}
       <Menu
         width="w-[320px]"
         panelClassName="max-h-[min(480px,70vh)]"
@@ -192,6 +247,10 @@ export function RunOnPicker({
             page={page}
             pinned={pinned}
             onPin={onPin}
+            searchable={searchable}
+            readinessFor={readinessFor}
+            onFixReadiness={onFixReadiness}
+            busyAction={busyAction}
           />
         )}
       </Menu>

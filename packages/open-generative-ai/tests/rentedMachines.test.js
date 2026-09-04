@@ -174,33 +174,35 @@ test('the Source choice survives a reload in BOTH studios', async () => {
   const path = await import('node:path');
   const read = (rel) => fs.readFileSync(new URL(path.join('..', rel), import.meta.url), 'utf8');
 
-  // Video shipped with rentedOnly readable but never writable: the restore path
-  // asked for it, no persist path ever produced it, so Rented silently fell back
-  // to Local on every reload. Both studios must carry it in the payload they save.
-  assert.match(
-    read('src/studios/VideoStudio.jsx').match(/const currentVideoPreferences = [\s\S]*?\n  \}\);/)[0],
-    /rentedOnly: s\.setup\.rentedOnly/,
-    'video preferences must persist the rented source',
-  );
-  assert.match(
-    read('src/studios/ImageStudio.jsx').match(/const currentImagePreferences = [\s\S]*?\n  \};/)[0],
-    /rentedOnly: s\.rentedOnly/,
-    'image preferences must persist the rented source',
-  );
+  // Both studios save the place their work runs, and the ONE override beside
+  // it. There is no `rentedOnly` any more: Video shipped with it readable but
+  // never writable, so "Rented" silently fell back to Local on every reload —
+  // and a mode that could do that was never the thing being chosen. A rental is
+  // a property of This Mac, and the pin is what a person actually set.
+  const video = read('src/studios/VideoStudio.jsx').match(/const currentVideoPreferences = [\s\S]*?\n  \}\);/)[0];
+  assert.match(video, /localMode: s\.setup\.localMode/);
+  assert.match(video, /rentedMachineId: s\.setup\.rentedMachineId \|\| ''/);
+  assert.doesNotMatch(video, /rentedOnly/);
+  const image = read('src/studios/ImageStudio.jsx').match(/const currentImagePreferences = [\s\S]*?\n  \};/)[0];
+  assert.match(image, /useLocalModel: s\.useLocalModel/);
+  assert.match(image, /rentedMachineId: s\.rentedMachineId/);
+  assert.doesNotMatch(image, /rentedOnly/);
 });
 
 test('the video boot state names its Source instead of leaving it undefined', async () => {
   const fs = await import('node:fs');
   const logic = fs.readFileSync(new URL('../src/studios/video/videoLogic.js', import.meta.url), 'utf8');
 
-  // A first run must say "not rented" out loud: an absent key normalizes to null,
-  // which is what made a never-written rentedOnly indistinguishable from a real
-  // "the user chose Local" and hid the missing persist above.
-  assert.match(logic.match(/export function buildInitialSetup[\s\S]*?\n\}/)[0], /rentedOnly: false/);
-  // Rented is a flavour of local routing, so it cannot outlive the local source.
-  assert.match(
+  // A first run must say where it runs out loud, and it has exactly one thing
+  // to say: `localMode`. The retired `rentedOnly` normalized to null when
+  // absent, which made a never-written flag indistinguishable from a real "the
+  // user chose Local" — the bug that hid a missing persist path for months.
+  const boot = logic.match(/export function buildInitialSetup[\s\S]*?\n\}/)[0];
+  assert.match(boot, /rentedMachineId: ''/);
+  assert.doesNotMatch(boot, /rentedOnly/);
+  assert.doesNotMatch(
     logic.match(/export function applyRestoredPreferences[\s\S]*?\n\}/)[0],
-    /rentedOnly: Boolean\(preferences\.rentedOnly && /,
+    /rentedOnly/,
   );
 });
 
@@ -227,15 +229,18 @@ test('withPin puts the pinned box in front for THIS tab only, and is inert for a
   assert.deepEqual(withPin(null, 'vast:47'), []);
 });
 
-test('the studios send the tab pin as run_on only in Rented mode, persist it, and copy it with the tab', async () => {
+test('the studios send the tab pin as run_on, persist it, and copy it with the tab', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const read = (rel) => fs.readFileSync(new URL(path.join('..', rel), import.meta.url), 'utf8');
   const image = read('src/studios/ImageStudio.jsx');
   const video = read('src/studios/VideoStudio.jsx');
 
-  // Image: one helper, gated on the Rented source, spread into every generate/upscale call.
-  assert.match(image, /const runOn = \(\) => \(s\.rentedOnly && s\.rentedMachineId \? \{ run_on: s\.rentedMachineId \} : \{\}\);/);
+  // Image: one helper, gated on the PIN alone, spread into every
+  // generate/upscale call. The pin is the whole override — unpinned, the
+  // gateway routes by its own lane rules, which is what "Rented mode" only ever
+  // did mechanically anyway.
+  assert.match(image, /const runOn = \(\) => \(s\.rentedMachineId \? \{ run_on: s\.rentedMachineId \} : \{\}\);/);
   // \s* rather than \n\s+: the invariant is that the lane and the pin travel
   // TOGETHER on every local generate, not that they sit on two lines. Two of
   // them moved onto one line when the calls were routed through modelRunner.
@@ -243,8 +248,8 @@ test('the studios send the tab pin as run_on only in Rented mode, persist it, an
   assert.equal(generateCalls.length, 5, 'every local generate call carries the pin');
   assert.match(image, /localAI\.upscale\(\{[^}]*\.\.\.runOn\(\) \}\)/);
   // Video: the hivemind request carries it, gated the same way.
-  assert.match(video, /\.\.\.\(setup\.rentedOnly && setup\.rentedMachineId \? \{ run_on: setup\.rentedMachineId \} : \{\}\),/);
-  // Both persist it alongside rentedOnly…
+  assert.match(video, /\.\.\.\(setup\.rentedMachineId \? \{ run_on: setup\.rentedMachineId \} : \{\}\),/);
+  // Both persist it…
   assert.match(image.match(/const currentImagePreferences = [\s\S]*?\n  \};/)[0], /rentedMachineId: s\.rentedMachineId/);
   assert.match(video.match(/const currentVideoPreferences = [\s\S]*?\n  \}\);/)[0], /rentedMachineId: s\.setup\.rentedMachineId/);
   // …and hand the picker the value + the writer, so the machine list edits THIS

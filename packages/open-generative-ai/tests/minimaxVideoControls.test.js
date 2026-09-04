@@ -404,8 +404,8 @@ test('with pricing published the picker prices the actual attachments, and Compa
         assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, leader5090).machine.rentalId, 'vast:48');
         // This tab's pin beats the server order; a pin on a machine that is not
         // attached is inert and the leader decides.
-        assert.equal(logic.motionReferenceLimitFor({ ...asSent, rentedOnly: true, rentedMachineId: 'vast:52' }, h3.id, leader5090), null);
-        assert.equal(logic.motionReferenceLimitFor({ ...asSent, rentedOnly: true, rentedMachineId: 'vast:gone' }, h3.id, leader5090).maxSeconds, 5);
+        assert.equal(logic.motionReferenceLimitFor({ ...asSent, rentedMachineId: 'vast:52' }, h3.id, leader5090), null);
+        assert.equal(logic.motionReferenceLimitFor({ ...asSent, rentedMachineId: 'vast:gone' }, h3.id, leader5090).maxSeconds, 5);
         // A card the table does not list keeps the base; no machines known is
         // exactly the old behaviour.
         assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, [{ ...pro6000, vram_gb: 24 }]).maxSeconds, 5);

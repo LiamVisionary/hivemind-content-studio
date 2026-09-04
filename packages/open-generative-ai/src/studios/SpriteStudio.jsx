@@ -22,12 +22,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
 import { useMediaSrc } from '../hooks/hooks.js';
-import { defaultPick, EVIDENCE_LABELS, fetchCapabilityMatrix, rankModels, RATING_LABELS, serverRows } from '../lib/capabilityMatrix.js';
+import {
+  EVIDENCE_LABELS, fetchCapabilityMatrix, rankModels, RATING_LABELS, RATING_TONE, serverRows,
+} from '../lib/capabilityMatrix.js';
+import { pickRunTarget, runTargetsFromRows } from '../lib/runTargets.js';
+import { readinessFromTargets, useRentedMachines } from '../lib/useRunTargets.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { saveBytes } from '../lib/downloadMedia.js';
 import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
 import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
-import { needsBrowserKey, placeLabelFor, runImage, runVideo, transportFor } from '../lib/modelRunner.js';
+import { needsBrowserKey, placeLabelFor, runImage, runVideo } from '../lib/modelRunner.js';
 import { useLocalImageCatalog } from '../lib/useLocalCatalog.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
@@ -39,7 +43,7 @@ import {
   Spinner, StudioLayout, TextArea, cx,
 } from '../ui/kit.jsx';
 import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
-import { ModelFitPicker, RATING_TONE } from './ModelFitPicker.jsx';
+import { RunOnPicker } from '../components/RunOnPicker.jsx';
 import { UploadPicker } from './UploadPicker.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 
@@ -136,12 +140,15 @@ export function SpriteStudio({ active = true } = {}) {
   const [matrixOpen, setMatrixOpen] = useState(false);
   // What this machine can actually run, and why the list is empty when it is.
   const { models: localModels, status: localStatus, refresh: refreshLocalCatalog } = useLocalImageCatalog();
+  // A rental is a property of This Mac, so the row it serves names it.
+  const { machines: rentedMachines } = useRentedMachines();
 
   // Stage 1 — the sprite
   const [subject, setSubject] = useState('');
   const [style, setStyle] = useState('16bit');
   const [background, setBackground] = useState('chroma');
-  const [imageModel, setImageModel] = useState(null);
+  // This tab's OVERRIDE, not the pick: null follows the Automatic run target.
+  const [imageChoice, setImageChoice] = useState(null);
   const [spriteUrl, setSpriteUrl] = useState('');
   const [drawing, setDrawing] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
@@ -152,7 +159,7 @@ export function SpriteStudio({ active = true } = {}) {
   const [customAction, setCustomAction] = useState('');
   const [soundscape, setSoundscape] = useState('');
   const [seconds, setSeconds] = useState(5);
-  const [videoModel, setVideoModel] = useState(null);
+  const [videoChoice, setVideoChoice] = useState(null);
   const [promptOverride, setPromptOverride] = useState('');
   const [clipUrl, setClipUrl] = useState('');
   const [animating, setAnimating] = useState(false);
@@ -255,6 +262,10 @@ export function SpriteStudio({ active = true } = {}) {
     return () => { alive = false; };
   }, []);
 
+  // Where a row runs and who pays for it is one question with one answer:
+  // runTargetsFromRows applies the transport check and the place vocabulary to
+  // this studio's own rated rows, so the picker below is the SAME control the
+  // Image, Video, Story and Restore studios show.
   const imageChoices = useMemo(() => {
     if (!matrix) return [];
     const local = localModels.map((model) => ({
@@ -272,33 +283,35 @@ export function SpriteStudio({ active = true } = {}) {
       label: row.model_label,
       source: 'cloud',
     }));
-    // A row also has to be one this studio can route — see modelRunner.js.
-    return rankModels(matrix, 'sprite_source', [...local, ...cloud]).map((row) => {
-      const route = transportFor(row);
-      return { ...row, available: row.available !== false && route.runnable, unavailableReason: route.reason };
-    });
-  }, [matrix, localModels]);
+    return runTargetsFromRows(
+      rankModels(matrix, 'sprite_source', [...local, ...cloud]),
+      { kind: 'image', machines: rentedMachines },
+    );
+  }, [matrix, localModels, rentedMachines]);
 
   const videoChoices = useMemo(() => {
     if (!matrix) return [];
     // Rated by the matrix, then marked with whether THIS stage can reach the
     // row — see spriteRouting.js. A cloud row the stage cannot send the sprite
     // to is shown with its reason, not offered as a job that fails locally.
-    return animationChoices(rankModels(matrix, 'sprite_animation', serverRows(matrix, 'sprite_animation')
-      .map((row) => ({ ...row, id: row.model, label: row.model_label, source: 'cloud' }))));
-  }, [matrix]);
+    return runTargetsFromRows(
+      animationChoices(rankModels(matrix, 'sprite_animation', serverRows(matrix, 'sprite_animation')
+        .map((row) => ({ ...row, id: row.model, label: row.model_label, source: 'cloud' })))),
+      { kind: 'video', machines: rentedMachines },
+    );
+  }, [matrix, rentedMachines]);
 
-  // The row's own reason, on the row. The image picker keeps its readiness
-  // where the credential lives; the animation picker only has to say which
-  // rows this stage cannot send the sprite to.
-  const animationReadiness = useCallback((row) => (
-    row.available === false && row.unavailableReason
-      ? { state: 'unroutable', label: 'Cannot run here', detail: row.unavailableReason, action: null, blocks: true }
-      : null
-  ), []);
+  const automaticFor = useCallback((kind, targets) => pickRunTarget(kind, {
+    catalog: targets, machines: rentedMachines, readiness: readinessFromTargets(targets, null),
+  }), [rentedMachines]);
+  const imageAuto = useMemo(() => automaticFor('image', imageChoices), [automaticFor, imageChoices]);
+  const videoAuto = useMemo(() => automaticFor('video', videoChoices), [automaticFor, videoChoices]);
+  const imageModel = imageChoice || imageAuto.target;
+  const videoModel = videoChoice || videoAuto.target;
 
-  useEffect(() => { if (!imageModel && imageChoices.length) setImageModel(defaultPick(imageChoices)); }, [imageChoices, imageModel]);
-  useEffect(() => { if (!videoModel && videoChoices.length) setVideoModel(defaultPick(videoChoices)); }, [videoChoices, videoModel]);
+  // Why a row cannot run is on the row itself now — the picker prints
+  // `target.reason` under any row it will not let you press — so this stage no
+  // longer needs a readiness adapter of its own to say it a second time.
 
   const animationPrompt = useMemo(() => (
     promptOverride || spriteAnimationPrompt({ subject, style, action, customBeat, customAction, background, soundscape })
@@ -631,7 +644,15 @@ export function SpriteStudio({ active = true } = {}) {
             </Button>
           </div>
 
-          <ModelFitPicker label="Drawing model" rows={imageChoices} value={imageModel} onChange={setImageModel} />
+          <RunOnPicker
+            label="Drawing model"
+            targets={imageChoices}
+            value={imageModel}
+            onChange={setImageChoice}
+            automatic={imageAuto}
+            onAutomatic={() => setImageChoice(null)}
+            isAutomatic={imageModel === imageAuto.target}
+          />
           {/* Only when this machine offers nothing: the cloud rows above are a
               real answer, so a warning beside them would be noise. */}
           {isLocalAIAvailable() && localStatus !== 'ready' && !localModels.length
@@ -682,7 +703,15 @@ export function SpriteStudio({ active = true } = {}) {
             </div>
           </details>
 
-          <ModelFitPicker label="Animation model" rows={videoChoices} value={videoModel} onChange={setVideoModel} readinessFor={animationReadiness} />
+          <RunOnPicker
+            label="Animation model"
+            targets={videoChoices}
+            value={videoModel}
+            onChange={setVideoChoice}
+            automatic={videoAuto}
+            onAutomatic={() => setVideoChoice(null)}
+            isAutomatic={videoModel === videoAuto.target}
+          />
 
           <div className="flex items-center gap-2">
             <Button icon="film" onClick={animate} disabled={animating || !spriteUrl} loading={animating}>
@@ -794,11 +823,11 @@ export function SpriteStudio({ active = true } = {}) {
                         <span className="truncate text-[13px] font-semibold text-ink1">{row.label}</span>
                         <Pill tone={RATING_TONE[row.rating] || 'neutral'}>{RATING_LABELS[row.rating]}</Pill>
                       </div>
-                      <p className="mt-1 text-[11px] leading-snug text-ink3">{row.reason}</p>
+                      <p className="mt-1 text-[11px] leading-snug text-ink3">{row.ratingReason}</p>
                       <p className="mt-1 text-[10px] uppercase tracking-wide text-ink3/70">
                         {placeLabelFor(row) ? `${placeLabelFor(row)} · ` : ''}
                         {EVIDENCE_LABELS[row.evidence] || row.evidence}
-                        {row.available === false ? ' · offline right now' : ''}
+                        {row.ready === false ? ' · offline right now' : ''}
                       </p>
                     </div>
                   ))}

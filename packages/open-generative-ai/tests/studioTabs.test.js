@@ -156,8 +156,10 @@ test('duplicating a tab copies configuration, never results or run state', () =>
     // …and the settings the user would expect to travel with a copy do.
     for (const field of ['prompt', 'negativePrompt', 'selectedModel', 'selectedLocalModel',
         'steps', 'guidanceScale', 'seed', 'uploadedImageUrls', 'loraSelectionsByModel',
-        // The per-tab "Run on" pin travels with a duplicate (video keeps it in `setup`).
-        'rentedOnly', 'rentedMachineId']) {
+        // The per-tab "Run on" pin travels with a duplicate (video keeps it in
+        // `setup`). It is the only run-on override a tab carries — `rentedOnly`
+        // was a mode beside it and is retired.
+        'rentedMachineId']) {
         assert.ok(IMAGE_TAB_FIELDS.includes(field), `image tabs must copy ${field}`);
     }
     // The video studio keeps its whole configuration in one immutable `setup`
