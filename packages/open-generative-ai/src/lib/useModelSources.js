@@ -9,7 +9,7 @@ import { useCallback, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 
 import {
-  ACCOUNTS, APP_ROUTE, HIVEMINDOS, LINK_POLL_MS, LINK_WAIT_MS, remedyFor, routeOf, sourceState,
+  ACCOUNTS, APP_ROUTE, HIVEMINDOS, LINK_POLL_MS, LINK_WAIT_MS, routeOf, sourceState,
 } from './textModels.js';
 import {
   connectHivemindosAccount, hivemindosLinkState, requestHivemindosLink, saveProviderKey,

@@ -48,8 +48,8 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(len(plan["variants"]), 4)
         # Zero variant drops the swept LoRA but keeps the others untouched.
         zero = plan["variants"][0]
-        self.assertNotIn("style.safetensors", [l["id"] for l in zero["loras"]])
-        self.assertIn("kept.safetensors", [l["id"] for l in zero["loras"]])
+        self.assertNotIn("style.safetensors", [entry["id"] for entry in zero["loras"]])
+        self.assertIn("kept.safetensors", [entry["id"] for entry in zero["loras"]])
         # Non-zero variants carry the swept value.
         self.assertEqual(plan["variants"][2]["coords"]["style.safetensors"], 0.4)
 
@@ -67,7 +67,7 @@ class PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_strength_hunt_plan(self.LORAS, ["missing.safetensors"])
         with self.assertRaises(ValueError):
-            build_strength_hunt_plan(self.LORAS, [l["id"] for l in self.LORAS])
+            build_strength_hunt_plan(self.LORAS, [entry["id"] for entry in self.LORAS])
         with self.assertRaises(ValueError):
             build_strength_hunt_plan(self.LORAS, [])
 

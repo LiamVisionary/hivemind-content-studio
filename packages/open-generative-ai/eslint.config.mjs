@@ -99,11 +99,16 @@ export default [
       'no-undef': 'error',
       // The JSX half of the same gate — see jsxScope above.
       'jsx/no-undef': 'error',
-      // Advisory, not a gate. Without the react plugin a component imported for
-      // JSX alone reads as unused, so imports are not checked at all here; what
-      // is left — a dead local — is worth saying and not worth failing a build
-      // over, least of all one whose file is mid-edit in another branch.
-      'no-unused-vars': ['warn', {
+      // A gate now, not advice. It sat at `warn` while six of them stood, and
+      // six warnings nobody may act on is how the next real one goes unread —
+      // one of the six was an import replaced months earlier, another a writer
+      // whose only caller had been deleted. The tree is at zero, so anything
+      // this reports is new and belongs to the change that introduced it.
+      //
+      // Still narrow by design: without the react plugin a component imported
+      // for JSX alone reads as unused, so `args`/imports stay unchecked and
+      // what fails a build is a dead local or a dead module-level binding.
+      'no-unused-vars': ['error', {
         args: 'none',
         varsIgnorePattern: '^[A-Z_]',
         caughtErrors: 'none',

@@ -97,6 +97,26 @@ dev = [
     "ruff==0.15.21",
 ]
 
+[tool.ruff]
+# `ruff check .` is the gate, so the gate has to have an answer for every file
+# in the tree — and the answer for code this repo did not write is "not ours to
+# reformat". These three trees are vendored verbatim and re-synced from their
+# sources, so an edit here is undone by the next sync and shows up as a diff
+# against upstream forever after. Everything else, including every test file, is
+# linted.
+extend-exclude = [
+    # Third-party MLX/Swift engines, MIT, tracked as upstream checkouts
+    # (VincentGourbin/flux-2-swift-mlx, a fork of mzbac/zimage.swift).
+    "engines",
+    # A byte-preserved snapshot of the working Krea2 Red Mix ComfyUI/MLX
+    # checkout — see its README; it exists to be diffed against the runtime.
+    "packages/comfyui-mobile/preserved-workflows",
+    # Reviewed snapshots synced from the Shared Brain and the pinned clueso-ai
+    # commit by scripts/sync_shared_skills.py. See skills/README.md.
+    "skills/shared",
+    "skills/vendor",
+]
+
 [tool.ruff.lint.per-file-ignores]
 # WebUI 需要先把项目根目录加入 sys.path，随后才能导入 app 包。
 # The donor's Streamlit shell and HTTP entry point now live under

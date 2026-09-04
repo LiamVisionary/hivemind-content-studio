@@ -89,7 +89,7 @@ registry, the video timeline, the composer, the client half of the vault. Pure
 logic — nothing mounts a component, which is why the lint gate matters:
 
 ```bash
-cd packages/open-generative-ai && npx eslint src     # 0 errors
+cd packages/open-generative-ai && npm run lint       # 0 errors, 0 warnings
 ```
 
 ### 5. Canvas — `packages/comfyui-mobile`

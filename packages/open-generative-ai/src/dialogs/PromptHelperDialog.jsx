@@ -24,7 +24,6 @@ import {
     externalHold,
     formatBytes,
     lastUsedModelId,
-    modelStatus,
     preferredModelId,
     rememberModelId,
 } from '../lib/promptHelperRuntime.js';
