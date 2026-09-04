@@ -137,6 +137,32 @@ export function normalizeImagePreferences(value) {
     };
 }
 
+/** The half of the preferences that plaintext localStorage is allowed to hold.
+ *
+ *  The negative prompt is prompt text — the top-level one and the copy each
+ *  model's tuning cache keeps — so it stays in the encrypted composer section
+ *  and is stripped here. Everything else (model, frame, sampler, steps) goes to
+ *  localStorage unconditionally, because that is the only store that can be read
+ *  SYNCHRONOUSLY at mount: without it the model reverts to the default on every
+ *  reload while the composer cache hydrates.
+ *
+ *  This lived inline in ImageStudio.jsx, where the node:test suite cannot reach
+ *  it — which is how the video studio grew a second, unstripped copy of the same
+ *  idea. One definition, exercised by tests/persistedBlobPrivacy.test.js. */
+export function persistedImageSettings(preferences) {
+    if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) return null;
+    const stripNegative = ({ negativePrompt: _neg, ...rest }) => rest;
+    const settings = stripNegative(preferences);
+    if (settings.modelSettings && typeof settings.modelSettings === 'object') {
+        settings.modelSettings = Object.fromEntries(
+            Object.entries(settings.modelSettings).map(([key, entry]) => [
+                key, entry && typeof entry === 'object' ? stripNegative(entry) : entry,
+            ]),
+        );
+    }
+    return settings;
+}
+
 // Mirrors KREA2_LOW_STEP_THRESHOLD in packages/media-gateway/
 // krea2_identity_workflow.py: at or below this step count the workflow swaps
 // its own sampler pair, which changes what a step costs.

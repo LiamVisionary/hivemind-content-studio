@@ -30,6 +30,7 @@ def render_faceless(manifest_path: str | Path) -> dict:
         params.video_source = "local"
         params.video_materials = generate_faceless_materials(path)
     _point_local_tts_at_the_studio_server()
+    _refresh_engine_credentials()
 
     result = task.start(manifest["run_id"], params, stop_at="video")
     if not isinstance(result, dict) or not result.get("videos"):
@@ -68,6 +69,21 @@ def _point_local_tts_at_the_studio_server() -> None:
     from app.config import config
 
     config.app["localtts_base_url"] = load_config().universal_tts_url.rstrip("/")
+
+
+def _refresh_engine_credentials() -> None:
+    """Fill the engine's provider keys from the machine's shared store.
+
+    The engine keeps its own `config.toml` with its own `pexels_api_keys` /
+    `pixabay_api_keys` / LLM key fields, and it reads that file once, at import.
+    So a stock-media key the owner saved into the shared credential store while
+    the studio was running never reached this lane, and the render died on
+    "pexels_api_keys is not set" pointing at a second store to fill in. One
+    re-read at run start keeps the machine at ONE credential store.
+    """
+    from app.config import config
+
+    config.refresh_hive_env()
 
 
 def _adopt_into_run(source: Path, run_dir: Path) -> Path:

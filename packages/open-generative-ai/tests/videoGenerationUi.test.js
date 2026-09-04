@@ -119,8 +119,8 @@ test('video preferences retain the complete generation configuration', async () 
         }],
     });
     assert.deepEqual(restored.ingredientSelections, [
-        { url: '/api/media-studio/references/front.png', description: 'front view' },
-    ], 'an off-origin reference url never persists');
+        { url: '/api/media-studio/references/front.png' },
+    ], 'an off-origin reference url never persists, and the description is not persisted at all');
     assert.equal(restored.ingredientSelectedSheet, 'stitched');
     // The completion ping is a shared all-studio setting now, not a video
     // preference — the key must not come back here.
@@ -155,9 +155,13 @@ test('video preferences migrate regular and Eros Ingredients into one shared sel
         },
     });
 
+    // The two per-model lists merge into one selection, deduped by url. The
+    // descriptions are NOT here: they ride in the encrypted composer section
+    // (tests/persistedBlobPrivacy.test.js), because a sentence about a picture
+    // of somebody's own life is prompt text.
     assert.deepEqual(preferences.ingredientSelections, [
-        { url: '/api/media-studio/references/front.png', description: 'front view' },
-        { url: '/api/media-studio/references/profile.png', description: 'profile view' },
+        { url: '/api/media-studio/references/front.png' },
+        { url: '/api/media-studio/references/profile.png' },
     ]);
 });
 
@@ -175,7 +179,7 @@ test('video preferences persist uploaded ingredient sheets and the selected shee
     });
 
     assert.deepEqual(preferences.ingredientSheets, [
-        { url: '/api/media-studio/references/sheet.png', description: 'full cast sheet' },
+        { url: '/api/media-studio/references/sheet.png' },
     ]);
     assert.equal(preferences.ingredientSelectedSheet, '/api/media-studio/references/sheet.png');
 

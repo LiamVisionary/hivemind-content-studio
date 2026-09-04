@@ -62,6 +62,8 @@ export {
   getRestoredAdvancedVideoValues,
   normalizeVideoPreferences,
   normalizeVideoIngredientSelections,
+  videoIngredientDescriptions,
+  withVideoIngredientDescriptions,
   normalizeSelectedVideoIngredientSheet,
   normalizeVideoGenerationProgress,
   classifyVideoGenerationStage,

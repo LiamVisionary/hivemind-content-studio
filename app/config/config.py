@@ -777,3 +777,39 @@ if ffmpeg_path and os.path.isfile(ffmpeg_path):
     os.environ["IMAGEIO_FFMPEG_EXE"] = ffmpeg_path
 
 logger.info(f"{project_name} v{project_version}")
+
+
+def refresh_hive_env() -> list[str]:
+    """Re-read the machine's shared credential store into the live config.
+
+    The load above runs ONCE, at import. A key is normally saved while the
+    studio is already running — from its own Settings page, into the one shared
+    store this machine has — so without this the faceless engine keeps whatever
+    the empty ``config.toml`` fields held at boot and ``get_api_key`` refuses
+    with "pexels_api_keys is not set ... set it in the config.toml file", which
+    sends the owner to fill in a SECOND credential store for a key the first one
+    is already holding. Called at the start of a faceless render.
+
+    Returns the names of the sections that actually changed. Never a value.
+    """
+    sections = {
+        "app": app,
+        "azure": azure,
+        "siliconflow": siliconflow,
+        "minimax_tts": minimax_tts,
+        "elevenlabs": elevenlabs,
+        "chatterbox": chatterbox,
+    }
+    refreshed = _apply_hive_env({name: dict(section) for name, section in sections.items()})
+    changed = []
+    for name, section in sections.items():
+        values = refreshed.get(name) or {}
+        updates = {
+            key: value
+            for key, value in values.items()
+            if dict.get(section, key, _MISSING) != value
+        }
+        if updates:
+            section.update(updates)
+            changed.append(name)
+    return changed
