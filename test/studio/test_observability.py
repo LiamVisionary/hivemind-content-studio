@@ -87,8 +87,10 @@ def test_a_forced_500_answers_with_an_incident_that_is_in_the_log(tmp_path: Path
     logging.getLogger().handlers[-1].flush()
     written = studio_log.read_text(encoding="utf-8")
     assert f"incident={incident}" in written
-    # A frame list, by basename, with no source lines and no locals.
-    assert "control_api.py:" in written and "test_observability.py:" in written
+    # A frame list, by basename, with no source lines and no locals. The route
+    # frame names api/system.py, which is where /api/runtime lives since the
+    # control API was split into one router module per subject.
+    assert "system.py:" in written and "test_observability.py:" in written
     # The exception's own text is sanitised the way a toast would be.
     assert "/Users/liam" not in written and "secret.txt" in written
 

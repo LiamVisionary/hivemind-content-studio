@@ -150,7 +150,12 @@ test('a video row\'s compact switch reaches the request, and every carrier keeps
     assert.match(studio, /\{ url, name, useAudio: false, compact: false \}/);
     assert.match(studio, /\(\{ \.\.\.item, useAudio: false, compact: false \}\)/);
     // The server accepts exactly the two values the MCP does and forwards them.
-    const api = read('../../src/hivemind_content_studio/control_api.py');
-    assert.match(api, /canvas: Literal\["full", "compact"\] = "full"/);
-    assert.match(api, /"use_audio": bool\(video_item\.use_audio\),\s*"canvas": video_item\.canvas,/);
+    // The control API is one router module per subject now: the request body
+    // lives in api/models.py, the staging that forwards it in api/video.py.
+    assert.match(
+        read('../../src/hivemind_content_studio/api/models.py'),
+        /canvas: Literal\["full", "compact"\] = "full"/);
+    assert.match(
+        read('../../src/hivemind_content_studio/api/video.py'),
+        /"use_audio": bool\(video_item\.use_audio\),\s*"canvas": video_item\.canvas,/);
 });
