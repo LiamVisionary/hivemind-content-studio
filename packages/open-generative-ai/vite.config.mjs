@@ -69,9 +69,12 @@ export default defineConfig({
                 target: process.env.OPENGEN_API_PROXY || 'http://127.0.0.1:8765',
                 changeOrigin: true,
             },
-            // Local-AI bridge straight to the loopback hosted-server (8794),
-            // which is not owner-gated — local models and auto-detected
-            // workflows work on the dev server with zero extra setup.
+            // Local-AI bridge straight to the loopback hosted-server (8794).
+            // The bridge is gated now (the same canvas-gate credential the
+            // Canvas surface uses), and the dev server needs no extra setup for
+            // it: cookies are scoped by host and not by port, so a browser
+            // signed in to the studio on 127.0.0.1:8765 sends its session
+            // cookie here too, and this proxy forwards it.
             '/local-ai': {
                 target: 'http://127.0.0.1:8794',
                 changeOrigin: true,

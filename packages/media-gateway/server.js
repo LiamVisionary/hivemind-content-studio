@@ -1,5 +1,4 @@
 const http = require('http');
-const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -71,40 +70,12 @@ const comfyPrivateViewToken = (process.env.COMFY_PRIVATE_VIEW_TOKEN || '').trim(
 // Everything below this line proxies with the gateway's own capability token
 // attached, so the port has to say who is asking before it forwards anything.
 // See lib/canvas-gate.js for the two credentials it accepts and why.
-const studioTarget = (process.env.HIVEMIND_STUDIO_TARGET || 'http://127.0.0.1:8765').replace(/\/+$/, '');
 const canvasGateModule = require('./lib/canvas-gate');
-const { ACCOUNT_COOKIE: GATE_ACCOUNT_COOKIE } = canvasGateModule;
+// One session probe for every gated Node surface — this one and the bridge.
+const studioSession = require('./lib/studio-session');
 
-/** Ask the control API whether this session cookie is a signed-in workspace. */
-function verifyAccountCookie(cookieValue) {
-  return new Promise((resolve) => {
-    // One try/catch around the whole thing: anything that throws here — a bad
-    // target URL, a header Node refuses — has to become a refusal, because a
-    // promise that neither resolves nor rejects would hang the request.
-    try {
-      const url = new URL('/api/owner/session', studioTarget);
-      const lib = url.protocol === 'https:' ? https : http;
-      const request = lib.get(url, {
-        headers: {
-          accept: 'application/json',
-          cookie: `${GATE_ACCOUNT_COOKIE}=${cookieValue}`,
-        },
-      }, (upstream) => {
-        const chunks = [];
-        upstream.on('data', (chunk) => chunks.push(chunk));
-        upstream.on('end', () => {
-          if ((upstream.statusCode || 500) !== 200) { resolve(false); return; }
-          try { resolve(Boolean(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}').unlocked)); }
-          catch { resolve(false); }
-        });
-      });
-      request.setTimeout(4000, () => request.destroy(new Error('session probe timeout')));
-      request.on('error', () => resolve(false));
-    } catch {
-      resolve(false);
-    }
-  });
-}
+const studioTarget = studioSession.studioTarget();
+const verifyAccountCookie = (cookieValue) => studioSession.verifyAccountCookie(cookieValue, studioTarget);
 
 const canvasGate = canvasGateModule.createCanvasGate({
   readGatewayToken: readWrapperToken,

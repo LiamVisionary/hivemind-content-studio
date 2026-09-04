@@ -343,6 +343,14 @@ def test_the_runtime_manifest_describes_the_one_node_service() -> None:
     assert manifest["entrypoints"]["nodeServices"] == "http://127.0.0.1:8793"
     assert manifest["entrypoints"]["nodeServicesHealth"] == "http://127.0.0.1:8793/healthz"
 
+    # The Canvas entrypoint is a URL a BROWSER can open, and /canvas on the
+    # shared port is not one: every page behind that mount emits absolute asset
+    # URLs (/_next/…, /mobile/assets/…) and the mount rewrites paths inbound,
+    # never bodies outbound, so the HTML would load and every asset in it would
+    # 404. node-services.mjs redirects a navigation there to this port instead.
+    assert manifest["entrypoints"]["canvas"] == "http://127.0.0.1:8788/"
+    assert "/canvas mount is for API and proxy routes only" in manifest["note"]
+
 
 def test_the_manifest_keeps_what_its_legacy_readers_read() -> None:
     """bin/image-gen-studio.mjs prints name and components.length; the MCP reads

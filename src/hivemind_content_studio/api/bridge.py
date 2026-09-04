@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .. import civitai_post
-from ..media_studio import sanitize_error_detail
+from ..media_studio import local_gateway_token, sanitize_error_detail
 from ..settings import settings as studio_settings
 
 
@@ -86,11 +86,21 @@ def register(app, ctx) -> None:
         upstream_url = f"{studio_settings().network.bridge_url}/{path}" + (f"?{query}" if query else "")
 
         def forward() -> tuple[bytes, int, str]:
+            # The bridge authenticates its callers now (canvas-gate, same two
+            # credentials as the Canvas surface beside it). This hop has no
+            # browser session of its own, so it presents the loopback gateway
+            # token — the same secret the bridge reads off disk. It stays
+            # server-side: it is set on the outbound request and never on the
+            # response the browser gets back.
+            headers = {"Content-Type": request.headers.get("content-type", "application/json")}
+            token = local_gateway_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
             proxy_request = urllib.request.Request(
                 upstream_url,
                 data=body or None,
                 method=request.method,
-                headers={"Content-Type": request.headers.get("content-type", "application/json")},
+                headers=headers,
             )
             try:
                 with urllib.request.urlopen(proxy_request, timeout=190) as upstream:

@@ -58,6 +58,17 @@ Each of those three files still listens on its own port when it is run as the
 program, so `node server.js`, `node hosted-server.js` and
 `media-studio-mcp.mjs --http` remain the way to bring one surface up alone.
 
+`/canvas` is an API and proxy mount, **not a page to open in a browser**.
+Everything behind it emits absolute asset URLs — Next writes `/_next/…`
+(`next.config.js` sets no `basePath` or `assetPrefix`), ComfyUI Mobile's build
+writes `/mobile/assets/…`, and `app/mobile/[[...path]]/route.js` rewrites
+`/comfy/…` in — and the mount rewrites paths inbound without rewriting bodies
+outbound, so the HTML would load and every asset in it would 404 on the shared
+port. A browser navigation to `/canvas/…` is therefore redirected to 8788, which
+is where the studio's iframe and the Tauri shell already address it; retiring
+8788 means making those three surfaces emit mount-relative URLs first. `/bridge`
+has no such limit: its `index.html` is already relative.
+
 **Attach-only — never spawned, never killed by the shell**
 
 * **ComfyUI lanes** (8188 default, 8198 Anima, 8199 LTX). The user's own
@@ -175,16 +186,23 @@ ship.
 
 Two pieces replace it:
 
-* **The Canvas port authenticates.** `packages/media-gateway/lib/canvas-gate.js`
-  gates the whole 8788 dispatch and its WebSocket upgrade on either the gateway
-  capability token (agents, the MCP, `media_studio.py`) or the studio account
-  cookie, checked against the control API's `/api/owner/session` and cached for
-  a few seconds. An unauthenticated navigation is redirected to the studio's
-  sign-in gate on the same host; an XHR gets 401 JSON carrying `sign_in_url`.
-  Only `GET /healthz` is exempt, so a supervisor can still see the child is
-  alive. This works **because of §2.1**: the webview is on `http://127.0.0.1`,
-  cookies are scoped by host and not by port, and 8765 and 8788 are the same
-  site — so the Canvas iframe's own requests carry the session.
+* **The token-holding Node surfaces authenticate.**
+  `packages/media-gateway/lib/canvas-gate.js` gates the whole 8788 dispatch and
+  its WebSocket upgrade, **and the local-inference bridge on 8794 / `/bridge`**,
+  on either the gateway capability token (agents, the MCP, `media_studio.py`,
+  and the control API when it proxies `/local-ai`) or the studio account
+  cookie, checked against the control API's `/api/owner/session` through
+  `lib/studio-session.js` and cached for a few seconds. An unauthenticated
+  navigation is redirected to the studio's sign-in gate on the same host; an
+  XHR gets 401 JSON carrying `sign_in_url`. Only the bare liveness path is
+  exempt — `GET /healthz` on the Canvas, `GET /health` or `/healthz` on the
+  bridge, because the supervisor and `unified_runtime.py` poll those names
+  before anybody has signed in. This works **because of §2.1**: the webview is
+  on `http://127.0.0.1`, cookies are scoped by host and not by port, and 8765,
+  8788 and 8794 are the same site — so the Canvas iframe's own requests carry
+  the session. Loopback binding is not a substitute: a page on any other site
+  can aim a CORS-simple POST at 127.0.0.1, and on the bridge those POSTs queue
+  generations and spend the owner's Civitai key.
 * **Remote access is opt-in.** `src/hivemind_content_studio/remote_access.py`
   and the switch on the Rented GPUs page run `tailscale serve` — a real
   certificate, no proxy process of ours, no key on disk — and publish **only**

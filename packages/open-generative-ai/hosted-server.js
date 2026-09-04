@@ -44,6 +44,41 @@ function readToken() {
   try { return fs.readFileSync(ZIMAGE_TOKEN_FILE, 'utf8').trim(); } catch { return ''; }
 }
 
+// Everything below this line proxies with the gateway's own capability token
+// attached — it queues local generations, and it spends the owner's Civitai key
+// — so the port has to say who is asking before it forwards anything. Same
+// module, same two credentials, as the Canvas surface mounted beside it in the
+// same process: see ../media-gateway/lib/canvas-gate.js.
+//
+// Loopback binding was doing this job on its own, and it cannot: `fromLoopback`
+// below stops a rebound DNS name, but not a page on another site aiming a
+// CORS-simple `text/plain` POST at 127.0.0.1:8794 — that request goes through,
+// and `readBody` does not check Content-Type. `/local-ai/generate`,
+// `/local-ai/civitai-download` and `/local-ai/upscale` all spend something.
+const canvasGateModule = require('../media-gateway/lib/canvas-gate');
+const studioSession = require('../media-gateway/lib/studio-session');
+
+// The two names the one liveness answer has. Exempt because the supervisor
+// (`scripts/hivemind-studio-stack`), the Tauri shell and `unified_runtime.py`
+// all poll `GET /health` before anybody has signed in, and it says only that
+// this process is up and where its gateway is — no models, no library, no
+// paths. Everything else on this surface presents a credential.
+const BRIDGE_HEALTH_PATHS = ['/health', '/healthz'];
+const BRIDGE_SURFACE = 'the local model bridge';
+const STUDIO_TARGET = studioSession.studioTarget();
+
+const bridgeGate = canvasGateModule.createCanvasGate({
+  readGatewayToken: readToken,
+  verifyAccountCookie: (cookie) => studioSession.verifyAccountCookie(cookie, STUDIO_TARGET),
+  healthPaths: BRIDGE_HEALTH_PATHS,
+});
+
+function refuseBridgeRequest(req, res) {
+  const answer = canvasGateModule.refusal(req, STUDIO_TARGET, { surface: BRIDGE_SURFACE });
+  res.writeHead(answer.status, answer.headers);
+  res.end(answer.body);
+}
+
 function send(res, status, body, headers = {}) {
   const data = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body, null, 2));
   res.writeHead(status, {
@@ -527,12 +562,13 @@ function slimCivitaiItem(item) {
   };
 }
 
-// The bridge has no session of its own: whoever reaches it can start local
-// generations and pay for Civitai downloads on the owner's key. A page on any
+// Second line, behind the gate above, and a different attack: a page on any
 // other site can point its own DNS name at 127.0.0.1 and reach this port, and
 // the browser will then treat it as same-origin — the Host header is the one
 // thing still carrying the attacker's name, so it is the one thing checked.
-// The studio proxies here as 127.0.0.1:8794 and passes.
+// The credential is what makes such a request useless; this is what keeps a
+// rebound name from ever looking like the studio's own origin in the first
+// place. The studio proxies here as 127.0.0.1:8794 and passes.
 const LOOPBACK_NAMES = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function fromLoopback(req) {
@@ -1195,9 +1231,14 @@ function handleBridgeRequest(req, res) {
   } catch {
     return sendJson(res, 400, { error: 'Invalid request URL' });
   }
-  return (async () => {
+  // Before the gate, and the only thing that is: liveness, for a supervisor
+  // that has to know this child is up before anyone can sign in.
+  if (canvasGateModule.isHealthProbe(u.pathname, req.method, BRIDGE_HEALTH_PATHS)) {
+    return sendJson(res, 200, bridgeHealth());
+  }
+  return bridgeGate.authorize(req, u.pathname).then(async (decision) => {
+    if (!decision.allowed) return refuseBridgeRequest(req, res);
     try {
-      if (u.pathname === '/health' || u.pathname === '/healthz') return sendJson(res, 200, bridgeHealth());
       // Awaited, so a rejection inside a route lands in THIS catch instead of
       // escaping as an unhandled rejection (which terminates Node 22).
       if (u.pathname.startsWith('/local-ai/')) return await handleLocalAi(req, res, u.pathname, u.searchParams);
@@ -1207,7 +1248,7 @@ function handleBridgeRequest(req, res) {
       if (res.headersSent) { try { res.end(); } catch { /* already closed */ } return undefined; }
       return sendJson(res, 500, { error: 'The local inference bridge hit an unexpected error' });
     }
-  })();
+  }).catch(() => refuseBridgeRequest(req, res));
 }
 
 /** What this surface says about itself, on its own /health and in the collapsed
