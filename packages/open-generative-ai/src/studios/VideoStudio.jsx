@@ -2896,12 +2896,12 @@ export function VideoStudio({
       // Same honesty as the source panel: name the actual blocker.
       toast.error(
         s.rentedBroken?.length
-          ? 'Lost the connection to your rented machine — reconnect it from the Source panel or Machines.'
+          ? 'Lost the connection to your rented machine — reconnect it from the Source panel or Rented GPUs.'
           : s.rentedIdle?.length
             ? 'Your rented machine is not connected to this studio yet — click "Use it here" in the Source panel.'
             : s.rentedProvisioning?.length
-              ? 'Your rented machine is still coming online — the Machines view shows its progress.'
-              : 'No rented machine is serving this model. Rent one in Machines, or switch the source to Local.',
+              ? 'Your rented machine is still coming online — the Rented GPUs page shows its progress.'
+              : 'No rented machine is serving this model. Rent one on the Rented GPUs page, or switch the source to Local.',
       );
       return;
     }

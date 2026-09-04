@@ -14,7 +14,7 @@ import { Icon } from '../../ui/icons.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import { runFailureRemedy } from '../../lib/failureRemedy.js';
 import {
-  Button, Card, EmptyState, Field, IconButton, NativeSelect, Pill, SectionLabel,
+  Button, Card, EmptyState, FailureCallout, Field, IconButton, NativeSelect, Pill, SectionLabel,
   Segmented, Spinner, TextArea, TextInput, Toggle, cx,
 } from '../../ui/kit.jsx';
 import {
@@ -141,9 +141,6 @@ function RoutePicker({ kind, label, icon, route, onRouteChange, up = true }) {
           active={open}
           onClick={toggle}
           disabled={kind === 'brain' && !providers.length}
-          title={kind === 'brain' && !providers.length && brainPlaceholder === 'Unavailable'
-            ? 'No LLM brain is advertised by the studio API — connect a provider under Providers, or check that the API is running.'
-            : undefined}
         />
       )}
     >
@@ -507,6 +504,10 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
   const s = useHub();
   const mode = STUDIO_MODES[s.studioMode] || STUDIO_MODES.create;
   const attachments = s.simpleAttachments;
+  // The catalog loaded and named no LLM provider — the one state the Brain chip
+  // can only render as "Unavailable". A studio that never answered is a
+  // different state, and the thread's EmptyState says that one.
+  const brainMissing = Boolean(s.simpleCatalog) && !routePickerProviders('brain').length;
 
   // Auto-grow the prompt textarea (same 150/250px caps as the old composer).
   useEffect(() => {
@@ -542,6 +543,20 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
           className="mx-auto flex w-full max-w-3xl flex-col gap-2"
           onSubmit={(e) => { e.preventDefault(); void submitSimplePrompt(); }}
         >
+          {/* The studio answered and advertised no brain. The only sign of that
+              used to be a greyed "Brain · Unavailable" chip whose explanation
+              lived in a `title` on a DISABLED button — unreachable by keyboard,
+              invisible on touch, and suppressed by Chrome and WebKit even for a
+              mouse. It is a callout with the button that repairs it now. The
+              API-is-down case is not this one: the thread above owns it. */}
+          {brainMissing ? (
+            <FailureCallout
+              title="No brain is connected, so the Planner cannot expand a brief."
+              remedy={{ label: 'Open Providers', action: 'connect-provider' }}
+              onRemedy={(remedy) => void runFailureRemedy(remedy)}
+            />
+          ) : null}
+
           {s.loadedCanvasSetup ? <LoadedCanvasSetup loaded={s.loadedCanvasSetup} /> : null}
 
           {s.composerRestoredFrom ? (

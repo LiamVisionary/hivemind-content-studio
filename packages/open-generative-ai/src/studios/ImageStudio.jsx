@@ -203,15 +203,23 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
 
   // imageMode is DERIVED from actually-attached references (picker onChange,
   // draft hydration, context restore) — never adopted as a bare persisted flag.
+  // `|| null` is load-bearing: with an empty catalog this line used to read
+  // `t2iModels[0].id` and take the whole studio down into the error boundary
+  // with a raw TypeError. The catalog is not supposed to be empty (cloudCatalog
+  // falls back to the offline list), but a studio that CANNOT render is a worse
+  // answer to a broken catalog than a studio that renders and says so — which
+  // is what the callout below the canvas does.
   const defaultModel = t2iModels.find((model) => model.id === persistedImagePreferences?.modelId)
     || i2iModels.find((model) => model.id === persistedImagePreferences?.modelId)
-    || t2iModels[0];
-  const selectedModel = defaultModel.id;
+    || t2iModels[0]
+    || i2iModels[0]
+    || null;
+  const selectedModel = defaultModel?.id || '';
   const initialI2iConfig = apiModelRequiresImage(selectedModel);
   const initialAspectRatios = initialI2iConfig ? getAspectRatiosForI2IModel(selectedModel) : getAspectRatiosForModel(selectedModel);
   const selectedAr = initialAspectRatios.includes(persistedImagePreferences?.aspectRatio)
     ? persistedImagePreferences.aspectRatio
-    : (defaultModel.inputs?.aspect_ratio?.default || initialAspectRatios[0] || '1:1');
+    : (defaultModel?.inputs?.aspect_ratio?.default || initialAspectRatios[0] || '1:1');
   const initialResolutions = initialI2iConfig ? getResolutionsForI2IModel(selectedModel) : getResolutionsForModel(selectedModel);
   const selectedResolution = initialResolutions.includes(persistedImagePreferences?.resolution)
     ? persistedImagePreferences.resolution
@@ -246,7 +254,7 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     bootSource: boot,
     persistedImagePreferences,
     selectedModel,
-    selectedModelName: defaultModel.name,
+    selectedModelName: defaultModel?.name || '',
     // Which ACCOUNT the cloud model is on. The catalog lists gpt-image-2 under
     // three providers on three different bills, so the id alone cannot route:
     // this is the other half of the routing identity modelRunner dispatches on.
@@ -1988,12 +1996,12 @@ export function ImageStudio({
         && !servedByAnyMachine(s.rentedMachines, localModelById(s.selectedLocalModel) || { id: s.selectedLocalModel })) {
       toast.error(
         s.rentedBroken?.length
-          ? 'Lost the connection to your rented machine — reconnect it from the Source panel or Machines.'
+          ? 'Lost the connection to your rented machine — reconnect it from the Source panel or Rented GPUs.'
           : s.rentedIdle?.length
             ? 'Your rented machine is not connected to this studio yet — click "Use it here" in the Source panel.'
             : s.rentedProvisioning?.length
-              ? 'Your rented machine is still coming online — the Machines view shows its progress.'
-              : 'No rented machine is serving this model. Rent one in Machines, or switch the source to Local.',
+              ? 'Your rented machine is still coming online — the Rented GPUs page shows its progress.'
+              : 'No rented machine is serving this model. Rent one on the Rented GPUs page, or switch the source to Local.',
       );
       return;
     }
@@ -3101,6 +3109,19 @@ export function ImageStudio({
           {/* The last failure stays on the canvas until dismissed or the next
               run — one sentence, the button that repairs it, and the raw text
               behind Details. Nothing toasts beside it (DESIGN.md §4). */}
+          {/* An empty catalog is not a state anyone should reach — the loader
+              falls back to the offline list — but when it happens the studio
+              renders and says so rather than crashing on a missing default
+              model. The repair is a reload: the catalog is fetched once, at
+              boot, and this studio's defaults are read from it there. */}
+          {!t2iModels.length && !i2iModels.length ? (
+            <FailureCallout
+              title="The model catalog could not be loaded, so this studio has no cloud models to offer."
+              onRetry={() => { try { window.location.reload(); } catch { /* no window */ } }}
+              retryLabel="Reload"
+            />
+          ) : null}
+
           {s.generateError ? (
             <FailureCallout
               title={s.generateError}

@@ -83,6 +83,33 @@ const MODE_COPY = () => ({
     never: { label: t('passbook.modeNever'), hint: t('passbook.modeNeverHint') },
 });
 
+/**
+ * A panel whose own read FAILED, told apart from a component that is absent.
+ *
+ * `/api/passbook/policy`, `/links`, `/broker` and `/access` are each caught into
+ * `null`, and a null used to render as "Not installed." / "Machine linking is
+ * not set up." — an outage reported as a design decision. A failed read says so
+ * and carries the retry; an absent component says there is nothing to fix.
+ */
+function PanelUnreadable({ busy, onRetry }) {
+    return (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-ink2">{t('passbook.panelUnreadable')}</p>
+            <Button size="sm" disabled={busy} onClick={onRetry}>{t('common.tryAgain')}</Button>
+        </div>
+    );
+}
+
+/** An absent optional component, and whether that matters (it does not). */
+function PanelAbsent({ detail, fallback }) {
+    return (
+        <>
+            <p className="text-xs text-ink3">{detail || fallback}</p>
+            {detail ? null : <p className="text-[11px] text-ink3">{t('passbook.optionalPart')}</p>}
+        </>
+    );
+}
+
 function Pending({ pending, busy, onResolve }) {
     // The request is waiting on this panel, so it leads. Anything below it is
     // configuration; this is someone standing at the door.
@@ -119,7 +146,10 @@ function Pending({ pending, busy, onResolve }) {
 }
 
 function Unlocks({ access, busy, onUnlock, onLock }) {
-    const copy = MODE_COPY();
+    // No `MODE_COPY()` here any more: this card used to end with a bare
+    // `copy.ask.hint` — "the request waits until you answer" — a lowercase,
+    // subjectless line about a control that lives in a different card further
+    // down the page. It reads there, beside the "Ask me" button it describes.
     const open = access?.sessions || [];
     return (
         <Card className="flex flex-col gap-3 p-4">
@@ -157,20 +187,20 @@ function Unlocks({ access, busy, onUnlock, onLock }) {
                     </p>
                 </>
             )}
-            <p className="text-[11px] text-ink3">{copy.ask.hint}</p>
         </Card>
     );
 }
 
-function AccessModes({ access, keys, busy, onSetMode }) {
+function AccessModes({ access, keys, busy, onSetMode, onRetry }) {
     const copy = MODE_COPY();
     // This panel governs THIS app's access to the shared store, so the app is
     // fixed rather than picked: PassBook's own UI is where another app's rules
     // are edited, and a picker here would offer to change a rule this studio
     // cannot then show the effect of.
     const app = 'hivemind-content-studio';
-    if (!access?.available) {
-        return <p className="text-xs text-ink3">{access?.detail || t('passbook.notInstalled')}</p>;
+    if (!access) return <PanelUnreadable busy={busy} onRetry={onRetry} />;
+    if (!access.available) {
+        return <PanelAbsent detail={access.detail} fallback={t('passbook.notInstalled')} />;
     }
     const entry = (access.apps || {})[app] || {};
     const rules = entry.keys || {};
@@ -211,12 +241,13 @@ function AccessModes({ access, keys, busy, onSetMode }) {
     );
 }
 
-function Broker({ broker }) {
+function Broker({ broker, busy, onRetry }) {
     // The limits ship with the status and are rendered, not summarised. This is
     // the one panel where an encouraging word would teach the owner something
     // false — "protected" here would mean "recorded", and they are not the same.
-    if (!broker?.available) {
-        return <p className="text-xs text-ink3">{broker?.detail || t('passbook.notInstalled')}</p>;
+    if (!broker) return <PanelUnreadable busy={busy} onRetry={onRetry} />;
+    if (!broker.available) {
+        return <PanelAbsent detail={broker.detail} fallback={t('passbook.notInstalled')} />;
     }
     return (
         <>
@@ -240,12 +271,13 @@ function Broker({ broker }) {
     );
 }
 
-function LinkedMachines({ links, busy, onRevoke }) {
+function LinkedMachines({ links, busy, onRevoke, onRetry }) {
     // Read plus revoke only. Approving and accepting need a fingerprint compared
     // against a second machine's screen, and a button here could not do that —
     // one that looked like it could would be worse than no button at all.
-    if (!links?.available) {
-        return <p className="text-xs text-ink3">{links?.detail || t('passbook.linkingNotSetUp')}</p>;
+    if (!links) return <PanelUnreadable busy={busy} onRetry={onRetry} />;
+    if (!links.available) {
+        return <PanelAbsent detail={links.detail} fallback={t('passbook.linkingNotSetUp')} />;
     }
     const rows = [
         ...(links.lent || []).map((row) => ({ ...row, lent: true })),
@@ -548,21 +580,21 @@ export function PassBookView({ active = true }) {
                         <div>
                             <SectionLabel>{t('passbook.howEachKeyAnswered')}</SectionLabel>
                             <div className="mt-2">
-                                <AccessModes access={access} keys={state.keys} busy={busy} onSetMode={setMode} />
+                                <AccessModes access={access} keys={state.keys} busy={busy} onSetMode={setMode} onRetry={() => void load()} />
                             </div>
                         </div>
 
                         <div>
                             <SectionLabel>{t('passbook.linkedMachines')}</SectionLabel>
                             <Card className="mt-2 flex flex-col gap-2 p-4">
-                                <LinkedMachines links={links} busy={busy} onRevoke={revoke} />
+                                <LinkedMachines links={links} busy={busy} onRevoke={revoke} onRetry={() => void load()} />
                             </Card>
                         </div>
 
                         <div>
                             <SectionLabel>{t('passbook.readBroker')}</SectionLabel>
                             <Card className="mt-2 flex flex-col gap-2 p-4">
-                                <Broker broker={broker} />
+                                <Broker broker={broker} busy={busy} onRetry={() => void load()} />
                             </Card>
                         </div>
 
@@ -594,7 +626,9 @@ export function PassBookView({ active = true }) {
                                         </div>
                                     </>
                                 ) : (
-                                    <p className="text-xs text-ink3">{ledger?.detail || t('passbook.noAccessRecord')}</p>
+                                    ledger
+                                        ? <PanelAbsent detail={ledger.detail} fallback={t('passbook.noAccessRecord')} />
+                                        : <PanelUnreadable busy={busy} onRetry={() => void load()} />
                                 )}
                             </Card>
                         </div>

@@ -23,7 +23,7 @@ import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
 import { Spinner } from '../ui/kit.jsx';
 import { CommandPalette } from './CommandPalette.jsx';
 import { ErrorBoundary } from './ErrorBoundary.jsx';
-import { HUB_PAGES, NAV_SECTIONS, PAGE_ALIASES, isKnownPage } from './navConfig.jsx';
+import { HUB_PAGES, PAGE_ALIASES, SHORTCUT_ITEMS, isKnownPage } from './navConfig.jsx';
 import { requestComposerMenu } from './composerMenuRequest.js';
 import { Shell } from './Shell.jsx';
 import { startApiHeartbeat, stopApiHeartbeat } from './statusStore.js';
@@ -167,7 +167,8 @@ export function App() {
   // App-wide shortcuts (the composers own ⌘↵, the tab strip owns ⌘T/⌘W):
   //   ⌘,      Settings
   //   ⌘K      the command palette — pages, tabs, saved prompts, installed models
-  //   ⌘1..⌘9  the first nav tier, in the order the sidebar lists it
+  //   ⌘1..⌘9  SHORTCUT_ITEMS — the first nine nav rows, in sidebar order,
+  //           and exactly the nine the command palette advertises
   useEffect(() => {
     const onKey = (e) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
@@ -182,7 +183,7 @@ export function App() {
         return;
       }
       if (/^[1-9]$/.test(e.key) && !e.shiftKey) {
-        const target = (NAV_SECTIONS[0]?.items || [])[Number(e.key) - 1];
+        const target = SHORTCUT_ITEMS[Number(e.key) - 1];
         if (!target) return;
         e.preventDefault();
         void navigate(target.page);

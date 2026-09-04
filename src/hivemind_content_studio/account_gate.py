@@ -712,6 +712,11 @@ async function addPasskey() {
   }
 }
 
+// The lede this screen opens with, kept so a retry can put it back — the
+// failure replaces it, and a recovery that left the failure sentence in place
+// would say the studio is unreachable over a working picker.
+const OPENING_LEDE = el('lede').textContent;
+
 async function start() {
   let payload;
   try {
@@ -719,8 +724,11 @@ async function start() {
     accounts = payload.accounts || [];
   } catch {
     el('lede').textContent = 'This studio is not reachable right now.';
+    el('unreachable').hidden = false;
     return;
   }
+  el('unreachable').hidden = true;
+  el('lede').textContent = OPENING_LEDE;
   if (payload.setup_required) { showSetup(); return; }
   renderTiles();
   // Settings > Workspaces sends people here to add one; the picker is where
@@ -747,6 +755,11 @@ el('create-form').addEventListener('submit', createWorkspace);
 el('create-passkey').addEventListener('click', createWorkspaceWithPasskey);
 el('create-back').addEventListener('click', back);
 el('enrol-add').addEventListener('click', addPasskey);
+el('unreachable-retry').addEventListener('click', async () => {
+  const button = el('unreachable-retry');
+  button.disabled = true;
+  try { await start(); } finally { button.disabled = false; }
+});
 el('enrol-skip').addEventListener('click', () => {
   if (el('enrol-hide').checked) {
     try { localStorage.setItem(offerHiddenKey(chosen.id), '1'); } catch {}
@@ -799,6 +812,15 @@ def account_gate_html(desktop: bool | None = None) -> str:
           computer. Settings &gt; Privacy says exactly which is which.</p>
       </div>
       <ul class="tiles" id="tiles"></ul>
+      <!-- The gate could not read its own workspace list. It used to swap the
+           lede for one sentence and stop there: no retry, no explanation, on
+           the first screen of the app. This is the same failure with a way out
+           of it, and it says what to wait for. -->
+      <div id="unreachable" hidden style="display:grid;justify-items:center;gap:12px;margin-top:8px">
+        <p class="lede" style="margin:0">The studio's local service has not answered yet. It is usually
+          still starting — give it a moment and try again.</p>
+        <button class="primary" id="unreachable-retry" type="button">Try again</button>
+      </div>
     </div>
 
     <section class="card" id="setup" hidden aria-labelledby="setup-title">

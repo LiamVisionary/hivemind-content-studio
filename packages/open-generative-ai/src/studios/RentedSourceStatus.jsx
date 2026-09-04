@@ -59,7 +59,7 @@ function MachinePicker({ machines, all, pinned, pendingId, onSelect }) {
             aria-pressed={locked}
             data-rental-id={machine.rental_id}
             title={locked && !dead
-              ? 'Click again to unpin — this tab follows the Machines default'
+              ? 'Click again to unpin — this tab follows the Rented GPUs default'
               : (dead
                 ? 'Reconnect this machine'
                 : 'Lock this tab to this machine')}
@@ -186,7 +186,7 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
         <small className="text-[11px] text-ink3">
           {lockedHere
             ? `This tab is locked to that machine — what you make runs there and comes back encrypted. Click it again to follow the default. ${live.length} running, about $${rate.toFixed(2)}/hr in total.`
-            : `Following the Machines default — click a machine to lock this tab to it. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`}
+            : `Following the Rented GPUs default — click a machine to lock this tab to it. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`}
         </small>
         {error ? <small className="text-[11px] text-warn">{error}</small> : null}
       </div>

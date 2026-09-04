@@ -67,6 +67,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
             boot::retry_service,
             boot::skip_service,
             boot::reveal_logs,
+            boot::restart_studio,
         ])
         .build(context)
         .expect("failed to start the Hivemind Content Studio shell")

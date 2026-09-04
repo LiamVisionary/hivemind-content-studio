@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "studio",
+  "description": "The studio page, served by the control API over loopback, which Tauri treats as a remote origin. It may ask the shell to restart the local services the shell itself started — and nothing else: no filesystem, no shell, no window control.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": ["allow-restart-studio"]
+}

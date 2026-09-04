@@ -409,6 +409,27 @@ impl Supervisor {
         true
     }
 
+    /// The studio's own "Restart studio": every service this shell started,
+    /// stopped and brought up again with its crash budget cleared.
+    ///
+    /// Two things it deliberately does not do. A service the person chose to
+    /// continue without stays skipped — a restart is not a way to overrule
+    /// them. And a service that is ATTACHED was never ours to signal, so
+    /// `bring_up` re-attaches to it rather than starting a second copy; a
+    /// developer's hand-started stack survives a press of this button.
+    /// Returns how many services were taken through a restart.
+    pub fn restart_all(&self) -> usize {
+        let ids: Vec<String> = {
+            let managed = self.managed.lock().unwrap_or_else(|error| error.into_inner());
+            managed
+                .iter()
+                .filter(|service| service.state != ServiceState::Skipped)
+                .map(|service| service.plan.id.clone())
+                .collect()
+        };
+        ids.iter().filter(|id| self.retry(id)).count()
+    }
+
     /// The "Continue without it" action. Stops trying, and stops the child if
     /// one is somehow still around.
     pub fn skip(&self, id: &str) -> bool {

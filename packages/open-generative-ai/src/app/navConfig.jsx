@@ -72,6 +72,15 @@ export function navGroups(section) {
 
 export const NAV_GROUPS = NAV_SECTIONS.flatMap(navGroups);
 export const NAV_ITEMS = NAV_GROUPS.flatMap((g) => g.items);
+
+// ⌘1..⌘9 — the first nine rows of the flat list, in the order the sidebar shows
+// them. ONE list, because the palette advertises these hints and App.jsx binds
+// them: they used to be derived separately (the palette off NAV_ITEMS, the
+// handler off NAV_SECTIONS[0].items, which is four rows long), so ⌘5..⌘9 were
+// printed beside Sprite, Lip sync, Planner, Library and Productions and did
+// nothing at all — in a browser they fell through to the browser's own tab
+// switching. An advertised shortcut that does nothing is worse than no hint.
+export const SHORTCUT_ITEMS = NAV_ITEMS.slice(0, 9);
 export const APP_NAME = t('app.name');
 
 // Studios mount once on first visit and are display-toggled thereafter (App.jsx

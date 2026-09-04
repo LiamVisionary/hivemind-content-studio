@@ -7,7 +7,7 @@ import { Icon } from '../../ui/icons.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import {
   Button, Card, CollapsibleSection, EmptyState, Field, IconButton, NativeSelect, Pill, SectionLabel, Segmented,
-  Spinner, TextInput,
+  Spinner, StudioRestartAction, TextInput,
 } from '../../ui/kit.jsx';
 import { api, humanize } from '../hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, requestRentedMode } from '../../lib/rentedMachines.js';
@@ -919,6 +919,9 @@ export function GpuMachinesView({ active }) {
   // A failed poll that still has good data on screen — reported as a chip, not
   // as an error that wipes the view.
   const [stale, setStale] = useState('');
+  // The one failure whose repair is a restart rather than another poll: a
+  // control API older than this build, missing the rental planner route.
+  const [needsRestart, setNeedsRestart] = useState(false);
   const [renting, setRenting] = useState(false);
   const [prefer, setPrefer] = useState('balanced');
   const [destroyingId, setDestroyingId] = useState(null);
@@ -953,14 +956,22 @@ export function GpuMachinesView({ active }) {
           // with /api/gpu-rentals/plan, but the control API is a long-lived
           // process that only picks up new routes on restart. FastAPI's bare
           // "Not Found" sent someone hunting through the UI for the fault.
-          throw /not found/i.test(err.message || '')
-            ? new Error('The studio API is running an older build without the rental planner — '
-              + 'restart the stack (zimage-stack restart), then reload.')
-            : err;
+          //
+          // The sentence used to end in `zimage-stack restart`, a command only
+          // somebody with a checkout can run. `needsRestart` puts the restart
+          // itself in the banner instead (ui/kit.jsx StudioRestartAction).
+          if (/not found/i.test(err.message || '')) {
+            const skew = new Error('The studio’s local service is running an older build without the rental '
+              + 'planner. Restart the studio and it will pick it up.');
+            skew.needsRestart = true;
+            throw skew;
+          }
+          throw err;
         }
       }
       setLoadError('');
       setStale('');
+      setNeedsRestart(false);
     } catch (err) {
       const message = err.message || 'Failed to reach the rentals API';
       // A poll that fails while a machine is provisioning must not replace a
@@ -968,6 +979,7 @@ export function GpuMachinesView({ active }) {
       // that restarts, and a single dropped request is not an outage. Keep the
       // last good data and say quietly that it went stale; only a view with
       // NOTHING on it gets the hard error.
+      setNeedsRestart(Boolean(err?.needsRestart));
       if (hasDataRef.current) setStale(message);
       else setLoadError(message);
     }
@@ -1194,8 +1206,19 @@ export function GpuMachinesView({ active }) {
       />
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         {loadError && (
-          <div className="mb-4 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger-tint p-3">
-            <small className="min-w-0 flex-1 font-mono text-[12px] text-danger">{loadError}</small>
+          // The sentence, not the wire text: everything reaching here came
+          // through describeFailure in hubData's api(). The way out is beside
+          // it — the restart when the API is behind this build, otherwise the
+          // poll this button jumps ahead of.
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-danger/40 bg-danger-tint p-3" role="alert">
+            <small className="min-w-0 flex-1 text-[12px] text-danger">{loadError}</small>
+            {needsRestart
+              ? <StudioRestartAction />
+              : (
+                <Button size="sm" icon="refresh" onClick={() => refresh(true)}>
+                  Try again
+                </Button>
+              )}
           </div>
         )}
         {error && (
@@ -1212,10 +1235,14 @@ export function GpuMachinesView({ active }) {
           </div>
         )}
         {stale && !loadError && (
-          <Card className="mb-4 flex items-center gap-2 border-warn/40 p-2 text-[11px] text-warn">
+          <Card className="mb-4 flex flex-wrap items-center gap-2 border-warn/40 p-2 text-[11px] text-warn">
             <Spinner size={12} className="text-warn" />
-            Showing the last reading — the studio API did not answer the latest poll
-            ({stale}). Retrying every {Math.round(POLL_MS / 1000)}s.
+            <span className="min-w-0">
+              Showing the last reading — the studio did not answer the latest poll.
+              {' '}{stale}{' '}
+              Retrying every {Math.round(POLL_MS / 1000)}s.
+            </span>
+            {needsRestart ? <StudioRestartAction /> : null}
           </Card>
         )}
         {failures.length > 0 && (

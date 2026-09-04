@@ -2,7 +2,8 @@
 // See DESIGN.md. All plain JSX, no external deps.
 import { createContext, useContext, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { STUDIO_RESTART_COMMAND, apiOfflineSentence, pingApiStatus, useApiStatus } from '../app/statusStore.js';
+import { apiOfflineSentence, pingApiStatus, useApiStatus } from '../app/statusStore.js';
+import { inDesktopShell, restartStudio } from '../lib/desktopShell.js';
 import { t } from '../lib/i18n.js';
 import { sectionOpen, setSectionOpen } from '../lib/prefs.js';
 import { Icon } from './icons.jsx';
@@ -735,6 +736,43 @@ function ComposerSlot({ drop, children }) {
   );
 }
 
+// THE remedy for a studio that is not answering, in the two shapes it can take.
+//
+// This replaced a `<code>` holding `scripts/hivemind-studio-stack restart` on
+// three surfaces — the studio banner, the status menu and the Settings
+// restart-required strip. That command is a repo-relative path: correct for the
+// person who started the stack from a checkout, useless to anyone who installed
+// the .dmg, which is most of the people who will ever see it. The desktop shell
+// supervises those services and can restart them from a button; a browser tab
+// cannot, and says so rather than printing a command it cannot run either.
+//
+// A successful restart reloads the page, because the control API the page is
+// served BY has just been replaced.
+export function StudioRestartAction({ className = '' }) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const inShell = inDesktopShell();
+  const press = async () => {
+    setBusy(true);
+    setFailed(false);
+    const result = await restartStudio();
+    if (result.ok) {
+      try { window.location.reload(); return; } catch { /* no window (tests) */ }
+    }
+    setBusy(false);
+    setFailed(true);
+  };
+  if (!inShell) {
+    return <span className={cx('min-w-0 text-xs leading-relaxed text-ink2', className)}>{t('app.restartOutsideShell')}</span>;
+  }
+  return (
+    <span className={cx('inline-flex flex-wrap items-center gap-2', className)}>
+      <Button size="sm" icon="refresh" loading={busy} onClick={press}>{t('app.restartStudio')}</Button>
+      {failed ? <span className="text-xs text-danger">{t('app.restartFailed')}</span> : null}
+    </span>
+  );
+}
+
 // The studio is not answering — said once, at the top of whatever studio the
 // user is standing in, with the same Retry the topbar pill offers. A press that
 // cannot possibly work is greyed out by each studio; this line is why.
@@ -753,9 +791,7 @@ function StudioOfflineBanner() {
     >
       <span className="font-semibold">{t('app.notRunning')}</span>
       <span className="min-w-0 text-ink2">{apiOfflineSentence()}</span>
-      <code className="rounded border border-line1 bg-bg2 px-1.5 py-0.5 font-mono text-[11px] text-ink1">
-        {STUDIO_RESTART_COMMAND}
-      </code>
+      <StudioRestartAction />
       <Button size="sm" icon="refresh" loading={busy} onClick={retry} className="ml-auto">
         {t('common.tryAgain')}
       </Button>
