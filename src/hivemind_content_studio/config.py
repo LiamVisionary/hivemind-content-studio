@@ -115,6 +115,12 @@ def app_dirs(project_root: Path | None = None) -> AppDirs:
     beside the code (``<repo>/data``, what every existing machine has), and a
     packaged build — which has no writable tree — puts it under
     ``$HIVEMIND_MEDIA_STATE_DIR/content-studio``.
+
+    ``CONTENT_STUDIO_CACHE_DIR`` and ``CONTENT_STUDIO_LOG_DIR`` override the two
+    derived folders on their own. The desktop shell passes all three from
+    Tauri's ``app_data_dir`` / ``app_cache_dir`` / ``app_log_dir``, which on
+    macOS are three different trees — logs belong in ``~/Library/Logs`` where
+    Console.app lists them, not inside the data folder.
     """
     root = project_root or Path(os.environ.get("CONTENT_STUDIO_ROOT", PROJECT_ROOT)).expanduser().resolve()
     configured = os.environ.get("CONTENT_STUDIO_DATA_DIR")
@@ -125,11 +131,16 @@ def app_dirs(project_root: Path | None = None) -> AppDirs:
     else:
         data_dir = media_state_root() / "content-studio"
         _migrate_repo_data_dir((root / "data").resolve(), data_dir)
+
+    def _override(name: str, fallback: Path) -> Path:
+        value = (os.environ.get(name) or "").strip()
+        return Path(value).expanduser().resolve() if value else fallback
+
     return AppDirs(
         config_dir=data_dir / "config",
         data_dir=data_dir,
-        cache_dir=data_dir / "cache",
-        logs_dir=data_dir / "logs",
+        cache_dir=_override("CONTENT_STUDIO_CACHE_DIR", data_dir / "cache"),
+        logs_dir=_override("CONTENT_STUDIO_LOG_DIR", data_dir / "logs"),
     )
 
 

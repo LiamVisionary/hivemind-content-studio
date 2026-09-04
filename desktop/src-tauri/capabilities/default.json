@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The boot screen: read the boot state, act on a failed service, reveal the log folder.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "opener:allow-reveal-item-in-dir",
+    "allow-boot-status",
+    "allow-retry-service",
+    "allow-skip-service",
+    "allow-reveal-logs"
+  ]
+}

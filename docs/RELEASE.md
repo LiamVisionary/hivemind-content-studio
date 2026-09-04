@@ -1,12 +1,14 @@
 # Release — what the download contains, and the decisions behind it
 
-This document exists so `src-tauri/` can be written from a spec instead of from
-guesswork. Today the shipped shell is a webview pointed at
-`HIVEMIND_STUDIO_URL || http://127.0.0.1:8765` and the thing that serves that URL
-is `scripts/hivemind-studio-stack`, a 36 KB bash supervisor bound to a git
-checkout, a hand-built ComfyUI, `uv`, three `npm ci` runs and a macOS LaunchAgent.
-A user who downloaded that shell today would get an empty window. Everything
-below names what changes.
+This document was written so `src-tauri/` could be built from a spec instead of
+from guesswork. It now exists, at [`desktop/src-tauri`](../desktop/README.md):
+a Rust core that reserves a port, supervises the sidecars by pid, shows a boot
+screen with an action per failure, and loads `http://127.0.0.1:<port>` once
+`/readyz` answers. The Electron shell it replaced — a webview pointed at
+`HIVEMIND_STUDIO_URL || http://127.0.0.1:8765` that started nothing and showed
+an empty window when the backend was absent — has been deleted, along with its
+`electron-builder` packaging. What remains unbuilt is the *bundling*: the
+runtimes the app ships with, and the signing chain. Everything below names it.
 
 `scripts/hivemind-studio-stack` stays. It is the **developer** supervisor and the
 reference implementation of the process tree; the Rust shell reimplements the
@@ -37,7 +39,7 @@ inherits one.
 
 | Process | Runtime | Port | Health |
 |---|---|---|---|
-| Control API (`content-studio-api`, `control_api.py`) | bundled Python | 8765 (`CONTENT_STUDIO_CONTROL_PORT`) | `GET /api/runtime` |
+| Control API (`content-studio-api`, `control_api.py`) | bundled Python | 8765 (`CONTENT_STUDIO_CONTROL_PORT`) | `GET /readyz` |
 | Media gateway (`packages/media-gateway/app.py`) | bundled Python | 8787 | `GET /health` |
 | Gateway frontend / Canvas (`packages/media-gateway/server.js`) | bundled Node | 8788 | `GET /` |
 | Local-inference bridge (`packages/open-generative-ai/hosted-server.js`) | bundled Node | 8794 (`OGA_PORT`) | `GET /health` |
@@ -86,15 +88,18 @@ from the custom protocol — breaks three things at once:
   no migration for an already-enrolled key.
 
 So the window loads the control API over loopback, same-origin with its own API,
-exactly as the browser and the current Electron shell already do. The cost is
-that the app cannot start until the control API is healthy; the shell shows its
-own startup state until `/api/runtime` answers, and never a blank window.
+exactly as the browser already does. The cost is that the app cannot start until
+the control API is healthy; the shell shows `splash/index.html` — one row per
+service, an action on every failure — until `/readyz` answers, and never a blank
+window. `/readyz` rather than `/api/runtime`: the latter probes three engines, so
+a ComfyUI that is not installed would hold the window shut.
 
 ### 2.2 When the port falls back, the shell sets the origin env vars
 
-8765 can be taken — by a developer stack, or by anything else. The shell picks
-the first free port in `8765-8785` and, **in the same step**, passes the chosen
-origin down:
+8765 can be taken — by a developer stack, or by anything else. When what holds
+it answers `/healthz` and names this product, the shell attaches to it and the
+port does not change. Otherwise it takes the first free port in `8765-8785` and,
+**in the same step**, passes the chosen origin down:
 
 * `CONTENT_STUDIO_WEBAUTHN_ORIGINS` — the accounts layer accepts an assertion
   only from an origin in this list. Unset, `RelyingParty.for_request` falls back
@@ -137,12 +142,12 @@ is Apple Silicon, the ComfyUI lanes are tuned for MPS, and every performance
 number in this repository was measured on an M-series machine. An Intel Mac gets
 a clear refusal at install time, not a slow app.
 
-Windows and Linux lanes stay present but **disabled**: `electron-builder.config.cjs`
-still describes the NSIS and deb/AppImage targets, and
-`scripts/package-linux-deb.js` still works, but neither is built, signed or
-published for v1. They are kept so the code paths do not rot, and because the
-control API and gateway are already platform-neutral — the missing pieces are
-the bundled runtimes and the signing chain, not the app.
+Windows and Linux are **not built**. Their electron-builder targets (NSIS,
+deb/AppImage) went with the Electron shell; Tauri can produce both, and the
+control API, the gateway and the supervisor are already platform-neutral — the
+supervisor's one Unix-specific piece is the process-group signal, which has a
+Windows branch. The missing pieces are the bundled runtimes and a signing chain
+per platform, not the app.
 
 ---
 
@@ -157,11 +162,11 @@ source archive the AGPL offer points at, so it is never moved or deleted.
 
 **Identity** comes from `src/hivemind_content_studio/identity.py` — product name,
 bundle id `ai.hivemindos.content-studio`, copyright holder, support-folder name,
-source URL. It is generated into
-`packages/open-generative-ai/electron/identity.json`
-(`python -m hivemind_content_studio.identity --write`), which the Electron main
-process, `hosted-server.js`, `electron-builder.config.cjs` and the Tauri config
-all read. Nothing else may type the bundle id.
+source URL. It is generated into `packages/open-generative-ai/identity.json`
+(`python -m hivemind_content_studio.identity --write`), which `hosted-server.js`
+reads, and it is repeated in `desktop/src-tauri/tauri.conf.json` because Tauri
+reads its identifier from there. `test/studio/test_identity.py` fails if those
+two disagree, and if the bundle id is typed anywhere else.
 
 **Signing**: Developer ID Application, hardened runtime, `--timestamp`, then
 `notarytool submit --wait` and `stapler staple` on the `.dmg`. The bundled Python
@@ -251,6 +256,8 @@ Run in order. Steps 1-4 are the gate; a failure at any of them stops the tag.
 
 Named here rather than left implicit:
 
-* `src-tauri/` does not exist yet. This document is its specification, not a description of it.
+* **Nothing here has been launched as a `.app`.** `cargo check` and `cargo test` pass and the supervisor's logic is unit-tested, but the shell has never been built into a bundle and double-clicked. Step 4 of the checklist is the first time that happens.
+* **The runtimes are not bundled.** `desktop/src-tauri` resolves its sidecar commands from configuration, and in a checkout those default to `<root>/.venv/bin/python` and `node` on PATH. §1's table is still the specification for what the DMG must carry.
+* The frontend still hard-codes `:8788` for the Canvas iframe and `:8796` for the MCP page. The shell prefers those ports and attaches to whatever already answers on them, so a collision degrades one panel rather than boot — but the discovery half of finding `startup-08` is unwritten.
 * The packaged app's configuration surface (the ~dozen env names and five hard-coded loopback ports the control API resolves by convention) still has no single settings object; see finding `cp-config-surface-for-packaging`.
 * Windows and Linux need bundled runtimes and a signing chain before their lanes can be re-enabled.

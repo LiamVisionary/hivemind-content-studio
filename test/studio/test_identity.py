@@ -1,7 +1,7 @@
 """The product's name and bundle id are written down once, or not at all.
 
 Before `identity.py` the donor's name leaked into four places at once — the
-electron bundle id, the window title, two crash dialogs and the local-AI support
+desktop bundle id, the window title, two crash dialogs and the local-AI support
 folder — and they disagreed with each other. These tests are what stops that
 happening again.
 """
@@ -15,16 +15,11 @@ from hivemind_content_studio import identity
 
 
 ROOT = Path(__file__).resolve().parents[2]
-IDENTITY_JSON = ROOT / "packages" / "open-generative-ai" / "electron" / "identity.json"
+IDENTITY_JSON = ROOT / "packages" / "open-generative-ai" / "identity.json"
 
 # Files that name the product for macOS, the packager or the user. Everything
 # here must read the generated JSON rather than typing the bundle id.
-JS_CONSUMERS = (
-    "packages/open-generative-ai/electron/main.js",
-    "packages/open-generative-ai/hosted-server.js",
-    "packages/open-generative-ai/electron-builder.config.cjs",
-    "packages/open-generative-ai/scripts/package-linux-deb.js",
-)
+JS_CONSUMERS = ("packages/open-generative-ai/hosted-server.js",)
 
 
 def test_generated_identity_json_matches_the_module() -> None:
@@ -40,11 +35,12 @@ def test_the_bundle_id_is_typed_in_exactly_one_source_file() -> None:
     # id to assert it; every other hit would be a second copy waiting to drift.
     allowed = {
         "src/hivemind_content_studio/identity.py",
-        "packages/open-generative-ai/electron/identity.json",
+        "packages/open-generative-ai/identity.json",
+        "desktop/src-tauri/tauri.conf.json",
         "test/studio/test_identity.py",
         "docs/RELEASE.md",
     }
-    searched = ("src", "app", "packages", "scripts", "test", "docs")
+    searched = ("src", "app", "packages", "scripts", "test", "docs", "desktop")
     offenders = []
     for root in searched:
         for path in (ROOT / root).rglob("*"):
@@ -69,11 +65,26 @@ def test_no_donor_product_name_in_the_desktop_shell_or_the_bridge() -> None:
         assert "identity" in text, f"{relative} should read the generated identity"
 
 
-def test_electron_builder_config_is_not_also_in_package_json() -> None:
-    # electron-builder refuses to run when both exist.
-    package = json.loads((ROOT / "packages" / "open-generative-ai" / "package.json").read_text(encoding="utf-8"))
+def test_the_desktop_shell_is_the_tauri_one_and_electron_is_gone() -> None:
+    """One shell, and it reads the same identity as everything else.
+
+    The Electron shell was a webview pointed at a launchd job: it started
+    nothing, watched nothing and showed an empty window when the backend was
+    absent. `desktop/src-tauri` replaces it, so nothing may reintroduce the
+    Electron packaging alongside it.
+    """
+    open_gen = ROOT / "packages" / "open-generative-ai"
+    package = json.loads((open_gen / "package.json").read_text(encoding="utf-8"))
     assert "build" not in package
-    assert (ROOT / "packages" / "open-generative-ai" / "electron-builder.config.cjs").is_file()
+    assert "main" not in package, "no Electron entry point"
+    assert not any(name.startswith("electron") for name in package.get("devDependencies", {}))
+    assert not any(name.startswith("electron:") for name in package.get("scripts", {}))
+    for gone in ("electron", "electron-builder.config.cjs", "afterPack.js"):
+        assert not (open_gen / gone).exists(), f"{gone} belongs to the retired Electron shell"
+
+    config = json.loads((ROOT / "desktop" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+    assert config["identifier"] == identity.BUNDLE_ID
+    assert config["productName"] == identity.PRODUCT_NAME
 
 
 def test_version_payload_names_the_product_its_licence_and_its_source() -> None:

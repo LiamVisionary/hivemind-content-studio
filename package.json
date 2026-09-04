@@ -15,7 +15,8 @@
     "stack:stop": "./scripts/hivemind-studio-stack stop",
     "stack:restart": "./scripts/hivemind-studio-stack restart",
     "stack:status": "./scripts/hivemind-studio-stack status",
-    "desktop": "HIVEMIND_STUDIO_URL=http://127.0.0.1:8765 npm --prefix packages/open-generative-ai run electron:dev",
+    "desktop": "HIVEMIND_STUDIO_ROOT=\"$PWD\" sh -c 'cd desktop && cargo tauri dev'",
+    "desktop:check": "sh -c 'cd desktop/src-tauri && cargo check && cargo test'",
     "bootstrap:check": "python3 scripts/bootstrap_unified_studio.py"
   }
 }
