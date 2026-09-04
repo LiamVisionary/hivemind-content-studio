@@ -18,6 +18,7 @@ import { isCivitaiUrl } from '../lib/civitaiDownload.js';
 import { useCivitaiDownloads } from '../hooks/hooks.js';
 import { Button, Field, ProgressBar, TextInput, cx } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
+import { t } from '../lib/i18n.js';
 
 export function CivitaiDownloadDialog({ api, onComplete, onStarted, onClose }) {
   const [url, setUrl] = useState('');
@@ -65,12 +66,12 @@ export function CivitaiDownloadDialog({ api, onComplete, onStarted, onClose }) {
     <Modal
       open
       onClose={onClose}
-      title="Download from Civitai"
+      title={t('civitai.downloadTitle')}
       size="md"
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
-            {running ? 'Close' : 'Cancel'}
+            {running ? t('common.close') : t('common.cancel')}
           </Button>
           <Button
             variant="primary"
@@ -81,15 +82,15 @@ export function CivitaiDownloadDialog({ api, onComplete, onStarted, onClose }) {
             // loading-only button would still read as clickable.
             disabled={running}
           >
-            Download
+            {t('common.download')}
           </Button>
         </>
       }
     >
       <form id="civitai-download-form" onSubmit={submit} noValidate className="flex flex-col gap-4">
         <Field
-          label="Civitai model URL"
-          hint="Any civitai.com model or model-version link — LoRAs, checkpoints, VAEs and the rest are filed by type."
+          label={t('civitai.modelUrl')}
+          hint={t('civitai.modelUrlHint')}
           error={urlError}
         >
           <TextInput
@@ -97,7 +98,7 @@ export function CivitaiDownloadDialog({ api, onComplete, onStarted, onClose }) {
             inputMode="url"
             autoComplete="off"
             autoFocus
-            placeholder="https://civitai.com/models/…"
+            placeholder={t('civitai.urlPlaceholder')}
             value={url}
             onChange={(e) => { setUrl(e.target.value); if (urlError) setUrlError(''); }}
             aria-invalid={urlError ? true : undefined}
@@ -114,13 +115,12 @@ export function CivitaiDownloadDialog({ api, onComplete, onStarted, onClose }) {
             >
               {statusText}
             </div>
-            <ProgressBar value={(Number(percent) || 0) / 100} tone={failed ? 'danger' : 'honey'} label="Download progress" />
+            <ProgressBar value={(Number(percent) || 0) / 100} tone={failed ? 'danger' : 'honey'} label={t('civitai.downloadProgress')} />
           </div>
         ) : null}
 
         <p className="text-[11px] leading-relaxed text-ink3">
-          You can close this window — the download keeps running in the background, and its progress
-          and cancel button live on the LoRA card until it finishes.
+          {t('civitai.keepsRunning')}
         </p>
       </form>
     </Modal>

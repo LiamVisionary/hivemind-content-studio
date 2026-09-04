@@ -475,7 +475,7 @@ export const REMEDIES = Object.freeze({
   connect: { label: t('failure.connectAccount'), action: 'connect' },
   // No provider account connected at all. Points at the section rather than at
   // one provider, because which one to connect is the owner's choice.
-  'connect-provider': { label: t('failure.connectProvider'), action: 'accounts' },
+  'connect-provider': { label: t('failure.connectAccount'), action: 'accounts' },
   retry: { label: t('common.tryAgain'), action: 'refresh' },
 });
 

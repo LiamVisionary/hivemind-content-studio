@@ -1,29 +1,35 @@
 // The key table's shape, and the surfaces that read from it.
 //
 // Moving the interface strings onto keys is only worth doing if the table stays
-// the place a phrase is DECIDED. Two things break that, and both had already
-// happened before the table was one table:
+// the place a phrase is DECIDED. Four things break that, and every one of them
+// had already happened:
 //
 //   * Two keys with the same value. 'Download' had four keys, 'Regenerate'
 //     three, 'History' three — so "change the word" meant finding all of them,
 //     and the studios drifted apart exactly as you would expect. A duplicate
 //     value is a collision that has not happened yet.
+//   * Two keys with the same value in DIFFERENT WORDS, which the equality check
+//     cannot see. 'runOn.freeStaysHere' and 'runOn.freeStaysOnThisMac' shipped
+//     side by side for a phase — one sentence, two phrasings, on one chip.
 //   * A key whose value is empty (or whitespace). t() renders it as nothing at
 //     all, so the control loses its label with no error anywhere.
+//   * A key that is REFERENCED and missing. t() falls back to the key itself,
+//     so a typo puts "nav.activity" on a button and every render test still
+//     passes. That is the one failure a key table introduces on its own.
 //
-// The third test is the one that keeps the table from being bypassed: on the
-// surfaces this item covered — the shell, the nav, the Setup doors, the failure
-// primitive and the Runs-on control — a user-visible string in JSX text
-// position has to come from `t`, not from a literal typed in place.
+// The covered-surface tests are what keep the table from being bypassed: on a
+// file named in COVERED, a user-visible string — between the tags, or in a
+// label / hint / placeholder / title — has to come from `t`, never from a
+// literal typed in place.
 //
 // Everything here reads the SOURCE as text where the rule is about what is
 // written, and RENDERS where the rule is about what a person sees.
 //
-// Deliberately textual: two of these are claims about what is WRITTEN, not
-// about what renders — that the table holds no duplicate value and no empty
-// one, and that a covered surface carries no bare literal in JSX text
-// position. A render shows the string that won; only the source shows whether
-// a second way of choosing it grew back.
+// Deliberately textual: several of these are claims about what is WRITTEN, not
+// about what renders — that the table holds no duplicate value, no near
+// duplicate and no empty one, and that a covered surface carries no bare
+// literal. A render shows the string that won; only the source shows whether a
+// second way of choosing it grew back.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -37,6 +43,15 @@ const { renderToStaticMarkup } = require('react-dom/server');
 const ROOT = path.join(__dirname, '..');
 const SRC = path.join(ROOT, 'src');
 const read = (relative) => fs.readFileSync(path.join(SRC, relative), 'utf8');
+
+function walk(dir, out = []) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full, out);
+        else if (/\.(jsx?|mjs)$/.test(entry.name)) out.push(full);
+    }
+    return out;
+}
 
 /* ---------------- the table itself ---------------- */
 
@@ -96,13 +111,138 @@ test('no key in the table is missing its value', async () => {
     }
 });
 
+/* ---------------- and no two keys hold the same phrase in different words ---- */
+
+// The exact-value check above catches the easy half. The half that actually
+// happened is a NEAR-duplicate: 'runOn.freeStaysHere' ("free, stays here") and
+// 'runOn.freeStaysOnThisMac' ("free, stays on this Mac") sat in the table
+// together for a whole phase and shipped side by side — the Image studio said
+// one, the Video studio the other, on the same chip. Two different strings, so
+// the equality test was happy.
+//
+// The shape of a value is its content words, sorted, with the small words that
+// only carry grammar removed. Two keys with the same shape are the same
+// sentence written twice.
+const GRAMMAR = new Set([
+    'a', 'an', 'the', 'this', 'that', 'these', 'those', 'is', 'are', 'was', 'be', 'it', 'its',
+    'on', 'in', 'at', 'of', 'to', 'for', 'from', 'with', 'and', 'or', 'your', 'you', 'my',
+    'here', 'there', 'now', 'own',
+]);
+const contentWords = (value) => String(value)
+    .toLowerCase().replace(/[’]/g, "'").replace(/[^a-z0-9']+/g, ' ')
+    .trim().split(/\s+/)
+    .filter((word) => word && !GRAMMAR.has(word));
+
+// Reviewed and kept apart on purpose. Each line is a resolution, not a mute:
+// the pair was read, and this is why it stays two keys.
+const REVIEWED_SHAPES = [
+    // The note is BUILT from the place label — `runOn.onYourCredits` is
+    // `on your ${HIVEMINDOS_CREDITS}` — so the words repeat because they are
+    // literally the same words, decided once in i18n.js.
+    'credits hivemindos',
+    // A confirm dialog asks the question and then names the act on its button.
+    // They are the same words because they are the same decision seen twice —
+    // "Cancel this production?" over "Cancel production" — and collapsing them
+    // would leave the modal with a title or a button, not both.
+    'cancel production',
+];
+
+test('no two keys say the same thing in different words', async () => {
+    const { STRINGS } = await import(pathToFileURL(path.join(SRC, 'lib/i18n.js')).href);
+    const byShape = new Map();
+    for (const [key, value] of Object.entries(STRINGS)) {
+        if (typeof value === 'function') continue;
+        const words = contentWords(value);
+        // One content word is a label, not a sentence: "Starting" and
+        // "Starting..." are the same word for two different subjects, and
+        // collapsing them would be a worse table, not a better one.
+        if (words.length < 2) continue;
+        const shape = words.slice().sort().join(' ');
+        byShape.set(shape, [...(byShape.get(shape) || []), key]);
+    }
+    // One shape recurs honestly: a chip says "Not connected" and the card
+    // underneath says "Not connected." — the label, and a sentence MADE of it.
+    // That is allowed only when the table actually builds it: the longer value
+    // is the shorter plus a full stop or a colon AND its line in i18n.js is a template
+    // reading a shared const. A second hand-typed copy still fails.
+    const derived = new Map(entries().map(({ key, raw }) => [key, raw]));
+    const builtFromTheOther = (keys) => keys.length === 2 && keys.some((longer) => {
+        const shorter = keys.find((key) => key !== longer);
+        return ['.', ':'].some((mark) => STRINGS[longer] === `${STRINGS[shorter]}${mark}`)
+            && /^`.*\$\{[A-Z_]+\}/.test(derived.get(longer) || '');
+    });
+    const collisions = [...byShape.entries()]
+        .filter(([shape, keys]) => keys.length > 1 && !REVIEWED_SHAPES.includes(shape) && !builtFromTheOther(keys))
+        .map(([, keys]) => `${keys.join(' / ')} — ${keys.map((key) => JSON.stringify(STRINGS[key])).join(' vs ')}`);
+    assert.deepEqual(
+        collisions,
+        [],
+        'one phrase, one key — reconcile it, or add its shape to REVIEWED_SHAPES with the reason',
+    );
+});
+
+/* ---------------- and every key a surface asks for exists ---------------- */
+
+test('every t() and tf() call site in src names a key the table holds', async () => {
+    const { STRINGS } = await import(pathToFileURL(path.join(SRC, 'lib/i18n.js')).href);
+    // A key that is not in the table is not an error anywhere: t() returns the
+    // key, so the button reads "nav.activity" and the app looks broken to a
+    // person and fine to every test that only renders. This is the test that
+    // makes a typo fail here instead of on screen.
+    const missing = [];
+    for (const file of walk(SRC)) {
+        if (path.relative(SRC, file) === 'lib/i18n.js') continue;
+        const source = fs.readFileSync(file, 'utf8');
+        source.split('\n').forEach((line, index) => {
+            for (const match of line.matchAll(/\bt(?:f)?\(\s*'([a-zA-Z0-9_.-]+)'/g)) {
+                if (!(match[1] in STRINGS)) missing.push(`${path.relative(SRC, file)}:${index + 1} ${match[1]}`);
+            }
+        });
+    }
+    assert.deepEqual(missing, [], 'a missing key renders as its own name');
+});
+
+test('the two families reached by a computed key are complete', async () => {
+    const { STRINGS, aspectRatioName } = await import(pathToFileURL(path.join(SRC, 'lib/i18n.js')).href);
+    // VideoStudio builds `video.progress.${stage}`, so every stage the
+    // classifier can return has to be in the table — a stage nobody named
+    // would render as "video.progress.queued" inside the progress card.
+    const { classifyVideoGenerationStage } = await import(
+        pathToFileURL(path.join(SRC, 'lib/videoPreferences.js')).href
+    );
+    const stages = new Set(['preparing']);
+    for (const status of ['loading model', 'encoding', 'queued', 'sampling', '']) {
+        stages.add(classifyVideoGenerationStage(status));
+    }
+    assert.deepEqual([...stages].sort(), ['finishing', 'loading', 'preparing', 'queued', 'rendering']);
+    for (const stage of stages) {
+        assert.ok(`video.progress.${stage}` in STRINGS, `video.progress.${stage} is not in the table`);
+    }
+    // And aspectRatioName resolves `ar.*` the same way.
+    for (const ar of ['1:1', '16:9', '9:16', '21:9', '4:5', '3:2']) {
+        const name = aspectRatioName(ar);
+        assert.ok(name && !name.startsWith('ar.'), `${ar} rendered as a key: ${name}`);
+    }
+});
+
 /* ---------------- the covered surfaces read from the table ---------------- */
 
-// The surfaces this item moved onto keys. A file is on this list because a
-// first-run user meets it: the shell and its state, the navigation, the doors
-// out of an empty Model section, the failure primitive, and the one control
-// that says where work runs. Deep advanced panels are NOT here yet.
+// The surfaces that read their words from the table, and the boundary of this
+// work. The first pass took the surfaces a first-run user meets — the shell and
+// its state, the navigation, the doors out of an empty Model section, the
+// failure primitive, the one control that says where work runs. This pass
+// worked outward from there, in the order a person meets them: every dialog,
+// the hub views, and the two studio panels that hold the deep dials.
+//
+// STILL INLINE, and honestly so: the studio stages and composers (Image, Video,
+// Story, Sprite, Restore, Lip sync and everything under studios/*/), the two
+// deepest operator consoles (hub/views/GpuMachinesView.jsx and
+// hub/views/PlannerView.jsx), the shared components/ and ui/ widgets, and the
+// sentences hub/hubData.js and the lib/ helpers compose. Adding a file here is
+// the way to claim it: the two tests below then refuse it until it reads from
+// the table.
 const COVERED = [
+    // The first pass.
     'app/navConfig.jsx',
     'app/statusStore.js',
     'components/RunOnPicker.jsx',
@@ -112,16 +252,60 @@ const COVERED = [
     'lib/videoRestore.js',
     'studios/LocalCatalogNotice.jsx',
     'ui/failureToast.jsx',
+    // Every dialog. A modal is where a person is STOPPED and asked something,
+    // so its words are the ones that have to be exact.
+    'dialogs/AuthModal.jsx',
+    'dialogs/CivitaiDownloadDialog.jsx',
+    'dialogs/ClipPrepDialog.jsx',
+    'dialogs/LocalModelManager.jsx',
+    'dialogs/PrivacyPanel.jsx',
+    'dialogs/PrivacyVaultPanel.jsx',
+    'dialogs/PromptHelperDialog.jsx',
+    'dialogs/VideoInpaintDialog.jsx',
+    // The hub views, and the Models page's own four.
+    'hub/views/AboutView.jsx',
+    'hub/views/CanvasView.jsx',
+    'hub/views/HistoryView.jsx',
+    'hub/views/InspoView.jsx',
+    'hub/views/ModelsView.jsx',
+    'hub/views/PassBookView.jsx',
+    'hub/views/ProvidersView.jsx',
+    'hub/views/RunsView.jsx',
+    'hub/views/SettingsView.jsx',
+    'hub/views/TelemetryView.jsx',
+    'hub/views/models/AssetDetail.jsx',
+    'hub/views/models/CivitaiBrowser.jsx',
+    'hub/views/models/InstalledAssets.jsx',
+    'hub/views/models/RunnableModels.jsx',
+    // The studios' advanced panels — the dials behind the fold, which is where
+    // a hint gets written twice because nobody has both open at once.
+    'studios/image/ImageSettingsPanel.jsx',
+    'studios/restore/RestoreSettings.jsx',
 ];
 
 // JSX text position: what sits between an opening and a closing tag. Not
 // attributes (a `className` is not copy), not expressions (`{t('…')}` is the
 // answer, `{cond ? … : …}` is code), and not the tag names themselves.
+//
+// A `{/* … */}` comment is prose in JSX position and would read as copy, so the
+// scan tracks the block and skips what is inside it.
 function bareJsxText(source) {
     const found = [];
+    let inComment = false;
     source.split('\n').forEach((line, index) => {
         const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return;
+        const opens = trimmed.includes('{/*') || trimmed.startsWith('/*');
+        const closes = trimmed.includes('*/');
+        if (inComment) {
+            if (closes) inComment = false;
+            return;
+        }
+        if (opens && !closes) { inComment = true; return; }
+        if (opens && closes) return;
+        if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) return;
+        // A multi-line import's member list reads as capitalised words too:
+        // `Button, Card, Field, NativeSelect,`. It is code, not copy.
+        if (/^[A-Za-z][A-Za-z0-9]*(?:,\s*[A-Za-z][A-Za-z0-9]*)+,?$/.test(trimmed)) return;
         // A line that is nothing but words, sitting inside JSX: `Connect ComfyUI`.
         if (/^[A-Z][A-Za-z0-9 ,.'’—–-]{2,}$/.test(trimmed) && !trimmed.endsWith(';')) {
             found.push(`${index + 1}: ${trimmed}`);
@@ -134,6 +318,23 @@ function bareJsxText(source) {
     return found;
 }
 
+// The other half of a covered surface: copy typed into an attribute. A label, a
+// hint, a placeholder or a title is read by a person exactly the way the text
+// between the tags is, and leaving it out of the rule is how a "covered" dialog
+// keeps a second, unreviewed vocabulary in its own Field labels.
+const COPY_ATTRIBUTES = /\b(label|hint|placeholder|title|kicker|subtitle|aria-label|confirmLabel|cancelLabel|retryLabel|body)="([^"]{2,})"/g;
+
+function bareAttributeCopy(source) {
+    const found = [];
+    source.split('\n').forEach((line, index) => {
+        if (line.trim().startsWith('//')) return;
+        for (const match of line.matchAll(COPY_ATTRIBUTES)) {
+            found.push(`${index + 1}: ${match[1]}="${match[2]}"`);
+        }
+    });
+    return found;
+}
+
 test('no covered surface still writes a user-visible string in JSX text position', () => {
     const offenders = [];
     for (const file of COVERED) {
@@ -141,6 +342,15 @@ test('no covered surface still writes a user-visible string in JSX text position
         for (const hit of bareJsxText(read(file))) offenders.push(`${file}:${hit}`);
     }
     assert.deepEqual(offenders, [], 'a covered surface reads its words from t(), never from a literal');
+});
+
+test('no covered surface hides copy in a label, hint, placeholder or title', () => {
+    const offenders = [];
+    for (const file of COVERED) {
+        if (!file.endsWith('.jsx')) continue;
+        for (const hit of bareAttributeCopy(read(file))) offenders.push(`${file}:${hit}`);
+    }
+    assert.deepEqual(offenders, [], 'an attribute a person reads is copy, and copy comes from the table');
 });
 
 test('every covered surface actually imports the table', () => {

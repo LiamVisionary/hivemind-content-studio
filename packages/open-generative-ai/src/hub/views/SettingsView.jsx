@@ -20,7 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { STUDIO_RESTART_COMMAND } from '../../app/statusStore.js';
-import { t } from '../../lib/i18n.js';
+import { t, tf } from '../../lib/i18n.js';
 import { isHostedLocalAI, isLocalAIAvailable } from '../../lib/localInferenceClient.js';
 import {
   SETTINGS_SECTIONS, displayValue, isDefault, restartPending, sectionRows, settingLabel,
@@ -42,7 +42,7 @@ import {
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { api, toastFailed } from '../hubData.js';
 
-const STUDIO_LABELS = { image: 'Image', video: 'Video', lipsync: 'Lip sync' };
+const STUDIO_LABELS = () => ({ image: t('nav.image'), video: t('common.video'), lipsync: t('nav.lipsync') });
 
 /** Read one studio's saved generation defaults for the read-out below. Never
  *  the prompt: the studios strip that before they persist (AGENTS.md). */
@@ -97,7 +97,7 @@ function SettingRow({ row, busy, onChange }) {
           />
           {!isDefault(row) ? (
             <Button variant="ghost" size="sm" disabled={busy} onClick={() => onChange(row.key, null)}>
-              Default
+              {t('settings.default')}
             </Button>
           ) : null}
         </div>
@@ -175,9 +175,9 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
       if ((result.pinned || []).includes(key)) {
         // Saved, but something on this machine still wins. Saying "Saved" alone
         // would be a lie the row underneath then contradicts.
-        toast('Saved — but an environment variable on this machine still overrides it.');
+        toast(t('settings.savedButPinned'));
       } else if (!pending.length) {
-        toast.success('Saved');
+        toast.success(t('settings.saved'));
       }
     } catch (error) {
       toastFailed(error);
@@ -194,7 +194,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
     if (!key) {
       if (browserMuapiKey()) {
         forgetBrowserMuapiKey();
-        toast.success('API key removed');
+        toast.success(t('settings.keyRemoved'));
         return;
       }
       toast.error(t('settings.invalidKey'));
@@ -203,8 +203,8 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
     try {
       const { where } = await storeMuapiKey(key);
       toast.success(where === 'machine'
-        ? 'Key saved to this machine’s shared store'
-        : 'API key saved');
+        ? t('settings.keySavedToMachine')
+        : t('settings.keySaved'));
     } catch (error) {
       toast.error(error?.detail?.message || error?.message || t('settings.invalidKey'));
     }
@@ -221,9 +221,9 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
       anchor.click();
       document.body.removeChild(anchor);
       URL.revokeObjectURL(url);
-      toast.success('Settings exported');
+      toast.success(t('settings.exported'));
     } catch {
-      toast.error('The studio could not write that file. Check that downloads are allowed for this page.');
+      toast.error(t('settings.exportFailed'));
     }
   };
 
@@ -233,10 +233,10 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
       const restored = importPrefs(JSON.parse(await file.text()));
       setStudioEpoch((n) => n + 1);
       toast.success(restored.studios.length
-        ? `${'Imported settings and '}${restored.studios.length}${' studio defaults'}`
-        : 'Imported settings');
+        ? tf('settings.importedWithStudios', restored.studios.length)
+        : t('settings.imported'));
     } catch (error) {
-      toast.error(error?.message || 'That file is not a studio settings export.');
+      toast.error(error?.message || t('settings.importNotAnExport'));
     }
   };
 
@@ -254,12 +254,12 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="This machine"
-        title="Settings"
+        kicker={t('settings.kicker')}
+        title={t('common.settings')}
         subtitle={payload?.path || ''}
         right={(
           <Button variant="ghost" size="sm" icon="refresh" onClick={() => void load()} disabled={loading}>
-            Refresh
+            {t('app.refresh')}
           </Button>
         )}
       />
@@ -270,7 +270,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
         <div className="flex flex-wrap items-center gap-3 border-b border-honey/50 bg-honey-tint/50 px-4 py-2.5 md:px-5">
           <Icon name="refresh" size={16} className="text-honey" />
           <span className="text-[13px] text-ink1">
-            {`Saved. ${restart.length === 1 ? 'That setting takes' : 'Those settings take'} effect after the studio restarts.`}
+            {tf('settings.restartRequired', restart.length)}
           </span>
           <code className="rounded-sm bg-bg0/80 px-2 py-1 font-mono text-[11px] text-ink2">{STUDIO_RESTART_COMMAND}</code>
           <Button
@@ -281,15 +281,15 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
               try {
                 if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
                 await navigator.clipboard.writeText(STUDIO_RESTART_COMMAND);
-                toast.success('Copied');
+                toast.success(t('settings.copied'));
               } catch {
-                toast.error('Copying is not available here — select the command and copy it.');
+                toast.error(t('settings.copyUnavailable'));
               }
             }}
           >
-            Copy command
+            {t('settings.copyCommand')}
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => setRestart([])}>Dismiss</Button>
+          <Button variant="ghost" size="sm" onClick={() => setRestart([])}>{t('common.dismiss')}</Button>
         </div>
       ) : null}
 
@@ -318,39 +318,39 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
 
           {payload?.readable === false ? (
             <Card className="border-warn/50 p-4">
-              <SectionLabel>The settings file could not be read</SectionLabel>
+              <SectionLabel>{t('settings.fileUnreadable')}</SectionLabel>
               <p className="mt-1 text-xs leading-relaxed text-ink3">
-                The studio started on its defaults. Saving any setting below replaces the file with a readable one.
+                {t('settings.fileUnreadableHint')}
               </p>
             </Card>
           ) : null}
 
           {section === 'general' ? (
             <>
-              <Group title="General" hint={current.hint}>
+              <Group title={t('settings.general')} hint={current.hint}>
                 <div className="flex flex-col gap-3 pt-1">
-                  <Field label="Language" hint="This build ships English only; a stored choice is kept for when the rest is translated.">
+                  <Field label={t('settings.language')} hint={t('settings.languageHint')}>
                     <NativeSelect value="en" disabled onChange={() => {}}>
-                      <option value="en">English</option>
+                      <option value="en">{t('settings.english')}</option>
                     </NativeSelect>
                   </Field>
                   <label className="flex items-center justify-between gap-3 rounded-md border border-line1 bg-bg2 px-3.5 py-3">
                     <span>
-                      <b className="block text-[13px] font-medium text-ink1">Completion chime</b>
+                      <b className="block text-[13px] font-medium text-ink1">{t('settings.chime')}</b>
                       <small className="text-xs text-ink3">
-                        A two-note chime when a generation lands. The same switch is in every studio.
+                        {t('settings.chimeHint')}
                       </small>
                     </span>
                     <Toggle
                       checked={chime}
                       onChange={(next) => setPrefs({ completionPing: next })}
-                      label="Completion chime"
+                      label={t('settings.chime')}
                     />
                   </label>
                 </div>
               </Group>
 
-              <Group title={t('settings.apiKey')} hint="The MUAPI key the hosted lanes generate with.">
+              <Group title={t('settings.apiKey')} hint={t('settings.apiKeyHint')}>
                 {onMachine ? (
                   <div className="flex items-start justify-between gap-3 rounded-md border border-line1 bg-bg2 px-3.5 py-3">
                     <div>
@@ -371,7 +371,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
                     <Field
                       className="flex-1"
                       label={t('settings.muapiKeyLabel')}
-                      hint={browserMuapiKey() ? `${t('settings.keyInBrowser')} ${'Clear the field and save to remove it.'}` : t('settings.keyInBrowser')}
+                      hint={browserMuapiKey() ? `${t('settings.keyInBrowser')} ${t('settings.clearToRemove')}` : t('settings.keyInBrowser')}
                     >
                       <TextInput
                         type="password"
@@ -389,14 +389,14 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
           ) : null}
 
           {section === 'generation' ? (
-            <Group title="Generation defaults" hint={current.hint}>
+            <Group title={t('settings.generationDefaults')} hint={current.hint}>
               <div className="flex flex-col">
                 {studios.map(({ studio, summary }) => (
                   <div key={studio} className="flex items-center justify-between gap-3 border-b border-line1 py-3 last:border-b-0">
                     <div className="min-w-0">
-                      <b className="block text-[13px] font-medium text-ink1">{STUDIO_LABELS[studio] || studio}</b>
+                      <b className="block text-[13px] font-medium text-ink1">{STUDIO_LABELS()[studio] || studio}</b>
                       <small className="block truncate font-mono text-[11px] text-ink3">
-                        {summary || 'still on the defaults'}
+                        {summary || t('settings.stillOnDefaults')}
                       </small>
                     </div>
                     <Button
@@ -404,17 +404,17 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
                       size="sm"
                       disabled={!summary}
                       onClick={() => setConfirm({
-                        title: `${'Reset '}${STUDIO_LABELS[studio] || studio}`,
-                        body: 'The saved model, aspect and tuning for this studio go back to the defaults the next time it opens. Nothing you have made is touched.',
-                        confirmLabel: 'Reset',
+                        title: tf('settings.resetStudio', STUDIO_LABELS()[studio] || studio),
+                        body: t('settings.resetStudioBody'),
+                        confirmLabel: t('settings.reset'),
                         run: () => {
                           resetStudioPreferences(studio);
                           setStudioEpoch((n) => n + 1);
-                          toast.success('Back to the defaults');
+                          toast.success(t('settings.backToDefaults'));
                         },
                       })}
                     >
-                      Reset
+                      {t('settings.reset')}
                     </Button>
                   </div>
                 ))}
@@ -424,14 +424,14 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
 
           {section === 'storage' ? (
             <>
-              <Group title="Folders" hint={current.hint}>
+              <Group title={t('settings.folders')} hint={current.hint}>
                 <div className="flex flex-col">
                   {rowsFor(current).filter((row) => row.section === 'paths').map((row) => (
                     <SettingRow key={row.key} row={row} busy={saving} onChange={save} />
                   ))}
                 </div>
               </Group>
-              <Group title="Local engines" hint="Off is a working studio with one fewer local lane, never an error.">
+              <Group title={t('settings.localEngines')} hint={t('settings.localEnginesHint')}>
                 <div className="flex flex-col">
                   {rowsFor(current).filter((row) => row.section === 'lanes').map((row) => (
                     <SettingRow key={row.key} row={row} busy={saving} onChange={save} />
@@ -440,12 +440,12 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
               </Group>
               {hasLocalAI ? (
                 <Group
-                  title="Local models"
-                  hint="Installing, inspecting and deleting a model all happen on the Models page."
+                  title={t('localModels.title')}
+                  hint={t('settings.localModelsHint')}
                 >
                   <div className="flex items-center justify-between gap-3 pt-1">
                     <p className="min-w-0 text-xs leading-relaxed text-ink3">
-                      The Engine tab on the Models page installs the inference engine and the models, and says whether each one fits this machine.
+                      {t('settings.engineTabBlurb')}
                     </p>
                     <Button
                       size="sm"
@@ -453,7 +453,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
                       className="shrink-0"
                       onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'models' } }))}
                     >
-                      Open Models
+                      {t('common.openModels')}
                     </Button>
                   </div>
                 </Group>
@@ -462,13 +462,13 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
           ) : null}
 
           {section === 'workspace' ? (
-            <Group title="Workspace" hint={current.hint}>
+            <Group title={t('settings.workspace')} hint={current.hint}>
               <div className="flex flex-col gap-3 pt-1">
                 <p className="text-xs leading-relaxed text-ink3">
-                  Each workspace has its own vault and its own media folders, and deleting one deletes what is inside it. Switching or adding a workspace happens on the sign-in screen.
+                  {t('settings.workspaceBlurb')}
                 </p>
                 <div className="rounded-md border border-line1 bg-bg2 px-3.5 py-3">
-                  <SectionLabel>Studio state folder</SectionLabel>
+                  <SectionLabel>{t('settings.stateFolder')}</SectionLabel>
                   <p className="mt-1 break-all font-mono text-[11px] text-ink2">
                     {payload?.settings?.find((row) => row.key === 'paths.data_dir')?.value || '—'}
                   </p>
@@ -484,7 +484,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
                       } catch (error) { toastFailed(error); }
                     }}
                   >
-                    Switch workspace
+                    {t('settings.switchWorkspace')}
                   </Button>
                 </div>
               </div>
@@ -493,7 +493,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
 
           {section === 'privacy' ? (
             <>
-              <Group title="Privacy & vault" hint={current.hint}>
+              <Group title={t('settings.privacyAndVault')} hint={current.hint}>
                 <div className="flex flex-col">
                   {rowsFor(current).map((row) => (
                     <SettingRow key={row.key} row={row} busy={saving} onChange={save} />
@@ -513,14 +513,14 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
 
           {section === 'advanced' ? (
             <>
-              <Group title="Network" hint="Where the studio’s own parts answer each other.">
+              <Group title={t('settings.network')} hint={t('settings.networkHint')}>
                 <div className="flex flex-col">
                   {rowsFor(current).filter((row) => row.section === 'network').map((row) => (
                     <SettingRow key={row.key} row={row} busy={saving} onChange={save} />
                   ))}
                 </div>
               </Group>
-              <Group title="Rented GPUs" hint="This one is money, not housekeeping: a box that failed to provision still bills.">
+              <Group title={t('nav.machines')} hint={t('settings.rentedGpusHint')}>
                 <div className="flex flex-col">
                   {rowsFor(current).filter((row) => row.section === 'reaper').map((row) => (
                     <SettingRow key={row.key} row={row} busy={saving} onChange={save} />
@@ -528,15 +528,15 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
                 </div>
               </Group>
               <Group
-                title="Backup & reset"
-                hint="An export carries no keys, no prompts and no search text — only what this browser remembers about how you like things."
+                title={t('settings.backupAndReset')}
+                hint={t('settings.backupAndResetHint')}
               >
                 <div className="flex flex-wrap gap-2 pt-1">
                   <Button variant="neutral" size="sm" icon="download" onClick={doExport}>
-                    Export settings
+                    {t('settings.exportSettings')}
                   </Button>
                   <Button variant="neutral" size="sm" icon="upload" onClick={() => fileRef.current?.click()}>
-                    Import settings
+                    {t('settings.importSettings')}
                   </Button>
                   <input
                     ref={fileRef}
@@ -553,23 +553,23 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
                     variant="danger"
                     size="sm"
                     onClick={() => setConfirm({
-                      title: 'Reset every preference',
-                      body: 'Language, the chime, filters, panel state and every studio’s saved defaults go back to how they started. Your work, your credentials and this machine’s settings above are not touched.',
-                      confirmLabel: 'Reset everything',
+                      title: t('settings.resetEveryPreference'),
+                      body: t('settings.resetEveryPreferenceBody'),
+                      confirmLabel: t('settings.resetEverything'),
                       run: () => {
                         resetPrefs();
                         Object.keys(STUDIO_PREFERENCE_KEYS).forEach(resetStudioPreferences);
                         setStudioEpoch((n) => n + 1);
-                        toast.success('Preferences reset');
+                        toast.success(t('settings.preferencesReset'));
                       },
                     })}
                   >
-                    Reset every preference
+                    {t('settings.resetEveryPreference')}
                   </Button>
                 </div>
                 {prefsWereUnreadable() ? (
                   <p className="mt-2 text-xs leading-relaxed text-warn">
-                    Your saved preferences could not be read and have been reset to the defaults.
+                    {t('settings.prefsWereUnreadable')}
                   </p>
                 ) : null}
               </Group>
@@ -577,14 +577,14 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
           ) : null}
 
           {section === 'about' ? (
-            <Group title="About" hint="">
+            <Group title={t('nav.about')} hint="">
               <dl className="flex flex-col gap-2 pt-1 text-[13px]">
                 {[
-                  ['Product', version?.product],
-                  ['Version', version?.version],
-                  ['Commit', version?.commit],
-                  ['Build date', version?.build_date],
-                  ['Licence', version?.license],
+                  [t('settings.product'), version?.product],
+                  [t('about.version'), version?.version],
+                  [t('settings.commit'), version?.commit],
+                  [t('settings.buildDate'), version?.build_date],
+                  [t('about.licence'), version?.license],
                 ].map(([label, value]) => (
                   <div key={label} className="flex justify-between gap-3">
                     <dt className="text-ink3">{label}</dt>
@@ -594,14 +594,14 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
               </dl>
               {version?.source_url ? (
                 <p className="mt-3 text-xs leading-relaxed text-ink3">
-                  {'Source: '}
+                  {`${t('common.source')}: `}
                   <a className="text-honey hover:underline" href={version.source_url} target="_blank" rel="noreferrer">
                     {version.source_url}
                   </a>
                 </p>
               ) : null}
               <p className="mt-2 text-xs leading-relaxed text-ink3">
-                {'Settings file: '}
+                {`${t('settings.settingsFile')}: `}
                 <code className="font-mono text-[11px] text-ink2">{payload?.path || '—'}</code>
               </p>
             </Group>

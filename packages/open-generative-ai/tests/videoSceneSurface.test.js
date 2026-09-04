@@ -154,7 +154,7 @@ test('the inpaint dialog cannot arm a run the workflow refuses', () => {
     assert.match(dialog, /const ready = Boolean\(source && !busy && !noReference && \(mode === 'sam3' \|\| hasPaint\)\);/);
     // Never a problem without its fix in the same component.
     assert.match(dialog, /onAttachReference \? \(/);
-    assert.match(dialog, /Attach a picture/);
+    assert.match(dialog, /\{t\('inpaint\.attachAPicture'\)\}/);
 
     const studio = read('src/studios/VideoStudio.jsx');
     assert.match(studio, /onAttachReference=\{\(\) => \{[\s\S]*?s\.referencesOpenRequest = \(s\.referencesOpenRequest \|\| 0\) \+ 1;/);

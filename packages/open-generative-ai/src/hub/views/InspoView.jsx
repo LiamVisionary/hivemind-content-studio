@@ -29,6 +29,7 @@ import { Icon } from '../../ui/icons.jsx';
 import { Modal } from '../../ui/Modal.jsx';
 import { Button, EmptyState, NativeSelect, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
+import { t, tf } from '../../lib/i18n.js';
 
 // The FILTERS are remembered; the creator box is not. A search box is something
 // a person typed, and typed text does not go into plaintext browser storage —
@@ -46,8 +47,8 @@ function sendToStudio(item) {
   loadStudioSetup(section, inspoToStudioSetup(item));
   window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));
   toast.success(section === 'video'
-    ? 'Prompt loaded into the Video studio.'
-    : 'Prompt loaded into the Image studio.');
+    ? t('inspo.loadedIntoVideo')
+    : t('inspo.loadedIntoImage'));
 }
 
 function Preview({ item, playing, className = '' }) {
@@ -89,7 +90,7 @@ function ResultCard({ item, onOpen, nsfwAllowed }) {
       <button
         type="button"
         onClick={() => (blurred ? setRevealed(true) : onOpen(item))}
-        aria-label={blurred ? 'Reveal this preview' : 'Open this result'}
+        aria-label={blurred ? t('inspo.revealPreview') : t('inspo.openResult')}
         className="relative flex aspect-[3/4] items-center justify-center overflow-hidden bg-bg3"
       >
         {item.previewUrl ? (
@@ -104,7 +105,7 @@ function ResultCard({ item, onOpen, nsfwAllowed }) {
         {blurred ? (
           <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-bg0/40 text-ink1">
             <Icon name="eye" size={16} />
-            <span className="text-[10px] font-semibold">Click to reveal</span>
+            <span className="text-[10px] font-semibold">{t('discover.clickToReveal')}</span>
           </span>
         ) : null}
         {item.nsfw ? (
@@ -123,7 +124,7 @@ function ResultCard({ item, onOpen, nsfwAllowed }) {
           {item.prompt}
         </p>
         <div className="truncate text-[10px] text-ink3" title={credits}>
-          {[credits, item.username && `by ${item.username}`].filter(Boolean).join(' · ')}
+          {[credits, item.username && tf('assets.byCreator', item.username)].filter(Boolean).join(' · ')}
         </div>
         <div className="mt-auto flex items-center gap-1.5 pt-0.5">
           <Button
@@ -133,13 +134,13 @@ function ResultCard({ item, onOpen, nsfwAllowed }) {
             className="flex-1"
             onClick={() => sendToStudio(item)}
           >
-            Use prompt
+            {t('common.usePrompt')}
           </Button>
           <button
             type="button"
             onClick={() => onOpen(item)}
-            title="Details"
-            aria-label="Show the full prompt and settings"
+            title={t('inspo.details')}
+            aria-label={t('inspo.detailsLabel')}
             className="grid h-ctl-sm w-7 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
           >
             <Icon name="expand" size={13} />
@@ -155,15 +156,15 @@ function DetailDialog({ item, onClose }) {
   const loras = (item.resources || []).filter((entry) => String(entry?.type || '').toLowerCase() === 'lora');
   const copy = (text, label) => {
     navigator.clipboard?.writeText(text).then(
-      () => toast.success(`${label} copied.`),
-      () => toast.error('Could not copy to the clipboard.'),
+      () => toast.success(tf('inspo.labelCopied', label)),
+      () => toast.error(t('assets.copyFailed')),
     );
   };
   return (
     <Modal
       open
       onClose={onClose}
-      title={item.kind === 'video' ? 'Civitai video' : 'Civitai image'}
+      title={item.kind === 'video' ? t('inspo.civitaiVideo') : t('inspo.civitaiImage')}
       size="xl"
       footer={
         <>
@@ -174,16 +175,16 @@ function DetailDialog({ item, onClose }) {
               className="mr-auto"
               onClick={() => window.open(item.pageUrl, '_blank', 'noopener,noreferrer')}
             >
-              Open on Civitai
+              {t('discover.openOnCivitai')}
             </Button>
           ) : null}
-          <Button variant="neutral" icon="copy" onClick={() => copy(item.prompt, 'Prompt')}>
-            Copy prompt
+          <Button variant="neutral" icon="copy" onClick={() => copy(item.prompt, t('inspo.prompt'))}>
+            {t('history.copyPrompt')}
           </Button>
           <Button variant="primary" icon="sparkles" onClick={() => { sendToStudio(item); onClose(); }}>
             {item.kind === 'video'
-              ? 'Use in Video studio'
-              : 'Use in Image studio'}
+              ? t('inspo.useInVideo')
+              : t('inspo.useInImage')}
           </Button>
         </>
       }
@@ -202,7 +203,7 @@ function DetailDialog({ item, onClose }) {
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Prompt</span>
+          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{t('inspo.prompt')}</span>
           <p className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line1 bg-bg2 p-2.5 font-mono text-xs leading-relaxed text-ink1">
             {item.prompt}
           </p>
@@ -210,7 +211,7 @@ function DetailDialog({ item, onClose }) {
 
         {item.negativePrompt ? (
           <div className="flex flex-col gap-1.5">
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Negative prompt</span>
+            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{t('image.negPromptLabel')}</span>
             <p className="max-h-28 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line1 bg-bg2 p-2.5 font-mono text-xs leading-relaxed text-ink2">
               {item.negativePrompt}
             </p>
@@ -219,7 +220,7 @@ function DetailDialog({ item, onClose }) {
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-ink2">
           {item.width && item.height ? (
-            <span><span className="text-ink3">Size</span> <span className="font-mono">{item.width}×{item.height}</span></span>
+            <span><span className="text-ink3">{t('assets.size')}</span> <span className="font-mono">{item.width}×{item.height}</span></span>
           ) : null}
           {settings.map(([label, value]) => (
             <span key={label}><span className="text-ink3">{label}</span> <span className="font-mono">{String(value)}</span></span>
@@ -230,17 +231,17 @@ function DetailDialog({ item, onClose }) {
             prompt — the id is Civitai's and means nothing to this machine. */}
         {item.baseModel || item.modelName || loras.length ? (
           <div className="rounded-md border border-line1 bg-bg2 p-2.5 text-[11px] text-ink2">
-            <div className="mb-1 font-medium text-ink1">Made with</div>
-            {item.baseModel ? <div>Base model: <span className="font-mono">{item.baseModel}</span></div> : null}
-            {item.modelName ? <div>Checkpoint: <span className="font-mono">{item.modelName}</span></div> : null}
+            <div className="mb-1 font-medium text-ink1">{t('inspo.madeWith')}</div>
+            {item.baseModel ? <div>{t('inspo.baseModelLabel')} <span className="font-mono">{item.baseModel}</span></div> : null}
+            {item.modelName ? <div>{t('inspo.checkpointLabel')} <span className="font-mono">{item.modelName}</span></div> : null}
             {loras.map((entry, index) => (
               <div key={`${entry.modelVersionId}-${index}`}>
-                LoRA: <span className="font-mono">{entry.modelVersionName || entry.modelVersionId}</span>
+                {t('inspo.loraLabel')} <span className="font-mono">{entry.modelVersionName || entry.modelVersionId}</span>
                 {entry.weight != null ? <span className="text-ink3"> @ {entry.weight}</span> : null}
               </div>
             ))}
             <div className="mt-1.5 text-ink3">
-              Only the prompt and settings are loaded — your model is not switched. Install these from the Models page to match it exactly.
+              {t('inspo.onlyPromptLoaded')}
             </div>
           </div>
         ) : null}
@@ -268,7 +269,7 @@ export function InspoView({ active }) {
   const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
 
   const search = useCallback(async (nextFilters) => {
-    setState({ status: 'loading', message: 'Searching Civitai…' });
+    setState({ status: 'loading', message: t('discover.searching') });
     setNextCursor('');
     try {
       const result = await localAI.searchCivitaiImages(inspoSearchParams(nextFilters));
@@ -279,8 +280,8 @@ export function InspoView({ active }) {
       setState({
         status: 'done',
         message: result.items.length
-          ? `${result.items.length} with prompts${result.scanned ? ` · read ${result.scanned}` : ''}`
-          : 'Nothing with a usable prompt here. Widen the period, or try the other media type.',
+          ? tf('inspo.withPrompts', result.items.length, result.scanned)
+          : t('inspo.nothingUsable'),
       });
     } catch (error) {
       setItems([]);
@@ -330,8 +331,8 @@ export function InspoView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="Civitai"
-        title="Inspo"
+        kicker={t('inspo.kicker')}
+        title={t('nav.inspo')}
         right={
           <>
             {state.status === 'loading' ? <Spinner size={14} className="text-honey" /> : null}
@@ -340,7 +341,7 @@ export function InspoView({ active }) {
                 they compose into one query and share the Search button, the
                 same way the model browser's filters do. */}
             <Segmented options={kindOptions} value={filters.kind} onChange={(value) => switchKind(value)} />
-            <Button icon="refresh" onClick={() => void search(filters)}>Refresh</Button>
+            <Button icon="refresh" onClick={() => void search(filters)}>{t('app.refresh')}</Button>
           </>
         }
       />
@@ -349,8 +350,8 @@ export function InspoView({ active }) {
         <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
           <EmptyState
             icon="cloud"
-            title="The inspiration finder needs the hosted bridge"
-            hint="Browsing Civitai runs on the Mac that holds the stack and its Civitai key. This build has no bridge to it."
+            title={t('inspo.needsBridge')}
+            hint={t('inspo.needsBridgeHint')}
           />
         </div>
       ) : (
@@ -364,35 +365,35 @@ export function InspoView({ active }) {
               <TextInput
                 value={filters.username || ''}
                 onChange={(event) => setFilter('username', event.target.value)}
-                placeholder="Filter by creator (optional)"
-                aria-label="Civitai creator"
+                placeholder={t('inspo.creatorPlaceholder')}
+                aria-label={t('inspo.creatorLabel')}
                 className="pl-8"
               />
             </div>
-            <NativeSelect aria-label="Base model" value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-[170px]">
-              <option value="">Any base model</option>
+            <NativeSelect aria-label={t('discover.baseModel')} value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-[170px]">
+              <option value="">{t('assets.anyBaseModel')}</option>
               {baseModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
             </NativeSelect>
-            <NativeSelect aria-label="Sort" value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-[160px]">
+            <NativeSelect aria-label={t('discover.sort')} value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-[160px]">
               {INSPO_SORTS.map((value) => <option key={value} value={value}>{value}</option>)}
             </NativeSelect>
-            <NativeSelect aria-label="Period" value={filters.period} onChange={(event) => setFilter('period', event.target.value)} className="w-[120px]">
-              {INSPO_PERIODS.map((value) => <option key={value} value={value}>{value === 'AllTime' ? 'All time' : value}</option>)}
+            <NativeSelect aria-label={t('discover.period')} value={filters.period} onChange={(event) => setFilter('period', event.target.value)} className="w-[120px]">
+              {INSPO_PERIODS.map((value) => <option key={value} value={value}>{value === 'AllTime' ? t('discover.allTime') : value}</option>)}
             </NativeSelect>
-            <NativeSelect aria-label="Rating" value={filters.nsfw} onChange={(event) => setFilter('nsfw', event.target.value)} className="w-[150px]">
-              <option value="false">Safe only</option>
-              <option value="true">Include NSFW</option>
-              <option value="">Any rating</option>
+            <NativeSelect aria-label={t('discover.rating')} value={filters.nsfw} onChange={(event) => setFilter('nsfw', event.target.value)} className="w-[150px]">
+              <option value="false">{t('discover.safeOnly')}</option>
+              <option value="true">{t('discover.includeNsfw')}</option>
+              <option value="">{t('discover.anyRating')}</option>
             </NativeSelect>
             <Button type="submit" variant="primary" icon="search" loading={state.status === 'loading'}>
-              Search
+              {t('discover.search')}
             </Button>
           </form>
 
           <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
             <div className="mb-3 flex items-center gap-2">
               <span className={cx('text-[11px]', state.status === 'error' ? 'text-danger' : 'text-ink3')}>
-                {state.message || 'Every result here came with a prompt you can load.'}
+                {state.message || t('inspo.everyResultHasPrompt')}
               </span>
             </div>
 
@@ -406,7 +407,7 @@ export function InspoView({ active }) {
                 {nextCursor ? (
                   <div className="mt-4 flex justify-center">
                     <Button icon="chevronDown" loading={loadingMore} onClick={() => void loadMore()}>
-                      Load more
+                      {t('discover.loadMore')}
                     </Button>
                   </div>
                 ) : null}
@@ -414,16 +415,16 @@ export function InspoView({ active }) {
                     otherwise look like Civitai is nearly empty. */}
                 <p className="mt-4 text-center text-[10px] text-ink3">
                   {scanned
-                    ? `Read ${formatCount(scanned)} Civitai results to find these ${items.length}. The rest were posted without a prompt.`
+                    ? tf('inspo.readToFind', formatCount(scanned), items.length)
                     : null}
                 </p>
               </>
             ) : state.status !== 'loading' ? (
               <EmptyState
                 icon={state.status === 'error' ? 'warning' : 'sparkles'}
-                title={state.status === 'error' ? 'Civitai search failed' : 'Nothing to show yet'}
-                hint={state.status === 'error' ? state.message : 'Search to see images and videos that came with their prompt.'}
-                action={state.status === 'error' ? <Button onClick={() => void search(filters)}>Retry</Button> : null}
+                title={state.status === 'error' ? t('discover.searchFailed') : t('discover.nothingYet')}
+                hint={state.status === 'error' ? state.message : t('inspo.searchToSee')}
+                action={state.status === 'error' ? <Button onClick={() => void search(filters)}>{t('common.retry')}</Button> : null}
               />
             ) : null}
           </div>

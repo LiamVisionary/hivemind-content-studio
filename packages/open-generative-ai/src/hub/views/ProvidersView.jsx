@@ -15,6 +15,7 @@ import { api, providerLabel, refreshOAuth, startOAuth, useHub } from '../hubData
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
 import { toastFailure } from '../../ui/failureToast.jsx';
+import { t, tf } from '../../lib/i18n.js';
 
 function OAuthCard({ card, link, checking, offline }) {
   const [busy, setBusy] = useState(false);
@@ -28,19 +29,19 @@ function OAuthCard({ card, link, checking, offline }) {
   // a dead API is said outright instead of checking forever.
   const detail = card.detail
     || (offline
-      ? 'Status unavailable — the studio is not running.'
+      ? t('providers.statusUnavailable')
       : checking
-        ? `Checking the HivemindOS ${card.label} OAuth session…`
+        ? tf('providers.checkingSession', card.label)
         : card.ready
-          ? 'Connected.'
-          : 'Not connected.');
+          ? t('providers.connectedSentence')
+          : t('providers.notConnectedSentence'));
   return (
     <Card className="flex flex-col gap-2.5 p-4">
       <div className="flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold text-ink1">{card.label}</h4>
         <StatusPill
           status={card.ready ? 'ready' : checking ? 'pending' : 'idle'}
-          label={card.ready ? 'Connected' : checking ? 'Checking' : 'Needs setup'}
+          label={card.ready ? t('providers.connected') : checking ? t('providers.checking') : t('providers.needsSetup')}
         />
       </div>
       <p className="break-words text-[12px] leading-relaxed text-ink3 [overflow-wrap:anywhere]">
@@ -50,16 +51,16 @@ function OAuthCard({ card, link, checking, offline }) {
       </p>
       {link ? (
         <p className="text-[12px] text-ink2">
-          The sign-in tab was blocked.{' '}
+          {t('providers.signInBlocked')}{' '}
           <a href={link} target="_blank" rel="noopener noreferrer" className="font-medium text-honey underline-offset-2 hover:underline">
-            Open the sign-in page here
+            {t('providers.openSignInHere')}
           </a>
         </p>
       ) : null}
       <Button size="sm" icon="external" loading={busy} onClick={connect} className="self-start">
         {card.ready || card.needsReconnect
-          ? `Reconnect ${card.label}`
-          : `Connect ${card.label}`}
+          ? tf('providers.reconnect', card.label)
+          : tf('providers.connectNamed', card.label)}
       </Button>
     </Card>
   );
@@ -83,11 +84,11 @@ function AddKeyRow({ name, configured, onSaved }) {
       await api('/api/passbook', { method: 'POST', body: JSON.stringify({ values: { [name]: value } }) });
       setValue('');
       setOpen(false);
-      toast.success(`${name} saved.`);
+      toast.success(tf('providers.keySaved', name));
       onSaved?.();
     } catch (error) {
       // api() has already turned the refusal into a sentence.
-      toastFailure(error, { operation: 'Saving the key' });
+      toastFailure(error, { operation: t('providers.savingTheKey') });
     } finally {
       setBusy(false);
     }
@@ -96,8 +97,8 @@ function AddKeyRow({ name, configured, onSaved }) {
     return (
       <Button size="sm" className="self-start" onClick={() => setOpen(true)}>
         {configured
-          ? `Replace ${name}`
-          : `Add ${name}`}
+          ? tf('providers.replaceKey', name)
+          : tf('providers.addKeyNamed', name)}
       </Button>
     );
   }
@@ -110,15 +111,15 @@ function AddKeyRow({ name, configured, onSaved }) {
           type="password"
           autoComplete="off"
           spellCheck={false}
-          placeholder="Paste the key"
+          placeholder={t('providers.pasteTheKey')}
           value={value}
           onChange={(event) => setValue(event.target.value)}
         />
       </Field>
       <Button size="sm" variant="primary" loading={busy} disabled={busy || !value.trim()} onClick={save}>
-        Save
+        {t('common.save')}
       </Button>
-      <Button size="sm" onClick={() => { setOpen(false); setValue(''); }}>Cancel</Button>
+      <Button size="sm" onClick={() => { setOpen(false); setValue(''); }}>{t('common.cancel')}</Button>
     </div>
   );
 }
@@ -135,7 +136,7 @@ function ProviderCard({ provider, settable, onSaved }) {
         <h3 className="min-w-0 truncate text-[13px] font-semibold text-ink1">{providerLabel(provider.id)}</h3>
         <StatusPill
           status={provider.available ? 'ready' : 'idle'}
-          label={provider.available ? 'Ready' : 'Needs setup'}
+          label={provider.available ? t('common.ready') : t('providers.needsSetup')}
           className="h-5 px-2 text-[10px]"
         />
       </div>
@@ -200,19 +201,19 @@ export function ProvidersView({ active }) {
   const oauthCards = [
     {
       id: 'openai',
-      label: 'OpenAI',
+      label: t('providers.openai'),
       ready: Boolean(oauth.openai?.connected),
       needsReconnect: false,
       detail: oauth.openai?.detail || '',
-      note: 'GPT Image OAuth uses the Codex Responses image tool. The official Image API remains a separate OPENAI_API_KEY provider.',
+      note: t('providers.openaiNote'),
     },
     {
       id: 'xai',
-      label: 'xAI',
+      label: t('providers.xai'),
       ready: Boolean(oauth.xai?.usable),
       needsReconnect: Boolean(oauth.xai?.needs_reconnect),
       detail: oauth.xai?.detail || '',
-      note: 'A usable api:access session enables Grok Imagine image and video generation.',
+      note: t('providers.xaiNote'),
     },
   ];
 
@@ -227,19 +228,19 @@ export function ProvidersView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker="Capability routing" title="Providers">
-        {s.apiOnline === false ? <Pill tone="warn" dot>Offline</Pill> : null}
+      <HubToolbar kicker={t('providers.kicker')} title={t('nav.providers')}>
+        {s.apiOnline === false ? <Pill tone="warn" dot>{t('providers.offline')}</Pill> : null}
         <Button size="sm" icon="refresh" loading={checking} onClick={checkStatus}>
-          Check status
+          {t('providers.checkStatus')}
         </Button>
       </HubToolbar>
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         <div className="flex flex-col gap-6">
           <section className="flex flex-col gap-3">
             <div>
-              <SectionLabel>Server-side authentication</SectionLabel>
+              <SectionLabel>{t('providers.serverSideAuth')}</SectionLabel>
               <p className="mt-1 text-xs text-ink3">
-                OAuth stays inside HivemindOS. This studio receives status only — finish a sign-in in its tab and the card updates here.
+                {t('providers.oauthBlurb')}
               </p>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
@@ -256,7 +257,7 @@ export function ProvidersView({ active }) {
           </section>
 
           <section className="flex flex-col gap-3">
-            <SectionLabel>Generation routes · capability providers</SectionLabel>
+            <SectionLabel>{t('providers.generationRoutes')}</SectionLabel>
             {providers.length ? (
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(240px,1fr))]">
                 {providers.map((provider) => (
@@ -271,8 +272,8 @@ export function ProvidersView({ active }) {
             ) : (
               <EmptyState
                 icon="plug"
-                title="No providers advertised"
-                hint="Provider readiness and routing appear once the studio is running."
+                title={t('providers.noneAdvertised')}
+                hint={t('providers.noneAdvertisedHint')}
               />
             )}
           </section>

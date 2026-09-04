@@ -101,28 +101,43 @@ test('the saved library reads a failure out of the hook and confirms before over
     assert.match(menu, /searchable \? filterSavedPrompts\(entries, query\) : entries/);
 });
 
-test('ClipPrep says which side of the motion budget binds, the right way round', () => {
+test('ClipPrep says which side of the motion budget binds, the right way round', async () => {
     const dialog = read('src/dialogs/ClipPrepDialog.jsx');
+    // The sentences moved onto keys, so the phrasing is asserted where it is now
+    // decided; the branch that picks between them is still read from the source.
+    const { STRINGS } = await import('../src/lib/i18n.js');
     // Short reference (limitedByReference): it keeps its own length and opens the full range.
-    assert.match(dialog, /budget\.limitedByReference \? \(\s*<>This <strong>\{seconds\(budget\.referenceSeconds\)\}<\/strong> reference keeps its own length — it costs \{seconds\(budget\.referenceSeconds\)\} of motion budget and leaves the full \{seconds\(clipSeconds\)\} range open\.<\/>/);
+    assert.match(dialog, /budget\.limitedByReference \? \(/);
+    assert.equal(STRINGS['clipPrep.budgetKeepsBefore'], 'This');
+    assert.equal(
+        STRINGS['clipPrep.budgetKeepsAfter']('0:02.0', '0:05.0'),
+        'reference keeps its own length — it costs 0:02.0 of motion budget and leaves the full 0:05.0 range open.',
+    );
     // Long reference: trimmed to the shot on the way in.
-    assert.match(dialog, /Longer than the \{seconds\(clipSeconds\)\} shot: it is trimmed to \{seconds\(clipSeconds\)\} on the way in\. Trim it below \{seconds\(clipSeconds\)\} to spend less budget\./);
+    assert.equal(
+        STRINGS['clipPrep.budgetLonger']('0:05.0'),
+        'Longer than the 0:05.0 shot: it is trimmed to 0:05.0 on the way in. Trim it below 0:05.0 to spend less budget.',
+    );
     assert.doesNotMatch(dialog, /the shot will be capped to the reference/);
     assert.doesNotMatch(dialog, /type="checkbox"/, 'the audio switch is the kit Toggle');
     assert.match(dialog, /<Toggle checked=\{dropAudio\}/);
-    assert.match(dialog, /onClick=\{\(\) => setAttempt\(\(n\) => n \+ 1\)\}>Retry<\/Button>/);
+    assert.match(dialog, /onClick=\{\(\) => setAttempt\(\(n\) => n \+ 1\)\}>\{t\('common\.retry'\)\}<\/Button>/);
 });
 
-test('the prompt helper waits for the runtime snapshot and keeps Unload out of the row button', () => {
+test('the prompt helper waits for the runtime snapshot and keeps Unload out of the row button', async () => {
     const dialog = read('src/dialogs/PromptHelperDialog.jsx');
     const picker = read('src/components/ModelSourcePicker.jsx');
-    assert.match(dialog, /Checking this machine's RAM and models…/);
+    const { STRINGS } = await import('../src/lib/i18n.js');
+    assert.match(dialog, /t\('promptHelper\.checkingRam'\)/);
+    assert.equal(STRINGS['promptHelper.checkingRam'], "Checking this machine's RAM and models…");
     // The rows themselves moved to the shared picker when the prompt helper
     // stopped being local-only, but the rule did not: a row carries a control
     // of its own, so it cannot be a <button>.
     assert.match(picker, /role="radio"/);
     assert.doesNotMatch(picker, /role="button"/, 'no control nested in a button');
-    assert.match(dialog, /label=\{model\.provider === 'mtplx' \? 'Stop the local helper' : `Unload \$\{model\.name\}`\}/);
+    assert.match(dialog, /label=\{model\.provider === 'mtplx' \? t\('promptHelper\.stopLocalHelper'\) : tf\('promptHelper\.unloadModel', model\.name\)\}/);
+    assert.equal(STRINGS['promptHelper.stopLocalHelper'], 'Stop the local helper');
+    assert.equal(STRINGS['promptHelper.unloadModel']('Qwen'), 'Unload Qwen');
     assert.match(dialog, /describeWritingFor\(\{ cast, references \}\)/);
     assert.match(dialog, /https:\/\/github\.com\/ggml-org\/llama\.cpp\/releases/);
     assert.match(dialog, /flattenApiDetail\(payload\?\.detail \?\? payload\?\.error\)/);
@@ -173,14 +188,20 @@ test('the dead preference copies are gone and MetaRow lives in one place', () =>
     assert.doesNotMatch(read('src/studios/LipSyncStudio.jsx'), /function MetaRow/);
 });
 
-test('the prompt helper offers Refine with tucked-away controls, not a revision box', () => {
+test('the prompt helper offers Refine with tucked-away controls, not a revision box', async () => {
     const dialog = read('src/dialogs/PromptHelperDialog.jsx');
-    // The Refine action and its knobs.
-    assert.match(dialog, />\s*Refine\s*</);
-    assert.match(dialog, /Refinement controls/);
-    assert.match(dialog, /'single', label: 'Single still'/);
-    assert.match(dialog, /'more', label: 'Add shots'/);
-    assert.match(dialog, /focus more on…, add…, remove…, make … more subtle/);
+    const { STRINGS } = await import('../src/lib/i18n.js');
+    // The Refine action and its knobs. The words are the table's now; what the
+    // source still has to show is that this dialog asks for them.
+    assert.match(dialog, /\{t\('composer\.refine'\)\}/);
+    assert.equal(STRINGS['composer.refine'], 'Refine');
+    assert.match(dialog, /title=\{t\('promptHelper\.refinementControls'\)\}/);
+    assert.equal(STRINGS['promptHelper.refinementControls'], 'Refinement controls');
+    assert.match(dialog, /'single', label: t\('promptHelper\.singleStill'\)/);
+    assert.equal(STRINGS['promptHelper.singleStill'], 'Single still');
+    assert.match(dialog, /'more', label: t\('promptHelper\.addShots'\)/);
+    assert.equal(STRINGS['promptHelper.addShots'], 'Add shots');
+    assert.equal(STRINGS['promptHelper.guidancePlaceholder'], 'Steer it: focus more on…, add…, remove…, make … more subtle');
     // The wire shape the backend validates (prompt_profiles.normalize_refine).
     assert.match(dialog, /refine: refine \|\| undefined/);
     assert.match(dialog, /detail: refineDetail/);

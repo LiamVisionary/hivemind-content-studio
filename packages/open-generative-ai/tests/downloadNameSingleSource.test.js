@@ -243,7 +243,7 @@ test('History can still download, now that the native control is gone', () => {
 
     // Suppressing the native item would otherwise leave History with NO way to
     // save a clip at all.
-    assert.match(view, /label: 'Download'/, 'History cards need their own download action');
+    assert.match(view, /label: t\('common\.download'\)/, 'History cards need their own download action');
     assert.match(view, /downloadMedia\(entry\.media_url, downloadName\)/);
     assert.match(view, /from '\.\.\/\.\.\/lib\/downloadMedia\.js'/);
 });

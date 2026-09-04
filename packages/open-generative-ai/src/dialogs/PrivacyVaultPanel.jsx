@@ -12,6 +12,7 @@ import { toast } from 'react-hot-toast';
 import { changeWorkspacePassword, mintNewRecoveryKey } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, Field, SectionLabel, TextInput } from '../ui/kit.jsx';
+import { t } from '../lib/i18n.js';
 
 // One sentence per failure, each one naming what to do next. Server text never
 // reaches this screen: these are the only five outcomes either call has.
@@ -89,12 +90,12 @@ export function PrivacyVaultPanel({ onDone }) {
   return (
     <div className="flex flex-col gap-6">
       <section className="flex flex-col gap-3">
-        <SectionLabel>Workspace password</SectionLabel>
+        <SectionLabel>{t('vault.workspacePassword')}</SectionLabel>
         <VaultNote>
-          Your password opens this workspace and decrypts its library. Changing it re-seals one copy of the key, so nothing is re-encrypted and any passkey — or this browser’s remembered unlock — keeps working.
+          {t('vault.workspacePasswordBlurb')}
         </VaultNote>
         <form onSubmit={changePassword} className="flex flex-col gap-3">
-          <Field label="Current password">
+          <Field label={t('vault.currentPassword')}>
             <TextInput
               type="password"
               value={current}
@@ -103,7 +104,7 @@ export function PrivacyVaultPanel({ onDone }) {
               disabled={Boolean(busy)}
             />
           </Field>
-          <Field label="New password">
+          <Field label={t('vault.newPassword')}>
             <TextInput
               type="password"
               value={next}
@@ -112,7 +113,7 @@ export function PrivacyVaultPanel({ onDone }) {
               disabled={Boolean(busy)}
             />
           </Field>
-          <Field label="Type the new one again" error={error}>
+          <Field label={t('vault.confirmPassword')} error={error}>
             <TextInput
               type="password"
               value={confirm}
@@ -128,22 +129,22 @@ export function PrivacyVaultPanel({ onDone }) {
               loading={busy === 'password'}
               disabled={Boolean(busy) || !current || !next || !confirm}
             >
-              Change password
+              {t('vault.changePassword')}
             </Button>
           </div>
         </form>
       </section>
 
       <section className="flex flex-col gap-3">
-        <SectionLabel>Recovery key</SectionLabel>
+        <SectionLabel>{t('vault.recoveryKey')}</SectionLabel>
         <VaultNote>
-          A recovery key is the only way back in if you forget your password — the server has never held your key and cannot reset it for you. Minting a new one retires the old key immediately and leaves everything you have made untouched.
+          {t('vault.recoveryKeyBlurb')}
         </VaultNote>
         <form onSubmit={rotateRecovery} className="flex flex-col gap-3">
           <Field
-            label="Current password"
+            label={t('vault.currentPassword')}
             error={rotateError}
-            hint="The new key is shown once, and then only you have it."
+            hint={t('vault.recoveryShownOnce')}
           >
             <TextInput
               type="password"
@@ -159,7 +160,7 @@ export function PrivacyVaultPanel({ onDone }) {
               loading={busy === 'recovery'}
               disabled={Boolean(busy) || !rotateWith}
             >
-              Show a new recovery key
+              {t('vault.showNewRecoveryKey')}
             </Button>
           </div>
         </form>

@@ -15,6 +15,7 @@ import { refreshMuapiKeyLocation } from '../../lib/providerReadiness.js';
 import { Button, Card, Field, Pill, SectionLabel, Spinner, TextInput } from '../../ui/kit.jsx';
 import { api } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
+import { t, tf } from '../../lib/i18n.js';
 
 function relative(iso) {
     const then = Date.parse(iso);
@@ -39,7 +40,7 @@ function CredentialRow({ row, value, onChange, onSave, busy }) {
                     <p className="mt-0.5 truncate text-[11px] text-ink3">{row.label}</p>
                 </div>
                 <Pill tone={configured ? 'ok' : 'neutral'} dot>
-                    {configured ? 'Stored' : 'Not set'}
+                    {configured ? t('passbook.stored') : t('passbook.notSet')}
                 </Pill>
             </div>
             {configured && !editing ? (
@@ -48,16 +49,16 @@ function CredentialRow({ row, value, onChange, onSave, busy }) {
                     className="self-start text-[11px] text-honey underline-offset-2 hover:underline"
                     onClick={() => setEditing(true)}
                 >
-                    Replace key
+                    {t('passbook.replaceKey')}
                 </button>
             ) : (
                 <div className="flex items-end gap-2">
-                    <Field className="flex-1" label="Key">
+                    <Field className="flex-1" label={t('passbook.key')}>
                         <TextInput
                             type="password"
                             autoComplete="off"
                             spellCheck={false}
-                            placeholder="Paste the key"
+                            placeholder={t('providers.pasteTheKey')}
                             value={value || ''}
                             onChange={(event) => onChange(row.key, event.target.value)}
                         />
@@ -67,7 +68,7 @@ function CredentialRow({ row, value, onChange, onSave, busy }) {
                         disabled={busy || !String(value || '').trim()}
                         onClick={() => onSave(row.key, Boolean(configured)).then(() => setEditing(false))}
                     >
-                        {configured ? 'Replace' : 'Save'}
+                        {configured ? t('passbook.replace') : t('common.save')}
                     </Button>
                 </div>
             )}
@@ -76,10 +77,10 @@ function CredentialRow({ row, value, onChange, onSave, busy }) {
 }
 
 const MODE_COPY = () => ({
-    always: { label: 'Always', hint: 'handed over without interruption' },
-    ask: { label: 'Ask me', hint: 'the request waits until you answer' },
-    window: { label: 'In hours', hint: 'allowed inside a schedule, refused outside' },
-    never: { label: 'Never', hint: 'always refused' },
+    always: { label: t('passbook.modeAlways'), hint: t('passbook.modeAlwaysHint') },
+    ask: { label: t('passbook.modeAsk'), hint: t('passbook.modeAskHint') },
+    window: { label: t('passbook.modeWindow'), hint: t('passbook.modeWindowHint') },
+    never: { label: t('passbook.modeNever'), hint: t('passbook.modeNeverHint') },
 });
 
 function Pending({ pending, busy, onResolve }) {
@@ -90,25 +91,25 @@ function Pending({ pending, busy, onResolve }) {
         <Card className="flex flex-col gap-3 border-honey/40 p-4">
             <div className="flex items-center justify-between gap-3">
                 <h4 className="text-sm font-semibold text-ink1">
-                    {`${pending.length} request${pending.length > 1 ? 's' : ''} waiting on you`}
+                    {tf('passbook.requestsWaiting', pending.length)}
                 </h4>
             </div>
             {pending.map((item) => (
                 <div key={item.id} className="flex flex-col gap-2 border-b border-line1 pb-3 last:border-0 last:pb-0">
                     <p className="text-xs text-ink1">
                         <span className="font-semibold">{item.app}</span>{' '}
-                        wants <span className="font-mono text-[11px]">{(item.keys || []).join(', ')}</span>
+                        {t('passbook.wants')} <span className="font-mono text-[11px]">{(item.keys || []).join(', ')}</span>
                     </p>
                     {item.reason ? <p className="text-[11px] text-ink3">{item.reason}</p> : null}
                     <div className="flex flex-wrap items-center gap-2">
                         <Button variant="primary" disabled={busy} onClick={() => onResolve(item.id, true, '')}>
-                            Just this once
+                            {t('passbook.justThisOnce')}
                         </Button>
                         <Button disabled={busy} onClick={() => onResolve(item.id, true, '1h')}>
-                            Approve for 1h
+                            {t('passbook.approveFor1h')}
                         </Button>
                         <Button disabled={busy} onClick={() => onResolve(item.id, false, '')}>
-                            Decline
+                            {t('passbook.decline')}
                         </Button>
                     </div>
                 </div>
@@ -129,22 +130,22 @@ function Unlocks({ access, busy, onUnlock, onLock }) {
                             <p className="text-xs text-ink1">
                                 {(item.keys || []).length
                                     ? <span className="font-mono text-[11px]">{item.keys.join(', ')}</span>
-                                    : 'Every key'}
+                                    : t('passbook.everyKey')}
                                 {item.app ? ` · ${item.app}` : ''}
                             </p>
                             <Pill tone="honey" dot>
-                                {`${Math.round(item.remaining_seconds / 60)}m left`}
+                                {tf('passbook.minutesLeft', Math.round(item.remaining_seconds / 60))}
                             </Pill>
                         </div>
                     ))}
                     <Button className="self-start" disabled={busy} onClick={onLock}>
-                        Close now
+                        {t('passbook.closeNow')}
                     </Button>
                 </>
             ) : (
                 <>
                     <p className="text-xs text-ink2">
-                        Stop being asked for a while. It closes on its own when the time is up.
+                        {t('passbook.stopBeingAskedBlurb')}
                     </p>
                     <div className="flex flex-wrap gap-2">
                         {(access?.presets || ['15m', '1h', '4h']).map((preset) => (
@@ -152,7 +153,7 @@ function Unlocks({ access, busy, onUnlock, onLock }) {
                         ))}
                     </div>
                     <p className="text-[11px] leading-relaxed text-ink3">
-                        While it is open, anything running as you can use these keys without asking. That is what it is for — but it should never be something you did without noticing.
+                        {t('passbook.whileOpenBlurb')}
                     </p>
                 </>
             )}
@@ -165,7 +166,7 @@ function AccessModes({ access, keys, busy, onSetMode }) {
     const copy = MODE_COPY();
     const [app, setApp] = useState('hivemind-content-studio');
     if (!access?.available) {
-        return <p className="text-xs text-ink3">{access?.detail || 'Not installed.'}</p>;
+        return <p className="text-xs text-ink3">{access?.detail || t('passbook.notInstalled')}</p>;
     }
     const entry = (access.apps || {})[app] || {};
     const rules = entry.keys || {};
@@ -174,9 +175,9 @@ function AccessModes({ access, keys, busy, onSetMode }) {
         <Card className="flex flex-col gap-3 p-4">
             <div className="flex items-center justify-between gap-3">
                 <p className="text-xs text-ink2">
-                    App <span className="font-mono text-[11px] text-ink1">{app}</span>
+                    {t('passbook.app')} <span className="font-mono text-[11px] text-ink1">{app}</span>
                 </p>
-                <Pill>{`default ${fallback}`}</Pill>
+                <Pill>{tf('passbook.defaultMode', fallback)}</Pill>
             </div>
             {(keys || []).map((key) => {
                 const mode = (rules[key] || {}).mode || fallback;
@@ -200,7 +201,7 @@ function AccessModes({ access, keys, busy, onSetMode }) {
                 );
             })}
             {!(keys || []).length ? (
-                <p className="text-xs text-ink3">No stored keys yet.</p>
+                <p className="text-xs text-ink3">{t('passbook.noStoredKeys')}</p>
             ) : null}
         </Card>
     );
@@ -211,23 +212,23 @@ function Broker({ broker }) {
     // the one panel where an encouraging word would teach the owner something
     // false — "protected" here would mean "recorded", and they are not the same.
     if (!broker?.available) {
-        return <p className="text-xs text-ink3">{broker?.detail || 'Not installed.'}</p>;
+        return <p className="text-xs text-ink3">{broker?.detail || t('passbook.notInstalled')}</p>;
     }
     return (
         <>
             <div className="flex items-center justify-between gap-3">
                 <p className="text-xs text-ink2">
                     {broker.running
-                        ? `Reads go through the broker, in ${broker.mode} mode.`
-                        : 'Not running — each app records its own reads, so the record has gaps.'}
+                        ? tf('passbook.brokerRunning', broker.mode)
+                        : t('passbook.brokerStopped')}
                 </p>
                 <Pill tone={broker.running ? 'ok' : 'warn'} dot>
-                    {broker.running ? 'Running' : 'Stopped'}
+                    {broker.running ? t('passbook.running') : t('passbook.stopped')}
                 </Pill>
             </div>
             {!broker.running ? (
                 <p className="text-[11px] text-ink3">
-                    {'Start it with '}<span className="font-mono">passbook broker start</span>
+                    {`${t('passbook.startItWith')} `}<span className="font-mono">passbook broker start</span>
                 </p>
             ) : null}
             <p className="text-[11px] leading-relaxed text-ink3">{broker.limits}</p>
@@ -240,7 +241,7 @@ function LinkedMachines({ links, busy, onRevoke }) {
     // against a second machine's screen, and a button here could not do that —
     // one that looked like it could would be worse than no button at all.
     if (!links?.available) {
-        return <p className="text-xs text-ink3">{links?.detail || 'Machine linking is not set up.'}</p>;
+        return <p className="text-xs text-ink3">{links?.detail || t('passbook.linkingNotSetUp')}</p>;
     }
     const rows = [
         ...(links.lent || []).map((row) => ({ ...row, lent: true })),
@@ -249,28 +250,28 @@ function LinkedMachines({ links, busy, onRevoke }) {
     return (
         <>
             <p className="text-[11px] text-ink3">
-                This machine's fingerprint:{' '}
+                {t('passbook.thisFingerprint')}{' '}
                 <span className="font-mono text-ink2">{links.fingerprint}</span>
             </p>
             {rows.length === 0 ? (
                 <p className="text-xs text-ink3">
-                    No linked machines. Add one with `passbook-link request` on the machine that needs keys.
+                    {t('passbook.noLinkedMachines')}
                 </p>
             ) : rows.map((row) => (
                 <div key={`${row.role}-${row.did}`} className="flex flex-col gap-1 border-b border-line1 py-2 last:border-0">
                     <div className="flex items-center justify-between gap-3">
                         <span className="text-xs text-ink1">
-                            {row.lent ? 'Lent to' : 'Borrowed from'}{' '}
+                            {row.lent ? t('passbook.lentTo') : t('passbook.borrowedFrom')}{' '}
                             <span className="font-mono text-[11px] text-ink2">{row.fingerprint || row.did}</span>
                         </span>
                         <Pill tone={row.active ? 'ok' : row.revoked ? 'neutral' : 'warn'} dot>
-                            {row.active ? 'Active' : row.revoked ? 'Revoked' : 'Expired'}
+                            {row.active ? t('common.active') : row.revoked ? t('passbook.linkRevoked') : t('passbook.linkExpired')}
                         </Pill>
                     </div>
                     <p className="font-mono text-[11px] text-ink3">{(row.keys || []).join(', ') || '—'}</p>
                     {row.lent && row.active ? (
                         <Button className="self-start" disabled={busy} onClick={() => onRevoke(row.did)}>
-                            Revoke
+                            {t('passbook.revoke')}
                         </Button>
                     ) : null}
                 </div>
@@ -339,10 +340,10 @@ export function PassBookView({ active = true }) {
             // Say what actually happened. "kept" means another app's value was
             // already there and this did nothing — silence would read as success.
             setNotice(result.added?.length
-                ? `${key} saved — every Hive app on this machine can use it now.`
+                ? tf('passbook.keySaved', key)
                 : result.updated?.length
-                    ? `${key} replaced.`
-                    : `${key} was already stored; nothing changed.`);
+                    ? tf('passbook.keyReplaced', key)
+                    : tf('passbook.keyUnchanged', key));
             if (key === MUAPI_CREDENTIAL) {
                 // The studios' client cached "no server key" at boot; forget it, or
                 // the next Generate still asks this browser for a key it no longer needs.
@@ -351,7 +352,7 @@ export function PassBookView({ active = true }) {
             }
             await load();
         } catch (error) {
-            setNotice(error?.detail?.message || error?.message || 'Could not save that key.');
+            setNotice(error?.detail?.message || error?.message || t('passbook.saveFailed'));
         } finally {
             setBusy(false);
         }
@@ -369,11 +370,11 @@ export function PassBookView({ active = true }) {
             // delivered values are still live until they are rotated, and a
             // message that omitted that would be actively misleading.
             setNotice(result.rotate?.length
-                ? `Revoked. Rotate these at the provider — revoking cannot unsend them: ${result.rotate.join(', ')}`
-                : 'Revoked.');
+                ? tf('passbook.revokedRotate', result.rotate.join(', '))
+                : t('passbook.revoked'));
             await load();
         } catch (error) {
-            setNotice(error?.detail?.message || 'Could not revoke that link.');
+            setNotice(error?.detail?.message || t('passbook.revokeFailed'));
         } finally {
             setBusy(false);
         }
@@ -387,36 +388,36 @@ export function PassBookView({ active = true }) {
             setNotice(describe(result));
             await load();
         } catch (error) {
-            setNotice(error?.detail?.message || error?.message || 'That did not work.');
+            setNotice(error?.detail?.message || error?.message || t('passbook.actionFailed'));
         } finally {
             setBusy(false);
         }
     };
 
     const setMode = ({ app, key, mode }) => act('/api/passbook/policy/mode', { app, key, mode },
-        () => `${key} is now "${mode}" for ${app}.`);
+        () => tf('passbook.modeSet', key, mode, app));
 
     const unlock = (duration) => act('/api/passbook/policy/unlock', { duration },
-        () => `Unlocked for ${duration}. It closes on its own.`);
+        () => tf('passbook.unlockedFor', duration));
 
     const lock = () => act('/api/passbook/policy/lock', {},
-        () => 'Closed.');
+        () => t('passbook.closed'));
 
     const resolve = (id, approve, remember) => act('/api/passbook/policy/resolve',
         { id, approve, remember },
         (result) => (approve
-            ? `Approved${remember ? ` for ${remember}` : ''}${result.approved_by?.startsWith('passkey') ? ' with your passkey' : ''}.`
-            : 'Declined.'));
+            ? tf('passbook.approved', remember, result.approved_by?.startsWith('passkey'))
+            : t('passbook.declined')));
 
     const seal = async () => {
         setBusy(true);
         setNotice('');
         try {
             const result = await api('/api/passbook/seal', { method: 'POST' });
-            setNotice(result.detail || 'Encrypted at rest.');
+            setNotice(result.detail || t('passbook.encryptedAtRest'));
             await load();
         } catch (error) {
-            setNotice(error?.detail?.message || 'Could not encrypt the store.');
+            setNotice(error?.detail?.message || t('passbook.encryptFailed'));
         } finally {
             setBusy(false);
         }
@@ -435,9 +436,9 @@ export function PassBookView({ active = true }) {
     return (
         <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
             <HubToolbar
-                kicker="Shared on this machine"
-                title="PassBook"
-                right={<Button onClick={() => void load()} disabled={busy}>Refresh</Button>}
+                kicker={t('passbook.kicker')}
+                title={t('nav.passbook')}
+                right={<Button onClick={() => void load()} disabled={busy}>{t('app.refresh')}</Button>}
             />
             {/* The page scrolls INSIDE the view, the way every other hub
                 page does. Without this the root was a plain `flex flex-col`
@@ -448,9 +449,9 @@ export function PassBookView({ active = true }) {
                     failed ? (
                         <div className="flex items-center justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-4 py-3">
                             <p className="text-xs text-ink1">
-                                Could not read the shared store.
+                                {t('passbook.storeUnreadable')}
                             </p>
-                            <Button size="sm" onClick={() => void load()}>Try again</Button>
+                            <Button size="sm" onClick={() => void load()}>{t('common.tryAgain')}</Button>
                         </div>
                     ) : (
                         <div className="flex h-40 items-center justify-center">
@@ -464,35 +465,35 @@ export function PassBookView({ active = true }) {
                     // are all my keys missing".
                     <Card className="flex flex-col gap-2 border-danger/40 p-4">
                         <h4 className="text-sm font-semibold text-ink1">
-                            This build cannot reach the shared store
+                            {t('passbook.containerHome')}
                         </h4>
                         <p className="text-xs leading-relaxed text-ink2">{state.detail}</p>
                         <p className="text-xs leading-relaxed text-ink3">
-                            Ship this build without the App Sandbox, or launch it with HIVE_HOME pointing at the real store.
+                            {t('passbook.containerHomeFix')}
                         </p>
                     </Card>
                 ) : (
                     <>
                         <Card className="flex flex-col gap-2 p-4">
                             <div className="flex flex-wrap items-center gap-2">
-                                <Pill>{`${stored} stored`}</Pill>
-                                <Pill>{`workspace ${state.workspace || 'main'}`}</Pill>
+                                <Pill>{tf('passbook.storedCount', stored)}</Pill>
+                                <Pill>{tf('passbook.workspaceName', state.workspace || 'main')}</Pill>
                                 {(state.apps || []).map((app) => <Pill key={app}>{app}</Pill>)}
                             </div>
                             <p className="text-xs leading-relaxed text-ink2">
-                                These keys live in one store shared by every Hive app on this machine. Paste a key once and they all have it — and installing HivemindOS later adopts this same store rather than starting another.
+                                {t('passbook.oneStoreBlurb')}
                             </p>
                             <p className="font-mono text-[10px] text-ink3">{state.path}</p>
                             {state.writes_to && state.writes_to !== state.path ? (
                                 <p className="text-[11px] text-ink3">
-                                    {'New keys are written to this workspace: '}
+                                    {`${t('passbook.newKeysWrittenTo')} `}
                                     <span className="font-mono">{state.writes_to}</span>
                                 </p>
                             ) : null}
                         </Card>
 
                         <div>
-                            <SectionLabel>Keys this studio uses</SectionLabel>
+                            <SectionLabel>{t('passbook.keysThisStudioUses')}</SectionLabel>
                             <div className="mt-2 grid gap-2 md:grid-cols-2">
                                 {(state.settable || []).map((row) => (
                                     <CredentialRow
@@ -509,20 +510,20 @@ export function PassBookView({ active = true }) {
                         </div>
 
                         <div>
-                            <SectionLabel>Encryption at rest</SectionLabel>
+                            <SectionLabel>{t('passbook.encryptionAtRest')}</SectionLabel>
                             <Card className="mt-2 flex flex-col gap-2 p-4">
                                 <div className="flex items-center justify-between gap-3">
                                     <p className="text-xs text-ink2">{sealing.detail}</p>
                                     <Pill tone={sealing.fully_sealed ? 'ok' : 'warn'} dot>
-                                        {sealing.fully_sealed ? 'Encrypted' : 'Plaintext'}
+                                        {sealing.fully_sealed ? t('passbook.encrypted') : t('passbook.plaintext')}
                                     </Pill>
                                 </div>
                                 <p className="text-[11px] leading-relaxed text-ink3">
-                                    This protects the store at rest — a stolen laptop, a backup, a synced home folder. It does not stop code running as you from reading a key.
+                                    {t('passbook.atRestBlurb')}
                                 </p>
                                 {sealing.supported && !sealing.fully_sealed ? (
                                     <Button variant="primary" className="self-start" disabled={busy} onClick={seal}>
-                                        Encrypt the store
+                                        {t('passbook.encryptTheStore')}
                                     </Button>
                                 ) : null}
                                 {!sealing.supported ? (
@@ -534,42 +535,42 @@ export function PassBookView({ active = true }) {
                         <Pending pending={access?.pending} busy={busy} onResolve={resolve} />
 
                         <div>
-                            <SectionLabel>Stop being asked</SectionLabel>
+                            <SectionLabel>{t('passbook.stopBeingAsked')}</SectionLabel>
                             <div className="mt-2">
                                 <Unlocks access={access} busy={busy} onUnlock={unlock} onLock={lock} />
                             </div>
                         </div>
 
                         <div>
-                            <SectionLabel>How each key is answered</SectionLabel>
+                            <SectionLabel>{t('passbook.howEachKeyAnswered')}</SectionLabel>
                             <div className="mt-2">
                                 <AccessModes access={access} keys={state.keys} busy={busy} onSetMode={setMode} />
                             </div>
                         </div>
 
                         <div>
-                            <SectionLabel>Linked machines</SectionLabel>
+                            <SectionLabel>{t('passbook.linkedMachines')}</SectionLabel>
                             <Card className="mt-2 flex flex-col gap-2 p-4">
                                 <LinkedMachines links={links} busy={busy} onRevoke={revoke} />
                             </Card>
                         </div>
 
                         <div>
-                            <SectionLabel>Read broker</SectionLabel>
+                            <SectionLabel>{t('passbook.readBroker')}</SectionLabel>
                             <Card className="mt-2 flex flex-col gap-2 p-4">
                                 <Broker broker={broker} />
                             </Card>
                         </div>
 
                         <div>
-                            <SectionLabel>Access record</SectionLabel>
+                            <SectionLabel>{t('passbook.accessRecord')}</SectionLabel>
                             <Card className="mt-2 flex flex-col gap-2 p-4">
                                 {ledger?.available ? (
                                     <>
                                         <div className="flex items-center justify-between gap-3">
                                             <p className="text-xs text-ink2">{ledger.detail}</p>
                                             <Pill tone={ledger.intact ? 'ok' : 'danger'} dot>
-                                                {ledger.intact ? 'Unaltered' : 'Altered'}
+                                                {ledger.intact ? t('passbook.unaltered') : t('passbook.altered')}
                                             </Pill>
                                         </div>
                                         <div className="max-h-64 overflow-y-auto">
@@ -589,7 +590,7 @@ export function PassBookView({ active = true }) {
                                         </div>
                                     </>
                                 ) : (
-                                    <p className="text-xs text-ink3">{ledger?.detail || 'No access record on this machine.'}</p>
+                                    <p className="text-xs text-ink3">{ledger?.detail || t('passbook.noAccessRecord')}</p>
                                 )}
                             </Card>
                         </div>

@@ -22,6 +22,7 @@ import {
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { Button, Field, ProgressBar, SectionLabel, Segmented, Spinner, Toggle, cx } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
+import { t, tf } from '../lib/i18n.js';
 
 const STORYBOARD_TILES = 6;
 
@@ -142,7 +143,7 @@ export function ClipPrepDialog({
         height: result.height,
       });
     } catch (error) {
-      toast.error(error?.message || 'Could not prepare that clip.');
+      toast.error(error?.message || t('clipPrep.prepareFailed'));
     } finally {
       setBusy(''); setProgress(0);
     }
@@ -199,7 +200,7 @@ export function ClipPrepDialog({
       open={open}
       onClose={busy ? undefined : onClose}
       dismissable={!busy}
-      title="Prepare clip"
+      title={t('clipPrep.title')}
       size="xl"
       footer={(
         <div className="flex w-full items-center justify-between gap-3">
@@ -211,12 +212,12 @@ export function ClipPrepDialog({
                 {' · '}{seconds(plan.trim.seconds)}
                 {plan.lossless ? ' · unchanged' : ''}
               </>
-            ) : 'Reading clip…'}
+            ) : t('clipPrep.readingClip')}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <Button variant="ghost" onClick={onClose} disabled={Boolean(busy)}>Cancel</Button>
+            <Button variant="ghost" onClick={onClose} disabled={Boolean(busy)}>{t('common.cancel')}</Button>
             <Button variant="primary" onClick={runPrepare} disabled={!ready} loading={busy === 'prepare'}>
-              Use as reference
+              {t('clipPrep.useAsReference')}
             </Button>
           </div>
         </div>
@@ -225,13 +226,13 @@ export function ClipPrepDialog({
       {loadError ? (
         <div className="flex items-start gap-3 rounded-md border border-danger bg-danger-tint px-3.5 py-3">
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-ink1">Couldn't read that clip</div>
+            <div className="text-sm font-medium text-ink1">{t('clipPrep.readFailed')}</div>
             <div className="mt-0.5 break-words font-mono text-xs text-danger">{loadError}</div>
           </div>
-          <Button size="sm" variant="neutral" icon="refresh" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>
+          <Button size="sm" variant="neutral" icon="refresh" onClick={() => setAttempt((n) => n + 1)}>{t('common.retry')}</Button>
         </div>
       ) : !source ? (
-        <div className="flex items-center gap-3 py-2 text-sm text-ink3"><Spinner /> Decrypting and reading the clip on this device…</div>
+        <div className="flex items-center gap-3 py-2 text-sm text-ink3"><Spinner /> {t('clipPrep.decrypting')}</div>
       ) : (
         <div className="flex flex-col gap-4">
           <div className="overflow-hidden rounded-lg border border-line1 bg-bg0">
@@ -253,14 +254,14 @@ export function ClipPrepDialog({
               keyboard-operable for free, which a div with pointer handlers is not. */}
           <div className="flex flex-col gap-2">
             <div className="flex items-baseline justify-between gap-3">
-              <SectionLabel>Trim</SectionLabel>
+              <SectionLabel>{t('clipPrep.trim')}</SectionLabel>
               {/* Timecodes outside the uppercase kicker: "0:00.0 TO 0:05.0" is not a readout. */}
               <span className="font-mono text-xs text-ink2">
                 {seconds(bounds.start)} – {seconds(bounds.end)} <span className="text-ink3">({seconds(bounds.seconds)})</span>
               </span>
             </div>
             <label className="flex items-center gap-2 text-xs text-ink3">
-              <span className="w-8 shrink-0">In</span>
+              <span className="w-8 shrink-0">{t('clipPrep.in')}</span>
               <input
                 type="range" className="hive-range flex-1"
                 min={0} max={source.duration} step={0.05}
@@ -269,7 +270,7 @@ export function ClipPrepDialog({
               />
             </label>
             <label className="flex items-center gap-2 text-xs text-ink3">
-              <span className="w-8 shrink-0">Out</span>
+              <span className="w-8 shrink-0">{t('clipPrep.out')}</span>
               <input
                 type="range" className="hive-range flex-1"
                 min={0} max={source.duration} step={0.05}
@@ -280,14 +281,14 @@ export function ClipPrepDialog({
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Quality" hint="Smaller references generate faster">
+            <Field label={t('clipPrep.quality')} hint={t('clipPrep.qualityHint')}>
               <Segmented
                 value={quality}
                 onChange={setQuality}
                 options={CLIP_QUALITY_PRESETS.map((preset) => ({ value: preset.id, label: preset.label }))}
               />
             </Field>
-            <Field label="Crop" hint="Centered, aspect preserved">
+            <Field label={t('clipPrep.crop')} hint={t('clipPrep.cropHint')}>
               <Segmented
                 value={aspect}
                 onChange={setAspect}
@@ -304,11 +305,11 @@ export function ClipPrepDialog({
               budget.limitedByReference ? 'border-line1 bg-bg0 text-ink3' : 'border-warn bg-bg0 text-ink2',
             )}>
               {budget.limitedByReference ? (
-                <>This <strong>{seconds(budget.referenceSeconds)}</strong> reference keeps its own length — it costs {seconds(budget.referenceSeconds)} of motion budget and leaves the full {seconds(clipSeconds)} range open.</>
+                <>{t('clipPrep.budgetKeepsBefore')}{' '}<strong>{seconds(budget.referenceSeconds)}</strong>{' '}{tf('clipPrep.budgetKeepsAfter', seconds(budget.referenceSeconds), seconds(clipSeconds))}</>
               ) : budget.referenceSeconds - clipSeconds < 0.05 ? (
-                <>As long as the {seconds(clipSeconds)} shot: it spends the whole motion budget. Trim it below {seconds(clipSeconds)} to spend less.</>
+                <>{tf('clipPrep.budgetAsLong', seconds(clipSeconds))}</>
               ) : (
-                <>Longer than the {seconds(clipSeconds)} shot: it is trimmed to {seconds(clipSeconds)} on the way in. Trim it below {seconds(clipSeconds)} to spend less budget.</>
+                <>{tf('clipPrep.budgetLonger', seconds(clipSeconds))}</>
               )}
             </div>
           ) : null}
@@ -318,16 +319,16 @@ export function ClipPrepDialog({
               icon="image"
               onClick={() => runGrabFrame(videoRef.current?.currentTime || bounds.start)}
               disabled={Boolean(busy)}
-              title="Saves the frame under the playhead as a start frame and closes this dialog — reopen Prepare to trim the clip as well"
+              title={t('clipPrep.useCurrentFrameTitle')}
             >
-              Use current frame
+              {t('clipPrep.useCurrentFrame')}
             </Button>
             <Button icon="grid" onClick={runStoryboard} disabled={Boolean(busy)} loading={busy === 'board'}>
-              Storyboard
+              {t('clipPrep.storyboard')}
             </Button>
             <span className="ml-auto flex items-center gap-2 text-xs text-ink3">
-              Drop audio{source.hasAudio ? '' : ' (none)'}
-              <Toggle checked={dropAudio} onChange={setDropAudio} label="Drop audio" disabled={!source.hasAudio} />
+              {t('clipPrep.dropAudio')}{source.hasAudio ? '' : ` ${t('clipPrep.noAudio')}`}
+              <Toggle checked={dropAudio} onChange={setDropAudio} label={t('clipPrep.dropAudio')} disabled={!source.hasAudio} />
             </span>
           </div>
 
@@ -339,9 +340,9 @@ export function ClipPrepDialog({
                   type="button"
                   className="group overflow-hidden rounded-md border border-line1 hover:border-honey"
                   onClick={() => runGrabFrame(tile.at)}
-                  title={`Use the frame at ${seconds(tile.at)} as a start frame (closes this dialog)`}
+                  title={tf('clipPrep.useFrameAt', seconds(tile.at))}
                 >
-                  <img src={tile.url} alt={`Frame at ${seconds(tile.at)}`} className="aspect-video w-full object-cover" />
+                  <img src={tile.url} alt={tf('clipPrep.frameAt', seconds(tile.at))} className="aspect-video w-full object-cover" />
                   <span className="block py-0.5 text-center text-[10px] text-ink3">{seconds(tile.at)}</span>
                 </button>
               ))}
@@ -351,11 +352,11 @@ export function ClipPrepDialog({
           {busy === 'prepare' ? <ProgressBar value={progress} /> : null}
 
           <div className="text-[11px] text-ink3">
-            Source {source.width}×{source.height}
+            {t('common.source')} {source.width}×{source.height}
             {source.frameRate ? ` · ${Math.round(source.frameRate)}fps` : ''}
             {' · '}{seconds(source.duration)}
             {blob ? ` · ${megabytes(blob.size)}` : ''}
-            {' · prepared on this device — nothing is uploaded until you apply it'}
+            {` · ${t('clipPrep.preparedHere')}`}
           </div>
         </div>
       )}

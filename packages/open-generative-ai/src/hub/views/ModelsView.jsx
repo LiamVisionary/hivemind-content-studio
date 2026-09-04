@@ -29,12 +29,13 @@ import { AssetDetail } from './models/AssetDetail.jsx';
 import { CivitaiBrowser } from './models/CivitaiBrowser.jsx';
 import { InstalledAssets } from './models/InstalledAssets.jsx';
 import { RunnableModels } from './models/RunnableModels.jsx';
+import { t, tf } from '../../lib/i18n.js';
 
 const TABS = () => [
-  { value: 'models', label: 'Models' },
-  { value: 'engine', label: 'Engine' },
-  { value: 'installed', label: 'Installed' },
-  { value: 'discover', label: 'Discover' },
+  { value: 'models', label: t('nav.models') },
+  { value: 'engine', label: t('models.tabEngine') },
+  { value: 'installed', label: t('common.installed') },
+  { value: 'discover', label: t('models.tabDiscover') },
 ];
 
 export function ModelsView({ active }) {
@@ -60,18 +61,18 @@ export function ModelsView({ active }) {
       // ("No matching models"); it is reported in the banner like the library.
       let modelsError = '';
       const [localCatalog, installed] = await Promise.all([
-        localAI.listModels().catch((err) => { modelsError = err?.message || 'Could not read the local workflow catalog.'; return { models: [], status: 'unreachable' }; }),
+        localAI.listModels().catch((err) => { modelsError = err?.message || t('models.catalogUnreadable'); return { models: [], status: 'unreachable' }; }),
         localAI.listLibrary(),
       ]);
       // The catalog fetch reports an unreachable engine instead of rejecting.
       if (!modelsError && localCatalog?.status === 'unreachable') {
-        modelsError = 'The local engine is starting — it has not answered yet.';
+        modelsError = t('localModels.engineStarting');
       }
       setModels(Array.isArray(localCatalog?.models) ? localCatalog.models : []);
       setLibrary(installed);
-      if (modelsError) setError(`Workflow catalog: ${modelsError}`);
+      if (modelsError) setError(tf('models.workflowCatalog', modelsError));
     } catch (err) {
-      setError(err.message || 'Could not reach the local model bridge.');
+      setError(err.message || t('models.bridgeUnreachable'));
     } finally {
       setLoading(false);
     }
@@ -89,13 +90,13 @@ export function ModelsView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="Local runtime"
-        title="Models"
+        kicker={t('models.kicker')}
+        title={t('nav.models')}
         right={
           <>
             {loading ? <Spinner size={14} className="text-honey" /> : null}
             <Segmented options={TABS()} value={tab} onChange={setTab} />
-            <IconButton icon="refresh" label="Rescan installed models" onClick={() => void load()} />
+            <IconButton icon="refresh" label={t('models.rescan')} onClick={() => void load()} />
           </>
         }
       />
@@ -103,7 +104,7 @@ export function ModelsView({ active }) {
       {error ? (
         <div className="flex items-center justify-between gap-3 border-b border-line1 bg-danger-tint px-4 py-2 md:px-5">
           <span className="min-w-0 truncate text-xs text-danger" title={error}>{error}</span>
-          <Button size="sm" onClick={() => void load()}>Retry</Button>
+          <Button size="sm" onClick={() => void load()}>{t('common.retry')}</Button>
         </div>
       ) : null}
 

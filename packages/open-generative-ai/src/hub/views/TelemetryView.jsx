@@ -6,6 +6,7 @@ import { Card, EmptyState, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx'
 import { formatTelemetryDuration, humanize, providerLabel, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
+import { t, tf } from '../../lib/i18n.js';
 
 function Tile({ label, value, detail }) {
   return (
@@ -34,23 +35,23 @@ export function TelemetryPanel() {
           // state, not a spinner that never ends.
           <EmptyState
             icon="plug"
-            title="The studio is not running"
-            hint="Telemetry comes from the studio on this machine. It retries on its own once the studio is back."
+            title={t('app.notRunning')}
+            hint={t('activity.offlineHint')}
           />
         ) : !telemetry ? (
           <div className="grid flex-1 place-items-center py-16"><Spinner size={22} className="text-ink2" /></div>
         ) : (
           <div className="flex flex-col gap-6">
             <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
-              <Tile label="Attempts" value={summary.attempts || 0} detail={`${summary.running || 0} running`} />
-              <Tile label="Success rate" value={`${rate.toFixed(rate % 1 ? 1 : 0)}%`} detail={`${summary.failed || 0} failed`} />
-              <Tile label="Average time" value={formatTelemetryDuration(summary.average_duration_ms)} detail={`p95 ${formatTelemetryDuration(summary.p95_duration_ms)}`} />
-              <Tile label="Generation cost" value={`$${Number(summary.charged_usd || 0).toFixed(2)}`} detail={`${summary.artifacts || 0} artifacts`} />
+              <Tile label={t('activity.attempts')} value={summary.attempts || 0} detail={tf('activity.running', summary.running || 0)} />
+              <Tile label={t('activity.successRate')} value={`${rate.toFixed(rate % 1 ? 1 : 0)}%`} detail={tf('activity.failed', summary.failed || 0)} />
+              <Tile label={t('activity.averageTime')} value={formatTelemetryDuration(summary.average_duration_ms)} detail={tf('activity.p95', formatTelemetryDuration(summary.p95_duration_ms))} />
+              <Tile label={t('activity.generationCost')} value={`$${Number(summary.charged_usd || 0).toFixed(2)}`} detail={tf('activity.artifacts', summary.artifacts || 0)} />
             </div>
 
             <div className="grid gap-6 lg:grid-cols-2">
               <section className="flex flex-col gap-3">
-                <SectionLabel>Routing evidence · by provider</SectionLabel>
+                <SectionLabel>{t('activity.routingEvidence')}</SectionLabel>
                 {providers.length ? (
                   <div className="flex flex-col gap-2">
                     {providers.map((provider) => (
@@ -71,14 +72,14 @@ export function TelemetryPanel() {
                 ) : (
                   <EmptyState
                     icon="pulse"
-                    title="No generation samples yet"
-                    hint="Image, video, voice, and music attempts made by Planner runs appear here — studio generations are not counted."
+                    title={t('activity.noSamples')}
+                    hint={t('activity.noSamplesHint')}
                   />
                 )}
               </section>
 
               <section className="flex flex-col gap-3">
-                <SectionLabel>Latest activity · generation attempts</SectionLabel>
+                <SectionLabel>{t('activity.latestActivity')}</SectionLabel>
                 {attempts.length ? (
                   <div className="flex flex-col gap-2">
                     {attempts.map((attempt, i) => (
@@ -88,10 +89,10 @@ export function TelemetryPanel() {
                           <b className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink1">{humanize(attempt.kind)} · {providerLabel(attempt.provider)}</b>
                         </div>
                         <small className="text-[11px] text-ink3">
-                          <span className="font-mono">{attempt.model || 'automatic'}</span> · {formatTelemetryDuration(attempt.duration_ms)} · ${Number(attempt.charged_usd || 0).toFixed(2)}
+                          <span className="font-mono">{attempt.model || t('activity.automatic')}</span> · {formatTelemetryDuration(attempt.duration_ms)} · ${Number(attempt.charged_usd || 0).toFixed(2)}
                         </small>
                         <small className="truncate text-[11px] text-ink3">
-                          Run <span className="font-mono">{attempt.run_id}</span>{attempt.error_type ? ` · ${attempt.error_type}` : ''}
+                          {t('common.run')} <span className="font-mono">{attempt.run_id}</span>{attempt.error_type ? ` · ${attempt.error_type}` : ''}
                         </small>
                       </div>
                     ))}
@@ -99,8 +100,8 @@ export function TelemetryPanel() {
                 ) : (
                   <EmptyState
                     icon="pulse"
-                    title="No recent attempts"
-                    hint="Start a production and its generation attempts show up here as they run."
+                    title={t('activity.noAttempts')}
+                    hint={t('activity.noAttemptsHint')}
                   />
                 )}
               </section>
@@ -117,11 +118,11 @@ export function TelemetryView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="Generation operations"
-        title="Activity"
-        subtitle="Agent-routed productions only · local metadata, no prompts, media, credentials, or provider payloads"
+        kicker={t('activity.kicker')}
+        title={t('nav.activity')}
+        subtitle={t('activity.subtitle')}
       >
-        {s.telemetry && s.apiOnline === false ? <Pill tone="warn" dot>Offline · showing the last reading</Pill> : null}
+        {s.telemetry && s.apiOnline === false ? <Pill tone="warn" dot>{t('activity.offlinePill')}</Pill> : null}
       </HubToolbar>
       <TelemetryPanel />
     </div>

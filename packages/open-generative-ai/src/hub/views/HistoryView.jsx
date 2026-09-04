@@ -28,12 +28,13 @@ import {
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { Lightbox } from '../components/Lightbox.jsx';
 import { MediaThumb, VaultLockedTile } from '../components/MediaThumb.jsx';
+import { t, tf } from '../../lib/i18n.js';
 
 const FILTERS = () => [
-  { value: '', label: 'All' },
-  { value: 'prompts', label: 'Prompts' },
-  { value: 'canvas', label: 'Outputs' },
-  { value: 'favorites', label: 'Favorites' },
+  { value: '', label: t('runs.filterAll') },
+  { value: 'prompts', label: t('history.prompts') },
+  { value: 'canvas', label: t('history.outputs') },
+  { value: 'favorites', label: t('history.favorites') },
 ];
 
 function useOnVisible(cb, { once = false, rootMargin = '0px', resetKey } = {}) {
@@ -119,10 +120,10 @@ function CanvasVideo({ url }) {
       type="button"
       onClick={() => { openedVideos.add(url); setLoad(true); }}
       className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-ink3 transition-colors hover:text-ink1"
-      aria-label="Load encrypted video preview"
+      aria-label={t('history.loadVideoLabel')}
     >
       <Icon name="play" size={22} />
-      <b className="text-[11px] font-semibold">Load video</b>
+      <b className="text-[11px] font-semibold">{t('history.loadVideo')}</b>
     </button>
   );
 }
@@ -152,7 +153,7 @@ function HistoryMenu({ items }) {
         <button
           type="button"
           onClick={toggle}
-          aria-label="Actions"
+          aria-label={t('runs.actions')}
           aria-expanded={open}
           className={cx(
             'grid h-7 w-7 place-items-center rounded-md transition-colors',
@@ -219,13 +220,13 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
       <div className="absolute right-2 top-2 z-10 rounded-md bg-bg1/80 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
         <HistoryMenu
           items={[
-            { label: 'Load in Studio', icon: 'sparkles', onClick: () => loadCanvasOutputInStudio(entry.history_id) },
-            { label: 'Load in Canvas', icon: 'nodes', onClick: () => loadCanvasOutputInCanvas(entry.history_id) },
+            { label: t('history.loadInStudio'), icon: 'sparkles', onClick: () => loadCanvasOutputInStudio(entry.history_id) },
+            { label: t('history.loadInCanvas'), icon: 'nodes', onClick: () => loadCanvasOutputInCanvas(entry.history_id) },
             // The players carry controlsList="nodownload", so this is the ONLY way
             // to save from History — and it is the one that names the file properly.
-            { label: 'Download', icon: 'download', onClick: () => void downloadMedia(entry.media_url, downloadName) },
-            { label: 'Copy prompt', icon: 'copy', onClick: () => copyCanvasPrompt(entry.history_id) },
-            { label: 'Delete', icon: 'trash', danger: true, onClick: () => onDelete(entry) },
+            { label: t('common.download'), icon: 'download', onClick: () => void downloadMedia(entry.media_url, downloadName) },
+            { label: t('history.copyPrompt'), icon: 'copy', onClick: () => copyCanvasPrompt(entry.history_id) },
+            { label: t('common.delete'), icon: 'trash', danger: true, onClick: () => onDelete(entry) },
           ]}
         />
       </div>
@@ -236,7 +237,7 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
           <button
             type="button"
             onClick={() => onPreview(entry)}
-            aria-label="Open preview"
+            aria-label={t('history.openPreview')}
             className="block h-full w-full cursor-zoom-in"
           >
             <MediaThumb url={entry.media_url} alt={kindLabel} className="h-full w-full" />
@@ -252,7 +253,7 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
         <div className="mt-1 flex items-center gap-1.5">
           {entry.file_format ? <Pill tone="neutral" className="h-5 px-2 text-[10px]">{(entry.file_format || '').toUpperCase()}</Pill> : null}
           <Pill tone={entry.encrypted_at_rest ? 'honey' : 'neutral'} className="h-5 px-2 text-[10px]">
-            {entry.encrypted_at_rest ? 'Encrypted at rest' : 'Private output'}
+            {entry.encrypted_at_rest ? t('history.encryptedAtRest') : t('history.privateOutput')}
           </Pill>
         </div>
       </div>
@@ -280,7 +281,7 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
         <button
           type="button"
           onClick={() => setPromptFavorite(entry.prompt_id, !entry.favorite)}
-          aria-label={entry.favorite ? 'Remove from favorites' : 'Add to favorites'}
+          aria-label={entry.favorite ? t('history.removeFavorite') : t('history.addFavorite')}
           aria-pressed={entry.favorite}
           className={cx('grid h-7 w-7 shrink-0 place-items-center rounded-md transition-colors', entry.favorite ? 'text-honey' : 'text-ink3 hover:text-ink1')}
         >
@@ -290,7 +291,7 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
             <Icon name="lock" size={14} className="shrink-0 text-honey" />
             <p className="min-w-0 text-[13px] leading-relaxed text-ink2">
-              Sealed prompt — unlock your vault to read it.
+              {SEALED_PROMPT_TEXT}
             </p>
             <button
               type="button"
@@ -298,7 +299,7 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
               className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-honey/50 bg-honey-tint px-2.5 text-[11px] font-semibold text-honey transition-colors hover:border-honey"
             >
               <Icon name="unlock" size={13} />
-              Unlock
+              {t('history.unlock')}
             </button>
           </div>
         ) : (
@@ -310,16 +311,16 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
             // sentence, not the prompt — so those doors stay shut until it opens.
             ...(sealed ? [] : [
               // Lands in the Planner composer (not a studio) — say so.
-              { label: 'Use in Planner', icon: 'sparkles', onClick: usePrompt },
-              { label: 'Copy prompt', icon: 'copy', onClick: () => copyText(entry.prompt) },
+              { label: t('history.useInPlanner'), icon: 'sparkles', onClick: usePrompt },
+              { label: t('history.copyPrompt'), icon: 'copy', onClick: () => copyText(entry.prompt) },
             ]),
-            { label: 'Delete', icon: 'trash', danger: true, onClick: () => onDelete(entry) },
+            { label: t('common.delete'), icon: 'trash', danger: true, onClick: () => onDelete(entry) },
           ]}
         />
       </div>
       {entry.user_prompt && entry.user_prompt !== entry.prompt ? (
         <details className="pl-9 text-xs text-ink3">
-          <summary className="cursor-pointer select-none">Your original wording</summary>
+          <summary className="cursor-pointer select-none">{t('history.originalWording')}</summary>
           <p className="mt-1 leading-relaxed text-ink2">{entry.user_prompt}</p>
         </details>
       ) : null}
@@ -346,7 +347,7 @@ function GroupHeading({ kicker, title, right }) {
 
 function SkeletonGrid({ count = 8 }) {
   return (
-    <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]" aria-busy="true" aria-label="Loading outputs">
+    <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]" aria-busy="true" aria-label={t('history.loadingOutputs')}>
       {Array.from({ length: count }, (_, i) => (
         <div key={i} className="flex flex-col overflow-hidden rounded-lg border border-line1 bg-bg2">
           <div className="aspect-square animate-pulse bg-bg3" />
@@ -409,11 +410,11 @@ export function HistoryView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker="Private archive" title="Library">
+      <HubToolbar kicker={t('history.kicker')} title={t('nav.library')}>
         {refreshing ? <Spinner size={14} className="text-honey" /> : null}
         {s.apiOnline === false ? (
-          <Pill tone="warn" dot title="The studio did not answer the latest poll">
-            Offline · showing the last reading
+          <Pill tone="warn" dot title={t('history.staleReadingTitle')}>
+            {t('activity.offlinePill')}
           </Pill>
         ) : null}
         <div className="relative min-w-[200px]">
@@ -422,8 +423,8 @@ export function HistoryView({ active }) {
             type="search"
             value={s.historyQuery}
             onChange={(e) => setHistoryQuery(e.target.value)}
-            placeholder="Filter prompts and outputs"
-            aria-label="Filter prompts and outputs"
+            placeholder={t('history.filterPlaceholder')}
+            aria-label={t('history.filterPlaceholder')}
             className="pl-8 text-xs"
           />
         </div>
@@ -431,21 +432,21 @@ export function HistoryView({ active }) {
         {showCanvas ? (
           <div className="flex items-center gap-2">
             <NativeSelect
-              aria-label="Format"
+              aria-label={t('common.format')}
               className="min-w-[7.5rem]"
               value={s.canvasFormat}
               onChange={(e) => setCanvasFilters({ format: e.target.value })}
             >
-              <option value="">All formats</option>
+              <option value="">{t('history.allFormats')}</option>
               {s.canvasFormats.map((format) => <option key={format} value={format}>{format}</option>)}
             </NativeSelect>
             <NativeSelect
-              aria-label="Model"
+              aria-label={t('common.model')}
               className="min-w-[8.5rem]"
               value={s.canvasModel}
               onChange={(e) => setCanvasFilters({ model: e.target.value })}
             >
-              <option value="">All models</option>
+              <option value="">{t('history.allModels')}</option>
               {s.canvasModels.map((model) => <option key={model} value={model}>{model}</option>)}
             </NativeSelect>
           </div>
@@ -454,22 +455,22 @@ export function HistoryView({ active }) {
 
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         <p className="mb-4 text-[11px] leading-relaxed text-ink3">
-          Everything here stays on this machine, encrypted at rest. Outputs come from the studios and Canvas · productions planned in the Planner live under Runs.
+          {t('history.everythingStaysHere')}
         </p>
 
         <div className="flex flex-col gap-6">
           {showCanvas ? (
             !s.historyLoaded && !hasData ? (
               <section className="flex flex-col gap-3">
-                <GroupHeading kicker="Studios & Canvas" title="Outputs" />
+                <GroupHeading kicker={t('history.studiosAndCanvas')} title={t('history.outputs')} />
                 <SkeletonGrid />
               </section>
             ) : outputs.length ? (
               <section className="flex flex-col gap-3">
                 <GroupHeading
-                  kicker="Studios & Canvas"
-                  title="Outputs"
-                  right={filtering ? `${outputs.length} of ${s.canvasHistory.length}` : `${s.canvasHistory.length} of ${s.canvasTotal}`}
+                  kicker={t('history.studiosAndCanvas')}
+                  title={t('history.outputs')}
+                  right={filtering ? tf('history.ofCount', outputs.length, s.canvasHistory.length) : tf('history.ofCount', s.canvasHistory.length, s.canvasTotal)}
                 />
                 <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
                   {outputs.map((entry) => (
@@ -480,19 +481,15 @@ export function HistoryView({ active }) {
                 </div>
                 {s.canvasHasMore && !filtering ? (
                   <div ref={sentinelRef} className="flex min-h-[1.5rem] items-center justify-center gap-2 py-4 text-xs text-ink3" aria-live="polite">
-                    {s.canvasLoading ? <><Spinner size={14} className="text-honey" /> Loading more outputs…</> : null}
+                    {s.canvasLoading ? <><Spinner size={14} className="text-honey" /> {t('history.loadingMore')}</> : null}
                   </div>
                 ) : null}
               </section>
             ) : (
               <EmptyState
                 icon="grid"
-                title={filtering
-                  ? 'No outputs match'
-                  : 'No outputs yet'}
-                hint={filtering
-                  ? 'Try another word, or clear the filter.'
-                  : 'Generate something in a studio and it appears here.'}
+                title={filtering ? t('history.noOutputsMatch') : t('history.noOutputsYet')}
+                hint={filtering ? t('history.clearTheFilter') : t('history.generateSomething')}
               />
             )
           ) : null}
@@ -501,7 +498,7 @@ export function HistoryView({ active }) {
             !s.historyLoaded && !hasData ? (
               s.historyFilter ? (
                 <section className="flex flex-col gap-3" aria-busy="true">
-                  <GroupHeading kicker="Prompt library" title="Loading…" />
+                  <GroupHeading kicker={t('history.promptLibrary')} title={t('history.loadingEllipsis')} />
                   <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
                     {Array.from({ length: 4 }, (_, i) => <div key={i} className="h-24 animate-pulse rounded-lg border border-line1 bg-bg2" />)}
                   </div>
@@ -510,9 +507,9 @@ export function HistoryView({ active }) {
             ) : prompts.length ? (
               <section className="flex flex-col gap-3">
                 <GroupHeading
-                  kicker="Prompt library"
-                  title={s.historyFilter === 'favorites' ? 'Favorites' : 'Generation prompts'}
-                  right={filtering ? `${prompts.length} of ${s.prompts.length}` : undefined}
+                  kicker={t('history.promptLibrary')}
+                  title={s.historyFilter === 'favorites' ? t('history.favorites') : t('history.generationPrompts')}
+                  right={filtering ? tf('history.ofCount', prompts.length, s.prompts.length) : undefined}
                 />
                 <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
                   {prompts.map((entry) => (
@@ -524,13 +521,13 @@ export function HistoryView({ active }) {
               <EmptyState
                 icon="history"
                 title={filtering
-                  ? 'No prompts match'
-                  : s.historyFilter === 'favorites' ? 'No favorites yet' : 'No prompts yet'}
+                  ? t('history.noPromptsMatch')
+                  : s.historyFilter === 'favorites' ? t('history.noFavoritesYet') : t('history.noPromptsYet')}
                 hint={filtering
-                  ? 'Try another word, or clear the filter.'
+                  ? t('history.clearTheFilter')
                   : s.historyFilter === 'favorites'
-                    ? 'Star a prompt to keep it as a reusable ingredient.'
-                    : 'Create a production and its final generation prompt will be recorded here.'}
+                    ? t('history.starAPrompt')
+                    : t('history.promptsRecordedHere')}
               />
             )
           ) : null}
@@ -544,11 +541,11 @@ export function HistoryView({ active }) {
         onClose={() => (deleting ? null : setConfirm(null))}
         onConfirm={runDelete}
         busy={deleting}
-        title={confirm?.kind === 'canvas' ? 'Delete this generated output?' : 'Delete this prompt?'}
-        confirmLabel="Delete permanently"
+        title={confirm?.kind === 'canvas' ? t('history.deleteOutputTitle') : t('history.deletePromptTitle')}
+        confirmLabel={t('history.deletePermanently')}
         body={confirm?.kind === 'canvas'
-          ? 'This permanently removes every same-name media copy, encrypted sidecar, history reference, workflow-index entry, and regenerable preview cache. This cannot be undone.'
-          : 'This permanently removes the saved prompt from your library. This cannot be undone.'}
+          ? t('history.deleteOutputBody')
+          : t('history.deletePromptBody')}
       />
     </div>
   );
