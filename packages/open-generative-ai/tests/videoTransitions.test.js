@@ -42,6 +42,13 @@ const H3 = {
 };
 
 async function loadLogic(tag) {
+    // The cloud model catalog is SERVED now (src/lib/cloudCatalog.js), so the
+    // studio's t2v/i2v lists are empty until it has loaded — and
+    // buildInitialSetup boots off t2vModels[0]. With no control API here this
+    // resolves from the generated offline list, the same one a standalone build
+    // uses. The module is shared across these ?test= instances, so once is enough.
+    const catalog = await import(pathToFileURL(path.join(__dirname, '../src/lib/cloudCatalog.js')).href);
+    await catalog.cloudCatalogReady();
     return import(`${pathToFileURL(path.join(__dirname, '../src/studios/video/videoLogic.js')).href}?test=${tag}`);
 }
 

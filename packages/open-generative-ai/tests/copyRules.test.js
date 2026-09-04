@@ -127,10 +127,10 @@ test('no toast carries a raw error.message', () => {
 /* ---------------- icons come from the icon set ---------------- */
 
 test('no emoji is used as an icon in a .jsx component', () => {
-  // Prompt data is content, not chrome: the model catalog, the starter prompts
+  // Prompt data is content, not chrome: the cloud catalog, the starter prompts
   // and the animation starters describe things a person wrote, and an emoji in
   // a prompt is part of the prompt.
-  const CONTENT = /(modelsData|defaultPrompts|animationStarters)/;
+  const CONTENT = /(cloudCatalogFallback|defaultPrompts|animationStarters)/;
   // Emoji and the glyphs DESIGN.md names (✓ ✕ ↻ ↓): pictographs and dingbats,
   // NOT the arrows and the ⌘ this codebase writes in prose and in shortcut
   // labels, and not CJK or the typographic dashes and quotes it uses.

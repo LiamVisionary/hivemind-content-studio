@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from hivemind_content_studio import muapi_proxy
+from hivemind_content_studio import muapi_catalog, muapi_proxy
 
 
 class FakeResponse(io.BytesIO):
@@ -232,3 +232,35 @@ def test_a_refused_path_is_a_400_the_owner_can_act_on(tmp_path, monkeypatch) -> 
 
     assert response.status_code == 400
     assert "api/v1" in response.json()["detail"]
+
+
+def test_the_catalog_route_answers_the_studios_model_set(tmp_path, monkeypatch) -> None:
+    """The one catalog, served — not swallowed by the forwarder below it.
+
+    /api/muapi/{path:path} would happily try to reach `api/v1/…/catalog`
+    upstream, so this route has to be registered ahead of it and answer locally.
+    """
+    monkeypatch.setenv("MUAPI_API_KEY", "server-key")
+    client = _client(tmp_path, monkeypatch)
+
+    body = client.get("/api/muapi/catalog").json()
+
+    assert body["ok"] is True
+    assert set(body["buckets"]) == set(muapi_catalog.BUCKETS)
+    # The set the Image, Video and Lip sync studios render.
+    assert [row["id"] for row in body["buckets"]["t2i"]] == [row["id"] for row in muapi_catalog.buckets()["t2i"]]
+    assert len(body["buckets"]["i2v"]) > 40
+    # Aspect ratios and durations ride along, because the studios read their
+    # pickers straight off these rows.
+    nano = next(row for row in body["buckets"]["t2i"] if row["id"] == "nano-banana")
+    assert "16:9" in nano["inputs"]["aspect_ratio"]["enum"]
+    seedance = next(row for row in body["buckets"]["t2v"] if row["id"] == "seedance-2.5-text-to-video")
+    assert seedance["inputs"]["duration"]["enum"] == [5, 10, 15, 20, 25, 30]
+
+
+def test_the_catalog_route_is_owner_only(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MUAPI_API_KEY", "server-key")
+    client = _client(tmp_path, monkeypatch)
+    client.cookies.clear()
+
+    assert client.get("/api/muapi/catalog").status_code in (401, 403)

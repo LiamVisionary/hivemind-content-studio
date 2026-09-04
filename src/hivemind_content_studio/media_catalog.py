@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from typing import Literal
 
+from . import muapi_catalog
 from .providers import provider_report
 
 
@@ -95,6 +96,28 @@ BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS: tuple[MediaModel, ...] = (
 )
 
 
+def _muapi_models(*selection: tuple[str, tuple[str, ...]]) -> tuple[MediaModel, ...]:
+    """The producer's MUAPI rows, named by the one MUAPI catalog.
+
+    The producer offers a chosen handful of the provider's models, and which
+    reference roles it wires for each is a routing decision of ours (Seedance
+    2.0 is listed here as its text-to-video endpoint, and the producer switches
+    to the image sibling when frames are attached — so the row advertises frames
+    the t2v endpoint itself has no input for). What is NOT ours to invent is the
+    model's existence or its name: those come from the catalog the studios read,
+    which is why this raises on an id the catalog does not carry rather than
+    quietly advertising a model the provider does not serve.
+    `test_muapi_catalog.py` runs that check at test time, so a drifted id fails
+    the suite instead of the studio.
+    """
+    models = []
+    for model_id, roles in selection:
+        if not muapi_catalog.knows(model_id):
+            raise ValueError(f"MUAPI catalog has no model '{model_id}' — see catalog/muapi_models.json")
+        models.append(MediaModel(model_id, muapi_catalog.label_for(model_id), roles, None, "live MUAPI endpoint schema"))
+    return tuple(models)
+
+
 MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
     MediaProviderModels("stickman-renderer", "Stickman renderer", "image", (MediaModel("automatic", "Automatic"),)),
     MediaProviderModels("static-text-renderer", "Static text renderer", "image", (MediaModel("automatic", "Automatic"),)),
@@ -139,11 +162,11 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
         MediaModel("higgsfield-ai/soul/standard", "Soul Standard"),
         MediaModel("reve/text-to-image", "Reve"),
     )),
-    MediaProviderModels("muapi", "MUAPI", "image", (
-        MediaModel("gpt-image-1.5", "GPT Image 1.5", ("reference",), None, "live MUAPI endpoint schema"),
-        MediaModel("flux-2-pro", "Flux 2 Pro", ("reference",), None, "live MUAPI endpoint schema"),
-        MediaModel("google-imagen4", "Google Imagen 4", ("reference",), None, "live MUAPI endpoint schema"),
-        MediaModel("nano-banana-pro-edit", "Nano Banana Pro Edit", ("reference",), None, "live MUAPI endpoint schema"),
+    MediaProviderModels("muapi", "MUAPI", "image", _muapi_models(
+        ("gpt-image-1.5", ("reference",)),
+        ("flux-2-pro", ("reference",)),
+        ("google-imagen4", ("reference",)),
+        ("nano-banana-pro-edit", ("reference",)),
     )),
     MediaProviderModels("hivemindos-hosted-media", "HivemindOS hosted", "image", (
         MediaModel("automatic", "Automatic hosted model", ("reference",), None, "hosted catalog schema"),
@@ -171,12 +194,12 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
         MediaModel("bytedance/seedance/v1/pro/image-to-video", "Seedance Pro", ("start",), 1),
         MediaModel("kling-video/v2.1/pro/image-to-video", "Kling 2.1 Pro", ("start",), 1),
     )),
-    MediaProviderModels("muapi", "MUAPI", "video", (
-        MediaModel("seedance-v2.0-t2v", "Seedance 2.0", ("start", "end", "reference"), None, "live MUAPI endpoint schema"),
-        MediaModel("seedance-pro-i2v", "Seedance Pro I2V", ("start", "reference"), None, "live MUAPI endpoint schema"),
-        MediaModel("kling-v3.0-pro-text-to-video", "Kling 3.0 Pro", ("start", "end"), None, "live MUAPI endpoint schema"),
-        MediaModel("veo3.1-image-to-video", "Veo 3.1", ("start", "reference"), None, "live MUAPI endpoint schema"),
-        MediaModel("vidu-q2-reference", "Vidu Q2 Reference", ("reference",), None, "live MUAPI endpoint schema"),
+    MediaProviderModels("muapi", "MUAPI", "video", _muapi_models(
+        ("seedance-v2.0-t2v", ("start", "end", "reference")),
+        ("seedance-pro-i2v", ("start", "reference")),
+        ("kling-v3.0-pro-text-to-video", ("start", "end")),
+        ("veo3.1-image-to-video", ("start", "reference")),
+        ("vidu-q2-reference", ("reference",)),
     )),
     MediaProviderModels("hivemindos-hosted-media", "HivemindOS hosted", "video", (
         MediaModel("automatic", "Automatic hosted model", ("start", "end", "reference"), None, "hosted catalog schema"),

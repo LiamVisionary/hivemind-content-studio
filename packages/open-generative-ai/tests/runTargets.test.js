@@ -241,8 +241,17 @@ test('the served-model filter has one implementation, not three', async () => {
 
 /* ---------------- the main studios can reach the other places ---------------- */
 
-test("the Image studio joins its own cloud catalog with the server's other places", async () => {
+test("the Image studio joins its own cloud catalog with the server's other places", async (t) => {
+  const { applyCloudCatalog, resetCloudCatalog } = await import('../src/lib/cloudCatalog.js');
   const { imageRunTargets, studioCloudImageModels } = await import('../src/studios/image/imageRunTargets.js');
+  // The MUAPI half is SERVED now, so it is empty until a catalog lands — in the
+  // app because App.jsx gates the studios on cloudCatalogReady(), here because
+  // this seeds it. Twelve rows against the media catalog's curated handful is
+  // the whole point of the join, and one id appears in both buckets to hold the
+  // dedup (a model with a text-to-image AND an editing row is one model).
+  const rows = Array.from({ length: 12 }, (_, i) => ({ id: `muapi-model-${i}`, name: `Model ${i}` }));
+  applyCloudCatalog({ t2i: rows, i2i: [rows[0], { id: 'muapi-edit-only', name: 'Edit only' }] }, 'server');
+  t.after(() => resetCloudCatalog());
   const targets = imageRunTargets({
     localModels,
     catalogProviders: catalog().image,
@@ -255,11 +264,13 @@ test("the Image studio joins its own cloud catalog with the server's other place
   assert.ok(places.has('hivemindos'));
   assert.ok(places.has('accounts'));
   assert.ok(targets.some((target) => target.provider === 'openai-gpt-image-oauth'));
-  // …and nothing was taken away: the vendored MUAPI catalog is dozens of models
-  // the server's list only samples, so it stays the source for that account.
+  // …and nothing was taken away: the MUAPI catalog is dozens of models the
+  // server's MEDIA catalog only samples, so it stays the source for that
+  // account rather than being replaced by the curated handful.
   const muapi = targets.filter((target) => target.provider === 'muapi');
   assert.equal(muapi.length, studioCloudImageModels().length);
-  assert.ok(muapi.length > 4, 'the full MUAPI catalog survives the join');
+  assert.equal(muapi.length, 13, 'the full MUAPI catalog survives the join, deduplicated');
+  assert.ok(muapi.length > catalog().image.length, 'the join is not the media catalog alone');
   assert.equal(muapi.every((target) => target.placeLabel === 'MUAPI account'), true);
 });
 

@@ -27,6 +27,9 @@ const TYPED = 'my daughter at the beach in a red swimsuit';
 // come back out.
 const ID_LIKE = new Set([
   'modelId', 'localModelId', 'workflowId', 'id', 'name', 'displayName',
+  // Which account a cloud model runs on. Chosen from the "Run on" menu, never
+  // typed, and normalized exactly as modelId is.
+  'providerId',
   'aspectRatio', 'resolution', 'quality', 'mode', 'inputMode', 'denoise',
   'sampler', 'scheduler', 'style', 'effectName', 'restylePresetId',
   'videoTask', 'headSwapBackend', 'localRuntimeMode', 'rentedMachineId',

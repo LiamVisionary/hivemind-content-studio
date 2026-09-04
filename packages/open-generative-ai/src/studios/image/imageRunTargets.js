@@ -1,15 +1,19 @@
 // The Image studio's models, in the shared "where does this run" vocabulary.
 //
-// Two inventories have to be joined and only one of them is the server's. The
-// vendored MUAPI catalog (src/lib/models.js) is dozens of models the server's
-// media catalog lists only a curated handful of, and it is what this studio has
-// always offered on its cloud side — dropping it to read the catalog alone
-// would take models away rather than add places. So MUAPI's rows come from the
-// studio's own catalog, and every OTHER provider — HivemindOS credits, a
-// connected ChatGPT or xAI account, Higgsfield — comes from the server's,
-// which is what makes those places reachable from here at all. Until now they
-// were readable only by Story and Sprite.
-import { i2iModels, t2iModels } from '../../lib/models.js';
+// Two inventories have to be joined, and they are two lists rather than one.
+// The MUAPI catalog is dozens of models that the server's MEDIA catalog lists
+// only a curated handful of, and it is what this studio has always offered on
+// its cloud side — reading the media catalog alone would take models away
+// rather than add places. So MUAPI's rows come from the cloud catalog, and
+// every OTHER provider — HivemindOS credits, a connected ChatGPT or xAI
+// account, Higgsfield — comes from the media catalog, which is what makes
+// those places reachable from here at all. Until now they were readable only
+// by Story and Sprite.
+//
+// Both lists are served now (the MUAPI half was a vendored copy until
+// 2026-09-04), so these are live bindings read at call time. Every caller
+// renders behind App.jsx's `withCloudCatalog` gate, so the rows have landed.
+import { i2iModels, t2iModels } from '../../lib/cloudCatalog.js';
 import { buildRunTargets } from '../../lib/runTargets.js';
 
 /** An image model the studio's own cloud catalog knows, deduplicated: a model

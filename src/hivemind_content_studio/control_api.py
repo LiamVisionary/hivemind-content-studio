@@ -63,7 +63,7 @@ from .identity import version_payload
 from .lanes import LANE_MATRIX
 from . import (
     comfy_connect, comfy_lanes, hivemindos_models, hivemindos_sam3, image_router, local_llm, media_posters,
-    muapi_proxy, prompt_profiles, provider_models, story_producer, text_models, video_restore,
+    muapi_catalog, muapi_proxy, prompt_profiles, provider_models, story_producer, text_models, video_restore,
 )
 from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
@@ -4333,6 +4333,24 @@ def build_control_app(
         lets a machine that already has the key stop asking for one.
         """
         return {"ok": True, "server_key": muapi_proxy.has_server_key()}
+
+    # Registered BEFORE the {path:path} forwarder below, which would otherwise
+    # swallow this and try to reach `api/v1/…/catalog` upstream.
+    @app.get("/api/muapi/catalog", dependencies=[Depends(require_owner)])
+    def muapi_catalog_route() -> dict:
+        """The cloud model catalog the Image, Video and Lip sync studios render.
+
+        One catalog, not two: this is the same list the producer's MUAPI rows are
+        built from, so the client and the server can no longer name different
+        models for the same provider. Answers from the shipped rows immediately
+        and folds in live provider schemas once a background read has landed —
+        see muapi_catalog for why that read may only update inputs a row already
+        declares.
+        """
+        try:
+            return muapi_catalog.catalog_payload()
+        except muapi_catalog.MuapiCatalogError as exc:
+            raise HTTPException(status_code=500, detail=sanitize_error_detail(str(exc))) from exc
 
     @app.api_route(
         "/api/muapi/{path:path}",
