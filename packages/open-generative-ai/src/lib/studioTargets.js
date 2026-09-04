@@ -71,13 +71,23 @@ export function resetSendTargets() {
   notify();
 }
 
-/** The three sources, in the order the studio's own toggle shows them. */
-export const SEND_SOURCES = Object.freeze(['local', 'api', 'rented']);
+/**
+ * The places work can be sent to, in the order every picker shows them.
+ *
+ * There used to be three, and the third was not a place: "Rented" was Local
+ * plus a menu filter — the fifth copy of a triad that Image, Video, the text
+ * producer and Restore each spelled differently. A rental is a property of This
+ * Mac (the box its work is currently landing on), so it is named in the row's
+ * own note rather than offered as a mode with nothing behind it.
+ *
+ * The wire values are unchanged: `source` travels between studios, and
+ * renaming what a person reads must not rename what a handoff sends.
+ */
+export const SEND_SOURCES = Object.freeze(['local', 'api']);
 
 export const SOURCE_LABELS = Object.freeze({
-  local: { en: 'Local', zh: '本地' },
-  api: { en: 'API', zh: '云端' },
-  rented: { en: 'Rented', zh: '租用' },
+  local: { en: 'This Mac', zh: '这台 Mac' },
+  api: { en: 'Your accounts', zh: '你的账户' },
 });
 
 /**

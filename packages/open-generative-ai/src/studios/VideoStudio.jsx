@@ -27,7 +27,6 @@ import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { fitShotTimeline } from '../lib/shotTimeline.js';
 import { isWan2gpModelId } from '../lib/localModels.js';
 import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
-import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
@@ -99,6 +98,10 @@ import { t, tf, aspectRatioName } from '../lib/i18n.js';
 
 import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
 import { useApiStatus } from '../app/statusStore.js';
+import { useRunTargets } from '../lib/useRunTargets.js';
+import { PLACE_THIS_MAC, pickRunTarget } from '../lib/runTargets.js';
+import { videoRunTargets } from './video/videoRunTargets.js';
+import { RunOnPicker } from '../components/RunOnPicker.jsx';
 import { basenameOf, rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { useMediaPoster, useMediaSrc } from '../hooks/hooks.js';
@@ -142,8 +145,8 @@ import { IngredientsPanel } from './video/IngredientsPanel.jsx';
 
 import {
   VIDEO_PREFERENCES_KEY, zh,
-  buildCatalogs, buildInitialSetup, adaptHivemindToVideoEntry, isLocalVideoModel, v2vModels,
-  currentModel, generationModelsFor, resolveVideoModel, withSelectedModel,
+  buildCatalogs, buildInitialSetup, adaptHivemindToVideoEntry, v2vModels,
+  allVideoModels, currentModel, generationModelsFor, resolveVideoModel, withSelectedModel,
   currentIngredientModel, frameSlotsVisible, activeIngredientSheetItems, ingredientSelectionSignature,
   isMotionControlV2V, isHivemindVideoInputMode,
   activeVideoTask, headSwapReadiness, isLtxFamilyModel, isMinimaxFamilyModel, slotLabelsFor,
@@ -1062,9 +1065,38 @@ export function VideoStudio({
     bump();
   };
 
+  // One join for the whole studio: the media catalog, the attached machines,
+  // the OAuth grants and the readiness that the Automatic ladder reads.
+  const runOnState = useRunTargets({ kind: 'video', pinned: s.setup.rentedMachineId || '' });
+
   const selectRegularModel = (m) => commit(selectRegularModelTransition(s.setup, m, s.catalogs));
   const selectHiveModel = (m) => commit(selectHivemindWorkflowTransition(s.setup, m, s.catalogs));
-  const selectV2VModel = (m) => commit(selectV2VModelTransition(s.setup, m, s.catalogs));
+
+  /**
+   * The one place a run target becomes a selection.
+   *
+   * A target carries its own place, so nothing here has to decide whether the
+   * user meant "Local", "API" or "Rented" — the three words this replaced. The
+   * three existing transitions still do the work; this only says which one, and
+   * folds the source flags into the SAME commit so the model and the place can
+   * never disagree for a render.
+   */
+  const chooseRunTarget = (target, { automatic = false } = {}) => {
+    if (!target) return;
+    const entry = allVideoModels(s.catalogs).find((m) => m.id === target.id);
+    if (!entry) return;
+    const base = {
+      ...s.setup,
+      localMode: target.place === PLACE_THIS_MAC,
+      // A rental is a property of This Mac: pinned work runs there, and the
+      // generate guard keeps its promise about where.
+      rentedOnly: Boolean(target.machine),
+      runOnAutomatic: Boolean(automatic),
+    };
+    if (isHivemindVideoModelId(entry.id)) commit(selectHivemindWorkflowTransition(base, entry, s.catalogs));
+    else if (v2vModels.some((tool) => tool.id === entry.id)) commit(selectV2VModelTransition(base, entry, s.catalogs));
+    else commit(selectRegularModelTransition(base, entry, s.catalogs));
+  };
 
   // This tab's "Run on" pin, written by the Rented panel's picker ('' = follow
   // the Machines default). Part of `setup`, so it persists and copies with the tab.
@@ -4106,6 +4138,48 @@ export function VideoStudio({
   const loraModel = currentVideoLoraModel();
   const ingredientModel = currentIngredientModel(s.setup, s.catalogs);
   const hasSourceToggle = isLocalAIAvailable();
+  // Where this tab's work runs. The lane registry is richer than the server
+  // catalog's video block, so the studio's own list stays the inventory and the
+  // shared join answers the other half — which place each model runs in, which
+  // rental is serving it, and which places cannot serve a clip at all yet.
+  const videoTargets = videoRunTargets({
+    // Tier pairs collapse to ONE row here as they did in the old menu: Lite and
+    // Standard are the same model, and the Quality switch below chooses between
+    // them. Two rows would read as two models.
+    models: groupModelTiers(generationModelsFor(s.setup, s.catalogs))
+      .map((row) => (row.isTierGroup ? row.tiers[activeTierFor(row, s.setup.modelId)] : row)),
+    tools: v2vModels,
+    catalogProviders: runOnState.catalogProviders,
+    machines: runOnState.machines,
+    pinned: s.setup.rentedMachineId || '',
+  });
+  const videoAutomatic = pickRunTarget('video', {
+    catalog: videoTargets.targets,
+    machines: runOnState.machines,
+    readiness: runOnState.readiness,
+  });
+  const runOn = {
+    targets: videoTargets.targets,
+    unreachable: videoTargets.unreachable,
+    automatic: videoAutomatic,
+    isAutomatic: Boolean(s.setup.runOnAutomatic),
+    // A selection the joined list does not carry (a catalog still landing, a
+    // model retired) still reads out as what is loaded, rather than as nothing.
+    value: videoTargets.targets.find((target) => target.id === s.setup.modelId) || {
+      id: s.setup.modelId,
+      provider: '',
+      place: s.setup.localMode ? PLACE_THIS_MAC : '',
+      placeLabel: s.setup.localMode ? 'This Mac' : 'Your accounts',
+      label: s.setup.modelName || s.setup.modelId || '',
+      machine: null,
+      ready: true,
+      reason: '',
+    },
+    onChange: (target) => chooseRunTarget(target),
+    onAutomatic: () => chooseRunTarget(videoAutomatic?.target, { automatic: true }),
+    pinned: s.setup.rentedMachineId || '',
+    onPin: pinMachine,
+  };
   // The Advanced disclosure hides the LoRA and ingredient panels, so say on its
   // closed header what is switched on down there — an active adapter or a stale
   // negative prompt steers every generation and must never be invisible state.
@@ -4261,35 +4335,35 @@ export function VideoStudio({
 
   const panel = (
     <>
-      {hasSourceToggle ? (
-        <div className="flex flex-col gap-2">
-          <SectionLabel>{zh() ? '来源' : 'Source'}</SectionLabel>
-          <Segmented
-            value={s.setup.rentedOnly ? 'rented' : s.setup.localMode ? 'local' : 'api'}
-            onChange={(v) => setLocalMode(v !== 'api', v === 'rented')}
-            options={[
-              { value: 'local', label: t('image.local') },
-              { value: 'api', label: t('image.api') },
-              { value: 'rented', label: t('image.rented') },
-            ]}
-          />
-          {s.setup.rentedOnly
-            ? <RentedSourceStatus engine={s} page="video" pinned={s.setup.rentedMachineId || ''} onPin={pinMachine} />
-            : null}
-        </div>
-      ) : null}
-
       {rentedBlocked ? null : (
         <>
+      {/* One readout for the question four controls used to ask four ways: the
+          place, the model and the bill in one line, over ONE list grouped by
+          who pays. The segmented Local / API / Rented triad and the separate
+          model menu beside it were asking the same question twice. */}
       <div className="flex flex-col gap-2">
-        <SectionLabel>{zh() ? '模型' : 'Model'}</SectionLabel>
-        <VideoModelMenu
+        <RunOnPicker
+          targets={runOn.targets}
+          value={runOn.value}
+          onChange={runOn.onChange}
+          automatic={runOn.automatic}
+          onAutomatic={runOn.onAutomatic}
+          isAutomatic={runOn.isAutomatic}
           engine={s}
-          hasSourceToggle={hasSourceToggle}
-          onSelectRegular={selectRegularModel}
-          onSelectHive={selectHiveModel}
-          onSelectV2V={selectV2VModel}
+          page="video"
+          pinned={runOn.pinned}
+          onPin={runOn.onPin}
         />
+        {/* The places that can make a STILL here but have no clip route yet.
+            Said once, quietly, rather than offered as rows whose Generate can
+            only fail. */}
+        {runOn.unreachable.length ? (
+          <small className="text-[11px] text-ink3">
+            {zh()
+              ? `${runOn.unreachable.join('、')}目前只能生成图片，还不能生成视频。`
+              : `${runOn.unreachable.join(' and ')} can make stills here, not clips yet.`}
+          </small>
+        ) : null}
         <Pill tone="honey" className="w-fit">{modeLabel}</Pill>
       </div>
 
@@ -5950,129 +6024,3 @@ export function VideoStudio({
 
 /* ---------------- model picker ---------------- */
 
-function VideoModelMenu({ engine: s, hasSourceToggle, onSelectRegular, onSelectHive, onSelectV2V }) {
-  return (
-    <Menu
-      width="w-[300px]"
-      panelClassName="max-h-[min(480px,70vh)]"
-      trigger={(open, toggle) => (
-        <ChipButton
-          icon={isLocalVideoModel(s.setup.modelId) ? 'cpu' : 'cloud'}
-          value={s.setup.modelName}
-          active={open}
-          onClick={toggle}
-          className="w-full max-w-full justify-between"
-        />
-      )}
-    >
-      {(close) => (
-        <VideoModelMenuList
-          engine={s}
-          hasSourceToggle={hasSourceToggle}
-          close={close}
-          onSelectRegular={onSelectRegular}
-          onSelectHive={onSelectHive}
-          onSelectV2V={onSelectV2V}
-        />
-      )}
-    </Menu>
-  );
-}
-
-function VideoModelMenuList({ engine: s, hasSourceToggle, close, onSelectRegular, onSelectHive, onSelectV2V }) {
-  const [filter, setFilter] = useState('');
-  const query = filter.toLowerCase();
-  const matches = (m) => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query);
-
-  // Regular generation models — t2v prepends hivemind workflows (old line 2082).
-  const generationModels = groupModelTiers(
-    generationModelsFor(s.setup, s.catalogs)
-      .filter((m) => !hasSourceToggle || isLocalVideoModel(m.id) === s.setup.localMode)
-      .filter((m) => !(s.setup.rentedOnly && s.rentedMachines?.length) || servedByAnyMachine(s.rentedMachines, m))
-      .filter(matches),
-  );
-
-  // Video Tools (remote-only v2v) — hidden while filtering to Local sources.
-  const toolModels = (hasSourceToggle && s.setup.localMode) ? [] : v2vModels.filter(matches);
-
-  const metaFor = (m) => (
-    isHivemindVideoModelId(m.id) ? (zh() ? 'Hivemind 本地工作流' : 'Hivemind local')
-      : isWan2gpModelId(m.id) ? (zh() ? 'Wan2GP 本地服务' : 'Wan2GP local')
-        : (m.family || (zh() ? '云端' : 'cloud'))
-  );
-
-  return (
-    <>
-      <div className="sticky top-0 z-10 -mx-1.5 -mt-1.5 mb-1 border-b border-line1 bg-bg1 p-1.5">
-        <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 px-2.5 focus-within:border-honey/60">
-          <Icon name="search" size={13} className="shrink-0 text-ink3" />
-          <input
-            type="text"
-            autoFocus
-            placeholder={t('common.searchModels')}
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            className="h-8 w-full border-none bg-transparent text-xs text-ink1 outline-none placeholder:text-ink3"
-          />
-        </div>
-      </div>
-
-      {generationModels.length === 0 && toolModels.length === 0 ? (
-        <div className="px-2.5 py-4 text-center text-xs text-ink3">
-          {s.setup.localMode
-            ? (zh() ? '暂无本地视频工作流，稍后会自动刷新。' : 'No local video workflows yet — they refresh automatically.')
-            : (zh() ? '没有匹配的视频模型。' : 'No video models match this search.')}
-        </div>
-      ) : null}
-
-      {generationModels.length ? (
-        <div>
-          <MenuHeading>{zh() ? '视频模型' : 'Video models'}</MenuHeading>
-          {generationModels.map((m) => {
-            // A tier pair shows once here; Lite/Standard is chosen in settings.
-            // Selecting the row keeps whichever tier is already active.
-            const target = m.isTierGroup ? m.tiers[activeTierFor(m, s.setup.modelId)] : m;
-            const selected = m.isTierGroup
-              ? Object.values(m.tiers).some((entry) => entry.id === s.setup.modelId)
-              : s.setup.modelId === m.id;
-            return (
-              <MenuItem
-                key={m.isTierGroup ? m.tierGroup : m.id}
-                selected={selected}
-                meta={metaFor(m)}
-                onClick={() => {
-                  if (isHivemindVideoModelId(target.id)) onSelectHive(target);
-                  else onSelectRegular(target);
-                  close();
-                }}
-              >
-                {m.name}
-                {(m.isTierGroup ? target.beta : m.beta) ? (
-                  <span className="ml-1.5 inline-block rounded-sm border border-honey/40 bg-honey-tint px-1 py-px align-middle font-mono text-[9px] font-semibold uppercase tracking-[0.08em] text-honey">
-                    {zh() ? '测试' : 'beta'}
-                  </span>
-                ) : null}
-              </MenuItem>
-            );
-          })}
-        </div>
-      ) : null}
-
-      {toolModels.length ? (
-        <div>
-          <MenuHeading>{t('video.videoTools')}</MenuHeading>
-          {toolModels.map((m) => (
-            <MenuItem
-              key={m.id}
-              selected={s.setup.modelId === m.id}
-              meta={m.imageField ? (zh() ? '视频 + 图片' : 'Video + image') : (zh() ? '仅视频' : 'Video only')}
-              onClick={() => { onSelectV2V(m); close(); }}
-            >
-              {m.name}
-            </MenuItem>
-          ))}
-        </div>
-      ) : null}
-    </>
-  );
-}

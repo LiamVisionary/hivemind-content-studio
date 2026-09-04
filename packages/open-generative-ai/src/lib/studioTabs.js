@@ -181,7 +181,8 @@ export function snapshotTabFields(engine, keys) {
 // original's results.
 export const IMAGE_TAB_FIELDS = [
   'prompt', 'negativePrompt',
-  'selectedModel', 'selectedModelName', 'useLocalModel', 'rentedOnly', 'rentedMachineId',
+  'selectedModel', 'selectedModelName', 'selectedProvider', 'runOnAutomatic',
+  'useLocalModel', 'rentedOnly', 'rentedMachineId',
   'selectedLocalModel', 'localRuntimeMode',
   'imageMode', 'uploadedImageUrls', 'maxImages',
   // What each reference supplies, the UGC deal counters and the open Custom

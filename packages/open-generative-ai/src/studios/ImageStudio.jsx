@@ -16,7 +16,10 @@ import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
 import { adoptCloudOutput } from '../lib/cloudAdopt.js';
-import { localRow, muapiRow, needsBrowserKey, runImage } from '../lib/modelRunner.js';
+import { localRow, needsBrowserKey, placeLabelFor, runImage, transportFor } from '../lib/modelRunner.js';
+import { useRunTargets } from '../lib/useRunTargets.js';
+import { PLACE_THIS_MAC, pickRunTarget } from '../lib/runTargets.js';
+import { imageRunTargets } from './image/imageRunTargets.js';
 import { describeFailure } from '../lib/describeFailure.js';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
 // Still imported for the NON-generation calls — polling a resumed job and
@@ -232,6 +235,14 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     persistedImagePreferences,
     selectedModel,
     selectedModelName: defaultModel.name,
+    // Which ACCOUNT the cloud model is on. The catalog lists gpt-image-2 under
+    // three providers on three different bills, so the id alone cannot route:
+    // this is the other half of the routing identity modelRunner dispatches on.
+    // '' means the MUAPI account, where every cloud model used to live.
+    selectedProvider: persistedImagePreferences?.providerId || '',
+    // Following the Automatic run target rather than a choice this tab made.
+    // Sticky per tab like every other setting here, and one click either way.
+    runOnAutomatic: !persistedImagePreferences,
     imageMode: false,
     selectedAr,
     selectedResolution,
@@ -435,6 +446,30 @@ export function ImageStudio({
   const tabActiveRef = useRef(tabActive);
   tabActiveRef.current = tabActive;
 
+  // Where this tab's work runs, joined once from the four inventories that
+  // answer that between them (the media catalog, this browser's local catalog,
+  // the attached machines, the OAuth grants). One hook, one vocabulary, and the
+  // Automatic pick with the line that explains it.
+  const runOnState = useRunTargets({
+    kind: 'image',
+    localModels: s.localImageModels,
+    pinned: s.rentedMachineId || '',
+  });
+  // The joined list this studio actually offers: the hook's catalog for every
+  // provider the server knows, plus the vendored MUAPI catalog, which is dozens
+  // of models the server's list only samples.
+  const runTargetList = imageRunTargets({
+    localModels: s.localImageModels,
+    catalogProviders: runOnState.catalogProviders,
+    machines: runOnState.machines,
+    pinned: s.rentedMachineId || '',
+  });
+  const runTargetAutomatic = pickRunTarget('image', {
+    catalog: runTargetList,
+    machines: runOnState.machines,
+    readiness: runOnState.readiness,
+  });
+
   const rootRef = useRef(null);
   const promptRef = useRef(null);
   const authRetryRef = useRef(null);
@@ -449,6 +484,12 @@ export function ImageStudio({
   const compatibleLocalModels = () => ((s.rentedOnly && s.rentedMachines?.length)
     ? s.localImageModels.filter((m) => servedByAnyMachine(s.rentedMachines, m))
     : s.localImageModels);
+
+  // The routing identity of the cloud selection: the model AND the account it
+  // is on. Every cloud generation goes through this rather than assuming MUAPI,
+  // which is what kept HivemindOS credits and a connected ChatGPT or xAI
+  // account out of this studio while Story and Sprite could spend both.
+  const cloudRow = () => ({ id: s.selectedModel, provider: s.selectedProvider || 'muapi', source: 'cloud' });
 
   // The tab's "Run on" pin rides every generation this tab sends while the
   // source is Rented; the gateway tries that machine ahead of its default order.
@@ -733,6 +774,7 @@ export function ImageStudio({
     snapshotCurrentModelSettings();
     return normalizeImagePreferences({
       modelId: s.selectedModel,
+      providerId: s.selectedProvider,
       imageMode: s.imageMode,
       useLocalModel: s.useLocalModel,
       rentedOnly: s.rentedOnly,
@@ -1190,6 +1232,62 @@ export function ImageStudio({
     updatePromptHelperVisibility();
     void loadLorasForCurrentModel();
     bump();
+  };
+
+  /**
+   * The one place a run target becomes a selection.
+   *
+   * A target carries its own place, so nothing here has to decide whether the
+   * user meant "Local", "API" or "Rented" — the three words this replaced. A
+   * rental is a property of This Mac: picking a This Mac model that a live
+   * machine serves pins the work to that machine, and picking one it does not
+   * serve lets the work stay here.
+   */
+  const chooseRunTarget = (target, { automatic = false } = {}) => {
+    if (!target) return;
+    s.runOnAutomatic = Boolean(automatic);
+    if (target.place === PLACE_THIS_MAC && target.source === 'local') {
+      const model = localModelById(target.id);
+      setSource(true, Boolean(target.machine));
+      if (model) selectLocalModel(model);
+    } else {
+      setSource(false);
+      // '' is the MUAPI account, which is what every saved cloud selection
+      // written before this studio could reach the others meant.
+      s.selectedProvider = target.provider === 'muapi' ? '' : target.provider;
+      selectApiModel({ id: target.id, name: target.label });
+    }
+    persistImagePreferences();
+    bump();
+  };
+
+  // Back to Automatic — the rung the ladder picks now, not the one it picked
+  // when the tab opened.
+  const followAutomatic = () => chooseRunTarget(runTargetAutomatic?.target, { automatic: true });
+
+  // What the readout names: the tab's own choice, or the Automatic pick.
+  const currentRunTarget = () => {
+    const wanted = s.useLocalModel
+      ? { id: s.selectedLocalModel, provider: '' }
+      : { id: s.selectedModel, provider: s.selectedProvider || 'muapi' };
+    const found = runTargetList.find((target) => target.id === wanted.id
+      && (!wanted.provider || target.provider === wanted.provider));
+    if (found) return found;
+    // A selection the joined list does not carry — a model retired from the
+    // catalog, or a list that has not landed yet. The readout still names what
+    // is actually loaded rather than reading "Nowhere yet" over a working tab.
+    return {
+      id: wanted.id,
+      provider: wanted.provider,
+      place: s.useLocalModel ? PLACE_THIS_MAC : '',
+      placeLabel: s.useLocalModel ? 'This Mac' : placeLabelFor({ provider: wanted.provider, source: 'cloud' }),
+      label: s.useLocalModel
+        ? (localModelById(s.selectedLocalModel)?.name || s.selectedLocalModel || '')
+        : (s.selectedModelName || s.selectedModel || ''),
+      machine: null,
+      ready: true,
+      reason: '',
+    };
   };
 
   const setSource = (nextLocal, nextRented = false) => {
@@ -2094,7 +2192,7 @@ export function ImageStudio({
     // The key this machine holds counts: needsBrowserKey is false when the
     // shared store has MUAPI_API_KEY (seeded once at boot), so a configured
     // machine never sees this dialog.
-    if (needsBrowserKey(muapiRow(s.selectedModel))) {
+    if (needsBrowserKey(cloudRow())) {
       authRetryRef.current = () => generate();
       s.authOpen = true;
       bump();
@@ -2158,11 +2256,16 @@ export function ImageStudio({
         const qualityField = getCurrentQualityField(s.selectedModel);
         if (qualityField && qualityLabel) genParams[qualityField] = qualityLabel;
         res = await runImage({
-          row: muapiRow(s.selectedModel),
+          row: cloudRow(),
           shared: { prompt: prompt || '', aspect_ratio: s.selectedAr, seed },
           // generateI2I, not generateImage: the reference rows are the point of
-          // this branch, and the two endpoints take different bodies.
-          extra: { muapi: { method: 'generateI2I', ...genParams } },
+          // this branch, and the two endpoints take different bodies. The
+          // studio route takes the same still request either way — it reads the
+          // reference off the prompt payload, not a second endpoint.
+          extra: {
+            muapi: { method: 'generateI2I', ...genParams },
+            studio: { quality: qualityLabel || '' },
+          },
           signal: run.abort.signal,
         });
       } else {
@@ -2184,9 +2287,9 @@ export function ImageStudio({
         const qualityField = getCurrentQualityField(s.selectedModel);
         if (qualityField && qualityLabel) genParams[qualityField] = qualityLabel;
         res = await runImage({
-          row: muapiRow(s.selectedModel),
+          row: cloudRow(),
           shared: { prompt: prompt || '', aspect_ratio: s.selectedAr, seed },
-          extra: { muapi: genParams },
+          extra: { muapi: genParams, studio: { quality: qualityLabel || '' } },
           signal: run.abort.signal,
         });
       }
@@ -2220,7 +2323,10 @@ export function ImageStudio({
       if (capturedRequestId) removePendingJob(capturedRequestId);
       finishImageProgress(false);
       console.warn('[ImageStudio] cloud generation failed:', e?.message || e);
-      failGeneration(e, 'muapi');
+      // The transport the row actually used: a studio-routed provider's failure
+      // has different remedies from a MUAPI one, and naming the wrong one puts
+      // the wrong button on the callout.
+      failGeneration(e, transportFor(cloudRow()).transport);
     } finally {
       if (s.activeGeneration === run) {
         s.activeGeneration = null;
@@ -2247,7 +2353,7 @@ export function ImageStudio({
       // A cloud job is claimable whenever a key exists ANYWHERE this page can
       // reach — this machine's shared store as much as this browser. The route
       // resolves itself, so the poll below needs no key argument.
-      const cloudRunnable = !needsBrowserKey(muapiRow(s.selectedModel));
+      const cloudRunnable = !needsBrowserKey(cloudRow());
       // A local (hosted-bridge) job is polled through the bridge by id — no cloud
       // key involved. Only the hosted bridge can resume one; a job left behind by
       // another runtime would poll forever, so it is dropped instead of kept.
@@ -2557,7 +2663,6 @@ export function ImageStudio({
   /* ---------------- render ---------------- */
 
   const activeLocalModel = localModelById(s.selectedLocalModel);
-  const modelLabel = s.useLocalModel ? (activeLocalModel?.name || s.selectedLocalModel || '—') : s.selectedModelName;
   const resolutions = s.useLocalModel ? [] : getCurrentResolutions(s.selectedModel);
   const aspectRatios = s.useLocalModel
     ? (activeLocalModel?.aspectRatios || ['1:1'])
@@ -2650,6 +2755,21 @@ export function ImageStudio({
       ? t('image.placeholderTransform')
       : t('image.placeholder');
 
+  // Everything the Runs-on readout needs, in one object: the joined list, the
+  // Automatic pick and its reason, and this tab's own choice. Assembled here
+  // for the same reason the LoRA props are — the plumbing stays next to the
+  // state it mutates.
+  const runOnProps = {
+    targets: runTargetList,
+    automatic: runTargetAutomatic,
+    isAutomatic: Boolean(s.runOnAutomatic),
+    value: currentRunTarget(),
+    onChange: (target) => chooseRunTarget(target),
+    onAutomatic: followAutomatic,
+    pinned: s.rentedMachineId || '',
+    onPin: pinMachine,
+  };
+
   // The LoRA panel's whole prop set, kept here (not in the panel component) so
   // the selection plumbing stays next to the state it mutates.
   const loraProps = {
@@ -2729,9 +2849,7 @@ export function ImageStudio({
       engine={s}
       bump={bump}
       persist={persistImagePreferences}
-      localAvailable={isLocalAIAvailable()}
       activeLocalModel={activeLocalModel}
-      modelLabel={modelLabel}
       aspectRatios={aspectRatios}
       resolutions={resolutions}
       resolvedDims={resolvedDims}
@@ -2760,11 +2878,9 @@ export function ImageStudio({
       selectedArNumber={selectedArNumber()}
       tabActive={tabActive}
       loraProps={loraProps}
+      runOn={runOnProps}
       onSetSource={setSource}
-      onPinMachine={pinMachine}
       onDiscoverLocalCatalog={discoverLocalCatalog}
-      onSelectLocalModel={selectLocalModel}
-      onSelectApiModel={selectApiModel}
     />
   );
 
@@ -2899,9 +3015,7 @@ export function ImageStudio({
       onRunWorkflowHelper={runPromptHelper}
       onClosePromptHelper={closePromptHelper}
       onUsePromptHelperResult={usePromptHelperResult}
-      modelLabel={modelLabel}
-      onSelectLocalModel={selectLocalModel}
-      onSelectApiModel={selectApiModel}
+      runOn={runOnProps}
       captureContext={() => captureImageContext(s.prompt)}
       onRestoreContext={(context) => restoreImageContext(context)}
       onApplyUgc={applyUgc}
