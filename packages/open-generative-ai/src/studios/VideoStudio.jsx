@@ -98,6 +98,7 @@ import { t, tf, aspectRatioName } from '../lib/i18n.js';
 import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
 import { useApiStatus } from '../app/statusStore.js';
 import { useRunTargets } from '../lib/useRunTargets.js';
+import { useProviderReadiness } from '../lib/useProviderReadiness.js';
 import { PLACE_THIS_MAC, pickRunTarget } from '../lib/runTargets.js';
 import { videoRunTargets } from './video/videoRunTargets.js';
 import { RunOnPicker } from '../components/RunOnPicker.jsx';
@@ -266,6 +267,13 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   let setup = buildInitialSetup(catalogs);
   const restored = applyRestoredPreferences(setup, persisted, catalogs);
   if (restored) setup = restored;
+  // A tab that has never been told otherwise follows Automatic, the same as
+  // Image (ImageStudio.jsx) and Sprite. Video used to boot with this unset, so
+  // the readout said "Workflow default — free, stays here" while the menu's
+  // Automatic row sat unselected naming a different model: the one control
+  // that says where work runs disagreed with itself on the tab that had made
+  // no choice at all.
+  setup = { ...setup, runOnAutomatic: !restored };
 
   const engine = {
     persistedVideoPreferences: persisted,
@@ -1060,6 +1068,12 @@ export function VideoStudio({
   // One join for the whole studio: the media catalog, the attached machines,
   // the OAuth grants and the readiness that the Automatic ladder reads.
   const runOnState = useRunTargets({ kind: 'video', pinned: s.setup.rentedMachineId || '' });
+  // One readiness module, one repair, shared with every other studio's picker.
+  const {
+    readinessFor: rowReadiness, onFixReadiness: fixReadiness, busyAction: fixingReadiness,
+  } = useProviderReadiness({
+    onMuapiKey: () => { s.authOpen = true; bump(); },
+  });
 
   const selectRegularModel = (m) => commit(selectRegularModelTransition(s.setup, m, s.catalogs));
   const selectHiveModel = (m) => commit(selectHivemindWorkflowTransition(s.setup, m, s.catalogs));
@@ -4122,6 +4136,12 @@ export function VideoStudio({
   const runOn = {
     targets: videoTargets.targets,
     unreachable: videoTargets.unreachable,
+    // The state of the account behind each row, and the button that repairs it
+    // — on the row, before the press. The MUAPI key opens this studio's own
+    // dialog; every other credential goes through the shared remedy runner.
+    readinessFor: rowReadiness,
+    onFixReadiness: fixReadiness,
+    busyAction: fixingReadiness,
     automatic: videoAutomatic,
     isAutomatic: Boolean(s.setup.runOnAutomatic),
     // A selection the joined list does not carry (a catalog still landing, a
@@ -4307,6 +4327,9 @@ export function VideoStudio({
           page="video"
           pinned={runOn.pinned}
           onPin={runOn.onPin}
+          readinessFor={runOn.readinessFor}
+          onFixReadiness={runOn.onFixReadiness}
+          busyAction={runOn.busyAction}
         />
         {/* The places that can make a STILL here but have no clip route yet.
             Said once, quietly, rather than offered as rows whose Generate can

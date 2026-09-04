@@ -34,17 +34,27 @@ function TargetRow({ target, selected, onSelect, readiness = null, onFixReadines
   // "Your OpenAI account", "HivemindOS credits".
   const meta = target.machine
     ? `${target.placeLabel} · $${(Number(target.machine.usd_per_hour) || 0).toFixed(2)}/hr`
-    // A row that IS its own place says it once, not twice.
-    : (target.placeLabel === target.label ? '' : target.placeLabel);
+    // A row that IS its own place says it once, not twice. An account reachable
+    // two ways names the door, or the two rows are one row printed twice.
+    : [target.placeLabel === target.label ? '' : target.placeLabel, target.credentialLabel || '']
+      .filter(Boolean).join(' · ');
   // Why the row is rated the way it is, or why it cannot run at all. It used to
   // live only on the fit picker's cards, and dropping it here would have made
   // this control worse than the two it replaces in Story and Sprite.
   const blocked = readiness && readiness.state !== 'ready';
-  // Said once. A row whose readiness block already carries the sentence must
-  // not print it again two lines above itself.
-  const note = target.ready
-    ? (target.ratingReason || '')
-    : (blocked && readiness.detail ? '' : target.reason);
+  // The row's OWN reason always wins: a sprite that can only be animated on
+  // this machine and a missing API key are two different refusals, and the
+  // credential sentence used to replace the constraint that actually applied.
+  const note = target.ready ? (target.ratingReason || '') : (target.reason || '');
+  // Said once. The readiness block adds its sentence only where it is not the
+  // one already printed above it — the server's "Needs an OpenAI API key."
+  // reaches the row both ways.
+  const detail = blocked && readiness.detail && readiness.detail !== note ? readiness.detail : '';
+  // A row nobody can press says why, always. The readiness block below carries
+  // the state and the button; this is the tooltip for the row itself, so a
+  // greyed line is never an unexplained one even when its reason is only the
+  // readiness label.
+  const why = note || (blocked ? [readiness.label, readiness.detail].filter(Boolean).join(' — ') : '');
   const actionKey = readiness?.action ? `${readiness.action.kind}:${readiness.action.provider || target.key}` : '';
   return (
     <div className="flex flex-col">
@@ -52,7 +62,8 @@ function TargetRow({ target, selected, onSelect, readiness = null, onFixReadines
         selected={selected}
         disabled={!target.ready}
         meta={meta}
-        title={note}
+        title={why}
+        aria-label={why ? `${target.label} — ${why}` : target.label}
         onClick={() => { if (target.ready) onSelect(target); }}
       >
         <span className="flex min-w-0 flex-col">
@@ -80,7 +91,7 @@ function TargetRow({ target, selected, onSelect, readiness = null, onFixReadines
           readiness.blocks ? 'text-warn' : 'text-ink3')}
         >
           <b>{readiness.label}</b>
-          {readiness.detail ? <span className="opacity-90">{readiness.detail}</span> : null}
+          {detail ? <span className="opacity-90">{detail}</span> : null}
           {readiness.action && onFixReadiness ? (
             <Button
               size="sm"
@@ -161,6 +172,15 @@ export function RunOnList({
       {groups.map((group) => (
         <div key={group.id}>
           <MenuHeading>{group.label}</MenuHeading>
+          {/* Who pays, on the section that is the bill. A rental prints its own
+              $/hr on its row and the hosted restore rail quotes per render, but
+              no media provider publishes a per-press rate the studio could
+              honestly print — so the section states whose money it is rather
+              than a figure it would have to invent. Same policy as the text
+              producer's "billed to your own account". */}
+          {group.blurb ? (
+            <p className="px-2.5 pb-1 text-[10px] leading-snug text-ink3">{group.blurb}</p>
+          ) : null}
           {group.targets.map((target) => (
             <TargetRow
               key={target.key}

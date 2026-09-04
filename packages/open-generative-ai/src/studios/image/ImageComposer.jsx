@@ -395,6 +395,9 @@ export function ImageComposer({
               page="image"
               pinned={runOn.pinned}
               onPin={runOn.onPin}
+              readinessFor={runOn.readinessFor}
+              onFixReadiness={runOn.onFixReadiness}
+              busyAction={runOn.busyAction}
             />
           </div>
 

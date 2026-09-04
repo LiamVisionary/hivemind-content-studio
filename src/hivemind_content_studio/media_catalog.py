@@ -344,6 +344,12 @@ def media_catalog() -> dict[str, list[dict]]:
             "label": provider.label,
             "available": bool(status.get("available")),
             "detail": str(status.get("detail") or ""),
+            # What the row is waiting for, in the provider report's own words,
+            # and the credential names behind it. The studio prints the sentence
+            # on the row and puts an "Add key" beside it, so a greyed model says
+            # which key it needs rather than nothing at all.
+            "needs": str(status.get("needs") or ""),
+            "keys": list(status.get("keys") or []),
             # False when this row's model list could not be read live. Distinct
             # from `available`: the provider can be down while the list is still
             # the real one (remembered), and a list can be a stale guess while

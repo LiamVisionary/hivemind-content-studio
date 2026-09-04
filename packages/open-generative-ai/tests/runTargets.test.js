@@ -164,9 +164,19 @@ test('the ladder runs local → HivemindOS credits → a connected account → a
   assert.equal(chosen.target.provider, 'openai-gpt-image-oauth');
   assert.equal(chosen.reason, 'on your openai account');
 
-  // 4. No grant either: a provider whose key is present.
-  chosen = await pick(cloudOnly, { hivemindosCredits: false, connectedProviders: [], keyedProviders: ['muapi'] });
+  // 4. No grant either: a provider whose key is present. "Present" is the
+  //    whole condition — a MUAPI row with no key anywhere is not a rung, it is
+  //    a row that cannot run, so the key has to be there for it to be picked.
+  const { setMuapiKeyOnServer } = await import('../src/lib/modelRunner.js');
+  setMuapiKeyOnServer(true);
+  chosen = await pick(await build(), { hivemindosCredits: false, connectedProviders: [], keyedProviders: ['muapi'] });
+  assert.equal(chosen.target.id, 'z-image-turbo', 'local still wins');
+  chosen = await pick(
+    (await build()).filter((target) => target.source !== 'local'),
+    { hivemindosCredits: false, connectedProviders: [], keyedProviders: ['muapi'] },
+  );
   assert.equal(chosen.target.provider, 'muapi');
+  setMuapiKeyOnServer(null);
 
   // 5. A rented box is the LAST rung: it bills by the hour whether or not
   //    anything is generating, so it is never chosen over something free.

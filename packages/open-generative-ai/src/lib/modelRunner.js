@@ -71,21 +71,27 @@ export const PLACE_ACCOUNTS = 'accounts';
 export const PROVIDER_TRANSPORTS = Object.freeze({
   'openai-gpt-image': {
     transport: 'studio', label: 'OpenAI GPT Image (API key)', place: PLACE_ACCOUNTS, placeLabel: 'Your OpenAI account',
+    credential: 'API key',
   },
   'openai-gpt-image-oauth': {
     transport: 'studio', label: 'OpenAI GPT Image (ChatGPT sign-in)', place: PLACE_ACCOUNTS, placeLabel: 'Your OpenAI account',
+    credential: 'ChatGPT sign-in',
   },
   'xai-imagine-api': {
     transport: 'studio', label: 'xAI Imagine (API key)', place: PLACE_ACCOUNTS, placeLabel: 'Your xAI account',
+    credential: 'API key',
   },
   'xai-imagine-oauth': {
     transport: 'studio', label: 'xAI Imagine (sign-in)', place: PLACE_ACCOUNTS, placeLabel: 'Your xAI account',
+    credential: 'sign-in',
   },
   'higgsfield-consumer': {
     transport: 'studio', label: 'Higgsfield', place: PLACE_ACCOUNTS, placeLabel: 'Your Higgsfield account',
+    credential: 'sign-in',
   },
   'higgsfield-cloud': {
     transport: 'studio', label: 'Higgsfield Cloud', place: PLACE_ACCOUNTS, placeLabel: 'Your Higgsfield account',
+    credential: 'API key',
   },
   'hivemindos-hosted-media': {
     transport: 'studio', label: 'HivemindOS hosted', place: PLACE_HIVEMINDOS, placeLabel: 'HivemindOS credits',
@@ -123,6 +129,21 @@ export function placeFor(row) {
 export function placeLabelFor(row) {
   if (row?.source === 'local') return t('place.thisMac');
   return PROVIDER_TRANSPORTS[String(row?.provider || '')]?.placeLabel || '';
+}
+
+/**
+ * Which credential this provider runs on, when the same account can be reached
+ * two ways.
+ *
+ * OpenAI, xAI and Higgsfield each appear twice in the catalog — once on an API
+ * key and once on a sign-in — and both rows carry the same model under the same
+ * place label. Two identical lines that bill differently is a choice nobody can
+ * make, so the row names the credential. '' where a provider has no sibling:
+ * "MUAPI account (API key)" would be noise.
+ */
+export function credentialLabelFor(row) {
+  if (row?.source === 'local') return '';
+  return PROVIDER_TRANSPORTS[String(row?.provider || '')]?.credential || '';
 }
 
 /** Providers that render something other than a generated image — a text card,

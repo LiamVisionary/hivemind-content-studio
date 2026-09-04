@@ -29,6 +29,7 @@
 
 import { t, tf } from './i18n.js';
 import { PLACE_HIVEMINDOS, PLACE_THIS_MAC } from './modelRunner.js';
+import { remedyFor } from './textModels.js';
 
 // The hosted lane's name, as the gateway reports it. Not a machine: there is
 // nothing to attach, nothing to provision and nothing running between renders.
@@ -363,8 +364,16 @@ export function restoreFailureLine(error) {
 export function describeLane(lane) {
   if (!lane) return '';
   if (!lane.available) {
-    const missing = (lane.missing || []).join(', ');
-    return `${t('place.thisMac')} has no SeedVR2 nodes${missing ? ` (missing ${missing})` : ''}.`;
+    // Never the node class names. `missing` is the graph's own list of classes
+    // — and when a lane is not answering at all the gateway can only return
+    // ALL of them, so printing it told somebody whose ComfyUI was switched off
+    // to install a node pack they already had. The lane says which of the two
+    // it is; this says it in words, with the install line that repairs either.
+    if (lane.lane === CLOUD_LANE) return lane.reason || t('restore.hostedUnavailable');
+    const what = lane.state === 'unreachable'
+      ? t('restore.laneNotAnswering')
+      : t('restore.laneNoNodes');
+    return `${what} ${t('restore.laneFixHint')}`;
   }
   if (lane.lane === CLOUD_LANE) {
     return 'Hosted GPU, billed per render in your HivemindOS credits. Nothing is rented and nothing runs between renders — and the price is quoted before anything is sent. This is the one machine your footage leaves this computer to reach.';
@@ -462,6 +471,32 @@ export function restoreRunTargets(lanes) {
       remedy: lane.remedy || '',
     };
   });
+}
+
+/**
+ * A lane that cannot restore, in the shape the RunOnPicker's readiness block
+ * reads — the state, the sentence and the button.
+ *
+ * Here rather than in the panel because it is a rule, not a rendering: the
+ * gateway says which lanes are refused and which of those the owner can do
+ * something about, and a lane greyed out with neither half is the one thing
+ * this picker is not allowed to show.
+ */
+export function laneReadinessFor(lanes) {
+  return (target) => {
+    if (target.ready) return null;
+    const lane = (lanes || []).find((entry) => entry.lane === target.id);
+    const remedy = lane?.remedy ? remedyFor(lane.remedy) : null;
+    return {
+      state: 'unroutable',
+      label: t('localModels.offline'),
+      // The lane's own sentence is already printed on the row above it;
+      // repeating it here would say it twice.
+      detail: '',
+      action: remedy ? { ...remedy, kind: 'restore-remedy' } : null,
+      blocks: true,
+    };
+  };
 }
 
 export function describeChunkPlan(plan) {

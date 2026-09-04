@@ -273,6 +273,8 @@ export const STRINGS = {
     'failure.connectAccount': 'Connect account',
     'failure.finishSignIn': `Finish the sign-in in the tab that opened, then press ${TRY_AGAIN}.`,
     'failure.finishCheckout': `Finish the checkout in the tab that opened, then press ${TRY_AGAIN}.`,
+    'failure.signInFailed': 'Could not start the sign-in.',
+    'failure.openMachines': 'Open Machines',
 
     // ---- Restore: a stopped render, and what continues it ----------------
     'restore.stopped': 'That render stopped.',
@@ -901,6 +903,11 @@ export const STRINGS = {
     'imagePanel.strengthHunt': 'Strength Hunt',
     'imagePanel.strengthHuntArmed': (count) => `Armed on ${count} LoRA${count === 1 ? '' : 's'} — one press sweeps each from 0 to its weight and adds a labeled comparison sheet.`,
     'imagePanel.strengthHuntIdle': 'Try one LoRA at every weight in a single press. Arm it on a LoRA with the grid button in the list above.',
+
+    'restore.laneNotAnswering': 'ComfyUI is not answering on this machine, so it cannot say what it can restore.',
+    'restore.laneNoNodes': 'This machine has no SeedVR2 upscaler installed.',
+    'restore.laneFixHint': 'Install ComfyUI-SeedVR2_VideoUpscaler here, or attach a machine that already has it.',
+    'restore.hostedUnavailable': 'The hosted restoration service is not available right now.',
 
     'restorePanel.pricing': 'Pricing this render…',
     'restorePanel.notPriced': 'This render could not be priced — nothing will be charged without a figure here.',

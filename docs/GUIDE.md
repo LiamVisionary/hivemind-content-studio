@@ -84,7 +84,12 @@ can go back to it.
 
 Each row in the list carries its own fit label — **Good fit**, **Workable**,
 **Untried here**, **Poor fit**, **Cannot run this** — and a row that cannot run
-says why on hover instead of failing after the press.
+says why on the row itself instead of failing after the press. Where the reason
+is something you can fix, the button that fixes it is on the row too: **Add
+key** for a provider key this machine does not hold, **Connect** or
+**Reconnect** for an account whose sign-in is missing or stale, **Open
+Machines** for a lane whose hardware cannot do the job. Where a row is billed to
+somebody, the group it sits under says whose money that is.
 
 A rented GPU is not a fourth group. When you have one attached, it shows up as
 the place name on the readout, with its hourly price after it — an attached

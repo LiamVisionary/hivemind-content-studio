@@ -154,8 +154,26 @@ test('a rented machine is described as the paid one, and says why', async () => 
     assert.match(paid, /hard cuts/i);
     const free = describeLane({ available: true, paid: false });
     assert.match(free, /free/i);
-    const missing = describeLane({ available: false, missing: ['SeedVR2VideoUpscaler'] });
-    assert.match(missing, /SeedVR2VideoUpscaler/);
+    // A lane that cannot restore says so in words and names the repair. The
+    // node CLASS names never appear: they are a graph detail, and the gateway
+    // returns the whole list whenever a lane merely fails to answer — which is
+    // how a user with ComfyUI switched off was told to install a node pack they
+    // already had.
+    const missing = describeLane({
+        lane: 'default', available: false, state: 'missing-nodes',
+        missing: ['LoadVideo', 'SeedVR2LoadDiTModel', 'SeedVR2VideoUpscaler'],
+    });
+    assert.match(missing, /no SeedVR2 upscaler installed/i);
+    assert.match(missing, /ComfyUI-SeedVR2_VideoUpscaler/, 'the package to install is named');
+    for (const cls of ['LoadVideo', 'GetVideoComponents', 'SeedVR2LoadDiTModel', 'SeedVR2VideoUpscaler']) {
+        assert.doesNotMatch(missing, new RegExp(`\\b${cls}\\b`), `${cls} is a class name, not copy`);
+    }
+    const silent = describeLane({
+        lane: 'default', available: false, state: 'unreachable',
+        missing: ['LoadVideo', 'SeedVR2LoadDiTModel', 'SeedVR2VideoUpscaler'],
+    });
+    assert.match(silent, /not answering/i, 'a lane that is down is not a lane missing nodes');
+    assert.doesNotMatch(silent, /SeedVR2LoadDiTModel/);
 });
 
 test('a machine says which of the four TensorRT states it is in', async () => {
