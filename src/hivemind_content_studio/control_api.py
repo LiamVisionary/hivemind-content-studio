@@ -20,7 +20,6 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextvars import ContextVar
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -32,25 +31,21 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-import yaml
 
-from . import __version__
-from .approval_config import load_approval_ledger
-from .config import DataFormatTooNew, ensure_data_format
+from .config import DataFormatTooNew
 from .agent_runtime import attach_script
 from .approval_ledger import ApprovalLedger
 from .asset_store import AssetStore
 from . import civitai_post
 from .canvas_history import (
     CanvasDeleteFetcher,
-    CanvasGatewayClient,
     CanvasHistoryFetcher,
     CanvasHistoryStore,
     CanvasMediaFetcher,
     CanvasWorkflowFetcher,
 )
 from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
-from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
+from .generation_telemetry import generation_telemetry_snapshot
 from .about import about_payload
 from .identity import version_payload
 from .lanes import LANE_MATRIX
@@ -75,18 +70,13 @@ from .media_studio import (
 )
 from .hivemindos_oauth import oauth_provider_status, start_oauth_login
 from .orchestrator import ContentOrchestrator
-from .prompt_history import PromptHistoryStore
 from .providers import provider_report, providers_for
 from .account_gate import account_gate_html
-from .account_scope import AccountWorkspaces, GatewayOutputClaims, NoAccountInScope, RunClaims, bootstrap_accounts
+from .account_scope import GatewayOutputClaims
 from .accounts import (
     ACCOUNT_COOKIE,
     SESSION_SECONDS,
     Account,
-    AccountAccess,
-    AccountStore,
-    LoginThrottle,
-    RelyingParty,
     WebAuthnError,
     authentication_options,
     hash_password,
@@ -101,8 +91,6 @@ from .private_access import (
     OWNER_SESSION_SECONDS,
     OwnerAccess,
     PrivateFieldCipher,
-    resolve_private_cipher,
-    configure_private_cipher,
     e2e_media_exists,
     e2e_media_sidecar,
     is_private_text_file,
@@ -113,7 +101,6 @@ from .private_access import (
     seal_private_media_e2e,
     write_private_text,
 )
-from .run_privacy import migrate_private_runs
 from .remote_access import (
     RemoteAccessError,
     remote_access_status,
@@ -124,9 +111,7 @@ from .shared_env import (
     ContainerisedHomeError,
     access_ledger,
     apply_shared_hive_env,
-    enable_access_stamps,
     hive_env_status,
-    join_hive_env,
     access_state,
     broker_status,
     close_unlock,
@@ -151,9 +136,9 @@ from .observability import (
 from .doctor import collect_report as doctor_report
 from .settings import SettingsError, apply as apply_settings, describe as describe_settings, settings as studio_settings
 from .studio_drafts import StudioRunDraft
-from .vault_store import VaultStore
 from .template_catalog import template_report
 from .unified_runtime import unified_runtime_snapshot
+from .api.context import build_context
 # ── the other half of this module ─────────────────────────────────────────────
 # This file keeps the app object, the middleware chain, the lifespan and
 # main(); every subject's routes live in hivemind_content_studio/api/ (see its
@@ -436,178 +421,73 @@ def build_control_app(
     canvas_delete_fetcher: CanvasDeleteFetcher | None = None,
     cloud_output_fetcher: CloudOutputFetcher | None = None,
 ) -> FastAPI:
-    # Join the machine's shared credential store before anything asks for a key.
-    # On a machine that already has HivemindOS this adopts the existing store; on
-    # a bare machine it creates the canonical one at the same path, so a later
-    # HivemindOS install finds this and does not start a second.
-    join_hive_env()
-    # Every credential read from here on leaves a hash-chained receipt naming
-    # the key. Optional and silent when the companion module is absent.
-    enable_access_stamps()
-    apply_shared_hive_env()
-    runs = orchestrator or ContentOrchestrator(generation_metric_sink=record_hivemind_generation_metric)
-    cipher = private_cipher or resolve_private_cipher()
-    configure_private_cipher(cipher)
-    access = owner_access or OwnerAccess.from_runtime(cipher)
-    state_dir = Path(runs.store.path).parent
-    # Refuse a folder a NEWER build wrote before opening a single store out of
-    # it. DataFormatTooNew carries the sentence; nothing below it runs.
-    ensure_data_format(state_dir)
-
-    # ── accounts ──────────────────────────────────────────────────────────────
-    # Every account's data lives in its own subtree with its own zero-knowledge
-    # vault (account_scope.py). Nothing below may reach a store without first
-    # naming an account, which is why the resolvers are functions rather than
-    # the module-level singletons they replaced: an unset scope raises instead
-    # of quietly serving account 1's library to whoever asked.
-    account_store = AccountStore(state_dir / "accounts.sqlite3")
-    run_claims = RunClaims(state_dir / "run-claims.sqlite3")
-    # The media gateway's outputs are the other machine-wide store: claimed per
-    # workspace at start/finish so each History lists only its own clips.
-    gateway_claims = GatewayOutputClaims(state_dir / "gateway-output-claims.sqlite3")
-    workspaces = AccountWorkspaces(state_dir, cipher=cipher)
-    # The owner account inherits whatever seed the studio was given — the env
-    # hash on a headless box, an injected hash under test, nothing at all on a
-    # fresh install — so `access` stays the single source of truth for it rather
-    # than this module reading the environment a second time and drifting from
-    # it. With no seed the owner row has no credentials and the gate asks for
-    # them (see setup_owner below).
-    owner_account = bootstrap_accounts(
-        store=account_store, state_dir=state_dir, legacy_password_hash=access.password_hash,
-        # An injected canvas store is already open on a path its owner chose;
-        # migrating that file would leave the connection pointing at nothing.
-        skip_migration=("canvas-history.sqlite3",) if canvas_history is not None else (),
+    # Every store this app runs on, opened in the order it always was (see
+    # api/context.py). What follows re-binds those as locals under their old
+    # names, so the lifespan, the account boundary and the dependencies below
+    # read exactly as they did when all of this was one function — and so a
+    # route module that takes `ctx` needs no other argument.
+    ctx = build_context(
+        orchestrator=orchestrator,
+        approvals=approvals,
+        control_token=control_token,
+        operator_token=operator_token,
+        owner_access=owner_access,
+        private_cipher=private_cipher,
+        canvas_history=canvas_history,
+        canvas_history_fetcher=canvas_history_fetcher,
+        canvas_media_fetcher=canvas_media_fetcher,
+        canvas_workflow_fetcher=canvas_workflow_fetcher,
+        canvas_delete_fetcher=canvas_delete_fetcher,
+        cloud_output_fetcher=cloud_output_fetcher,
     )
-    account_access = AccountAccess(signing_secret=cipher.derive("account-session-v1"))
-    login_throttle = LoginThrottle()
-    # The per-address key above can be moved by whoever is asking — a page that
-    # rotates x-forwarded-for gets a fresh bucket on every try, and the
-    # five-attempt lock never fires for the one caller it most needs to stop.
-    # This second key names the WORKSPACE, which no header can change: twenty
-    # failures in fifteen minutes and that workspace stops answering for
-    # fifteen, whoever is asking. Looser than the per-address limit on purpose,
-    # so a household sharing one proxy is not locked out by someone else's
-    # typo, and tight enough that a password cannot be guessed at speed.
-    account_login_throttle = LoginThrottle(max_attempts=20, window_seconds=900.0, block_seconds=900.0)
-    # Set per request by the middleware below; never defaulted.
-    current_account: ContextVar[Account | None] = ContextVar("current_account", default=None)
-
-    def scoped_account() -> Account:
-        account = current_account.get()
-        if account is None:
-            raise NoAccountInScope("This state is account-scoped and nobody is signed in")
-        return account
-
-    def scoped_account_id() -> int:
-        return scoped_account().id
-
-    def vault() -> VaultStore:
-        return workspaces.vault(scoped_account_id())
-
-    def prompt_history() -> PromptHistoryStore:
-        return workspaces.prompt_history(scoped_account_id())
-
-    def canvas_store() -> CanvasHistoryStore:
-        return canvas_history or workspaces.canvas_history(scoped_account_id())
-
-    def references_root() -> Path:
-        return workspaces.paths(scoped_account_id()).references_root
-
-    def outputs_root() -> Path:
-        return workspaces.paths(scoped_account_id()).outputs_root
-
-    # ── password resets, atomic across two databases ──────────────────────────
-    #
-    # Changing a workspace password moves two things that do not share a
-    # transaction: the scrypt hash in accounts.sqlite3, and the
-    # passphrase-wrapped master key in THAT account's vault. Half of it is worse
-    # than none — a new password that cannot open the library, or a library
-    # wrapped under a passphrase the account will not accept.
-    def _apply_vault_wrap(account_id: int, wrap: dict[str, str]) -> None:
-        """Merge a new passphrase wrap into an account's vault identity.
-
-        Only the passphrase half moves. The recovery copy, the public key, the
-        sealed private key and every passkey's PRF wrap are read back and
-        written out untouched — which is exactly why passkeys and device wraps
-        survive a password change: all of them wrap the SAME master key, and
-        the master key is not what changes here.
-        """
-        store = workspaces.vault(int(account_id))
-        identity = store.get_identity()
-        if not identity:
-            raise LookupError("This workspace has no vault to re-wrap")
-        merged = dict(identity)
-        merged["salt"] = wrap["salt"]
-        merged["wrapped_mk_pass"] = wrap["wrapped_mk_pass"]
-        if wrap.get("kdf"):
-            merged["kdf"] = wrap["kdf"]
-        store.put_identity(merged, allow_replace=True)
-
-    def _commit_password_reset(account_id: int, password_hash: str, wrap: dict[str, str]) -> None:
-        """Set the password AND the vault wrap, or neither.
-
-        The journal row is the commit point. Before it, nothing has changed and
-        the old password still works. After it, every later instant is
-        recoverable: a process killed mid-write is finished by
-        `_resume_password_resets` on the next boot, because the row carries both
-        halves. An in-process failure rolls the vault back to the identity
-        snapshotted here and drops the journal, so the caller's 500 is the truth.
-        """
-        before = workspaces.vault(int(account_id)).get_identity()
-        account_store.begin_password_reset(int(account_id), password_hash, wrap)
-        try:
-            _apply_vault_wrap(account_id, wrap)
-            account_store.finish_password_reset(int(account_id))
-        except Exception:
-            if before is not None:
-                with contextlib.suppress(Exception):
-                    workspaces.vault(int(account_id)).put_identity(before, allow_replace=True)
-            account_store.cancel_password_reset(int(account_id))
-            raise
-
-    def _resume_password_resets() -> None:
-        for pending in account_store.pending_password_resets():
-            account_id = int(pending["account_id"])
-            try:
-                _apply_vault_wrap(account_id, pending["vault_wrap"])
-            except Exception:
-                log.warning("Could not finish the password reset for workspace %s", account_id)
-                continue
-            account_store.finish_password_reset(account_id)
-            log.info("Finished an interrupted password reset for workspace %s", account_id)
-
-    _resume_password_resets()
-
-    def _vault_public_key() -> str | None:
-        """The SIGNED-IN account's vault public key for server-side sealing, or
-        None until they have created a vault in-browser. Resolving this per
-        request is what stops one person's output being sealed to another
-        person's key — the seal target follows the session, not the process."""
-        return workspaces.vault_public_key(scoped_account_id())
-    canvas_gateway = CanvasGatewayClient()
-    fetch_canvas_history = canvas_history_fetcher or canvas_gateway.history
-    fetch_canvas_media = canvas_media_fetcher or canvas_gateway.media
-    fetch_canvas_workflow = canvas_workflow_fetcher or canvas_gateway.workflow
-    delete_canvas_output = canvas_delete_fetcher or canvas_gateway.delete
-    fetch_cloud_result = cloud_output_fetcher or fetch_cloud_output
-    configured_control_token = control_token if control_token is not None else os.environ.get("CONTENT_STUDIO_CONTROL_TOKEN", "")
-    configured_operator_token = operator_token if operator_token is not None else os.environ.get("CONTENT_STUDIO_OPERATOR_TOKEN", "")
-    if approvals is None:
-        approvals = load_approval_ledger(required=False)
-    try:
-        migrate_private_runs(store_path=Path(runs.store.path))
-    except Exception as exc:  # startup must survive a partial legacy layout
-        print(f"[content-studio] run privacy migration warning: {exc}", file=sys.stderr)
-
-    # The boot contract, in two flags. `ready` only turns on once the accounts
-    # bootstrap above and the catalog warm hook have both run, so a shell that
-    # polls /readyz never opens the studio onto an empty model list.
-    boot_state: dict[str, Any] = {"ready": False}
-    # Every long-lived background thread this app starts checks this instead of
-    # `while True`, so SIGTERM ends them rather than the interpreter killing
-    # them mid-loop. Set once, never cleared: an app that shut down stays down.
-    shutting_down = threading.Event()
-    app_version = __version__
+    runs = ctx.runs
+    cipher = ctx.cipher
+    account_store = ctx.account_store
+    run_claims = ctx.run_claims
+    gateway_claims = ctx.gateway_claims
+    workspaces = ctx.workspaces
+    owner_account = ctx.owner_account
+    account_access = ctx.account_access
+    login_throttle = ctx.login_throttle
+    account_login_throttle = ctx.account_login_throttle
+    current_account = ctx.current_account
+    scoped_account_id = ctx.scoped_account_id
+    vault = ctx.vault
+    prompt_history = ctx.prompt_history
+    canvas_store = ctx.canvas_store
+    references_root = ctx.references_root
+    outputs_root = ctx.outputs_root
+    _vault_public_key = ctx._vault_public_key
+    _commit_password_reset = ctx._commit_password_reset
+    fetch_canvas_media = ctx.fetch_canvas_media
+    fetch_canvas_workflow = ctx.fetch_canvas_workflow
+    delete_canvas_output = ctx.delete_canvas_output
+    fetch_cloud_result = ctx.fetch_cloud_result
+    configured_control_token = ctx.configured_control_token
+    configured_operator_token = ctx.configured_operator_token
+    approvals = ctx.approvals
+    boot_state = ctx.boot_state
+    shutting_down = ctx.shutting_down
+    app_version = ctx.app_version
+    open_gen_dist = ctx.open_gen_dist
+    media_studio_input_root = ctx.media_studio_input_root
+    generation_timings = ctx.generation_timings
+    ingredients_sheet_compositor = ctx.ingredients_sheet_compositor
+    record_prompt = ctx.record_prompt
+    execute_draft = ctx.execute_draft
+    _from_proxy = ctx._from_proxy
+    _set_session_cookie = ctx._set_session_cookie
+    _relying_party = ctx._relying_party
+    owner_visible = ctx.owner_visible
+    claim_visible = ctx.claim_visible
+    require_visible_run = ctx.require_visible_run
+    stage_media_studio_reference = ctx.stage_media_studio_reference
+    media_studio_video_jobs = ctx.media_studio_video_jobs
+    media_studio_finishers = ctx.media_studio_finishers
+    _generated_output_response = ctx._generated_output_response
+    _own_generated_output = ctx._own_generated_output
+    _forget_canvas_sync = ctx._forget_canvas_sync
+    _sync_canvas_history_cached = ctx._sync_canvas_history_cached
 
     @contextlib.asynccontextmanager
     async def _lifespan(application: FastAPI):
@@ -689,80 +569,11 @@ def build_control_app(
             {"detail": unexpected_error_detail(), "incident": incident}, status_code=500
         )
 
-    repository_root = Path(__file__).resolve().parents[2]
-    # A packaged build has no checkout to point at, so the shell hands these
-    # over; the checkout paths stay the fallback so a dev machine needs nothing.
-    open_gen_dist = Path(
-        os.environ.get("CONTENT_STUDIO_FRONTEND_DIST")
-        or repository_root / "packages/open-generative-ai/dist"
-    ).expanduser()
-    # Staging for external tools (ComfyUI reads plaintext from here and the
-    # sweeper removes it). Deliberately NOT per-account: nothing durable lives
-    # here, and the files are named by mkstemp rather than being addressable.
-    media_studio_input_root = Path(runs.store.path).parent / "uploads" / "media-studio"
-    generation_timings = GenerationTimings(Path(runs.store.path).parent / "generation-timings.jsonl")
-    ingredients_sheet_compositor = Path(
-        os.environ.get("CONTENT_STUDIO_INGREDIENTS_COMPOSITOR")
-        or repository_root / "packages/media-gateway/bin/compose-ingredients-sheet.py"
-    ).expanduser()
     # The unified studio frontend (packages/open-generative-ai, Vite build) is
     # the ONLY UI this server ships. /open-gen stays mounted for older links
     # and the desktop shell; /assets serves the same build's hashed bundles.
     app.mount("/assets", StaticFiles(directory=open_gen_dist / "assets", check_dir=False), name="studio-assets")
     app.mount("/open-gen", StaticFiles(directory=open_gen_dist, html=True, check_dir=False), name="open-generative-ai")
-
-    def record_prompt(
-        draft: StudioRunDraft,
-        *,
-        source: str,
-        run_id: str,
-        user_prompt: str = "",
-        composer: dict[str, Any] | None = None,
-    ) -> None:
-        """History capture never blocks or fails a production run.
-
-        The suppression also covers NoAccountInScope: a run reaching here from a
-        machine route has no workspace to file the prompt under, and dropping
-        the history entry is the correct outcome — far better than writing one
-        person's prompt into whichever library happened to be first.
-        """
-        try:
-            prompt_history().record(
-                prompt=(draft.concept or "").strip() or user_prompt or draft.title,
-                user_prompt=user_prompt,
-                title=draft.title,
-                lane=draft.lane,
-                source=source,
-                run_id=run_id,
-                composer=composer,
-            )
-        except Exception as exc:  # noqa: BLE001 — history never fails a run
-            # Silent until now, and "my prompts stopped being saved" is a real
-            # support call. The prompt itself is never written here — only why
-            # the store refused it.
-            log.warning("prompt history not recorded for %s: %s", source, sanitize_error_detail(str(exc)))
-
-    def execute_draft(body: StudioRunDraft) -> dict:
-        draft_root = Path(runs.store.path).parent / "ui-drafts"
-        draft_root.mkdir(parents=True, exist_ok=True)
-        descriptor, draft_name = tempfile.mkstemp(prefix="studio-draft-", suffix=".yaml", dir=draft_root)
-        draft_path = Path(draft_name)
-        try:
-            os.close(descriptor)
-            write_private_text(draft_path, yaml.safe_dump(body.to_brief(), sort_keys=False))
-            run = runs.execute_content_run(
-                draft_path,
-                policy={"privacy": body.privacy},
-                budget={"max_cost_usd": body.max_cost_usd},
-            )
-            # Stamp whose run this is at the only moment anyone knows: machine
-            # callers are in owner scope here, so agent runs file to the owner.
-            scope = current_account.get()
-            if scope is not None:
-                run_claims.claim(run["run_id"], scope.id)
-            return run
-        finally:
-            draft_path.unlink(missing_ok=True)
 
     # Routes the sign-in screen itself must reach before anyone is signed in.
     # Deliberately a small, exact set: everything else stays behind the gate.
@@ -835,28 +646,6 @@ def build_control_app(
             for token in (configured_control_token, configured_operator_token)
         )
 
-    configured_proxy_secret = (os.environ.get(PROXY_SECRET_ENV) or "").strip()
-
-    def _from_proxy(request: Request, header: str) -> str:
-        """The first hop of an x-forwarded-* header — but only from the proxy.
-
-        The tailnet HTTPS proxy rewrites Host to 127.0.0.1 and puts the address
-        bar's name, scheme and client address in x-forwarded-*. Three answers
-        were derived from those: whether the session cookie is `secure`, which
-        relying-party id a passkey is bound to, and which bucket a failed
-        password counts against. Any caller can write those headers, so any
-        caller could choose its own throttle bucket. Now they count only when
-        the request also carries the secret the stack hands the proxy — and
-        with no secret configured there is no proxy to believe, so the studio
-        reads what it can see itself.
-        """
-        if not configured_proxy_secret:
-            return ""
-        supplied = request.headers.get(PROXY_SECRET_HEADER, "")
-        if not hmac.compare_digest(supplied, configured_proxy_secret):
-            return ""
-        return request.headers.get(header, "").split(",", 1)[0].strip()
-
     def _same_site_origin(request: Request) -> bool:
         """Is this write coming from a page the studio actually serves?
 
@@ -876,22 +665,6 @@ def build_control_app(
             return True
         forwarded_host = _host_name(_from_proxy(request, "x-forwarded-host"))
         return bool(forwarded_host) and name == forwarded_host
-
-    def _set_session_cookie(response: Response, request: Request, account: Account) -> None:
-        forwarded = _from_proxy(request, "x-forwarded-proto").lower()
-        response.set_cookie(
-            ACCOUNT_COOKIE,
-            account_access.issue(account.id),
-            max_age=account_access.session_seconds,
-            httponly=True,
-            secure=request.url.scheme == "https" or forwarded == "https",
-            # Lax, not Strict: a studio link opened from Slack or Notes is a
-            # top-level navigation from another site, and Strict drops the
-            # cookie on it — so a signed-in person landed on the gate and had
-            # to reload. Lax still withholds the cookie from cross-site POSTs.
-            samesite="lax",
-            path="/",
-        )
 
     # Past this age (half the session) an authenticated request re-issues the
     # cookie, so a tab that stays in use never expires mid-generation. The old
@@ -1046,72 +819,6 @@ def build_control_app(
     # matters is workspace creation itself, which stays owner-approved.
     register_gpu_rental_routes(app, require_owner)
 
-    def owner_visible(request: Request, value: dict[str, Any]) -> dict[str, Any]:
-        return value if bool(getattr(request.state, "is_owner", False)) else machine_run_receipt(value)
-
-    def claim_visible(claimed: int | None) -> bool:
-        """May the current scope see an entry of a machine-wide store that
-        `claimed` (an account id, or None) asked for? Runs and gateway outputs
-        both answer this way.
-
-        Every workspace enumerates only its own generations — in both
-        directions, so the owner does not see a sibling's either. What the
-        owner does hold is everything UNCLAIMED: entries that predate accounts,
-        ones started by agents holding a machine token (they resolve to owner
-        scope, so their claims already say owner), and ones whose workspace
-        has since been deleted — falling back beats stranding them invisibly.
-        """
-        scope = current_account.get()
-        if scope is None:
-            # No session and no machine token: the pre-auth machine surface,
-            # which only ever serves machine_run_receipt redactions — run id
-            # and status, no prompts, no paths. Agents and monitors watch the
-            # whole machine through it, so it stays whole-machine.
-            return True
-        if claimed == scope.id:
-            return True
-        return scope.is_owner and (claimed is None or account_store.get(claimed) is None)
-
-    def require_visible_run(run_id: str) -> dict[str, Any]:
-        """The run, or a 404 that is indistinguishable from it never existing —
-        which runs exist in other workspaces is exactly what this hides."""
-        try:
-            run = runs.get_run(run_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-        if not claim_visible(run_claims.account_for(run_id)):
-            # Byte-identical to the KeyError detail above (str() of a KeyError
-            # keeps its quotes), so absent and hidden cannot be told apart.
-            raise HTTPException(status_code=404, detail=str(KeyError(f"Unknown run: {run_id}")))
-        return run
-
-    def stage_media_studio_reference(value: str) -> Path:
-        prefix = "/api/media-studio/references/"
-        if not value.startswith(prefix):
-            raise ValueError("Media reference is not a private Studio reference")
-        encoded_name = value.removeprefix(prefix)
-        if not encoded_name or "/" in encoded_name or "?" in encoded_name or "#" in encoded_name:
-            raise ValueError("Media reference is invalid")
-        name = urllib.parse.unquote(encoded_name)
-        reference = (references_root() / name).resolve()
-        reference_root = references_root().resolve()
-        # A sealed (.e2e) reference cannot be staged server-side — this host holds
-        # no key. The client decrypts it in-browser and re-sends it as base64.
-        if reference.is_relative_to(reference_root) and e2e_media_exists(reference):
-            raise ValueError("Sealed reference must be sent as inline base64 (decrypted in-browser)")
-        if name != Path(name).name or not reference.is_relative_to(reference_root) or not _private_media_exists(reference):
-            raise ValueError("Media reference is unavailable")
-        decrypted = _read_private_media(reference, cipher, scope="media-studio-reference")
-        media_studio_input_root.mkdir(parents=True, exist_ok=True)
-        descriptor, staged_name = tempfile.mkstemp(
-            prefix="media-studio-reference-",
-            suffix=reference.suffix,
-            dir=media_studio_input_root,
-        )
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(decrypted)
-        return Path(staged_name)
-
     @app.get("/healthz")
     def healthz() -> dict:
         # Unauthenticated and proxied to the tailnet, so it stays minimal: is
@@ -1147,19 +854,6 @@ def build_control_app(
         constant, so a tab can warn before (rather than after) it lapses."""
         remaining = account_access.remaining_seconds(request.cookies.get(ACCOUNT_COOKIE))
         return int(remaining) if remaining is not None else SESSION_SECONDS
-
-    def _relying_party(request: Request) -> RelyingParty:
-        forwarded = _from_proxy(request, "x-forwarded-proto").lower()
-        # Behind the tailnet proxy the Host header is the upstream target, not
-        # the name in the browser's address bar — and the RP id must match what
-        # the browser sees, or every passkey ceremony is refused client-side.
-        # Only the proxy may say so: a caller that could name its own relying
-        # party could ask a passkey to sign for a domain of its choosing.
-        forwarded_host = _from_proxy(request, "x-forwarded-host")
-        return RelyingParty.for_request(
-            host=forwarded_host or request.headers.get("host", ""),
-            scheme=forwarded or request.url.scheme,
-        )
 
     def _throttle_key(request: Request, account_id: int | None) -> str:
         # Behind the tailnet / Hivemind Link proxy every browser shares the
@@ -3479,20 +3173,6 @@ def build_control_app(
             response = {**response, "warnings": list(staged.warnings)}
         return response if bool(getattr(request.state, "is_owner", False)) else machine_operation_receipt(response)
 
-    # Job-based variant: high-resolution runs take tens of minutes, far beyond
-    # what one browser HTTP request survives. start returns a gateway job id
-    # immediately; a background task finishes (download, QA, sealing) while the
-    # browser polls the job route. The registry below is process memory, but a
-    # restart no longer strands the run: the claim ledger remembers whose job it
-    # is, the browser keeps presenting the device key the job was started with,
-    # and the gateway still holds the record — so the first poll after a restart
-    # re-adopts the job and re-arms the finisher (see _readopt_media_studio_video_job).
-    media_studio_video_jobs: dict[str, dict[str, Any]] = {}
-    # In-flight finishers, awaited on shutdown. A finisher killed between the
-    # download and the seal leaves a plaintext mp4 in the outputs root, which is
-    # the one thing this app must never do — so a stop waits for them.
-    media_studio_finishers: set[asyncio.Task] = set()
-
     def _prune_media_studio_video_jobs() -> None:
         cutoff = time.time() - 6 * 3600
         for key in [key for key, entry in media_studio_video_jobs.items() if entry.get("created", 0.0) < cutoff]:
@@ -4565,39 +4245,6 @@ def build_control_app(
         ]
         return {"ok": True, "references": references}
 
-    def _generated_output_response(output: Path, request: Request) -> Response:
-        """Serve one output out of THIS workspace's outputs root.
-
-        Split out of the route below because History reaches the same files by
-        a different door: a cloud result adopted into this root is listed by
-        history_id, not by filename, and both doors must hand back the same
-        envelope or the browser's decryption sees two different things.
-        """
-        # Client-only E2E envelope: serve verbatim, the browser decrypts.
-        envelope = read_e2e_envelope(output)
-        if envelope is not None:
-            return _e2e_envelope_response(envelope)
-        if not _private_media_exists(output):
-            raise HTTPException(status_code=404, detail="Generated video not found")
-        media_type = mimetypes.guess_type(output.name)[0] or "video/mp4"
-        if output.is_file():
-            return FileResponse(output, media_type=media_type, filename=output.name)
-        try:
-            body = _read_private_media(output, cipher)
-        except ValueError as exc:
-            raise HTTPException(status_code=503, detail="Generated video could not be decrypted") from exc
-        return _private_media_response(body, media_type=media_type, range_header=request.headers.get("range", ""))
-
-    def _own_generated_output(locator: str) -> Path | None:
-        """The path under this workspace's outputs root that `locator` names, or
-        None when it names something else (a gateway clip, a Canvas render)."""
-        try:
-            candidate = Path(str(locator)).expanduser().resolve()
-            root = outputs_root().resolve()
-        except (OSError, RuntimeError):
-            return None
-        return candidate if candidate.is_relative_to(root) else None
-
     @app.get("/api/media-studio/generated/{filename}", dependencies=[Depends(require_owner)])
     def media_studio_generated_video(filename: str, request: Request) -> Response:
         name = Path(filename).name
@@ -4610,51 +4257,6 @@ def build_control_app(
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str, request: Request) -> dict:
         return owner_visible(request, require_visible_run(run_id))
-
-    def _sync_canvas_history_for_scope() -> None:
-        """Index the machine-wide gateway history for the signed-in workspace.
-
-        The canvas store reads MACHINE-wide sources — ComfyUI's output roots
-        and the media gateway's job log — where every workspace's video-studio
-        clips land side by side: each sealed to the browser that asked for it,
-        but all listed together, and the gateway cannot tell whose is whose.
-        The studio can: every gateway job it starts and every output it
-        finishes is claimed for the workspace in scope (GatewayOutputClaims),
-        and a listing adopts only what that scope may see — its own claims,
-        plus, for the owner, everything unclaimed (pre-accounts outputs, agents
-        on the machine token, the passphrase-gated Canvas itself) or orphaned
-        by a deleted workspace. Records the scope may NOT see are purged from
-        its store as well, so a row adopted in the seconds before its claim was
-        written does not linger in the wrong History."""
-        records = fetch_canvas_history()
-        claimants = gateway_claims.claimants_for_records(records)
-        mine = [record for record, claimed in zip(records, claimants) if claim_visible(claimed)]
-        foreign = [record for record, claimed in zip(records, claimants) if not claim_visible(claimed)]
-        store = canvas_store()
-        store.sync(mine)
-        if foreign:
-            store.forget(foreign)
-
-    # A sync reads the gateway's history, walks both output roots and writes
-    # sqlite; a History poll repeated all of it every tick. Remembered per
-    # workspace for a few seconds, dropped the moment a job finishes in this
-    # process (see _finalize_media_studio_video) and skippable with ?refresh=1.
-    CANVAS_SYNC_TTL_SECONDS = 10.0
-    canvas_sync_at: dict[int | None, float] = {}
-
-    def _scope_key() -> int | None:
-        scope = current_account.get()
-        return scope.id if scope is not None else None
-
-    def _forget_canvas_sync(scope_id: int | None = None) -> None:
-        canvas_sync_at.pop(scope_id if scope_id is not None else _scope_key(), None)
-
-    def _sync_canvas_history_cached(*, refresh: bool = False) -> None:
-        key = _scope_key()
-        if not refresh and time.monotonic() - canvas_sync_at.get(key, 0.0) < CANVAS_SYNC_TTL_SECONDS:
-            return
-        _sync_canvas_history_for_scope()
-        canvas_sync_at[key] = time.monotonic()
 
     @app.get("/api/canvas/history", dependencies=[Depends(require_owner)])
     def canvas_output_history(
