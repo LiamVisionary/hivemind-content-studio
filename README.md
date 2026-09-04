@@ -136,7 +136,37 @@ Start the complete local stack:
 uv run content-studio stack start
 ```
 
-Then visit `http://127.0.0.1:8765`. The first screen on a fresh install asks you to name your studio and set a passphrase (from that machine only); a headless or fleet box that nobody sits in front of can seed the owner instead with `CONTENT_STUDIO_OWNER_PASSWORD_HASH` (the SHA-256 hex digest of the passphrase) and `CONTENT_STUDIO_OWNER_NAME`. The supervisor starts the Content Studio API, embedded OpenGen local-inference bridge, media gateway, ComfyUI lanes, ComfyUI Mobile, MCP, and optional native MLX sidecar. Use `uv run content-studio stack status|stop|restart|url` for lifecycle control. Run `python3 scripts/bootstrap_unified_studio.py --install-links` only when intentionally replacing the stable legacy launcher link; it archives the previous launcher and prints its rollback path.
+Then visit `http://127.0.0.1:8765`. First launch is two steps and is described in [First launch and recovery](#first-launch-and-recovery) below; a headless or fleet box that nobody sits in front of can skip step one by seeding the owner with `CONTENT_STUDIO_OWNER_PASSWORD_HASH` (the SHA-256 hex digest of the passphrase) and `CONTENT_STUDIO_OWNER_NAME`. The supervisor starts the Content Studio API, embedded OpenGen local-inference bridge, media gateway, ComfyUI lanes, ComfyUI Mobile, MCP, and optional native MLX sidecar. Use `uv run content-studio stack status|stop|restart|url` for lifecycle control. Run `python3 scripts/bootstrap_unified_studio.py --install-links` only when intentionally replacing the stable legacy launcher link; it archives the previous launcher and prints its rollback path.
+
+### First launch and recovery
+
+**Step 1 — name your studio.** The first screen on a fresh install is a setup
+card: a studio name and a passphrase, chosen at the machine. There is no
+compiled-in password. The name is what the sign-in screen shows; the passphrase
+both signs you in and encrypts your library, and nobody — not the app, not the
+owner of the machine — can reset it for you.
+
+**Step 2 — keep the recovery key.** Setup then creates your encrypted vault and
+shows its recovery key exactly once, as step two of setup rather than as a
+surprise later. It is the only thing that opens your sealed media and drafts if
+the passphrase is ever lost. Copy it into a password manager, or save it as a
+file — in the packaged desktop app that opens a real save dialog. The studio
+cannot show it again.
+
+After that, sign-in is a passkey if the machine offers one (the app enrols it
+right after the first password sign-in). A studio with one workspace and a
+passkey goes straight to the Touch ID prompt on every launch, with "Choose a
+different workspace" still on the card.
+
+**What is encrypted with which key** — Settings > Privacy spells this out in the
+app, and it is not one rule: your library, generated media, references and
+personas are sealed to your key and cannot be opened from another workspace on
+the same Mac; run files (the brief, the script, the prompt lists) are encrypted
+with a key in this Mac's keychain, so any program running as you can read them
+and the owner can see runs from every workspace.
+
+Losing both the passphrase and the recovery key means the sealed media stays
+sealed; see [Recovery and rollback](docs/OPERATIONS.md#recovery-and-rollback).
 
 Private runtime state is outside Git under `~/.hivemindos/media-studio`. Existing gateway history and settings are migrated there by `scripts/migrate_media_state.py`. ComfyUI models, workflows, custom nodes, generated outputs, and caches remain under the configured ComfyUI/private model directories; deleting donor source checkouts does not remove them.
 

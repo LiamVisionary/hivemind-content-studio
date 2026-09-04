@@ -159,6 +159,16 @@ Do not delete an old checkout until all of these are true:
 
 Deleting donor checkouts must never include the external ComfyUI checkout, model directories, `~/.comfy-private.noindex`, or `~/.hivemindos/media-studio`. Keep a final archive until at least one real generation has completed through the unified stack.
 
+## First sign-in and vault recovery
+
+- **First launch** is two steps at the machine: name the studio and choose a passphrase on the setup card, then keep the vault recovery key the app shows as step two. There is no compiled-in password. A headless or fleet box seeds the owner instead with `CONTENT_STUDIO_OWNER_PASSWORD_HASH` (SHA-256 hex of the passphrase) and `CONTENT_STUDIO_OWNER_NAME`.
+- **The passphrase** signs in *and* derives the vault key. Nobody can reset it: there is no server-side copy, by design (`docs/E2E_ENCRYPTION_DESIGN.md`).
+- **The recovery key** is emitted once, at vault creation, and never stored. Lost passphrase + lost recovery key = the sealed library stays sealed; run files and anything written before the vault existed are unaffected because they use this machine's key, not the account's.
+- **Changing the passphrase** re-wraps the master key for the account; it does not re-encrypt media, and it does not invalidate the recovery key.
+- **Passkeys** are per device and additive. Removing the last one leaves password sign-in; removing the password is not offered, because it is the only thing that can unwrap the vault on a new device.
+- **`CONTENT_STUDIO_DESKTOP=1`** tells the sign-in gate it is running inside the packaged desktop shell: a solo workspace with a passkey goes straight to the prompt, and "New workspace" moves to Settings > Privacy > Workspaces. Unset in the developer stack.
+- **The gate's stylesheet is generated**: `python3 scripts/generate_gate_css.py` after any change to `packages/open-generative-ai/src/styles/variables.css`; `--check` fails when it is stale.
+
 ## Recovery and rollback
 
 - Cancel: `content-studio run cancel <run-id> --reason <reason>` preserves all evidence.

@@ -24,7 +24,7 @@ import { toast } from 'react-hot-toast';
 import { useMediaSrc } from '../hooks/hooks.js';
 import { defaultPick, EVIDENCE_LABELS, fetchCapabilityMatrix, rankModels, RATING_LABELS, serverRows } from '../lib/capabilityMatrix.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
-import { downloadMedia } from '../lib/downloadMedia.js';
+import { saveBytes } from '../lib/downloadMedia.js';
 import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
 import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { needsBrowserKey, runImage, runVideo, transportFor } from '../lib/modelRunner.js';
@@ -69,18 +69,14 @@ function canvasToBlob(canvas) {
 }
 
 // The sheet and its atlas are made in this browser, so they arrive as blobs
-// rather than as URLs — but they still go out through the studio's ONE download
-// path (downloadMedia), so naming, the ciphertext refusal and the Safari
-// revoke-race fix have a single definition instead of a fourth copy here.
+// rather than as URLs — which is exactly what saveBytes takes. It is the studio's
+// ONE save path, so the desktop shell's native dialog, the anchor fallback and
+// the last-resort keep are defined once instead of a second time here. (This
+// used to wrap the bytes back into an object URL and hand it to downloadMedia,
+// which re-fetched bytes it already had to run a ciphertext check that a
+// canvas-made blob can never fail.)
 async function saveBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  try {
-    await downloadMedia(url, filename);
-  } finally {
-    // Revoked on the next tick: revoking synchronously races the download in
-    // Safari and hands the user a zero-byte file.
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
+  await saveBytes(blob, filename);
 }
 
 function StageHeader({ index, stage, done, children }) {

@@ -19,6 +19,7 @@ import { browserMuapiKey, forgetBrowserMuapiKey, storeMuapiKey } from '../lib/mu
 import { Button, Field, SectionLabel, Tabs, TextInput } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import { LocalModelManager } from './LocalModelManager.jsx';
+import { PrivacyPanel } from './PrivacyPanel.jsx';
 
 export function SettingsModal({ onClose }) {
   const { zh } = useLang();
@@ -39,6 +40,10 @@ export function SettingsModal({ onClose }) {
   const tabs = [
     { value: 'api', label: t('settings.apiKey') },
     ...(hasLocalAI ? [{ value: 'local', label: t('settings.localModels') }] : []),
+    // Always present: it answers "what is sealed to my key, and what is only
+    // encrypted on this Mac", which the sign-in gate used to answer with one
+    // sentence that was stronger than the implementation.
+    { value: 'privacy', label: zh ? '隐私' : 'Privacy' },
   ];
 
   const hadKey = Boolean(browserMuapiKey());
@@ -80,20 +85,21 @@ export function SettingsModal({ onClose }) {
       title={t('settings.title')}
       size="lg"
       footer={
-        tab === 'api' ? (
+        tab === 'local' ? null : (
           <>
             <Button variant="ghost" onClick={onClose}>
-              {onMachine ? (zh ? '关闭' : 'Close') : t('common.cancel')}
+              {onMachine || tab !== 'api' ? (zh ? '关闭' : 'Close') : t('common.cancel')}
             </Button>
             {/* Nothing to save when the machine holds the key — the tab is a
-                status line, and PassBook is where it is changed or removed. */}
-            {onMachine ? null : (
+                status line, and PassBook is where it is changed or removed. The
+                Privacy tab has nothing to save at all: it reads. */}
+            {onMachine || tab !== 'api' ? null : (
               <Button variant="primary" type="submit" form="settings-api-form" disabled={saving}>
                 {t('common.save')}
               </Button>
             )}
           </>
-        ) : null
+        )
       }
     >
       {tabs.length > 1 ? <Tabs tabs={tabs} value={tab} onChange={setTab} className="-mt-1 mb-4" /> : null}
@@ -149,6 +155,8 @@ export function SettingsModal({ onClose }) {
           <LocalModelManager />
         </div>
       ) : null}
+
+      {tab === 'privacy' ? <PrivacyPanel onClose={onClose} /> : null}
     </Modal>
   );
 }

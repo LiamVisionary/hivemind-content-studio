@@ -12,8 +12,10 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { toast, Toaster } from 'react-hot-toast';
 import { ExploreDock } from '../bridges/ExploreDock.jsx';
 import { MEDIA_DOWNLOAD_BLOCKED_EVENT } from '../lib/downloadMedia.js';
+import { isFirstRunSetup } from '../lib/firstRun.js';
 import { seedMuapiKeyLocation } from '../lib/muapiKey.js';
 import { getPendingJobs } from '../lib/pendingJobs.js';
+import { ensureVaultReady } from '../lib/vaultSession.js';
 import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
 import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
@@ -205,6 +207,16 @@ export function App() {
       stopApiHeartbeat();
     };
   }, [navigate]);
+
+  // First run: the gate's setup card signed this person in one reload ago, so
+  // create the vault HERE, deliberately, instead of leaving it to whichever
+  // media resolve or composer hydrate happened to await ensureVaultReady first.
+  // That accident is what made the one-time recovery key land on top of a
+  // half-loaded studio; now it is step two of setting the studio up.
+  useEffect(() => {
+    if (!isFirstRunSetup()) return;
+    void ensureVaultReady();
+  }, []);
 
   // Does this machine hold the MUAPI key? Asked ONCE here, for every studio:
   // each gate reads the answer (modelRunner.needsBrowserKey), so a machine that
