@@ -123,6 +123,9 @@ export function ImageSettingsPanel({
               page="image"
               pinned={runOn.pinned}
               onPin={runOn.onPin}
+              readinessFor={runOn.readinessFor}
+              onFixReadiness={runOn.onFixReadiness}
+              busyAction={runOn.busyAction}
             />
             {/* A list that cannot run anything is worse than no list: it reads
                 as a working studio right up to the press. When this machine has

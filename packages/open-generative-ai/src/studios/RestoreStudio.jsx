@@ -126,22 +126,29 @@ export function RestoreStudio({ active = true }) {
     setProjects(await fetchRestoreProjects());
   }, []);
 
+  // Asked again by the panel's own "Try again", so a lane that was down when
+  // the studio opened is not down until a reload.
+  const reloadCapabilities = useCallback(async () => {
+    const data = await restoreCapabilities();
+    const usable = (data.lanes || []).filter((item) => item.available);
+    setCapabilities(data);
+    setLanes(data.lanes || []);
+    // The free one first when it can do the job: a paid default is a bill
+    // nobody chose.
+    setLane((current) => current || usable.find((item) => !item.paid)?.lane || usable[0]?.lane || '');
+    return data;
+  }, []);
+
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
     (async () => {
-      const data = await restoreCapabilities();
+      await reloadCapabilities();
       if (cancelled) return;
-      const usable = (data.lanes || []).filter((item) => item.available);
-      setCapabilities(data);
-      setLanes(data.lanes || []);
-      // The free one first when it can do the job: a paid default is a bill
-      // nobody chose.
-      setLane((current) => current || usable.find((item) => !item.paid)?.lane || usable[0]?.lane || '');
       void refreshProjects();
     })();
     return () => { cancelled = true; };
-  }, [active, refreshProjects]);
+  }, [active, refreshProjects, reloadCapabilities]);
 
   useEffect(() => {
     if (!laneInfo?.paid || lane === CLOUD_LANE) { setRental(null); return undefined; }
@@ -454,7 +461,7 @@ export function RestoreStudio({ active = true }) {
       plan={plan}
       source={file ? source : null}
       busy={Boolean(busy) || Boolean(running)}
-      onRemedy={(remedy) => void runFailureRemedy(remedy)}
+      onRemedy={(remedy) => void runFailureRemedy(remedy, { onRetry: () => { void reloadCapabilities(); } })}
     />
   );
 

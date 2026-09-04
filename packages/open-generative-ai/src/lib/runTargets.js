@@ -27,7 +27,8 @@
 // the rules the studio applies.
 import { t } from './i18n.js';
 import {
-  PLACE_ACCOUNTS, PLACE_HIVEMINDOS, PLACE_THIS_MAC, clipRouteFor, placeFor, placeLabelFor, transportFor,
+  PLACE_ACCOUNTS, PLACE_HIVEMINDOS, PLACE_THIS_MAC, clipRouteFor, credentialLabelFor, needsBrowserKey, placeFor,
+  placeLabelFor, transportFor,
 } from './modelRunner.js';
 import { attachedOrder, machineServesModel, withPin } from './rentedMachines.js';
 
@@ -71,6 +72,23 @@ export function machineForModel(machines, model, pinned = '') {
 const hourly = (machine) => `$${(Number(machine?.usd_per_hour) || 0).toFixed(2)}/hr`;
 
 /**
+ * Whether this provider's credential is present, from the ONE rule that
+ * decides it — the same rule providerReadiness.readinessFor applies.
+ *
+ * The two inventories disagree about MUAPI and only one of them is right: the
+ * media catalog and the capability matrix both report `available` from the
+ * SERVER's probe, but a MUAPI key held in this browser runs a generation just
+ * as well, and a key in the shared store means the browser never needed one.
+ * So MUAPI's answer is "can a key be reached from here", and every other
+ * provider's is the probe. Two answers is how the same model came to be offered
+ * in Image and refused in Sprite at the same moment.
+ */
+export function credentialReady(row, available = true) {
+  if (transportFor(row).transport === 'muapi') return !needsBrowserKey(row);
+  return available !== false;
+}
+
+/**
  * One selectable run target.
  *
  * `id`/`provider`/`source` are the routing identity modelRunner dispatches on,
@@ -79,12 +97,13 @@ const hourly = (machine) => `$${(Number(machine?.usd_per_hour) || 0).toFixed(2)}
  */
 function makeTarget({
   id, provider, source, label, rating = '', ratingReason = '', accepts = null, family = '', available = true,
-  machines = null, pinned = '', kind = 'image',
+  needs = '', keys = null, detail = '', machines = null, pinned = '', kind = 'image',
 }) {
   const row = { id, provider, source, accepts, family };
   const place = placeFor(row);
   const route = kind === 'video' ? clipRouteFor(row) : transportFor(row);
   const machine = place === PLACE_THIS_MAC ? machineForModel(machines, { id, name: label }, pinned) : null;
+  const credentialled = credentialReady(row, available);
   return {
     key: `${place || 'unknown'}:${provider}:${id}`,
     id,
@@ -98,6 +117,10 @@ function makeTarget({
     // model, the machine IS the place: "This Mac" would be a true sentence
     // about the lane and a false one about the hardware doing the work.
     placeLabel: machine ? (machine.gpu || t('place.rentedGpu')) : placeLabelFor(row),
+    // Which of that account's two doors this row goes through — "API key" or
+    // "ChatGPT sign-in" — so two rows on one bill are not one row printed
+    // twice. '' for every provider with no sibling.
+    credentialLabel: machine ? '' : credentialLabelFor(row),
     machine,
     rating,
     ratingReason,
@@ -105,9 +128,21 @@ function makeTarget({
     // side is the strict one: the Media Studio lane serves its own workflows
     // and nothing else, so a Higgsfield clip has no route yet and says so
     // rather than being offered as a row whose Generate can only fail.
-    ready: available !== false && route.runnable,
-    reason: route.runnable ? '' : route.reason,
+    ready: credentialled && route.runnable,
+    // Never a greyed row with nothing on it. A row refused by the transport
+    // says what the transport said; a row refused for a missing credential
+    // carries the server's own sentence, so the picker has something to print
+    // even where no readiness adapter is passed.
+    reason: route.runnable ? (credentialled ? '' : (String(needs || '') || String(detail || ''))) : route.reason,
     transport: route.transport,
+    // The credential half of the row, carried rather than dropped: readinessFor
+    // reads exactly these to decide between "not configured — add this key" and
+    // "the provider is down", and without them every cloud row it saw looked
+    // ready.
+    available: available !== false,
+    needs: String(needs || ''),
+    detail: String(detail || ''),
+    keys: Array.isArray(keys) ? keys.filter(Boolean).map(String) : [],
   };
 }
 
@@ -156,6 +191,12 @@ export function buildRunTargets({
         family: String(model.family || ''),
         accepts: Array.isArray(model.accepts) ? model.accepts : null,
         available: provider.available !== false,
+        // The provider row's own account of what it is waiting for — the
+        // sentence the server wrote ("Needs a MUAPI key") and the credential
+        // names behind it, so a blocked row explains itself.
+        needs: provider.needs || '',
+        detail: provider.detail || '',
+        keys: Array.isArray(provider.keys) ? provider.keys : null,
         machines,
         pinned,
         kind,
@@ -192,6 +233,9 @@ export function runTargetsFromRows(rows, { kind = 'image', machines = null, pinn
       rating: row.rating || '',
       ratingReason: row.reason || '',
       available: row.available !== false,
+      needs: row.needs || row.unavailableReason || '',
+      detail: row.detail || '',
+      keys: Array.isArray(row.keys) ? row.keys : null,
       machines,
       pinned,
       kind,
@@ -200,7 +244,15 @@ export function runTargetsFromRows(rows, { kind = 'image', machines = null, pinn
     // are places the GATEWAY named, and asking the transport table about them
     // would refuse every one of them for having no provider.
     const declared = Boolean(row.place);
-    const blocked = row.available === false;
+    // A row that names its OWN reason keeps its own answer — a sealed sprite
+    // that can only be animated here, a lane with no SeedVR2 nodes. A row that
+    // is merely "the server's probe failed" defers to the one credential rule,
+    // because for MUAPI that probe is not the whole truth: a key on this
+    // machine or in this browser runs the generation the probe said it could
+    // not. That disagreement is what offered a model in Image and refused the
+    // same model in Sprite at the same moment.
+    const blocked = row.available === false
+      && (Boolean(row.unavailableReason) || !credentialReady(row, false));
     return {
       ...target,
       // How the verdict was arrived at travels with the row: a picker that

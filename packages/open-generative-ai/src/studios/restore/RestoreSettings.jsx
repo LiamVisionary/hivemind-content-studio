@@ -18,11 +18,10 @@ import {
 } from '../../ui/kit.jsx';
 import { RunOnPicker } from '../../components/RunOnPicker.jsx';
 import { runTargetsFromRows } from '../../lib/runTargets.js';
-import { remedyFor } from '../../lib/textModels.js';
 import { t, tf } from '../../lib/i18n.js';
 import {
   CLOUD_LANE, COLOR_CORRECTIONS, RESOLUTION_PRESETS, RESTORE_MODELS,
-  advancedSummary, describeChunkPlan, describeCloudPrice, describePrice, restoreRunTargets,
+  advancedSummary, describeChunkPlan, describeCloudPrice, describePrice, laneReadinessFor, restoreRunTargets,
 } from '../../lib/videoRestore.js';
 
 
@@ -37,18 +36,12 @@ export function RestoreSettings({
   // A lane that cannot run the job says why, and — where the owner can do
   // something about it — carries the door. "Unavailable" on its own is the same
   // sentence as "broken", and only one of the two is true here.
-  const laneReadiness = (target) => {
-    if (target.ready) return null;
-    const source = lanes.find((lane) => lane.lane === target.id);
-    const remedy = source?.remedy ? remedyFor(source.remedy) : null;
-    return {
-      state: 'unroutable',
-      label: t('localModels.offline'),
-      detail: '',
-      action: remedy ? { ...remedy, kind: 'restore-remedy' } : null,
-      blocks: true,
-    };
-  };
+  const laneReadiness = laneReadinessFor(lanes);
+  // The install line, shown when NO machine here can restore — which is the
+  // case it was written for and, until the lanes started saying why they were
+  // refused, the case it never reached: a reachable gateway always returns the
+  // local lane plus the hosted one, so `lanes.length` was never 0 for it.
+  const anyLane = lanes.some((lane) => lane.available);
   const model = RESTORE_MODELS.find((item) => item.id === settings.model) || RESTORE_MODELS[2];
   const singleChunk = (plan?.chunks?.length || 0) < 2;
 
@@ -83,7 +76,8 @@ export function RestoreSettings({
               <p className="text-[11px] font-medium leading-snug text-ink2">{describePrice(price)}</p>
             ) : null}
           </>
-        ) : (
+        ) : null}
+        {anyLane ? null : (
           <Card className="p-3 text-[11px] leading-snug text-ink3">
             {/* A <code> element splits the sentence; the table holds both halves. */}
             {t('restorePanel.noSeedVr2Before')}

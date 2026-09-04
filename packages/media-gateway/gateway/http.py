@@ -912,6 +912,14 @@ class Handler(BaseHTTPRequestHandler):
                 "paid": remote,
                 "available": capability.get("available"),
                 "missing": capability.get("missing") or [],
+                # Why it cannot restore, and the door that changes that. A lane
+                # the studio can only grey out is the one thing the picker is
+                # not allowed to show: `state` says whether ComfyUI is not
+                # answering or the node pack is absent, and `remedy` is the
+                # button — the Machines page, where a machine that has the
+                # nodes is attached or rented.
+                "state": capability.get("state") or "",
+                "remedy": "" if capability.get("available") else "attach-machine",
                 "models": capability.get("models") or [],
                 "devices": capability.get("devices") or [],
                 "attention_modes": capability.get("attention_modes") or [],
@@ -935,6 +943,9 @@ class Handler(BaseHTTPRequestHandler):
             "available": bool(hosted.get("available")),
             "missing": [] if hosted.get("available") else ["hosted service"],
             "reason": hosted.get("reason") or "",
+            # Nothing here is the owner's to install, so the only honest button
+            # is the one that asks again — the service comes back on its own.
+            "remedy": "" if hosted.get("available") else "retry",
             "models": list(config.video_restore.CLOUD_MODELS),
             "devices": [],
             "attention_modes": ["sdpa"],

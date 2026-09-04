@@ -39,10 +39,15 @@ export function studioCloudImageModels() {
 export function imageRunTargets({
   localModels = [], catalogProviders = [], machines = null, pinned = '', ratings = null,
 } = {}) {
+  // The server's own MUAPI row, for what it knows that this list does not:
+  // whether the key is set, which key that is, and the sentence it wrote about
+  // it. Only the MODELS come from the studio's catalog; hardcoding the rest was
+  // how the same model came to be offered here and refused in Sprite.
+  const served = (catalogProviders || []).find((provider) => String(provider?.id || '') === 'muapi') || null;
   const providers = [
     // MUAPI from the studio's own catalog — the full list, not the catalog's
     // curated four.
-    { id: 'muapi', available: true, models: studioCloudImageModels() },
+    { ...(served || {}), id: 'muapi', models: studioCloudImageModels() },
     ...(catalogProviders || []).filter((provider) => String(provider?.id || '') !== 'muapi'),
   ];
   return buildRunTargets({

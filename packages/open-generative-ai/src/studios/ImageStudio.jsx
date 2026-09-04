@@ -18,6 +18,7 @@ import { toast } from 'react-hot-toast';
 import { adoptCloudOutput } from '../lib/cloudAdopt.js';
 import { localRow, needsBrowserKey, placeLabelFor, runImage, transportFor } from '../lib/modelRunner.js';
 import { useRunTargets } from '../lib/useRunTargets.js';
+import { useProviderReadiness } from '../lib/useProviderReadiness.js';
 import { PLACE_THIS_MAC, pickRunTarget } from '../lib/runTargets.js';
 import { imageRunTargets } from './image/imageRunTargets.js';
 import { describeFailure } from '../lib/describeFailure.js';
@@ -478,6 +479,15 @@ export function ImageStudio({
     catalog: runTargetList,
     machines: runOnState.machines,
     readiness: runOnState.readiness,
+  });
+  // Whether each of those rows can run right now, and the repair when it
+  // cannot. The one readiness module, wired in here rather than re-derived: a
+  // row this studio greys out has to be able to say why and offer the door,
+  // exactly as Story's and Restore's do.
+  const {
+    readinessFor: rowReadiness, onFixReadiness: fixReadiness, busyAction: fixingReadiness,
+  } = useProviderReadiness({
+    onMuapiKey: () => { s.authOpen = true; bump(); },
   });
 
   const rootRef = useRef(null);
@@ -2799,6 +2809,13 @@ export function ImageStudio({
     onAutomatic: followAutomatic,
     pinned: s.rentedMachineId || '',
     onPin: pinMachine,
+    // Whether a row can actually run, and the button that repairs it, ON the
+    // row — resolved before the press instead of arriving as a provider's
+    // sentence after it. The MUAPI key opens this studio's own dialog; every
+    // other credential goes through the shared remedy runner.
+    readinessFor: rowReadiness,
+    onFixReadiness: fixReadiness,
+    busyAction: fixingReadiness,
   };
 
   // The LoRA panel's whole prop set, kept here (not in the panel component) so

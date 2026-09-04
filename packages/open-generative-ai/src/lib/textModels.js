@@ -477,6 +477,10 @@ export const REMEDIES = Object.freeze({
   // one provider, because which one to connect is the owner's choice.
   'connect-provider': { label: t('failure.connectAccount'), action: 'accounts' },
   retry: { label: t('common.tryAgain'), action: 'refresh' },
+  // A machine that cannot do the job is repaired on the Machines page — attach
+  // one that can, or rent one. The restore lanes are the first rows to say it,
+  // and they say it in the one vocabulary rather than a second one.
+  'attach-machine': { label: t('failure.openMachines'), action: 'machines' },
 });
 
 /**

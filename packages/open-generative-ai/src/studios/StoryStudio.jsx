@@ -48,9 +48,8 @@ import { askProducer } from '../lib/localProducer.js';
 import { needsBrowserKey, runImage } from '../lib/modelRunner.js';
 import { pickRunTarget, runTargetsFromRows } from '../lib/runTargets.js';
 import { readinessFromTargets, useRentedMachines } from '../lib/useRunTargets.js';
-import {
-  fetchOAuthStatus, readinessFor, readinessFromError, refreshMuapiKeyLocation, startOAuthLogin,
-} from '../lib/providerReadiness.js';
+import { readinessFromError } from '../lib/providerReadiness.js';
+import { useProviderReadiness } from '../lib/useProviderReadiness.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { canvasMismatch } from './story/sheetLayout.js';
 import { lastUsedModelId, rememberModelId, sortModels } from '../lib/promptHelperRuntime.js';
@@ -151,10 +150,6 @@ export function StoryStudio({ active = true } = {}) {
 
   const [matrix, setMatrix] = useState(null);
   const [matrixError, setMatrixError] = useState('');
-  // Which accounts are connected, read BEFORE anything is generated. A picker
-  // that only learns this from a failed request has already wasted the press.
-  const [oauth, setOauth] = useState(null);
-  const [fixing, setFixing] = useState('');
   // Discovered, not assumed. Story used to list the desktop sd.cpp catalog as
   // "On this machine" and default to the first workable row in it, which in a
   // hosted studio is an id the bridge refuses.
@@ -442,52 +437,19 @@ export function StoryStudio({ active = true } = {}) {
     return () => { alive = false; };
   }, []);
 
-  const refreshOAuth = useCallback(async () => {
-    // Both credentials this studio can act on, in one pass: which accounts are
-    // connected, and whether this machine already holds the MUAPI key.
-    const [status] = await Promise.all([fetchOAuthStatus(), refreshMuapiKeyLocation()]);
-    setOauth(status);
-    return status;
-  }, []);
-
-  useEffect(() => { void refreshOAuth(); }, [refreshOAuth]);
-
-  const rowReadiness = useCallback((row) => readinessFor(row, { oauth }), [oauth]);
-
-  /**
-   * Repair whatever a row said was wrong, from the row itself.
-   *
-   * Opening the authorize URL rather than printing it: a link someone has to
-   * copy out of a message is the same failure as an error they have to
-   * interpret.
-   */
-  const fixReadiness = useCallback(async (action) => {
-    if (!action) return;
-    if (action.kind === 'muapi-key') { setAuthOpen(true); return; }
+  // Which accounts are connected and whether this machine holds the MUAPI key,
+  // read BEFORE anything is generated — a picker that only learns this from a
+  // failed request has already wasted the press. One hook, shared with every
+  // other studio's picker; this studio only hands in the two doors it owns.
+  const {
+    oauth, readinessFor: rowReadiness, onFixReadiness: fixReadiness, busyAction: fixing,
+    refreshReadiness: refreshOAuth,
+  } = useProviderReadiness({
+    onMuapiKey: () => setAuthOpen(true),
     // A missing server-side key opens the producer picker's own inline field —
     // the same door, so there is one place a key is added rather than two.
-    if (action.kind === 'key') { void runRemedy({ action: 'key', key: action.key }); return; }
-    if (action.kind !== 'oauth') return;
-    const key = `oauth:${action.provider}`;
-    setFixing(key);
-    try {
-      const url = await startOAuthLogin(action.provider);
-      window.open(url, '_blank', 'noopener,noreferrer');
-      toast('Finish the sign-in in the tab that just opened, then press Check again.', { duration: 9000 });
-    } catch (error) {
-      // The reason AND what to do about it. "Could not start the sign-in" on
-      // its own is the kind of message this studio is not allowed to ship.
-      toast.error(
-        error?.instruction
-          ? `${error.message}\n\n${error.instruction}`
-          : (error?.message || 'Could not start the sign-in.'),
-        { duration: 14000 },
-      );
-    } finally {
-      setFixing('');
-      await refreshOAuth();
-    }
-  }, [refreshOAuth, runRemedy]);
+    onKey: (action) => { void runRemedy({ action: 'key', key: action.key }); },
+  });
 
   const choicesFor = useCallback((featureId) => {
     if (!matrix) return [];

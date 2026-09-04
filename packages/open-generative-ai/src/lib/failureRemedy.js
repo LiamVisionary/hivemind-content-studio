@@ -32,6 +32,9 @@ export async function runFailureRemedy(remedy, handlers = {}) {
   if (action === 'lower-resolution') { handlers.onLowerResolution?.(); return; }
   if (action === 'refresh') { handlers.onRetry?.(); return; }
   if (action === 'models') { openPage('models'); return; }
+  // Where a machine is attached, pinned or rented — the answer for a lane that
+  // cannot run the job on this hardware.
+  if (action === 'machines') { openPage('machines'); return; }
   if (action === 'key') {
     // The MUAPI key has a field in this studio; everything else is set where
     // the shared store is edited.

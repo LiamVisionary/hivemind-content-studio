@@ -27,6 +27,7 @@ import {
 } from '../lib/capabilityMatrix.js';
 import { pickRunTarget, runTargetsFromRows } from '../lib/runTargets.js';
 import { readinessFromTargets, useRentedMachines } from '../lib/useRunTargets.js';
+import { useProviderReadiness } from '../lib/useProviderReadiness.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { saveBytes } from '../lib/downloadMedia.js';
 import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
@@ -309,9 +310,13 @@ export function SpriteStudio({ active = true } = {}) {
   const imageModel = imageChoice || imageAuto.target;
   const videoModel = videoChoice || videoAuto.target;
 
-  // Why a row cannot run is on the row itself now — the picker prints
-  // `target.reason` under any row it will not let you press — so this stage no
-  // longer needs a readiness adapter of its own to say it a second time.
+  // Why a row cannot run is on the row itself, and so is the button that
+  // repairs it: one readiness module, the same one Story and Restore pass to
+  // the same picker. The MUAPI key opens this studio's own dialog rather than
+  // a page, because the dialog is already here.
+  const {
+    readinessFor: rowReadiness, onFixReadiness: fixReadiness, busyAction: fixingReadiness,
+  } = useProviderReadiness({ onMuapiKey: () => setAuthOpen(true) });
 
   const animationPrompt = useMemo(() => (
     promptOverride || spriteAnimationPrompt({ subject, style, action, customBeat, customAction, background, soundscape })
@@ -652,6 +657,9 @@ export function SpriteStudio({ active = true } = {}) {
             automatic={imageAuto}
             onAutomatic={() => setImageChoice(null)}
             isAutomatic={imageModel === imageAuto.target}
+            readinessFor={rowReadiness}
+            onFixReadiness={fixReadiness}
+            busyAction={fixingReadiness}
           />
           {/* Only when this machine offers nothing: the cloud rows above are a
               real answer, so a warning beside them would be noise. */}
@@ -711,6 +719,9 @@ export function SpriteStudio({ active = true } = {}) {
             automatic={videoAuto}
             onAutomatic={() => setVideoChoice(null)}
             isAutomatic={videoModel === videoAuto.target}
+            readinessFor={rowReadiness}
+            onFixReadiness={fixReadiness}
+            busyAction={fixingReadiness}
           />
 
           <div className="flex items-center gap-2">

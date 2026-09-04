@@ -458,6 +458,13 @@ def lane_restore_capability(lane_url, timeout=8.0):
         "models": [],
         "attention_modes": [],
         "missing": list(config.video_restore.REQUIRED_NODE_CLASSES),
+        # WHY it cannot restore, as a word the studio can turn into its own
+        # sentence and its own button. A lane that is not answering and a lane
+        # that answered without the nodes look identical in `missing` — the
+        # whole node list, because nothing was there to check against — and the
+        # studio was telling a user with ComfyUI switched off to install a node
+        # pack they already had.
+        "state": "unreachable",
         "tensorrt": {"available": False, "reason": "not asked yet"},
     }
     try:
@@ -469,7 +476,9 @@ def lane_restore_capability(lane_url, timeout=8.0):
         return capability
     capability["missing"] = [name for name in config.video_restore.REQUIRED_NODE_CLASSES if name not in info]
     if capability["missing"]:
+        capability["state"] = "missing-nodes"
         return capability
+    capability["state"] = ""
     loader = ((info.get("SeedVR2LoadDiTModel") or {}).get("input") or {})
     required = loader.get("required") or {}
     optional = loader.get("optional") or {}
@@ -1221,8 +1230,14 @@ def _resolve_restore_lane(plan, options):
     lane_url = lanes.COMFY_LANES.get(lane_name, config.COMFY_HTTP_DEFAULT)
     capability = lane_restore_capability(lane_url)
     if not capability.get("available"):
-        missing = ", ".join(capability.get("missing") or []) or "the SeedVR2 nodes"
-        raise RuntimeError(f"the machine you pinned cannot restore video: it is missing {missing}")
+        # Node class names are a graph detail, not a sentence: the studio reads
+        # this text and shows it, so it says what is wrong in words the owner
+        # can act on.
+        raise RuntimeError(
+            "the machine you pinned is not answering"
+            if capability.get("state") == "unreachable"
+            else "the machine you pinned does not have the SeedVR2 nodes installed"
+        )
     return lane_name, lane_url, capability
 
 

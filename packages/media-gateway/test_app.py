@@ -6905,3 +6905,67 @@ class RestoreReaperTests(unittest.TestCase):
         directory = self._project('rrun00001', status='running', age_days=400)
         self.assertEqual(self.app.restore.reap_restore_projects(ttl_days=30), 0)
         self.assertTrue(directory.exists())
+
+
+class RestoreLanesSayWhyAndWhatToDo(unittest.TestCase):
+    """A lane the studio cannot use has to arrive with a reason it can print
+    and a remedy it can put a button on.
+
+    Reported 2026-09-04: a fresh machine's Restore picker read "This Mac has no
+    SeedVR2 nodes (missing LoadVideo, GetVideoComponents, SeedVR2LoadDiTModel,
+    SeedVR2LoadVAEModel, SeedVR2VideoUpscaler)" with no button under it. Two
+    faults in one sentence — five internal graph class names shown to a person,
+    and the SAME sentence for a ComfyUI that is simply not running, because a
+    lane that never answered has "all of them" missing by construction.
+    """
+
+    def setUp(self):
+        self.app = load_app()
+
+    def test_an_unreachable_lane_is_not_a_lane_missing_nodes(self):
+        def refuse(*args, **kwargs):
+            raise OSError('connection refused')
+
+        with patch.object(self.app.restore.net, 'urlopen', refuse):
+            capability = self.app.restore.lane_restore_capability('http://127.0.0.1:19099')
+        self.assertFalse(capability['available'])
+        self.assertEqual(capability['state'], 'unreachable')
+
+    def test_a_lane_that_answers_without_the_nodes_says_so(self):
+        class _Answer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({'LoadVideo': {}}).encode('utf-8')
+
+        with patch.object(self.app.restore.net, 'urlopen', lambda *a, **k: _Answer()):
+            capability = self.app.restore.lane_restore_capability('http://127.0.0.1:19099')
+        self.assertFalse(capability['available'])
+        self.assertEqual(capability['state'], 'missing-nodes')
+
+    def test_every_refused_lane_carries_a_remedy_the_studio_can_render(self):
+        captured = {}
+
+        class _Handler:
+            def send_json(self, payload):
+                captured.update(payload)
+
+            get_api_restore_capabilities = self.app.http.Handler.get_api_restore_capabilities
+
+        with patch.object(self.app.restore, 'lane_restore_capability',
+                          lambda url, timeout=8.0: {'available': False, 'state': 'unreachable',
+                                                    'missing': ['LoadVideo'], 'models': [],
+                                                    'devices': [], 'attention_modes': []}), \
+                patch.object(self.app.config.cloud_restore, 'status',
+                             lambda: {'available': False, 'reason': 'switched off'}):
+            _Handler().get_api_restore_capabilities(None, {})
+
+        self.assertTrue(captured['lanes'])
+        for lane in captured['lanes']:
+            self.assertFalse(lane['available'], lane)
+            # The whole point: never a greyed row with nothing on it.
+            self.assertTrue(lane['remedy'], lane)
