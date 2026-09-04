@@ -6,6 +6,7 @@ import numpy as np
 
 from app.models.schema import SubtitleRequest, VideoParams
 from app.services import video
+from app.utils import utils
 
 
 class TestSubtitleBackgroundSettings(unittest.TestCase):
@@ -22,7 +23,13 @@ class TestSubtitleBackgroundSettings(unittest.TestCase):
         WebUI 新增字幕背景开关和颜色选择器后，所有已有语言都必须包含对应
         翻译 key，避免某些语言界面直接显示英文内部 key。
         """
-        i18n_dir = Path(__file__).parent.parent.parent / "webui" / "i18n"
+        i18n_dir = (
+            Path(__file__).resolve().parents[2]
+            / "archive"
+            / "moneyprinterturbo"
+            / "webui"
+            / "i18n"
+        )
         required_keys = {
             "Enable Subtitle Background",
             "Subtitle Background Color",
@@ -121,42 +128,39 @@ class TestSubtitleBackgroundSettings(unittest.TestCase):
         )
 
     def test_detects_font_without_chinese_glyphs(self):
-        fonts_dir = (
-            Path(__file__).parent.parent.parent / "resource" / "fonts"
-        )
+        # The bundled fonts are Latin-only OFL faces (resource/FONTS.md). A CJK
+        # face is whatever this machine has installed, found the same way a real
+        # render finds it.
+        bundled = utils.resolve_font_path("BeVietnamPro-Bold.ttf")
 
         self.assertFalse(
-            video.subtitle_font_supports_text(
-                str(fonts_dir / "BeVietnamPro-Bold.ttf"), "人工智能改变生活"
-            )
+            video.subtitle_font_supports_text(bundled, "人工智能改变生活")
         )
         self.assertTrue(
-            video.subtitle_font_supports_text(
-                str(fonts_dir / "MicrosoftYaHeiBold.ttc"), "人工智能改变生活"
-            )
+            video.subtitle_font_supports_text(bundled, "Artificial intelligence")
         )
-        self.assertTrue(
-            video.subtitle_font_supports_text(
-                str(fonts_dir / "BeVietnamPro-Bold.ttf"), "Artificial intelligence"
-            )
-        )
+        for cjk_font in utils.script_fallback_fonts():
+            with self.subTest(font=Path(cjk_font).name):
+                self.assertTrue(
+                    video.subtitle_font_supports_text(cjk_font, "人工智能改变生活")
+                )
 
     def test_wrap_text_keeps_closing_punctuation_with_text(self):
         """
         中文长句按字符换行时，句号等闭合标点不能独占一行，否则字幕背景
         会被一个单独的小点撑高。这里复现大字号中文长句的边界情况。
         """
-        font_path = (
-            Path(__file__).parent.parent.parent
-            / "resource"
-            / "fonts"
-            / "MicrosoftYaHeiBold.ttc"
-        )
+        # Needs a font that draws CJK; the project ships none (resource/FONTS.md),
+        # so this measures the machine's own — and says nothing on a machine
+        # without one rather than measuring notdef boxes.
+        cjk_fonts = utils.script_fallback_fonts()
+        if not cjk_fonts:
+            self.skipTest("no installed font on this machine draws CJK")
 
         wrapped_text, _ = video.wrap_text(
             "如果你调整字号，中文笔画也不能被黑色背景遮挡。",
             max_width=1642,
-            font=str(font_path),
+            font=str(cjk_fonts[0]),
             fontsize=72,
         )
 

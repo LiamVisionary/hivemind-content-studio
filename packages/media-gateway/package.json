@@ -1,6 +1,5 @@
 {
   "name": "media-studio-next",
-  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev -H 127.0.0.1 -p 8788",

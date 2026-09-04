@@ -1,11 +1,21 @@
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 const r = (p) => fileURLToPath(new URL(p, import.meta.url));
 
+// One version number for the whole product, read from pyproject.toml — see
+// scripts/projectVersion.cjs. The topbar chip and the About page use THIS, and
+// /api/version reads the same file through Python's package metadata, so the two
+// halves of the app cannot disagree about which build someone is running.
+const { projectVersion } = createRequire(import.meta.url)('./scripts/projectVersion.cjs');
+
 export default defineConfig({
     base: './',
+    define: {
+        __APP_VERSION__: JSON.stringify(projectVersion()),
+    },
     plugins: [react()],
     // Force a SINGLE React instance across the app, react-hot-toast, and goober.
     // Without this, Vite's dev optimizer resolves the app's ESM `react/jsx-runtime`

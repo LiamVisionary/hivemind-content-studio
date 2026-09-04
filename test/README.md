@@ -9,7 +9,9 @@ This directory contains unit tests for the **MoneyPrinterTurbo** project.
   - `test_task_manager.py`: In-memory and Redis queue tests
   - `test_controller_*.py`: API controller tests split by controller domain
   - `test_video.py`, `test_voice.py`: Media service tests
-- `test_main.py`: Application entry-point test
+- The donor Streamlit shell's tests (`test_webui_*.py`) and the donor HTTP
+  entry-point test moved with the shell to `archive/moneyprinterturbo/test/`;
+  `pytest` does not collect them (`testpaths = ["test"]`).
 
 ## Running Tests
 

@@ -5,6 +5,8 @@ const { execFileSync } = require('child_process');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const PACKAGE_JSON = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+// The version comes from pyproject.toml; this package.json no longer carries one.
+const { projectVersion } = require('./projectVersion.cjs');
 // The electron-builder config moved out of package.json's `build` field into
 // electron-builder.config.cjs; both read the same generated identity, which is
 // written down once in src/hivemind_content_studio/identity.py.
@@ -122,7 +124,7 @@ function main() {
     const debArch = toDebArch(arch);
     const appDir = path.resolve(args['app-dir'] || getDefaultAppDir(arch));
     const outputDir = path.resolve(args['output-dir'] || path.join(REPO_ROOT, 'release'));
-    const version = args.version || PACKAGE_JSON.version;
+    const version = args.version || projectVersion();
 
     if (!fs.existsSync(appDir)) {
         console.error(`Packaged app directory not found: ${appDir}`);

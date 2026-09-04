@@ -1,3 +1,11 @@
+This directory began as a fork of Open Generative AI, and the donor's MIT notice
+below is preserved for the code it covers. Everything added since is
+AGPL-3.0-or-later, and this package AS DISTRIBUTED is AGPL-3.0-or-later — the
+same as the umbrella project, whose full licence text is in LICENSE at the
+repository root. See README.md here and THIRD_PARTY_NOTICES.md at the root.
+
+----------------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 Open Generative AI Contributors

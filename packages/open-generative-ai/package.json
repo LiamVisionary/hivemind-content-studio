@@ -2,7 +2,6 @@
   "name": "open-generative-ai",
   "description": "Hivemind Content Studio — unified local AI image, video, cinema and lip sync studio",
   "private": true,
-  "version": "2.0.0",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "vite:dev": "vite",

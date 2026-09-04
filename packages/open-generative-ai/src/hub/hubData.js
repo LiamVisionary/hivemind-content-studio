@@ -867,7 +867,7 @@ export function generationProgressPct(card) {
 /* Navigation (hubApp.js:781-800)                                     */
 /* ------------------------------------------------------------------ */
 
-export const HUB_VIEWS = ['create', 'canvas', 'inspo', 'models', 'runs', 'history', 'telemetry', 'providers', 'passbook', 'machines', 'agents'];
+export const HUB_VIEWS = ['create', 'canvas', 'inspo', 'models', 'runs', 'history', 'telemetry', 'providers', 'passbook', 'machines', 'agents', 'about'];
 // View name → AppShell page id ('create' renders on the 'planner' page, 'agents'
 // on the 'mcp-cli' page — both page keys are the wire contract, not the view name).
 const HUB_PAGE_FOR_VIEW = { create: 'planner', agents: 'mcp-cli' };

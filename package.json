@@ -1,7 +1,6 @@
 {
   "name": "hivemind-content-studio-monorepo",
   "private": true,
-  "version": "0.2.0",
   "scripts": {
     "build:open-gen": "npm --prefix packages/open-generative-ai run vite:build",
     "build:mobile": "npm --prefix packages/comfyui-mobile run build",

@@ -8,9 +8,15 @@
  * package.json no longer carries a `build` block.
  */
 const identity = require('./electron/identity.json');
+// The version comes from pyproject.toml, not from this package.json, which no
+// longer carries one (see scripts/projectVersion.cjs). extraMetadata overrides
+// the manifest electron-builder reads, so the packaged app is stamped with the
+// product's own version rather than with `undefined`.
+const { projectVersion } = require('./scripts/projectVersion.cjs');
 
 module.exports = {
   appId: identity.bundleId,
+  extraMetadata: { version: projectVersion() },
   productName: identity.productName,
   copyright: identity.copyright,
   directories: {

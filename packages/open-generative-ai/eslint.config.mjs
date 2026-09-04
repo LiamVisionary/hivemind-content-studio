@@ -48,6 +48,10 @@ export default [
       globals: {
         ...globals.browser,
         ...globals.node,
+        // Replaced at build time by vite.config.mjs, which reads the one version
+        // number in pyproject.toml. `src/lib/appVersion.js` is the only reader
+        // and treats its absence (node --test, a bare import) as "ask the API".
+        __APP_VERSION__: 'readonly',
       },
     },
     rules: {

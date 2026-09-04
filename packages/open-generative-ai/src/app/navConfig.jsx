@@ -52,6 +52,10 @@ export const NAV_SECTIONS = [
       { page: 'passbook', icon: 'key', label: () => 'PassBook' },
       { page: 'canvas', icon: 'nodes', label: () => (zh() ? '画布' : 'Canvas') },
       { page: 'mcp-cli', icon: 'terminal', label: () => t('nav.mcpcli') },
+      // Version, licence, source and third-party notices. AGPL §5(d) asks an
+      // interactive program to show these; the topbar version chip is the other
+      // door to the same page.
+      { page: 'about', icon: 'info', label: () => (zh() ? '关于' : 'About') },
     ],
   },
 ];
@@ -84,8 +88,10 @@ export const HUB_PAGES = {
   machines: 'machines',
   passbook: 'passbook',
   // Agents & API is a static docs page with no state of its own — it rides the
-  // hub layer rather than the studio mount registry.
+  // hub layer rather than the studio mount registry. About does the same: one
+  // fetch of /api/about on first open, then nothing.
   'mcp-cli': 'agents',
+  about: 'about',
 };
 
 // Retired pages that still resolve. A page key is a wire contract — old links,

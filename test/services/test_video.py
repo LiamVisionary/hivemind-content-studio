@@ -955,8 +955,11 @@ class TestVideoService(unittest.TestCase):
     def test_wrap_text(self):
         """test text wrapping function"""
         try:
-            font_path = os.path.join(utils.font_dir(), "STHeitiMedium.ttc")
-            if not os.path.exists(font_path):
+            # The bundled font is Latin-only OFL (resource/FONTS.md); a name the
+            # project no longer ships resolves to the machine's own copy when it
+            # has one, which is exactly the fallback under test here.
+            font_path = utils.resolve_font_path("STHeitiMedium.ttc")
+            if not font_path or not os.path.exists(font_path):
                 self.fail(f"font file not found: {font_path}")
                 
             # test english text wrapping
@@ -972,17 +975,21 @@ class TestVideoService(unittest.TestCase):
             # verify text is wrapped
             self.assertIn("\n", wrapped_text_en)
             
-            # test chinese text wrapping
-            test_text_zh = "这是一段用来测试中文长句换行的文本内容，应该会根据宽度限制进行换行处理"
-            wrapped_text_zh, text_height_zh = vd.wrap_text(
-                text=test_text_zh,
-                max_width=300,
-                font=font_path,
-                fontsize=30
-            )   
-            print(wrapped_text_zh, text_height_zh)
-            # verify chinese text is wrapped
-            self.assertIn("\n", wrapped_text_zh)
+            # test chinese text wrapping — only where a font on this machine can
+            # actually draw the glyphs. Wrapping a script the font has no glyphs
+            # for measures the notdef box, not the wrapper, so on a machine with
+            # no CJK font this half has nothing to say.
+            if vd.subtitle_font_supports_text(font_path, "中文"):
+                test_text_zh = "这是一段用来测试中文长句换行的文本内容，应该会根据宽度限制进行换行处理"
+                wrapped_text_zh, text_height_zh = vd.wrap_text(
+                    text=test_text_zh,
+                    max_width=300,
+                    font=font_path,
+                    fontsize=30
+                )
+                print(wrapped_text_zh, text_height_zh)
+                # verify chinese text is wrapped
+                self.assertIn("\n", wrapped_text_zh)
         except Exception as e:
             self.fail(f"test wrap_text failed: {str(e)}")
 
