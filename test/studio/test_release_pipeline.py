@@ -183,13 +183,13 @@ def test_no_secret_is_ever_written_where_it_could_be_read_back() -> None:
 
 
 def test_the_updater_public_key_is_config_and_the_private_key_is_a_name() -> None:
-    config = json.loads((ROOT / "src-tauri" / "updater.json").read_text(encoding="utf-8"))
+    config = json.loads((ROOT / "desktop" / "src-tauri" / "updater.json").read_text(encoding="utf-8"))
     assert config["endpoints"], "an installed app would have nowhere to ask about updates"
     assert "pubkey" in config, "the public key must be a config value, not a build-time surprise"
     assert config["private_key_secret"] == "TAURI_SIGNING_PRIVATE_KEY"
     # A name, not a value.
     assert len(config["private_key_secret"]) < 64
-    raw = (ROOT / "src-tauri" / "updater.json").read_text(encoding="utf-8")
+    raw = (ROOT / "desktop" / "src-tauri" / "updater.json").read_text(encoding="utf-8")
     assert "minisign secret key" not in raw
     assert config["promotion"]["prerelease_moves_updater"] is False
 

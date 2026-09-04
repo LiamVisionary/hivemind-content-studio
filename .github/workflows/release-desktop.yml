@@ -84,8 +84,8 @@ jobs:
       - name: The desktop shell must be scaffolded
         run: |
           set -euo pipefail
-          if [ ! -f src-tauri/tauri.conf.json ]; then
-            echo "src-tauri/tauri.conf.json is missing, so there is nothing to build." >&2
+          if [ ! -f desktop/src-tauri/tauri.conf.json ]; then
+            echo "desktop/src-tauri/tauri.conf.json is missing, so there is nothing to build." >&2
             echo "docs/RELEASE.md is that directory's specification; scaffold it before dispatching a build." >&2
             exit 1
           fi
@@ -144,7 +144,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: desktop/src-tauri -> target
 
       # The Rust CLI, not the npm one. This repository's root package.json is a
       # monorepo task runner with no `tauri` script, so tauri-action's default
@@ -210,7 +210,7 @@ jobs:
       - name: Build the frozen desktop Python
         run: |
           python3 scripts/build_desktop_python.py \
-            --build src-tauri/resources/desktop-python \
+            --build desktop/src-tauri/resources/desktop-python \
             --ffmpeg-dir vendor/ffmpeg/darwin-arm64
 
       # Every Apple secret is referenced by name and unset in this repository.
@@ -262,7 +262,7 @@ jobs:
         if: steps.signing.outputs.updater != 'true'
         run: |
           set -euo pipefail
-          cat > src-tauri/no-updater.conf.json <<'JSON'
+          cat > desktop/src-tauri/no-updater.conf.json <<'JSON'
           {
             "bundle": {
               "createUpdaterArtifacts": false
@@ -294,7 +294,7 @@ jobs:
             exit 1
           fi
 
-      # projectPath is the directory that CONTAINS src-tauri — the repository
+      # projectPath is the directory that CONTAINS src-tauri — desktop/ here
       # root here — and tauriScript is the Rust CLI installed above. Without
       # both, tauri-action looks for an npm `tauri` script at projectPath and
       # fails on every platform with "Missing script: tauri".
@@ -308,7 +308,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          projectPath: .
+          projectPath: desktop
           tauriScript: cargo tauri
           # No `releaseId` and no tag: this workflow uploads artifacts and never
           # creates a release. Promotion is release-desktop-promote.yml.
@@ -432,7 +432,7 @@ jobs:
       - name: Build the app
         uses: tauri-apps/tauri-action@v0
         with:
-          projectPath: .
+          projectPath: desktop
           tauriScript: cargo tauri
           includeUpdaterJson: false
 
@@ -460,6 +460,6 @@ jobs:
       - name: Build the app
         uses: tauri-apps/tauri-action@v0
         with:
-          projectPath: .
+          projectPath: desktop
           tauriScript: cargo tauri
           includeUpdaterJson: false
