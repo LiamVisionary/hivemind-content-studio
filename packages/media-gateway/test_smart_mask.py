@@ -73,7 +73,7 @@ class SmartMaskGraphTest(unittest.TestCase):
 class SmartMaskRouteTest(unittest.TestCase):
     def test_route_stages_the_image_and_dispatches(self):
         app = load_app()
-        completed = app.threading.Event()
+        completed = app.jobs.threading.Event()
         captured = {}
 
         def fake_run(job_id, image_path, options):
@@ -88,15 +88,15 @@ class SmartMaskRouteTest(unittest.TestCase):
         with TemporaryDirectory() as td:
             out_dir = Path(td) / "out"
             out_dir.mkdir()
-            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
-            thread = app.threading.Thread(target=server.serve_forever, daemon=True)
-            with patch.object(app, "TOKEN", "test-token"), \
-                 patch.object(app, "OUT_DIR", out_dir), \
-                 patch.object(app, "jobs", {}), \
-                 patch.object(app, "run_sam3_smart_mask", side_effect=fake_run):
+            server = app.runtime.ThreadingHTTPServer(("127.0.0.1", 0), app.http.Handler)
+            thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, "TOKEN", "test-token"), \
+                 patch.object(app.config, "OUT_DIR", out_dir), \
+                 patch.object(app.jobs, "jobs", {}), \
+                 patch.object(app.runners, "run_sam3_smart_mask", side_effect=fake_run):
                 thread.start()
                 try:
-                    request = app.Request(
+                    request = app.net.Request(
                         f"http://127.0.0.1:{server.server_port}/api/smart-mask",
                         data=json.dumps({
                             "image_base64": "data:image/png;base64," + png,
@@ -105,7 +105,7 @@ class SmartMaskRouteTest(unittest.TestCase):
                         headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
                         method="POST",
                     )
-                    with app.urlopen(request, timeout=5) as response:
+                    with app.net.urlopen(request, timeout=5) as response:
                         payload = json.loads(response.read().decode("utf-8"))
                         self.assertEqual(response.status, 202)
                     self.assertTrue(completed.wait(1))
@@ -121,21 +121,21 @@ class SmartMaskRouteTest(unittest.TestCase):
         app = load_app()
         png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
         with TemporaryDirectory() as td:
-            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
-            thread = app.threading.Thread(target=server.serve_forever, daemon=True)
-            with patch.object(app, "TOKEN", "test-token"), \
-                 patch.object(app, "OUT_DIR", Path(td)), \
-                 patch.object(app, "jobs", {}):
+            server = app.runtime.ThreadingHTTPServer(("127.0.0.1", 0), app.http.Handler)
+            thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, "TOKEN", "test-token"), \
+                 patch.object(app.config, "OUT_DIR", Path(td)), \
+                 patch.object(app.jobs, "jobs", {}):
                 thread.start()
                 try:
-                    request = app.Request(
+                    request = app.net.Request(
                         f"http://127.0.0.1:{server.server_port}/api/smart-mask",
                         data=json.dumps({"image_base64": "data:image/png;base64," + png}).encode("utf-8"),
                         headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
                         method="POST",
                     )
-                    with self.assertRaises(app.HTTPError) as raised:
-                        app.urlopen(request, timeout=5)
+                    with self.assertRaises(app.http.HTTPError) as raised:
+                        app.net.urlopen(request, timeout=5)
                     self.assertEqual(raised.exception.code, 400)
                 finally:
                     server.shutdown()
@@ -177,14 +177,14 @@ class SmartMaskRouteTest(unittest.TestCase):
 
             source = Path(td) / "src.png"
             source.write_bytes(b"image")
-            with patch.object(app, "COMFY_TEMP_DIR", comfy_temp), \
-                 patch.object(app, "COMFY_INPUT_DIR", Path(td) / "input"), \
-                 patch.object(app, "jobs", {}), \
-                 patch.object(app, "urlopen", side_effect=fake_urlopen), \
-                 patch.object(app, "time", app.time), \
-                 patch.object(app, "append_history", side_effect=written.append):
-                app.run_sam3_smart_mask("job1", source, {"prompt": "the jacket"})
-                record = app.jobs["job1"]
+            with patch.object(app.runners, "COMFY_TEMP_DIR", comfy_temp), \
+                 patch.object(app.config, "COMFY_INPUT_DIR", Path(td) / "input"), \
+                 patch.object(app.jobs, "jobs", {}), \
+                 patch.object(app.net, "urlopen", side_effect=fake_urlopen), \
+                 patch.object(app.media, "time", app.media.time), \
+                 patch.object(app.history, "append_history", side_effect=written.append):
+                app.runners.run_sam3_smart_mask("job1", source, {"prompt": "the jacket"})
+                record = app.jobs.jobs["job1"]
             mask_still_there = mask.exists()
 
         self.assertEqual(record["status"], "success", record.get("error"))

@@ -9,6 +9,7 @@ first Generate instead of a sentence before it.
 """
 
 import importlib.util
+import sys
 import json
 import signal
 import unittest
@@ -20,6 +21,11 @@ BASE = Path(__file__).resolve().parent
 
 
 def load_app():
+    # A fresh world per load: the gateway's state lives in the modules under
+    # gateway/, so a cached one would carry the previous test's caches and
+    # threads into this one.
+    for _cached in [n for n in sys.modules if n == 'gateway' or n.startswith('gateway.')]:
+        del sys.modules[_cached]
     spec = importlib.util.spec_from_file_location('zimg_app_shutdown', BASE / 'app.py')
     app = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(app)
@@ -36,12 +42,12 @@ class AtomicStateWriteTests(unittest.TestCase):
             target.write_text(json.dumps({'old': {'id': 'old'}}), encoding='utf-8')
 
             # A write that dies before os.replace leaves the previous file intact.
-            with patch.object(app.os, 'replace', side_effect=OSError('interrupted')):
+            with patch.object(app.config.os, 'replace', side_effect=OSError('interrupted')):
                 with self.assertRaises(OSError):
-                    app.write_json_atomic(target, {'new': {'id': 'new'}})
+                    app.util.write_json_atomic(target, {'new': {'id': 'new'}})
             self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'old': {'id': 'old'}})
 
-            app.write_json_atomic(target, {'new': {'id': 'new'}}, indent=2)
+            app.util.write_json_atomic(target, {'new': {'id': 'new'}}, indent=2)
             self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'new': {'id': 'new'}})
             # No temp files left behind for the next loader to trip over.
             self.assertEqual([p.name for p in Path(td).iterdir()], ['download_jobs.json'])
@@ -50,10 +56,10 @@ class AtomicStateWriteTests(unittest.TestCase):
         app = load_app()
         with TemporaryDirectory() as td:
             target = Path(td) / 'download_jobs.json'
-            with patch.object(app, 'DOWNLOAD_JOBS_FILE', target), \
-                 patch.object(app, 'download_jobs', {'job-1': {'id': 'job-1', 'status': 'running'}}):
-                app.save_download_jobs_unlocked()
-                self.assertEqual(app.load_download_jobs(), {'job-1': {'id': 'job-1', 'status': 'running'}})
+            with patch.object(app.history, 'DOWNLOAD_JOBS_FILE', target), \
+                 patch.object(app.history, 'download_jobs', {'job-1': {'id': 'job-1', 'status': 'running'}}):
+                app.history.save_download_jobs_unlocked()
+                self.assertEqual(app.history.load_download_jobs(), {'job-1': {'id': 'job-1', 'status': 'running'}})
 
 
 class ShutdownTests(unittest.TestCase):
@@ -66,15 +72,15 @@ class ShutdownTests(unittest.TestCase):
                 'queued-1': {'id': 'queued-1', 'status': 'queued'},
                 'done-1': {'id': 'done-1', 'status': 'success'},
             }
-            with patch.object(app, 'HISTORY_FILE', history), \
-                 patch.object(app, 'jobs', jobs), \
-                 patch.object(app, 'comfy_prompt_route', lambda _pid: None):
-                interrupted = app.interrupt_in_flight_jobs()
+            with patch.object(app.history, 'HISTORY_FILE', history), \
+                 patch.object(app.jobs, 'jobs', jobs), \
+                 patch.object(app.promptroutes, 'comfy_prompt_route', lambda _pid: None):
+                interrupted = app.runtime.interrupt_in_flight_jobs()
 
             self.assertEqual(sorted(rec['id'] for rec in interrupted), ['local-1', 'queued-1'])
             self.assertEqual(jobs['done-1']['status'], 'success')
             self.assertEqual(jobs['local-1']['status'], 'interrupted')
-            self.assertEqual(jobs['local-1']['error'], app.JOB_INTERRUPTED_MESSAGE)
+            self.assertEqual(jobs['local-1']['error'], app.runtime.JOB_INTERRUPTED_MESSAGE)
             # history.jsonl is where find_job() looks after a restart, so this is
             # what turns the studio's next poll into a true answer with a retry.
             written = [json.loads(line) for line in history.read_text(encoding='utf-8').splitlines()]
@@ -87,11 +93,11 @@ class ShutdownTests(unittest.TestCase):
         with TemporaryDirectory() as td:
             history = Path(td) / 'history.jsonl'
             jobs = {'rented': {'id': 'rented', 'status': 'running', 'comfy_prompt_id': 'p-9'}}
-            with patch.object(app, 'HISTORY_FILE', history), \
-                 patch.object(app, 'jobs', jobs), \
-                 patch.object(app, 'comfy_prompt_route',
+            with patch.object(app.history, 'HISTORY_FILE', history), \
+                 patch.object(app.jobs, 'jobs', jobs), \
+                 patch.object(app.promptroutes, 'comfy_prompt_route',
                               lambda pid: {'remote': True, 'status': 'submitted'} if pid == 'p-9' else None):
-                self.assertEqual(app.interrupt_in_flight_jobs(), [])
+                self.assertEqual(app.runtime.interrupt_in_flight_jobs(), [])
 
             self.assertEqual(jobs['rented']['status'], 'running')
             self.assertFalse(history.exists())
@@ -114,10 +120,10 @@ class ShutdownTests(unittest.TestCase):
 
         proc = FakeProc(4242)
         killed = []
-        with patch.object(app, 'native_job_procs', {'job-1': proc}), \
-             patch.object(app.os, 'getpgid', lambda pid: pid), \
-             patch.object(app.os, 'killpg', lambda pgid, sig: killed.append((pgid, sig))):
-            stopped = app.terminate_native_job_processes(timeout=0.1)
+        with patch.object(app.jobs, 'native_job_procs', {'job-1': proc}), \
+             patch.object(app.config.os, 'getpgid', lambda pid: pid), \
+             patch.object(app.config.os, 'killpg', lambda pgid, sig: killed.append((pgid, sig))):
+            stopped = app.runtime.terminate_native_job_processes(timeout=0.1)
 
         self.assertEqual(stopped, ['job-1'])
         self.assertEqual(killed, [(4242, signal.SIGTERM)])
@@ -126,14 +132,14 @@ class ShutdownTests(unittest.TestCase):
     def test_installing_the_handlers_claims_sigterm_and_sigint(self):
         app = load_app()
         installed = {}
-        with patch.object(app.signal, 'signal', lambda sig, handler: installed.__setitem__(sig, handler)):
-            app.install_shutdown_handlers(server=None)
+        with patch.object(app.runtime.signal, 'signal', lambda sig, handler: installed.__setitem__(sig, handler)):
+            app.runtime.install_shutdown_handlers(server=None)
         self.assertEqual(sorted(installed, key=lambda s: s.value), sorted([signal.SIGINT, signal.SIGTERM], key=lambda s: s.value))
 
 
 class HealthTests(unittest.TestCase):
     def _health(self, app, *, authed):
-        handler = object.__new__(app.Handler)
+        handler = object.__new__(app.http.Handler)
         handler.path = '/health'
         captured = {}
 
@@ -143,24 +149,24 @@ class HealthTests(unittest.TestCase):
 
         handler.send_json = send_json
         handler.authed = lambda _qs: authed
-        app.Handler.do_GET(handler)
+        app.http.Handler.do_GET(handler)
         return captured['payload']
 
     def test_health_names_the_lane_that_is_down_instead_of_claiming_everything_is_fine(self):
         app = load_app()
         lanes = {'default': 'http://127.0.0.1:8188', 'rental9': 'http://127.0.0.1:18337'}
         probes = {'default': None, 'rental9': 'ConnectionRefusedError: Connection refused'}
-        with patch.object(app, 'COMFY_LANES', lanes), \
-             patch.object(app, 'COMFY_REMOTE_LANES', {'rental9'}), \
-             patch.object(app, 'refresh_comfy_lanes', lambda: None), \
-             patch.object(app, '_lane_health_cache', {}), \
-             patch.object(app, 'comfy_lane_probe_detail', lambda lane, timeout=2.0: probes[lane]):
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app.lanes, 'refresh_comfy_lanes', lambda: None), \
+             patch.object(app.lanes, '_lane_health_cache', {}), \
+             patch.object(app.lanes, 'comfy_lane_probe_detail', lambda lane, timeout=2.0: probes[lane]):
             body = self._health(app, authed=True)
 
         # The process is up, so ok stays true — the supervisor's readiness gate
         # reads this endpoint and must not flap when a lane is merely off.
         self.assertTrue(body['ok'])
-        self.assertEqual(body['version'], app.GATEWAY_VERSION)
+        self.assertEqual(body['version'], app.config.GATEWAY_VERSION)
         self.assertTrue(body['lanes']['default']['alive'])
         self.assertFalse(body['lanes']['rental9']['alive'])
         self.assertEqual(body['degraded'], ['rental9'])
@@ -169,11 +175,11 @@ class HealthTests(unittest.TestCase):
 
     def test_a_local_lane_that_is_off_says_how_to_connect_one(self):
         app = load_app()
-        with patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
-             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
-             patch.object(app, 'refresh_comfy_lanes', lambda: None), \
-             patch.object(app, '_lane_health_cache', {}), \
-             patch.object(app, 'comfy_lane_probe_detail', lambda lane, timeout=2.0: 'ConnectionRefusedError: nope'):
+        with patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app.lanes, 'refresh_comfy_lanes', lambda: None), \
+             patch.object(app.lanes, '_lane_health_cache', {}), \
+             patch.object(app.lanes, 'comfy_lane_probe_detail', lambda lane, timeout=2.0: 'ConnectionRefusedError: nope'):
             body = self._health(app, authed=False)
 
         self.assertEqual(body['degraded'], ['default'])
@@ -189,13 +195,13 @@ class HealthTests(unittest.TestCase):
     def test_the_lane_probe_is_cached_so_a_burst_of_health_checks_costs_one_knock(self):
         app = load_app()
         calls = []
-        with patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
-             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
-             patch.object(app, '_lane_health_cache', {}), \
-             patch.object(app, 'comfy_lane_probe_detail',
+        with patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app.lanes, '_lane_health_cache', {}), \
+             patch.object(app.lanes, 'comfy_lane_probe_detail',
                           lambda lane, timeout=2.0: calls.append(lane) or None):
             for _ in range(5):
-                app.comfy_lane_health('default')
+                app.lanes.comfy_lane_health('default')
 
         self.assertEqual(calls, ['default'])
 
@@ -212,12 +218,12 @@ class HealthTests(unittest.TestCase):
         """
         app = load_app()
         probes = []
-        with patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
-             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
-             patch.object(app, '_lane_health_cache', {}), \
-             patch.object(app, 'comfy_lane_probe_detail',
+        with patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app.lanes, '_lane_health_cache', {}), \
+             patch.object(app.lanes, 'comfy_lane_probe_detail',
                           lambda lane, timeout=2.0: probes.append(lane) or 'ConnectionRefusedError: nope'):
-            messages = [app.comfy_lane_liveness_error('default') for _ in range(4)]
+            messages = [app.lanes.comfy_lane_liveness_error('default') for _ in range(4)]
 
         self.assertEqual(probes, ['default'], 'the health cache must absorb the burst')
         for message in messages:
@@ -226,11 +232,11 @@ class HealthTests(unittest.TestCase):
 
     def test_a_local_lane_that_answers_raises_nothing_on_the_prompt_path(self):
         app = load_app()
-        with patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
-             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
-             patch.object(app, '_lane_health_cache', {}), \
-             patch.object(app, 'comfy_lane_probe_detail', lambda lane, timeout=2.0: None):
-            self.assertIsNone(app.comfy_lane_liveness_error('default'))
+        with patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app.lanes, '_lane_health_cache', {}), \
+             patch.object(app.lanes, 'comfy_lane_probe_detail', lambda lane, timeout=2.0: None):
+            self.assertIsNone(app.lanes.comfy_lane_liveness_error('default'))
 
 
 if __name__ == '__main__':  # pragma: no cover

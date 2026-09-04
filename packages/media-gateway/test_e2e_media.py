@@ -2,6 +2,7 @@
 the plaintext is removed, and the gateway holds no key to decrypt it."""
 
 import importlib.util
+import sys
 import json
 import sqlite3
 from pathlib import Path
@@ -13,6 +14,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 def _load_gateway():
+    # A fresh world per load: the gateway's state lives in the modules under
+    # gateway/, so a cached one would carry the previous test's caches and
+    # threads into this one.
+    for _cached in [n for n in sys.modules if n == 'gateway' or n.startswith('gateway.')]:
+        del sys.modules[_cached]
     spec = importlib.util.spec_from_file_location("gwapp", str(Path(__file__).with_name("app.py")))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -49,16 +55,16 @@ def test_gateway_seals_output_to_vault_pubkey_and_removes_plaintext(tmp_path):
     _write_vault_db(vault_db, keypair.public_key())
 
     # Point the gateway at the temp dirs and enable E2E.
-    gw.OUT_DIR = out_dir
-    gw.VAULT_DB = vault_db
-    gw.E2E_MEDIA_ENABLED = True
-    gw._vault_public_key_cache.update(mtime=None, spki=None)
+    gw.config.OUT_DIR = out_dir
+    gw.media.VAULT_DB = vault_db
+    gw.media.E2E_MEDIA_ENABLED = True
+    gw.media._vault_public_key_cache.update(mtime=None, spki=None)
 
     original = b"\x00\x01\x02fake-mp4-bytes" * 500
     media = out_dir / "clip_00001_.mp4"
     media.write_bytes(original)
 
-    gw.encrypt_output_file(media)
+    gw.media.encrypt_output_file(media)
 
     # Plaintext is gone; only the sealed envelope remains.
     assert not media.exists()
@@ -79,26 +85,26 @@ def test_gateway_seals_output_to_vault_pubkey_and_removes_plaintext(tmp_path):
     assert recovered == original
 
     # The logical path resolves to the envelope, and it is not re-encryptable.
-    assert gw.is_encryptable_output(envelope_path) is False
-    assert gw.logical_path_for_encrypted(envelope_path).name == "clip_00001_.mp4"
+    assert gw.media.is_encryptable_output(envelope_path) is False
+    assert gw.media.logical_path_for_encrypted(envelope_path).name == "clip_00001_.mp4"
 
 
 def test_exact_output_path_resolves_e2e_only_files(tmp_path):
     gw = _load_gateway()
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    gw.OUT_DIR = out_dir
-    gw.COMFY_OUTPUT_DIR = tmp_path / "absent-comfy"
+    gw.config.OUT_DIR = out_dir
+    gw.config.COMFY_OUTPUT_DIR = tmp_path / "absent-comfy"
 
     # The only on-disk form is the sealed envelope — the logical path must
     # still resolve or history thumbnails 404.
     (out_dir / "anima_00034_.png.e2e").write_text("{}")
-    resolved = gw.find_exact_output_logical_path(str(out_dir / "anima_00034_.png"))
+    resolved = gw.media.find_exact_output_logical_path(str(out_dir / "anima_00034_.png"))
     assert resolved is not None and resolved.name == "anima_00034_.png"
     # The sealed physical path normalizes to the same logical output.
-    via_physical = gw.find_exact_output_logical_path(str(out_dir / "anima_00034_.png.e2e"))
+    via_physical = gw.media.find_exact_output_logical_path(str(out_dir / "anima_00034_.png.e2e"))
     assert via_physical is not None and via_physical.name == "anima_00034_.png"
-    assert gw.find_exact_output_logical_path(str(out_dir / "missing_00001_.png")) is None
+    assert gw.media.find_exact_output_logical_path(str(out_dir / "missing_00001_.png")) is None
 
 
 def test_vault_identity_json_returns_wrapped_material_only(tmp_path):
@@ -106,31 +112,31 @@ def test_vault_identity_json_returns_wrapped_material_only(tmp_path):
     keypair = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     vault_db = tmp_path / "owner-vault.sqlite3"
     _write_vault_db(vault_db, keypair.public_key())
-    gw.VAULT_DB = vault_db
+    gw.media.VAULT_DB = vault_db
 
-    identity = gw.vault_identity_json()
+    identity = gw.media.vault_identity_json()
     assert identity == json.loads(json.dumps(identity))  # plain JSON
     assert "public_key" in identity
     # The store only ever holds wrapped/public fields; bare secrets are rejected
     # upstream (vault_store), so serving the row verbatim leaks nothing.
     assert "master_key" not in identity and "passphrase" not in identity
 
-    gw.VAULT_DB = tmp_path / "absent.sqlite3"
-    assert gw.vault_identity_json() is None
+    gw.media.VAULT_DB = tmp_path / "absent.sqlite3"
+    assert gw.media.vault_identity_json() is None
 
 
 def test_gateway_falls_back_to_legacy_when_no_vault_exists(tmp_path):
     gw = _load_gateway()
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    gw.OUT_DIR = out_dir
-    gw.VAULT_DB = tmp_path / "absent-vault.sqlite3"  # no vault yet
-    gw.E2E_MEDIA_ENABLED = True
-    gw._vault_public_key_cache.update(mtime=None, spki=None)
+    gw.config.OUT_DIR = out_dir
+    gw.media.VAULT_DB = tmp_path / "absent-vault.sqlite3"  # no vault yet
+    gw.media.E2E_MEDIA_ENABLED = True
+    gw.media._vault_public_key_cache.update(mtime=None, spki=None)
 
-    assert gw.vault_public_key_spki() is None
+    assert gw.media.vault_public_key_spki() is None
     media = out_dir / "clip_00002_.png"
     media.write_bytes(b"pngbytes" * 100)
     # seal must decline (no pubkey) so the caller keeps the legacy path available.
-    assert gw.seal_output_to_e2e(media) is False
+    assert gw.media.seal_output_to_e2e(media) is False
     assert media.exists()  # untouched; legacy encryption would handle it

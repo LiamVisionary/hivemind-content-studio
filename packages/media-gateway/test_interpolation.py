@@ -39,7 +39,7 @@ def make_test_clip(path, frames=10, fps=10):
 class InterpolationRouteTest(unittest.TestCase):
     def test_interpolate_route_stages_clip_and_dispatches(self):
         app = load_app()
-        completed = app.threading.Event()
+        completed = app.jobs.threading.Event()
         captured = {}
 
         def fake_run(job_id, video_path, options):
@@ -50,15 +50,15 @@ class InterpolationRouteTest(unittest.TestCase):
         with TemporaryDirectory() as td:
             out_dir = Path(td) / "out"
             out_dir.mkdir()
-            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
-            server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
-            with patch.object(app, "TOKEN", "test-token"), \
-                 patch.object(app, "OUT_DIR", out_dir), \
-                 patch.object(app, "jobs", {}), \
-                 patch.object(app, "run_video_interpolation", side_effect=fake_run):
+            server = app.runtime.ThreadingHTTPServer(("127.0.0.1", 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, "TOKEN", "test-token"), \
+                 patch.object(app.config, "OUT_DIR", out_dir), \
+                 patch.object(app.jobs, "jobs", {}), \
+                 patch.object(app.runners, "run_video_interpolation", side_effect=fake_run):
                 server_thread.start()
                 try:
-                    request = app.Request(
+                    request = app.net.Request(
                         f"http://127.0.0.1:{server.server_port}/api/interpolate",
                         data=json.dumps({
                             "video_base64": "data:video/mp4;base64," + base64.b64encode(b"clipbytes").decode(),
@@ -67,7 +67,7 @@ class InterpolationRouteTest(unittest.TestCase):
                         headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
                         method="POST",
                     )
-                    with app.urlopen(request, timeout=5) as response:
+                    with app.net.urlopen(request, timeout=5) as response:
                         payload = json.loads(response.read().decode("utf-8"))
                         self.assertEqual(response.status, 202)
                     self.assertTrue(completed.wait(1))
@@ -84,7 +84,7 @@ class InterpolationRouteTest(unittest.TestCase):
 
     def test_run_video_interpolation_real_rife_2x_with_audio(self):
         app = load_app()
-        venv_python = Path(app.SUBPROCESS_PYTHON)
+        venv_python = Path(app.media.SUBPROCESS_PYTHON)
         if not venv_python.is_file():
             self.skipTest("repo venv python unavailable")
         probe = subprocess.run(
@@ -98,12 +98,12 @@ class InterpolationRouteTest(unittest.TestCase):
             out_dir.mkdir()
             clip = Path(td) / "in.mp4"
             make_test_clip(clip, frames=8, fps=8)
-            with patch.object(app, "COMFY_OUTPUT_DIR", out_dir), \
-                 patch.object(app, "jobs", {}), \
-                 patch.object(app, "encrypt_outputs", side_effect=lambda paths, job_id=None: [str(p) for p in paths]), \
-                 patch.object(app, "append_history", side_effect=lambda rec: None):
-                app.run_video_interpolation("testjob01", clip, {"factor": 2})
-                rec = app.jobs["testjob01"]
+            with patch.object(app.config, "COMFY_OUTPUT_DIR", out_dir), \
+                 patch.object(app.jobs, "jobs", {}), \
+                 patch.object(app.media, "encrypt_outputs", side_effect=lambda paths, job_id=None: [str(p) for p in paths]), \
+                 patch.object(app.history, "append_history", side_effect=lambda rec: None):
+                app.runners.run_video_interpolation("testjob01", clip, {"factor": 2})
+                rec = app.jobs.jobs["testjob01"]
 
             self.assertEqual(rec["status"], "success", rec.get("error"))
             output = Path(rec["outputs"][0])
