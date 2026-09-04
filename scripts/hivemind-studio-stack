@@ -781,9 +781,15 @@ PY
   # lists it and a person can find it — not in $PRIV, which is chflags hidden.
   # A DIFFERENT file from the redirect below: a shell '>>' and a rotating
   # handler on one path means the shell keeps writing to the rotated-away file.
+  #
+  # ZIMG_TOKEN_FILE is passed explicitly now: the control API presents that
+  # token when it proxies /local-ai to the gated bridge, so if this process and
+  # the Node child ever resolved the path differently, every local model call
+  # would 401. Both are handed the same file, by name.
   HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
   CONTENT_STUDIO_LOG_DIR="$LOG_DIR/Hivemind Content Studio" \
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
 	  COMFY_LANES="$comfy_lanes" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   CONTENT_STUDIO_PROXY_SECRET="$CONTENT_STUDIO_PROXY_SECRET" \

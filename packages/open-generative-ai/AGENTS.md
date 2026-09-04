@@ -23,9 +23,12 @@ In short: **optimize per platform, but preserve all existing platform paths.**
 
 Default to the vite dev server for ALL frontend iteration — run the
 `open-generative-ai` launch config (port 5173). Its proxies make it fully
-functional against the live local stack with no owner unlock and no build:
-`/api` → the studio control API (127.0.0.1:8765) and `/local-ai` → the
-loopback hosted bridge (127.0.0.1:8794, ungated).
+functional against the live local stack with no build: `/api` → the studio
+control API (127.0.0.1:8765) and `/local-ai` → the loopback hosted bridge
+(127.0.0.1:8794). Both are gated; the dev server needs no extra setup for
+either, because cookies are scoped by host and not by port, so a browser signed
+in to the studio on 127.0.0.1:8765 sends its session to 5173 too and the proxy
+forwards it. Sign in once and local models answer.
 
 Run `npm run vite:build` ONLY when the user explicitly asks for a build or to
 deploy changes to the served app (8765 / the Tailscale HTTPS URL on 8789 —

@@ -16,7 +16,17 @@
  *     /healthz      one health answer covering all three
  *
  * Each surface keeps its own dispatch table: the prefix is stripped before the
- * request reaches it, so every route answers exactly as it did on its own port.
+ * request reaches it, so every route answers exactly as it did on its own port
+ * — including a request that carries an `Upgrade` header to a surface with no
+ * WebSocket route, which is served as ordinary HTTP here exactly as the bare
+ * port serves it.
+ *
+ * ONE thing the mounts do not do, and it is deliberate: `/canvas` is for API
+ * and proxy routes, not for opening in a browser. Everything behind it emits
+ * absolute asset URLs, and this mount rewrites paths inbound and never bodies
+ * outbound, so a browser navigation is redirected to the compatibility port
+ * rather than served HTML whose every asset would 404. See CANVAS_BROWSER_ROOTS
+ * below; the bridge is unaffected (its index.html is already mount-relative).
  *
  * The three old ports keep answering. Removing one is a separate decision, and
  * until it is made the frontend, the stack script, the Tauri shell, the MCP
@@ -32,6 +42,7 @@ import { realpathSync } from 'node:fs';
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const openGenRoot = resolve(here, '..', 'open-generative-ai');
+const canvasGate = require('./lib/canvas-gate');
 
 const HOST = process.env.HIVEMIND_NODE_SERVICES_HOST || process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.HIVEMIND_NODE_SERVICES_PORT || 8793);
@@ -164,8 +175,27 @@ function healthDocument(surfaces) {
   return { ok: allOk, service: 'hivemind-node-services', host: HOST, port: PORT, surfaces: detail };
 }
 
-/** The shared port's own dispatch: one health answer, then the three mounts. */
-function sharedHandler(surfaces) {
+// `/canvas` is an API and proxy mount, not a place to open in a browser.
+//
+// Every page behind it emits ABSOLUTE asset URLs — Next writes `/_next/...`
+// (next.config.js sets no basePath or assetPrefix), ComfyUI Mobile's build
+// writes `/mobile/assets/...`, and app/mobile/[[...path]]/route.js rewrites
+// `/comfy/...` in — and this mount strips the prefix on the way in without
+// rewriting bodies on the way out. So the HTML would arrive and every asset in
+// it would land on the shared port's 404. Rewriting three surfaces' bodies to
+// be mount-relative is a real project; until someone does it, a navigation is
+// sent to the compatibility port, where the Canvas genuinely works and where
+// the studio's iframe and the Tauri shell already address it.
+// Only roots that are unambiguously the Canvas's. A bare `/assets/` is not:
+// the bridge's own index.html is mount-relative, so a page opened at `/bridge`
+// without the trailing slash resolves `./assets/…` there, and it would be
+// pointed at the wrong port.
+const CANVAS_BROWSER_ROOTS = ['/_next/', '/mobile/', '/comfy/'];
+
+/** The shared port's own dispatch: one health answer, then the three mounts.
+ *  Exported so the mount's behaviour can be tested over a real socket without
+ *  a Next build behind it. */
+export function sharedHandler(surfaces) {
   return (req, res) => {
     const url = req.url || '/';
     const pathname = url.split('?')[0].split('#')[0];
@@ -177,10 +207,29 @@ function sharedHandler(surfaces) {
     }
     const target = mountFor(url);
     if (!target) {
+      // A `/_next/...` or `/mobile/assets/...` request here is a page that was
+      // opened on the wrong port, so the 404 says which port it wanted rather
+      // than leaving a blank screen and a mounts list to interpret.
+      const strayCanvasAsset = CANVAS_BROWSER_ROOTS.some((root) => pathname.startsWith(root));
       sendJson(res, 404, {
         ok: false,
         error: 'No service is mounted at this path.',
+        ...(strayCanvasAsset ? { remedy: canvasBrowserRemedy() } : {}),
         mounts: MOUNTS,
+      });
+      return;
+    }
+    if (target.id === 'canvas' && isBrowserNavigation(req)) {
+      const location = canvasBrowserUrl(req, target.url);
+      if (location) {
+        res.writeHead(302, { location, 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
+      sendJson(res, 404, {
+        ok: false,
+        error: 'The Canvas is not served on this port.',
+        remedy: canvasBrowserRemedy(),
       });
       return;
     }
@@ -189,15 +238,68 @@ function sharedHandler(surfaces) {
   };
 }
 
-function sharedUpgradeHandler(surfaces) {
+/** A person typing a URL in, as opposed to the page's own fetch/XHR. Same
+ *  predicate the credential gate uses, so the two cannot disagree. */
+function isBrowserNavigation(req) {
+  return canvasGate.wantsHtml(req);
+}
+
+function canvasBrowserRemedy() {
+  return LEGACY_PORTS_ENABLED
+    ? `Open the Canvas on http://${HOST}:${CANVAS_LEGACY_PORT} instead; ${MOUNTS.canvas} on this port serves its API and proxy routes only.`
+    : `${MOUNTS.canvas} on this port serves API and proxy routes only, and the compatibility port is switched off (HIVEMIND_NODE_SERVICES_LEGACY_PORTS=0). Start it to open the Canvas in a browser.`;
+}
+
+/** Where the same path is actually browsable, or null when nothing serves it. */
+function canvasBrowserUrl(req, strippedUrl) {
+  if (!LEGACY_PORTS_ENABLED) return null;
+  const host = String(req.headers.host || `${HOST}:${PORT}`).replace(/:\d+$/, '') || HOST;
+  return `http://${host}:${CANVAS_LEGACY_PORT}${strippedUrl}`;
+}
+
+/** Answer an upgrade request the way a server with no `upgrade` listener would.
+ *
+ *  Node only routes a request to `'upgrade'` when a listener is registered; with
+ *  none, it clears `req.upgrade` and the request is served as ordinary HTTP.
+ *  The three legacy ports register a listener only for the Canvas, so `GET
+ *  /local-ai/models` with `Upgrade: websocket` answers 200 on 8794 — while the
+ *  shared port, which needs ONE listener for all three mounts, used to destroy
+ *  the socket with no reply. That is the mount diverging from the port it
+ *  replaces, so the fallback is to serve the request rather than drop it.
+ *
+ *  `head` is everything the parser read past the headers, which is the whole
+ *  body of an upgrade request. `unshift` puts it back before `'end'` is emitted
+ *  (`push` would throw: the parser already signalled EOF). Nothing frames it
+ *  after that, so Content-Length has to be honoured here or a pipelined byte
+ *  would arrive as body — the bare port's parser stops at the declared length
+ *  and so does this. The one visible difference from the bare port is that this
+ *  connection closes after the answer instead of staying keep-alive. */
+function serveUpgradeAsRequest(surface, req, socket, head) {
+  const res = new http.ServerResponse(req);
+  res.assignSocket(socket);
+  res.on('finish', () => { res.detachSocket(socket); socket.end(); });
+  socket.on('error', () => { /* a client that hung up mid-answer is not an error here */ });
+  const declared = Number(req.headers['content-length']);
+  const body = head && head.length
+    ? (Number.isFinite(declared) && declared >= 0 ? head.subarray(0, declared) : head)
+    : null;
+  if (body && body.length) req.unshift(body);
+  surface.handleRequest(req, res);
+}
+
+export function sharedUpgradeHandler(surfaces) {
   return (req, socket, head) => {
     const target = mountFor(req.url || '/');
     const surface = target && surfaces.get(target.id);
-    if (!surface || typeof surface.handleUpgrade !== 'function') {
+    if (!surface) {
       socket.destroy();
       return;
     }
     req.url = target.url;
+    if (typeof surface.handleUpgrade !== 'function') {
+      serveUpgradeAsRequest(surface, req, socket, head);
+      return;
+    }
     surface.handleUpgrade(req, socket, head);
   };
 }

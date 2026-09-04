@@ -1116,22 +1116,32 @@ def _token(descriptor: MediaStudioDescriptor) -> str:
     if direct:
         return direct
     if descriptor.auth_env_key in {"MEDIA_STUDIO_TOKEN", "ZIMG_TOKEN"}:
-        for path in _token_paths():
-            try:
-                value = path.read_text(encoding="utf-8").strip()
-            except OSError:
-                continue
-            if value:
-                return value
-        # Nothing on disk. This token is not a credential anyone issues — it is
-        # a local secret shared between the studio and its own gateway, and the
-        # only thing that ever created one was a one-off migration script. So a
-        # machine that never ran that migration had no token, the gateway read
-        # "", and the entirely LOCAL image and video lanes reported themselves
-        # unavailable. Mint it here instead of asking the user for a secret that
-        # is ours to generate.
-        return _provision_gateway_token()
+        return local_gateway_token()
     return ""
+
+
+def local_gateway_token() -> str:
+    """The loopback secret this machine's studio shares with its own services.
+
+    The gateway on 8787 holds it, the Canvas surface and the local-inference
+    bridge both accept it, and the control API presents it when it proxies to
+    either of them. One value, read from the same file every one of those reads.
+
+    This token is not a credential anyone issues — it is a local secret shared
+    between the studio and its own gateway, and the only thing that ever created
+    one was a one-off migration script. So a machine that never ran that
+    migration had no token, the gateway read "", and the entirely LOCAL image
+    and video lanes reported themselves unavailable. Mint it here instead of
+    asking the user for a secret that is ours to generate.
+    """
+    for path in _token_paths():
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return _provision_gateway_token()
 
 
 def _provision_gateway_token() -> str:

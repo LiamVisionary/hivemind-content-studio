@@ -101,24 +101,53 @@ class RouteGates(unittest.TestCase):
                 thread.join(timeout=5)
         self.assertEqual(answered, [], "these gateway paths answered a request with no token: " + "; ".join(answered))
 
-    def test_the_health_check_answers_without_a_token_but_hides_the_lane_urls(self):
+    def _health(self, query: str = "") -> dict:
         server = app.runtime.ThreadingHTTPServer(("127.0.0.1", 0), app.http.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         with patch.object(app.config, "TOKEN", "sweep-token"):
             thread.start()
             try:
                 base = f"http://127.0.0.1:{server.server_port}"
-                with urlopen(base + "/healthz", timeout=5) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                with urlopen(base + "/healthz" + query, timeout=5) as response:
+                    return json.loads(response.read().decode("utf-8"))
             finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+
+    def test_the_health_check_answers_without_a_token_but_hides_the_lane_urls(self):
+        payload = self._health()
         self.assertTrue(payload["ok"])
         # An unauthenticated caller learns that a lane is degraded, never where
         # a rented machine lives.
         for lane in payload.get("lanes", {}).values():
             self.assertNotIn("url", lane)
+
+    def test_the_health_check_discloses_no_path_and_nothing_about_this_machine(self):
+        # Same reasoning as the lane URLs, one step further. ``comfy`` was an
+        # absolute filesystem path with the account name in it, handed to any
+        # caller with no token; the version, the build flag and the accelerator
+        # answers fingerprint the machine. None of that is liveness. The
+        # project's norm for an unauthenticated health answer is written in
+        # lib/canvas-gate.js: liveness "and nothing else — no lane list, no
+        # version, no paths", and lane liveness is the argued exception.
+        payload = self._health()
+        for field in ("comfy", "version", "runner", "ui", "accelerator_profile", "native_mlx_ltx"):
+            self.assertNotIn(
+                field, payload,
+                f"/health hands {field} to a caller with no token; move it into the authed branch",
+            )
+        rendered = json.dumps(payload)
+        self.assertNotIn("/Users/", rendered)
+        self.assertNotIn(str(app.config.COMFY), rendered)
+
+    def test_the_same_answer_with_the_token_still_says_where_ComfyUI_is(self):
+        # Nothing is lost, only gated: the fields moved behind the same token
+        # the lane URLs are behind.
+        payload = self._health("?token=sweep-token")
+        self.assertEqual(payload["comfy"], str(app.config.COMFY))
+        self.assertEqual(payload["version"], app.config.GATEWAY_VERSION)
+        self.assertIn("accelerator_profile", payload)
 
 
 if __name__ == "__main__":  # pragma: no cover - parity with the other suites here

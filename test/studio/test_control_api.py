@@ -1550,6 +1550,50 @@ def test_opengen_bridge_proxy_forwards_the_query_string(tmp_path: Path, monkeypa
     assert client.get("/local-ai/secrets", params={"baseModels": "LTXV"}).status_code == 404
 
 
+def test_opengen_bridge_proxy_presents_the_loopback_gateway_token(tmp_path: Path, monkeypatch) -> None:
+    """The bridge authenticates its callers now, and this hop has no session.
+
+    The browser reaches local models same-origin through here, so if this
+    proxy stopped presenting the shared loopback token every local model call
+    would 401 with a sign-in link the owner is already past. The token stays
+    server-side: it is set on the outbound request only.
+    """
+    token_file = tmp_path / "secure" / "zimg-token"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text("loopback-token-value\n", encoding="utf-8")
+    monkeypatch.setenv("ZIMG_TOKEN_FILE", str(token_file))
+    client, _, _ = _client(tmp_path, monkeypatch)
+    seen: dict[str, object] = {}
+
+    class _Upstream:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_urlopen(request, timeout=0):  # noqa: ARG001
+        seen["headers"] = dict(request.header_items())
+        return _Upstream()
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.urllib.request.urlopen", fake_urlopen)
+
+    response = client.get("/local-ai/models")
+    assert response.status_code == 200
+    headers = {name.lower(): value for name, value in seen["headers"].items()}
+    assert headers["authorization"] == "Bearer loopback-token-value"
+    # And it never comes back out: the browser sees the bridge's body, not the
+    # credential this hop used to fetch it.
+    assert "authorization" not in {name.lower() for name in response.headers}
+    assert "loopback-token-value" not in response.text
+
+
 def test_opengen_bridge_proxy_exposes_the_lora_update_and_cancel_routes(tmp_path: Path, monkeypatch) -> None:
     """The studio calls these same-origin through control_api, not the 8794 bridge
     directly, so a route missing from the allowlist fails silently in the real app

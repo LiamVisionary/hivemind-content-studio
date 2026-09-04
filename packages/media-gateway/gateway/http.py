@@ -656,20 +656,33 @@ class Handler(BaseHTTPRequestHandler):
         # 502 — after composing a prompt. The lane URLs stay behind the
         # token: an unauthenticated caller learns that a lane is degraded,
         # not where a rented machine lives.
+        #
+        # And not where anything else lives either. `comfy` is a filesystem
+        # path with the account name in it, and the version, the build flag and
+        # the accelerator answers fingerprint the machine — none of which is
+        # liveness. The project's own norm for an unauthenticated health answer
+        # is written down in lib/canvas-gate.js: liveness "and nothing else —
+        # no lane list, no version, no paths". The lane liveness IS the
+        # exception here, argued above and pinned by test_route_gates.py;
+        # everything else moves behind the token, where the lane URLs already
+        # are. Nothing in this repository read these fields unauthenticated.
         _lanes.refresh_comfy_lanes()
         authed = self.authed(qs)
         lanes = {
             lane: {**({"url": _lanes.COMFY_LANES.get(lane) or ""} if authed else {}), **health}
             for lane, health in _lanes.comfy_lane_health_snapshot().items()
         }
-        return self.send_json({
-            "ok": True,
+        machine = {
             "version": config.GATEWAY_VERSION,
             "comfy": str(config.COMFY),
             "runner": config.RUNNER.exists(),
             "ui": "v2",
             "accelerator_profile": config.accelerator_profile(),
             "native_mlx_ltx": config.supports_native_mlx_ltx_route(),
+        } if authed else {}
+        return self.send_json({
+            "ok": True,
+            **machine,
             "lanes": lanes,
             "degraded": [lane for lane, state in lanes.items() if not state.get("alive")],
         })
