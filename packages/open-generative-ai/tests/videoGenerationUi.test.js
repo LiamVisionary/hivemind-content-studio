@@ -1,3 +1,6 @@
+// Deliberately textual: which reference views the studio exposes for a
+// conditioning-only lane is wiring into a lane this machine may not have.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

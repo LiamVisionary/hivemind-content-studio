@@ -1,7 +1,9 @@
 // Rental-LoRA registry: the dev-mode "Use in rentals" flow and the Rented-mode
-// catalog filter. The store logic is exercised directly; the JSX wiring
-// (LoraSection/studios) is asserted by source shape, matching this suite's
-// convention for components node:test cannot import.
+// catalog filter. The store logic is exercised directly; the wiring around it
+// is asserted on the source.
+//
+// Deliberately textual: registry filtering and the SFW/NSFW confirm are store
+// wiring around the pure helpers exercised above.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

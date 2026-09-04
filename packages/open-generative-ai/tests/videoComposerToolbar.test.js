@@ -2,12 +2,30 @@
 // and Generate stays pinned right on every width. One flex-wrap row used to
 // hold both, so below ~1280px the primary button dropped to a second row,
 // left-aligned, under the chips.
+//
+// Deliberately textual (everything after the first test): where a button sits
+// in a flex row, which branch of a ternary is the leading action, and what the
+// keyboard and confirm paths do are all shape and interaction. The chips
+// themselves are rendered.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { renderStudio, textOf } = require('./helpers/render.js');
 
 const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
+
+test('the video composer paints its chips and one Generate', async () => {
+    const studio = textOf(await renderStudio('src/studios/VideoStudio.jsx', 'VideoStudio'));
+    for (const chip of ['Add someone', 'Start frame', 'Source video', 'Prompts', 'Camera', 'Refine']) {
+        assert.match(studio, new RegExp(chip), `the composer is missing the ${chip} chip`);
+    }
+    assert.match(studio, /Generate/);
+    // The empty state names the next move, and the studio says where it runs
+    // before anything is typed.
+    assert.match(studio, /Describe a shot or drop in a starting picture, then press Generate\./);
+    assert.match(studio, /Runs on/);
+});
 
 test('the chips wrap as a group and Generate is a pinned sibling', () => {
     const studio = read('src/studios/VideoStudio.jsx');

@@ -6,17 +6,26 @@
 // registry control in the same panel. The composer carried nine chips, three of
 // which all meant "improve my prompt".
 //
-// These are source-shape guarantees — the same kind the rest of this suite
-// makes — plus one behavioural check: a picked photo becomes a data: URL, so
-// the bytes reach MUAPI only after the Generate-time confirm.
+// What a person SEES — which controls the panel opens on, which chips the
+// composer carries — is rendered. What is left textual is either a shape the
+// render cannot reach (a control that only paints for a local model, on a
+// machine with weights) or a promise that something stays deleted; each of
+// those carries its reason above it.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { renderStudio, textOf } = require('./helpers/render.js');
 
 const root = path.join(__dirname, '..');
 const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8');
 const exists = (relative) => fs.existsSync(path.join(root, relative));
+const load = (relative) => import(pathToFileURL(path.join(root, relative)).href);
+
+// The Image studio, mounted (renderStudio loads the catalog first, the way
+// App.jsx does before the studio chunk).
+const renderImageStudio = async () => textOf(await renderStudio('src/studios/ImageStudio.jsx', 'ImageStudio'));
 
 const PANEL = 'src/studios/image/ImageSettingsPanel.jsx';
 const COMPOSER = 'src/studios/image/ImageComposer.jsx';
@@ -69,25 +78,54 @@ test('nothing gates a control on a ?dev=1 URL any more', () => {
 
 /* ---------------- the panel's tiers ---------------- */
 
-test('the default panel is Model, Aspect, Style, How many and LoRAs — the rest is behind two disclosures', () => {
+// What the panel SHOWS is rendered, because a source position proves nothing
+// about what paints: this pair replaced a grep that asserted "How many" and
+// LoRAs were above the first <CollapsibleSection> — both true of the file, and
+// neither on screen, because they belong to a local model and the panel opens
+// on a cloud one.
+test('the panel opens on the everyday controls, with Advanced and Modes shut', async () => {
+    const panel = await renderImageStudio();
+    assert.match(panel, /Runs on/, 'Runs on — place and model — is always visible');
+    assert.match(panel, /Aspect ratio/, 'Aspect is always visible');
+    assert.match(panel, /Style preset/, 'Style is always visible');
+    // Exactly two disclosures, each named, and neither open.
+    assert.match(panel, /Advanced/);
+    assert.match(panel, /Modes/);
+    for (const inside of ['Seed', 'Region boxes']) {
+        assert.doesNotMatch(panel, new RegExp(inside), `${inside} lives inside a closed disclosure and must not paint`);
+    }
+});
+
+test('opening a disclosure paints what it holds', async () => {
+    // The section reopens the way it was left, so the stored preference is the
+    // same door a press goes through — see CollapsibleSection's storageKey.
+    const { setSectionOpen } = await load('src/lib/prefs.js');
+    setSectionOpen('image.advanced', true);
+    assert.match(await renderImageStudio(), /Seed/, 'Advanced holds the seed');
+    setSectionOpen('image.advanced', false);
+    setSectionOpen('image.modes', true);
+    assert.match(await renderImageStudio(), /Region boxes/, 'Modes holds the region boxes');
+    setSectionOpen('image.modes', false);
+});
+
+// Deliberately textual. Steps, Guidance, Sampler, Scheduler, the negative
+// prompt and the width/height pair only paint for a LOCAL model — a machine
+// with weights on disk — so which disclosure declares them is a source fact a
+// render on a bare machine cannot reach. The same for the third-disclosure
+// count and the two hints, which are about the file's shape.
+test('tuning is declared in Advanced, the meaning-changing modes in Modes, and there is no third disclosure', () => {
     const panel = read(PANEL);
     const basic = panel.slice(0, panel.indexOf('<CollapsibleSection'));
     // One control names the place AND the model: the segmented Local / API /
     // Rented triad and the model menu beside it asked the same question twice.
-    assert.match(basic, /<RunOnPicker/, 'Runs on — place and model — is always visible');
     assert.doesNotMatch(panel, /<Segmented[\s\S]{0,120}image\.local/, 'the source triad is gone');
-    assert.match(basic, /<AspectRatioPicker/, 'Aspect is always visible');
-    assert.match(basic, /\{t\('image\.stylePreset'\)\}/, 'Style is always visible');
-    assert.match(basic, /'How many'/, 'the batch count is always visible');
-    assert.match(basic, /<LoraSection \{\.\.\.loraProps\} \/>/, 'the adapters are always visible');
+    assert.match(basic, /'How many'/, 'the batch count is above the disclosures');
+    assert.match(basic, /<LoraSection \{\.\.\.loraProps\} \/>/, 'the adapters are above the disclosures');
 
-    // Exactly two disclosures, and each names what is armed inside it.
     const sections = panel.match(/<CollapsibleSection[\s\S]{0,220}?>/g) || [];
     assert.equal(sections.length, 2, 'one Advanced, one Modes — no third disclosure');
     assert.match(sections[0], /title=\{t\('image\.advancedOptions'\)\} hint=\{advancedHint\}/);
     assert.match(sections[1], /title=\{zh\(\) \? '模式' : 'Modes'\} hint=\{modesHint\}/);
-    // Tuning lives in Advanced; the modes that change what the composer MEANS
-    // live in Modes.
     const advanced = panel.slice(panel.indexOf('<CollapsibleSection'), panel.indexOf("title={zh() ? '模式' : 'Modes'}"));
     for (const control of [/t\('image\.steps'\)/, /t\('image\.guidanceScale'\)/, /t\('image\.seed'\)/, /'Sampler'/, /'Scheduler'/, /t\('image\.negPromptLabel'\)/, /LOCAL_BASE_SIZES/, /t\('image\.width'\)/]) {
         assert.match(advanced, control, `Advanced is missing ${control}`);
@@ -114,23 +152,28 @@ test('the Krea-2 timing sentence is replaced by the measured ETA', () => {
 
 /* ---------------- the composer's five chips ---------------- */
 
-test('the composer is five chips and one door for improving a prompt', () => {
+test('the composer renders its chips and one door for improving a prompt', async () => {
+    // The chip row, as a person meets it. The grep this replaced sliced the
+    // source at a className and asserted on the slice — it stayed green through
+    // a chip that rendered under a condition nobody could satisfy.
+    const composer = await renderImageStudio();
+    for (const chip of ['Attach', 'Starters', 'Improve', 'Camera', 'Start fresh', 'Runs on']) {
+        assert.match(composer, new RegExp(chip), `the composer is missing the ${chip} chip`);
+    }
+    assert.match(composer, /Generate/, 'and the button the whole page is for');
+});
+
+// Deliberately textual: what is left here is that the retired doors stay
+// retired, and that the Starters chip and its lazily-loaded menu are named by
+// one descriptor — a render sees the chip either way, so only the source can
+// say the two cannot drift apart.
+test('the improve-my-prompt doors stayed merged into one menu', () => {
     const composer = read(COMPOSER);
     const row = composer.slice(composer.indexOf('<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">'));
-    // Attach, Starters, Improve, Start fresh, Model.
-    assert.match(row, /<UploadPicker/);
-    assert.match(row, /label=\{zh\(\) \? '附加' : 'Attach'\}/);
-    // Starters is loaded on press (its shipped prompt library is the heaviest
-    // thing on this page), so the row holds the lazy component plus the chip
-    // that stands in for it while the chunk arrives — both named by the same
-    // descriptor, so the two can never drift apart.
     assert.match(row, /<SavedPromptsMenuLazy/);
     assert.match(row, /chip=\{startersChip\}/);
     assert.match(row, /\{\.\.\.startersChip\}/);
     assert.match(composer, /label: zh\(\) \? '起点' : 'Starters'/);
-    assert.match(row, /label=\{zh\(\) \? '润色' : 'Improve'\}/);
-    assert.match(row, /label=\{t\('common\.startFresh'\)\}/);
-    assert.match(row, /<RunOnPicker/);
     // The three separate "make my prompt better" doors are one menu now.
     assert.doesNotMatch(row, /<UgcMenu/);
     assert.doesNotMatch(row, /<ReferenceRolesMenu[\s\S]{0,80}\/>\s*<Menu/);

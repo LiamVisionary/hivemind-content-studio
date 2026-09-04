@@ -5,6 +5,9 @@
 // asynchronous gate (the session probe is a network round trip, and dropping
 // bodies would break every generation queued from the Canvas), and a refused
 // WebSocket upgrade closes with a status line instead of hanging.
+//
+// Deliberately textual: which host the Canvas URL is built on is what decides
+// whether the session cookie is in scope for the iframe.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');

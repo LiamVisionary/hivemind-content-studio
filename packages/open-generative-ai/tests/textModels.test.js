@@ -1,6 +1,10 @@
 // The producer's model picker: which source a model belongs to, what it costs,
 // and what the studio promises about it. Every test is named after what the
 // owner is told when the rule below it is missing.
+//
+// Deliberately textual: the IMPORT SET is the point here. A picker that calls
+// a function it never imported renders perfectly until someone clicks the row —
+// which is exactly how it shipped (2026-09-02).
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';

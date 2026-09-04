@@ -1,5 +1,8 @@
 // The Story studio's drawn-reference slot: a sheet that cannot be shown is a
 // STATE with an action, never a broken <img> with alt text in it.
+//
+// Deliberately textual: a sheet the tab cannot open, and one drawn from bytes
+// still in hand, are both states reached after an async read.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';

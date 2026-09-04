@@ -1,10 +1,11 @@
 // Hive Persona ID — the wiring the pure logic in personaId.test.js cannot see.
 //
-// PersonaBar.jsx, ReferencesMenu.jsx and VideoStudio.jsx are JSX, which
-// node:test cannot import, so these assert the shape of the source the same way
-// the other studio tests do (see framePickerInteractions.test.js). The flow
-// itself — save, load, edit a row, overwrite — was driven in the browser
-// against the running studio and the sealed blob it wrote.
+// The flow itself — save, load, edit a row, overwrite — was driven in the
+// browser against the running studio and the sealed blob it wrote.
+//
+// Deliberately textual: a persona is a NAME for three reference lists, so what
+// is pinned here is where it is stored and which setters write it back. That
+// is module wiring, not something a page can be made to show.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

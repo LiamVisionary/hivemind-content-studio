@@ -1,3 +1,6 @@
+// Deliberately textual: the view branches on a server payload this machine
+// cannot produce without two marketplaces refusing a credential.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -8,8 +11,8 @@ const path = require('node:path');
 // credential, the server dropped both refusals, and an unpriced rung is drawn
 // identically whether the market is sold out or nobody was ever asked. The
 // server now sends `marketplace_failures`; these pin that the view actually
-// branches on it. JSX node:test cannot import, so this is a source-shape pin —
-// the rendering itself was driven in the browser against a fixture plan.
+// branches on it. The rendering itself was driven in the browser against a
+// fixture plan.
 const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
 const view = read('src/hub/views/GpuMachinesView.jsx');
 

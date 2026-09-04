@@ -1,9 +1,12 @@
 // ActionButton hover hints.
 //
-// kit.jsx is JSX, which node:test cannot import, so these assert the shape of the
-// source the way the other studio tests do. The clipping this guards against was
-// reproduced in the browser: in the image result modal the last button's hint
-// rendered as "Down…", cut at the dialog's edge.
+// The clipping this guards against was reproduced in the browser: in the image
+// result modal the last button's hint rendered as "Down…", cut at the dialog's
+// edge.
+//
+// Deliberately textual: a hint exists only while a pointer hovers. It is
+// portalled to the body, positioned against the viewport and re-placed on
+// scroll; none of that survives a static render.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

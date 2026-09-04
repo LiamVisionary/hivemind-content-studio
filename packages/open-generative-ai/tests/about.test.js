@@ -9,20 +9,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { registerHooks } = require('node:module');
-const { fileURLToPath, pathToFileURL } = require('node:url');
-const esbuild = require('esbuild');
-
-registerHooks({
-    load(url, context, nextLoad) {
-        if (!url.startsWith('file:') || !url.endsWith('.jsx')) return nextLoad(url, context);
-        const file = fileURLToPath(url);
-        const { code } = esbuild.transformSync(fs.readFileSync(file, 'utf8'), {
-            loader: 'jsx', jsx: 'automatic', format: 'esm', sourcefile: file,
-        });
-        return { format: 'module', shortCircuit: true, source: code };
-    },
-});
+const { pathToFileURL } = require('node:url');
+// The shared render idiom, which also installs the JSX import hook this file
+// used to carry its own copy of.
+const { renderComponent, textOf } = require('./helpers/render.js');
 
 const root = path.join(__dirname, '..');
 const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8');
@@ -109,10 +99,20 @@ test('About is reachable from the nav and from the topbar chip', async () => {
     assert.ok(/onNavigate\('about'\)/.test(shell), 'the chip must open the About page');
 });
 
-test('the About page states the licence, the source offer and the warranty', () => {
-    const view = read('src/hub/views/AboutView.jsx');
-    assert.ok(view.includes('AGPL-3.0-or-later'), 'the licence must be named in the page itself');
-    assert.ok(/NO WARRANTY/.test(view), 'the no-warranty line is required by the licence');
-    assert.ok(view.includes('/api/about'), 'the page must read the server payload');
-    assert.ok(view.includes('View source'), 'the source offer must be a link a user can follow');
+test('the About page states the licence, the source offer and the warranty', async () => {
+    // AGPL §5(d) asks an interactive program to SHOW these, so they are read
+    // off the rendered page rather than out of the file: a licence line inside
+    // a section that never opens satisfies a grep and nobody else.
+    const page = textOf(await renderComponent('src/hub/views/AboutView.jsx', 'AboutView', { active: true }));
+    assert.match(page, /AGPL-3\.0-or-later/, 'the licence must be named on the page');
+    assert.match(page, /ABSOLUTELY NO WARRANTY/, 'the no-warranty line is required by the licence');
+    assert.match(page, /View source/, 'the source offer must be a link a user can follow');
+    assert.match(page, /Report a vulnerability privately/);
+});
+
+// Deliberately textual: which endpoint the page asks for its build facts is
+// invisible on screen — the render never runs an effect, which is exactly why
+// the version and build date are blank above.
+test('the About page reads its build facts from the server', () => {
+    assert.ok(read('src/hub/views/AboutView.jsx').includes('/api/about'));
 });

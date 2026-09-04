@@ -11,6 +11,11 @@
 // the user's. Tokens like <Subject 1> may live in the compiled prompt, in hover
 // titles and in Prompt Check's findings — never in the labels, hints and menu
 // copy a first-timer reads.
+//
+// Deliberately textual: chain lineage, the single arming path and the run a
+// workflow refuses are state machinery; and the fold's contents only paint for
+// a lane this machine may not have, so a render on a bare box sees an empty
+// disclosure either way.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

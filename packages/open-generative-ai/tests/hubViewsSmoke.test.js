@@ -12,6 +12,10 @@
 // network refused and the Electron bridge stubbed. Effects never run under a
 // server render, so nothing here reaches the API; the load gate itself is
 // asserted on the source.
+//
+// The one textual assertion left in this file is deliberate: the load GATE —
+// that a page never opened never fetches — is about an effect that a server
+// render does not run. Everything else here is rendered.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

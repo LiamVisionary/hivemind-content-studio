@@ -1,3 +1,6 @@
+// Deliberately textual: the assertion on source here is that a decrypt path
+// has no second implementation — an absence claim over the tree.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');

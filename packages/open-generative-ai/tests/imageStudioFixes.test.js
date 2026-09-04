@@ -3,6 +3,11 @@
 // hosted bridge's cancel/resume contract, and the source-shape guarantees the
 // audit findings turned into (Start fresh clears the draft, Cancel is honest,
 // dead cloud controls are hidden, the roles block follows the reference count).
+//
+// Deliberately textual: these pin the studio's WIRING — what a cancel tears
+// down, what a captured context carries, which handler a re-render commits —
+// none of which a single static render can observe. What the Image studio
+// SHOWS is rendered in imageTiering.test.js and pagesSmoke.test.js.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

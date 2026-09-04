@@ -1,3 +1,6 @@
+// Deliberately textual: the bridge chain a download travels, end to end. Every
+// link is a call site.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

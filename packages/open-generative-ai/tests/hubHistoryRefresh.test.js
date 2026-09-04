@@ -1,3 +1,6 @@
+// Deliberately textual: which key History looks a sealed setup up by is a
+// lookup, not a rendering.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 

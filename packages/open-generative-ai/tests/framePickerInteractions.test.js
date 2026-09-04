@@ -1,9 +1,11 @@
 // Reference / keyframe picker interaction rules.
 //
-// UploadPicker.jsx, FrameSlotsPicker.jsx, VideoStudio.jsx and videoLogic.js are
-// JSX, which node:test cannot import, so these assert the shape of the source the
-// same way the other studio tests do (see loraSelection.test.js). The behaviors
-// themselves were verified in the browser against the running studio.
+// The behaviours themselves were verified in the browser against the running
+// studio.
+//
+// Deliberately textual: every rule here is a pointer interaction — a dismiss
+// region that includes its own trigger, a press that opens a preview, a pick
+// that switches the model — and a server render paints one frame and stops.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
