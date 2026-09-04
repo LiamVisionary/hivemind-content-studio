@@ -133,3 +133,24 @@ def test_the_lede_promises_only_what_the_code_delivers():
     assert "Nothing in one can be opened from another" not in html
     assert "sealed to your own key" in html
     assert "encrypted on this" in html
+
+
+def test_a_gate_that_cannot_reach_the_studio_still_offers_a_way_forward():
+    """The first screen of the app never ends at "not reachable".
+
+    `start()` used to swap the lede for one sentence and return before the tiles
+    were rendered, leaving a screen with a problem on it and nothing to press —
+    the state a person meets when the control API is restarting behind a stale
+    tab. The failure now reveals a block that says what to wait for and carries
+    a Try again, and a successful retry puts the opening lede back rather than
+    leaving the failure sentence over a working picker.
+    """
+    from hivemind_content_studio.account_gate import account_gate_html
+
+    html = account_gate_html(desktop=False)
+    assert 'id="unreachable"' in html
+    assert 'id="unreachable-retry"' in html
+    assert "still starting" in html, "the sentence says what to wait for"
+    assert "el('unreachable').hidden = false;" in html, "the failure path reveals it"
+    assert "el('unreachable-retry').addEventListener" in html, "and the button runs start() again"
+    assert "el('lede').textContent = OPENING_LEDE;" in html, "a recovery restores the opening lede"

@@ -197,6 +197,19 @@ impl BootController {
         restarted
     }
 
+    /// The studio page's "Restart studio". The window is already showing the
+    /// studio when this is pressed, so the page reloads itself once the command
+    /// returns; `open_studio_when_ready` is still called for the one case where
+    /// the first navigation never happened.
+    pub fn restart<R: Runtime>(&self, app: &AppHandle<R>) -> usize {
+        let Some(supervisor) = self.supervisor() else {
+            return 0;
+        };
+        let restarted = supervisor.restart_all();
+        self.open_studio_when_ready(app);
+        restarted
+    }
+
     pub fn skip(&self, id: &str) -> bool {
         self.supervisor()
             .is_some_and(|supervisor| supervisor.skip(id))
@@ -253,6 +266,27 @@ pub async fn retry_service(
     })
     .await
     .map_err(|_| "The studio could not run that retry. Try again.".to_string())
+}
+
+/// Restart the local services this shell started.
+///
+/// The studio page is a REMOTE origin (it is served by the control API on
+/// loopback), so this command reaches it only through the `studio` capability —
+/// see `capabilities/studio.json`. It is what the offline banner presses; the
+/// alternative, for years, was printing a shell command at someone who had
+/// installed a .dmg.
+#[tauri::command]
+pub async fn restart_studio(app: AppHandle, controller: Controller<'_>) -> Result<BootStatus, String> {
+    let controller = Arc::clone(&controller);
+    let handle = app.clone();
+    // Off the UI thread: this stops and re-spawns processes and waits on their
+    // health checks.
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.restart(&handle);
+        controller.status()
+    })
+    .await
+    .map_err(|_| "The studio could not restart itself. Quit and open it again.".to_string())
 }
 
 #[tauri::command]

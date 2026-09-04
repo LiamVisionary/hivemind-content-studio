@@ -63,6 +63,13 @@ async function fetchServedCatalog() {
   if (!response.ok) throw new Error(`catalog ${response.status}`);
   const payload = await response.json();
   if (!payload?.buckets || typeof payload.buckets !== 'object') throw new Error('catalog has no buckets');
+  // A 200 carrying no text-to-image rows is a failed catalog wearing a success
+  // code. Every studio boots its default model off a bucket, so an empty t2i is
+  // the one shape that must fall through to the offline list rather than be
+  // applied — the invariant three lines above this file's title, now enforced.
+  if (!Array.isArray(payload.buckets.t2i) || payload.buckets.t2i.length === 0) {
+    throw new Error('catalog has no t2i models');
+  }
   return payload.buckets;
 }
 

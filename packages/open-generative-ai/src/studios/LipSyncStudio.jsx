@@ -69,12 +69,14 @@ function createEngine() {
   } catch { /* corrupted prefs — boot with defaults */ }
   const inputMode = persisted?.inputMode || 'image';
   const initialModels = inputMode === 'image' ? imageLipSyncModels : videoLipSyncModels;
-  const initialModel = initialModels.find((model) => model.id === persisted?.modelId) || initialModels[0];
-  const selectedModel = initialModel.id;
+  // Same guard the Image studio needed: an empty catalog bucket made this
+  // `initialModels[0].id` throw before the studio could render anything at all.
+  const initialModel = initialModels.find((model) => model.id === persisted?.modelId) || initialModels[0] || null;
+  const selectedModel = initialModel?.id || '';
   const initialResolutions = getResolutionsForLipSyncModel(selectedModel);
   const selectedResolution = initialResolutions.includes(persisted?.resolution)
     ? persisted.resolution
-    : (initialModel.inputs?.resolution?.default || initialResolutions[0] || '');
+    : (initialModel?.inputs?.resolution?.default || initialResolutions[0] || '');
   return {
     inputMode,
     selectedModel,

@@ -30,12 +30,12 @@ export function apiStatusLabel(status) {
   return status?.label || LABELS[tone] || LABELS.connecting;
 }
 
-// Never a problem without its fix: the one sentence and the one command live
-// here, so the pill, the studio banner and anything else that has to explain
-// the offline state all say exactly the same thing.
-// TODO(tauri): when the desktop shell is in, replace the command with a
-// "Restart studio" action wired to the supervisor sidecar.
-export const STUDIO_RESTART_COMMAND = 'scripts/hivemind-studio-stack restart';
+// Never a problem without its fix: the one sentence lives here, so the pill,
+// the studio banner and anything else that has to explain the offline state all
+// say exactly the same thing. The FIX beside it is `StudioRestartAction` in
+// ui/kit.jsx — a button in the desktop shell, a sentence in a browser. It used
+// to be a `scripts/hivemind-studio-stack restart` string exported from here,
+// which nobody who installed the app could act on.
 
 export function apiOfflineSentence() {
   return t('app.offlineSentence');

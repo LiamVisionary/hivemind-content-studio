@@ -12,6 +12,7 @@ fn main() {
                 "retry_service",
                 "skip_service",
                 "reveal_logs",
+                "restart_studio",
             ]),
         ),
     )

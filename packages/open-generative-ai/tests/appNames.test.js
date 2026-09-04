@@ -97,7 +97,7 @@ test('the Agents & API page keeps the technical noun exactly once', () => {
 test('the state pill says Ready / Starting / Not running — never a backend name', async () => {
   globalThis.window = new EventTarget();
   globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
-  const { apiStatusLabel, setApiStatus, getApiStatus, STUDIO_RESTART_COMMAND, apiOfflineSentence } =
+  const { apiStatusLabel, setApiStatus, getApiStatus, apiOfflineSentence } =
     await import('../src/app/statusStore.js');
   setApiStatus('online');
   assert.equal(getApiStatus().label, 'Ready');
@@ -106,7 +106,10 @@ test('the state pill says Ready / Starting / Not running — never a backend nam
   setApiStatus('connecting');
   assert.equal(getApiStatus().label, 'Starting');
   assert.equal(apiStatusLabel(getApiStatus()), 'Starting');
-  // Never a problem without its fix: the offline sentence carries the command.
+  // Never a problem without its fix — but the fix is no longer a command this
+  // module hands out. The sentence states the problem; `StudioRestartAction`
+  // (ui/kit.jsx) carries the repair, and tests/failureStatesHaveExits.test.js
+  // is what holds it to that.
   assert.match(apiOfflineSentence(), /not answering/);
-  assert.ok(STUDIO_RESTART_COMMAND.includes('hivemind-studio-stack'));
+  assert.doesNotMatch(apiOfflineSentence(), /hivemind-studio-stack|zimage-stack|\brunning:/);
 });

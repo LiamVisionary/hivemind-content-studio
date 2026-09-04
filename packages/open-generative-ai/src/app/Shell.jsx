@@ -6,13 +6,13 @@ import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
 import { t, tf } from '../lib/i18n.js';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
-import { Button, CollapsibleSection, IconButton, Kbd, cx, openSection } from '../ui/kit.jsx';
+import { Button, CollapsibleSection, IconButton, Kbd, StudioRestartAction, cx, openSection } from '../ui/kit.jsx';
 import { getExploreDock, subscribeExploreDock, toggleExploreDock } from './exploreDockStore.js';
 import { getNavBadges, subscribeNavBadges } from './navBadges.js';
 import { APP_NAME, NAV_ITEMS, NAV_SECTIONS, OFF_NAV_PAGE_TITLES } from './navConfig.jsx';
 import { APP_VERSION, shortCommit, versionLabel } from '../lib/appVersion.js';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
-import { STUDIO_RESTART_COMMAND, apiOfflineSentence, apiStatusLabel, pingApiStatus, useApiStatus } from './statusStore.js';
+import { apiOfflineSentence, apiStatusLabel, pingApiStatus, useApiStatus } from './statusStore.js';
 
 // Topbar trigger for the Hivemind prompt library (explore dock). Only in studio
 // mode; the panel itself is rendered once by App and anchors under this button.
@@ -91,9 +91,7 @@ function ApiStatusPill() {
           {status.tone === 'offline' ? (
             <>
               <p className="text-xs leading-relaxed text-ink2">{apiOfflineSentence()}</p>
-              <code className="block select-all break-all rounded-md border border-line1 bg-bg2 px-2 py-1.5 font-mono text-[11px] text-ink1">
-                {STUDIO_RESTART_COMMAND}
-              </code>
+              <StudioRestartAction />
             </>
           ) : null}
           <Button

@@ -203,10 +203,11 @@ exist.
 
 `saveBytes` therefore branches on `window.__TAURI__`, which means the shell must:
 
-* set `app.withGlobalTauri = true` in `tauri.conf.json` (the branch reads the
-  plugin APIs off the global rather than importing `@tauri-apps/api`, because the
-  frontend is built once and also served to browsers and the tailnet, where those
-  imports do not resolve);
+* set `app.withGlobalTauri = true` in `tauri.conf.json` — **done**, see §2.6,
+  which needed the same global (the branch reads the plugin APIs off the global
+  rather than importing `@tauri-apps/api`, because the frontend is built once
+  and also served to browsers and the tailnet, where those imports do not
+  resolve);
 * add `tauri-plugin-dialog` and `tauri-plugin-fs`;
 * grant exactly `dialog:allow-save` and `fs:allow-write-file` in the window's
   capability file, with **no** `fs:scope` beyond what the save dialog returns.
@@ -222,6 +223,42 @@ cancelled save sheet is reported as `cancelled` and nothing else fires.
 `tests/saveBytes.test.js` pins both sides of the branch. It cannot pin the real
 webview; step 6 of the release checklist is where a Download button is pressed in
 the built app.
+
+### 2.6 The studio can restart its own services
+
+The offline state — the status chip, the banner across the top of a studio, the
+"takes effect after the studio restarts" strip in Settings — used to end in a
+`<code>` holding `scripts/hivemind-studio-stack restart`. That is a path in a
+checkout. The person who installs the DMG has neither the checkout nor, in the
+packaged window, a terminal, so the app's only remedy for "nothing can generate"
+was one they could not carry out.
+
+The shell already supervises those services, so it restarts them:
+
+* `restart_studio` (`src/boot.rs`) takes every non-skipped service through the
+  same stop-clear-start that Retry uses, off the UI thread. A service the person
+  chose to continue without stays skipped, and an ATTACHED service — a
+  developer's hand-started stack — is re-attached rather than started twice,
+  because `bring_up` health-checks the port before it spawns anything.
+* The window loads the studio from `http://127.0.0.1:<port>`, which Tauri treats
+  as a REMOTE origin (§2.1), so the command is granted by a second capability
+  file: `capabilities/studio.json`, scoped to loopback URLs and holding exactly
+  `allow-restart-studio`. The boot screen's own capability is untouched.
+* `app.withGlobalTauri` is on, which is what puts `invoke` where a page built
+  for three environments can find it —
+  `packages/open-generative-ai/src/lib/desktopShell.js` is the one place that
+  looks, the same shape `saveBytes()` uses in §2.5. **The boot screen needed it
+  too**: `splash/index.html` is plain HTML with no bundler, it reads
+  `window.__TAURI__?.core?.invoke`, and with the flag off it would have taken
+  its own no-shell branch — "Open the studio from the app" — with Retry, Skip
+  and Show logs inert and no polling at all.
+* Outside the shell there is no supervisor and no pretence of one: the same
+  component renders a sentence saying the page cannot start the studio and what
+  to do instead. `tests/failureStatesHaveExits.test.js` renders both halves, and
+  refuses any string in `src/` that hands a user a command from this repository.
+
+The page reloads itself when the command returns, because the control API that
+served it has just been replaced.
 
 ---
 

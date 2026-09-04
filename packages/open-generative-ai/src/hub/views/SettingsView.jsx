@@ -19,13 +19,13 @@
 // it can be changed at all.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { STUDIO_RESTART_COMMAND } from '../../app/statusStore.js';
 import { t, tf } from '../../lib/i18n.js';
 import { isHostedLocalAI, isLocalAIAvailable } from '../../lib/localInferenceClient.js';
 import {
   SETTINGS_SECTIONS, displayValue, isDefault, restartPending, sectionRows, settingLabel,
   settingsFilename, sourceNote,
 } from '../../lib/machineSettings.js';
+import { isHivemindStudioEnabled } from '../../lib/hivemindStudio.js';
 import { muapiKeyIsOnServer } from '../../lib/modelRunner.js';
 import { PrivacyPanel } from '../../dialogs/PrivacyPanel.jsx';
 import { PrivacyVaultPanel } from '../../dialogs/PrivacyVaultPanel.jsx';
@@ -37,12 +37,25 @@ import {
 import { Icon } from '../../ui/icons.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import {
-  Button, Card, Field, NativeSelect, Pill, SectionLabel, Spinner, TextInput, Toggle, cx,
+  Button, Card, Field, NativeSelect, Pill, SectionLabel, Spinner, StudioRestartAction, TextInput, Toggle, cx,
 } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { api, toastFailed } from '../hubData.js';
 
 const STUDIO_LABELS = () => ({ image: t('nav.image'), video: t('common.video'), lipsync: t('nav.lipsync') });
+
+/**
+ * Where a key pasted into this field will actually live — decided the same way
+ * AuthModal decides it, because a credential described two ways is a credential
+ * the owner cannot reason about. In studio mode `storeMuapiKey()` writes to the
+ * machine's shared store and deletes the browser copy; only a standalone build
+ * keeps it in this browser. A browser copy that still exists is named first,
+ * because that one IS in this browser whatever the build does next.
+ */
+function keyLocationNote() {
+  if (browserMuapiKey()) return `${t('settings.keyInBrowser')} ${t('settings.clearToRemove')}`;
+  return isHivemindStudioEnabled() ? t('auth.storedOnMachine') : t('settings.keyInBrowser');
+}
 
 /** Read one studio's saved generation defaults for the read-out below. Never
  *  the prompt: the studios strip that before they persist (AGENTS.md). */
@@ -266,29 +279,14 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
 
       {restart.length ? (
         // A restart-required key must never pretend it took effect. The fix is
-        // in the same component as the problem: the command, ready to copy.
+        // in the same component as the problem: the restart itself, pressed
+        // here, in the app — never a command a packaged user cannot run.
         <div className="flex flex-wrap items-center gap-3 border-b border-honey/50 bg-honey-tint/50 px-4 py-2.5 md:px-5">
           <Icon name="refresh" size={16} className="text-honey" />
           <span className="text-[13px] text-ink1">
             {tf('settings.restartRequired', restart.length)}
           </span>
-          <code className="rounded-sm bg-bg0/80 px-2 py-1 font-mono text-[11px] text-ink2">{STUDIO_RESTART_COMMAND}</code>
-          <Button
-            variant="neutral"
-            size="sm"
-            icon="copy"
-            onClick={async () => {
-              try {
-                if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
-                await navigator.clipboard.writeText(STUDIO_RESTART_COMMAND);
-                toast.success(t('settings.copied'));
-              } catch {
-                toast.error(t('settings.copyUnavailable'));
-              }
-            }}
-          >
-            {t('settings.copyCommand')}
-          </Button>
+          <StudioRestartAction />
           <Button variant="ghost" size="sm" onClick={() => setRestart([])}>{t('common.dismiss')}</Button>
         </div>
       ) : null}
@@ -371,7 +369,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
                     <Field
                       className="flex-1"
                       label={t('settings.muapiKeyLabel')}
-                      hint={browserMuapiKey() ? `${t('settings.keyInBrowser')} ${t('settings.clearToRemove')}` : t('settings.keyInBrowser')}
+                      hint={keyLocationNote()}
                     >
                       <TextInput
                         type="password"

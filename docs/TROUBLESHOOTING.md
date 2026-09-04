@@ -86,7 +86,7 @@ then resume — the finished chunks are kept."* Nothing already rendered is lost
 ## A rented machine went away mid-render
 
 **You see, in Restore:** *"The rented machine is no longer there."* with
-*"Attach it again on the Machines page, or switch the machine and resume."*
+*"Attach it again on the Rented GPUs page, or switch the machine and resume."*
 
 **Fix:** open **Rented GPUs** in the Advanced group. If the rental is still
 alive, **Reconnect** it; if it is gone, rent another or switch the run back to
@@ -214,10 +214,12 @@ it never changes a ComfyUI you installed yourself."*
 running**, or a studio says *"The studio is not answering"* / *"The studio is
 not running"*, and **Generate** is disabled.
 
-**Fix:** open the chip. Its menu carries the sentence and the exact command to
-restart, together, and a **Try again** button for when it has already come back
-on its own. In the packaged desktop app, quitting and reopening does the same
-thing.
+**Fix:** open the chip. Its menu carries the sentence and the way out together.
+In the desktop app that is a **Restart studio** button, which stops the local
+services the app started and brings them back; in a browser tab, which cannot
+start anything, it says so and you start the studio the way you started it
+before. Either way **Try again** is there for when it has already come back on
+its own.
 
 ---
 

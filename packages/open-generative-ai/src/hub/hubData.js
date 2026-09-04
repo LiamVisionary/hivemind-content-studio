@@ -700,7 +700,15 @@ export async function submitSimplePrompt() {
   if (!prompt) { toast.error('Describe what you want to create.'); return; }
   if (hubState.studioMode === 'edit' && !hubState.simpleAttachments.length) { toast.error('Add at least one reference image before planning an edit.'); return; }
   const brain = parseRoute(hubState.routes.brain);
-  if (!brain.provider || brain.provider === 'automatic') { toast.error('Connect or select an LLM brain first.'); return; }
+  if (!brain.provider || brain.provider === 'automatic') {
+    // The second dead end of the no-brain state; the greyed Brain chip was the
+    // first. "Connect or select an LLM brain first." named neither the control
+    // nor the act, so this says which control and where it is — and when there
+    // is no brain to pick at all, PlannerView's callout is already on screen
+    // above this composer with the door to Providers on it.
+    toast.error('Pick a brain in the Brain menu below the prompt, then try again.');
+    return;
+  }
   pushThread({ kind: 'user', text: prompt });
   hubState.simpleHistory.push({ role: 'user', content: prompt });
   setSimpleBusy(true);

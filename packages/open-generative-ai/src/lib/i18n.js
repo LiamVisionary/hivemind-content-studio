@@ -120,7 +120,13 @@ export const STRINGS = {
     'app.running': 'The studio is running',
     'app.notRunning': STUDIO_NOT_RUNNING,
     'app.reaching': 'Reaching the studio…',
-    'app.offlineSentence': 'The studio’s local service is not answering, so nothing can generate. Start it again by running:',
+    'app.offlineSentence': 'The studio’s local service is not answering, so nothing can generate.',
+    // The remedy, in the two shapes it can take. The desktop shell supervises
+    // the local services and can restart them; a browser tab cannot, and says
+    // so rather than printing a command only this checkout could run.
+    'app.restartStudio': 'Restart studio',
+    'app.restartOutsideShell': 'This page cannot start it — start the studio the way you started it before, then press Try again.',
+    'app.restartFailed': 'The studio could not restart itself. Quit the app and open it again.',
     'app.statusTitle': (label) => `The studio: ${label}`,
     'app.refresh': 'Refresh',
     'app.refreshTitle': 'Refresh catalog, runs and history',
@@ -293,7 +299,7 @@ export const STRINGS = {
     'restore.spendReached': 'This render reached the amount you approved.',
     'restore.spendReachedFix': 'Resume quotes the rest at today’s price and asks you to approve it.',
     'restore.rentalGone': 'The rented machine is no longer there.',
-    'restore.rentalGoneFix': 'Attach it again on the Machines page, or switch the machine and resume.',
+    'restore.rentalGoneFix': 'Attach it again on the Rented GPUs page, or switch the machine and resume.',
     'restore.unreachable': 'That machine stopped answering.',
     'restore.unreachableFix': 'Check it is still running, then resume — the finished chunks are kept.',
     'restore.tooLarge': (size, ceiling) => `That clip is ${size} and this machine takes up to ${ceiling}. Trim it, or restore it in two halves.`,
@@ -748,7 +754,7 @@ export const STRINGS = {
     'history.filterPlaceholder': 'Filter prompts and outputs',
     'history.allFormats': 'All formats',
     'history.allModels': 'All models',
-    'history.everythingStaysHere': 'Everything here stays on this machine, encrypted at rest. Outputs come from the studios and Canvas · productions planned in the Planner live under Runs.',
+    'history.everythingStaysHere': 'Everything here stays on this machine, encrypted at rest. Outputs come from the studios and Canvas · productions planned in the Planner live under Productions.',
     'history.studiosAndCanvas': 'Studios & Canvas',
     'history.ofCount': (shown, total) => `${shown} of ${total}`,
     'history.loadingMore': 'Loading more outputs…',
@@ -783,9 +789,6 @@ export const STRINGS = {
     'settings.imported': 'Imported settings',
     'settings.importNotAnExport': 'That file is not a studio settings export.',
     'settings.restartRequired': (count) => `Saved. ${count === 1 ? 'That setting takes' : 'Those settings take'} effect after the studio restarts.`,
-    'settings.copied': 'Copied',
-    'settings.copyUnavailable': 'Copying is not available here — select the command and copy it.',
-    'settings.copyCommand': 'Copy command',
     'settings.fileUnreadable': 'The settings file could not be read',
     'settings.fileUnreadableHint': 'The studio started on its defaults. Saving any setting below replaces the file with a readable one.',
     'settings.general': 'General',
@@ -891,7 +894,7 @@ export const STRINGS = {
     'restorePanel.pricing': 'Pricing this render…',
     'restorePanel.notPriced': 'This render could not be priced — nothing will be charged without a figure here.',
     'restorePanel.noSeedVr2Before': 'No machine here has the SeedVR2 nodes. Install',
-    'restorePanel.noSeedVr2After': 'on this ComfyUI, or attach a rented machine that has it from the Machines page.',
+    'restorePanel.noSeedVr2After': 'on this ComfyUI, or attach a rented machine that has it from the Rented GPUs page.',
     'restorePanel.firstChunkDownload': 'A model this machine has not used before downloads on its first chunk.',
     'restorePanel.output': 'Output',
     'restorePanel.comesOut': (width, height) => `This clip comes out ${width}x${height}.`,
@@ -944,6 +947,12 @@ export const STRINGS = {
     'passbook.stopBeingAskedBlurb': 'Stop being asked for a while. It closes on its own when the time is up.',
     'passbook.whileOpenBlurb': 'While it is open, anything running as you can use these keys without asking. That is what it is for — but it should never be something you did without noticing.',
     'passbook.notInstalled': 'Not installed.',
+    // "Not installed" on its own leaves a first-time owner unable to tell a
+    // missing component from a broken one. These two say which it is: the
+    // first that there is nothing to do, the second that a read failed and
+    // the panel beside it carries the retry.
+    'passbook.optionalPart': 'Nothing to fix — this part of PassBook is optional, and the keys above work without it.',
+    'passbook.panelUnreadable': 'This part of the page could not be read.',
     'passbook.app': 'App',
     'passbook.defaultMode': (mode) => `default ${mode}`,
     'passbook.noStoredKeys': 'No stored keys yet.',
