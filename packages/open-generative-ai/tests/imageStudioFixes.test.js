@@ -152,9 +152,12 @@ test('cancel flags the run, tears down the timer and listener, and the late resu
     assert.match(studio, /if \(run\.cancelled\) return;\n\s+unsub\(\);\n\s+s\.localProgress = \{ active: false, pct: 0, label: '' \};\n\s+finishImageProgress\(true\);/);
     // …and a cancelled rejection is not an error.
     assert.match(studio, /if \(run\.cancelled \|\| e\?\.cancelled\) return;/);
-    // No ghost Cancel inside the progress card; a danger Cancel beside Generate.
+    // No ghost Cancel inside the progress card; a danger Cancel beside Generate
+    // (the composer is its own module now).
     assert.doesNotMatch(studio, /variant="ghost" onClick=\{cancel/);
-    assert.match(studio, /<Button\s+variant="danger"\s+size="lg"\s+onClick=\{cancelGeneration\}/);
+    assert.match(studio, /onCancel=\{cancelGeneration\}/);
+    const composer = read('src/studios/image/ImageComposer.jsx');
+    assert.match(composer, /<Button\s+variant="danger"\s+size="lg"\s+onClick=\{onCancel\}/);
 });
 
 test('local generations save a pending job by the hosted bridge\'s job id and resume through it', () => {
@@ -296,18 +299,20 @@ test('deleting a recent reference asks first, and the drag state is depth-counte
 
 test('on the cloud source the inert Advanced controls are hidden and the seed rides on the request', () => {
     const studio = read('src/studios/ImageStudio.jsx');
-    // Steps / guidance / batch / negative are local-only now.
-    assert.match(studio, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.steps'\)\}>/);
-    assert.match(studio, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.guidanceScale'\)\}>/);
-    assert.match(studio, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.batchCount'\)\}>/);
-    assert.match(studio, /\{s\.useLocalModel && currentModelSupportsNegativePrompt\(\) \? \(/);
-    // The reference-strength slider is gone (nothing reads it).
-    assert.doesNotMatch(studio, /t\('image\.refStrength'\)/);
+    const panel = read('src/studios/image/ImageSettingsPanel.jsx');
+    // Steps / guidance / how-many / negative are local-only now.
+    assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.steps'\)\}/);
+    assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.guidanceScale'\)\}/);
+    assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{zh\(\) \? '生成数量' : 'How many'\}/);
+    assert.match(panel, /\{s\.useLocalModel && supportsNegativePrompt \? \(/);
+    // The reference-strength slider is gone, and so is the dead value behind it.
+    assert.doesNotMatch(panel, /t\('image\.refStrength'\)/);
+    assert.doesNotMatch(studio, /referenceStrength/);
     // Seed reaches both cloud requests; the seed field parses 0 as a seed.
     assert.match(studio, /const seed = \(typeof s\.seed === 'number' && s\.seed >= 0\) \? s\.seed : -1;/);
     const cloud = studio.match(/\/\/ ── Remote API path[\s\S]*?const generate = \(\)/)[0];
     assert.equal((cloud.match(/\n\s+seed,\n/g) || []).length, 2, 'seed is in both the i2i and t2i genParams');
-    assert.match(studio, /s\.seed = parseSeedInput\(e\.target\.value\)/);
+    assert.match(panel, /s\.seed = parseSeedInput\(e\.target\.value\)/);
 });
 
 test('with no saved preference the studio boots on the Local source when local models exist', () => {
@@ -337,15 +342,16 @@ test('a failed generation leaves ONE callout — described, with its remedy — 
 
 test('the composer keeps the chips wrapping and Generate pinned in its own group', () => {
     const studio = read('src/studios/ImageStudio.jsx');
-    assert.match(studio, /<div className="flex items-end gap-2">\s*<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">/);
-    assert.match(studio, /<div className="ml-auto flex shrink-0 items-center gap-2">\s*<Button\s+variant="primary"/);
-    // The app helper is "Refine" (as in Video) and no longer looks permanently armed.
-    assert.match(studio, /label=\{zh\(\) \? '润色' : 'Refine'\}/);
-    assert.doesNotMatch(studio, /className="border-honey\/40 text-honey"/);
+    const composer = read('src/studios/image/ImageComposer.jsx');
+    assert.match(composer, /<div className="flex items-end gap-2">\s*<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">/);
+    assert.match(composer, /<div className="ml-auto flex shrink-0 items-center gap-2">/);
+    // The app helper lives inside the one "Improve" menu now.
+    assert.match(composer, /label=\{zh\(\) \? '润色' : 'Improve'\}/);
+    assert.doesNotMatch(composer, /className="border-honey\/40 text-honey"/);
     // The progress card carries the bridge status; the button just says Generating.
     assert.match(studio, /const generateLabel = s\.generating \? t\('common\.generating'\) : t\('common\.generate'\);/);
     // Cmd/Ctrl+Enter generates.
-    assert.match(studio, /if \(\(e\.metaKey \|\| e\.ctrlKey\) && e\.key === 'Enter'\)/);
+    assert.match(composer, /if \(\(e\.metaKey \|\| e\.ctrlKey\) && e\.key === 'Enter'\)/);
     // The placeholder no longer carries a dead fallback; the key exists.
     assert.match(studio, /`\$\{refCount\} \$\{t\('image\.multiImageNote'\)\}`/);
     const i18n = read('src/lib/i18n.js');

@@ -12,7 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useSavedLibrary } from '../hooks/hooks.js';
 import { buildPaletteEntries, filterPaletteEntries, paletteGroupLabel } from '../lib/commandPalette.js';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { localAI } from '../lib/localInferenceClient.js';
 import { LIBRARIES } from '../lib/savedLibraryStore.js';
 import { readTabLabels } from '../lib/studioTabLabel.js';
@@ -24,7 +24,6 @@ import { Kbd, TextInput, cx } from '../ui/kit.jsx';
 import { NAV_ITEMS } from './navConfig.jsx';
 import { insertIntoActivePrompt } from './promptTarget.js';
 
-const zh = () => getLang() === 'zh-CN';
 
 const TEXT = {
   title: () => (zh() ? '快速跳转' : 'Go to'),

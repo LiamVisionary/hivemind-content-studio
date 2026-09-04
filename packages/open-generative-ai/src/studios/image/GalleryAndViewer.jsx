@@ -2,12 +2,11 @@
 // Every media src is resolved through useMediaSrc (E2E decrypt, fail-open).
 import { useEffect, useRef } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { getLang, t } from '../../lib/i18n.js';
+import { t, zh } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Modal } from '../../ui/Modal.jsx';
 import { ActionButton, IconButton, Pill, cx } from '../../ui/kit.jsx';
 
-const zh = () => getLang() === 'zh-CN';
 
 // "Created" as a readable local date, not the raw ISO string.
 export function formatCreated(timestamp) {

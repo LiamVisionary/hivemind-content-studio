@@ -120,7 +120,8 @@ export function normalizeImagePreferences(value) {
         batchCount: numberValue(value.batchCount, 1, 1, 4, true),
         customWidth: numberValue(value.customWidth, 0, 0, 16384, true),
         customHeight: numberValue(value.customHeight, 0, 0, 16384, true),
-        referenceStrength: numberValue(value.referenceStrength, 50, 0, 100, true),
+        // No referenceStrength: nothing ever read it. Blobs written before it was
+        // dropped still load — an unknown field is simply not copied out.
         coupleMode: Boolean(value.coupleMode),
         coupleDirection: value.coupleDirection === 'vertical' ? 'vertical' : 'horizontal',
         coupleSplit: numberValue(value.coupleSplit, 50, 10, 90, true),

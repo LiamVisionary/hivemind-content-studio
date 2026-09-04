@@ -9,7 +9,6 @@ import {
   civitaiDownloadPercent,
   describeCivitaiDownload,
 } from '../../lib/civitaiDownloadStore.js';
-import { isDevMode } from '../../lib/devMode.js';
 import { localAI } from '../../lib/localInferenceClient.js';
 import { loraVersionLabel } from '../../lib/loraSelection.js';
 import { filterRentalLoras } from '../../lib/rentalLoras.js';
@@ -76,14 +75,21 @@ export function LoraSection({
   // Source is "rented": the catalog narrows to LoRAs registered for rentals,
   // because those are the only files a machine provisioned today would have.
   rentedOnly = false,
+  // Rented mode with nothing registered has exactly one fix — look at the local
+  // catalog and mark something — so the empty state carries it.
+  onSwitchToLocal,
 }) {
   const mutedCount = selection.filter((lora) => lora.enabled === false).length;
   const huntedCount = selection.filter((lora) => lora.hunt).length;
-  // Rental registry: dev mode manages it (per-card Rental control), rented
-  // mode filters by it. Neither active → the hook never fetches.
-  const devMode = isDevMode();
-  const rentalRegistry = useRentalLoras(devMode || rentedOnly);
+  // Rental registry: rented mode filters the catalog by it, and the per-card
+  // control manages it. Gated on RELEVANCE rather than on a hidden ?dev=1 flag
+  // — useRentalLoras reports 'unsupported' on a stack without the routes, so a
+  // machine that cannot register a LoRA never draws the affordance.
+  const rentalRegistry = useRentalLoras(true);
   const rentalEntries = rentalRegistry.entries;
+  // The registry answered, so this machine has the rental routes and the owner
+  // can decide which adapters ride along on the next rental.
+  const canManageRentals = rentalRegistry.status === 'ready';
   const visibleLoras = rentedOnly ? filterRentalLoras(loras, rentalEntries) : loras;
   // Which card is showing the rental SFW/NSFW chooser. Same one-at-a-time,
   // in-card pattern as the update menu below.
@@ -123,7 +129,7 @@ export function LoraSection({
           onClick={onToggleOpen}
           className="inline-flex items-center gap-1 text-xs font-medium text-ink2 transition-colors hover:text-ink1"
         >
-          {open ? 'Hide' : 'Show'}
+          {open ? 'Done' : 'Add'}
           <Icon name="chevronDown" size={13} className={cx('transition-transform duration-150', open && 'rotate-180')} />
         </button>
       </div>
@@ -272,10 +278,14 @@ export function LoraSection({
           {/* Rented mode with installed LoRAs but none registered: say why the
               grid is empty instead of looking like the collection vanished. */}
           {rentedOnly && loras.length > 0 && visibleLoras.length === 0 ? (
-            <div className="rounded-md border border-line1 bg-bg2 px-3 py-2.5 text-xs text-ink3">
-              None of these LoRAs are on rented machines. Switch Source to Local and use a
-              card&apos;s Rental button (dev mode) — machines rented afterwards download them
-              during provisioning.
+            <div className="flex flex-col items-start gap-2 rounded-md border border-line1 bg-bg2 px-3 py-2.5 text-xs text-ink3">
+              <span>
+                None of your LoRAs are on rented machines yet. Mark one with its Rental
+                button and every machine rented afterwards downloads it while it sets up.
+              </span>
+              {onSwitchToLocal ? (
+                <Button size="sm" onClick={onSwitchToLocal}>Show my installed LoRAs</Button>
+              ) : null}
             </div>
           ) : null}
           {/* The grid renders whenever the panel is open: an in-flight download owns
@@ -422,13 +432,14 @@ export function LoraSection({
                     </div>
                   ) : null}
 
-                  {/* Rental availability: badge always, management in dev mode.
-                      Chooser overlays the card like the update menu above. */}
-                  {(devMode || rentalEntries?.[lora.id]) && !updating ? (
+                  {/* Rental availability: badge whenever the LoRA is registered,
+                      management whenever this stack can register one. Chooser
+                      overlays the card like the update menu above. */}
+                  {(canManageRentals || rentalEntries?.[lora.id]) && !updating ? (
                     <LoraRentalControl
                       lora={lora}
                       entry={rentalEntries?.[lora.id]}
-                      devMode={devMode && rentalRegistry.status === 'ready'}
+                      canManage={canManageRentals}
                       baseModels={baseModels}
                       choosing={rentalChoosing}
                       onToggleChooser={(open) => setRentalChoicesFor(open ? lora.id : '')}

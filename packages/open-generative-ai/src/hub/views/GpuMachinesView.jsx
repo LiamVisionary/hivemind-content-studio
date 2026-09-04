@@ -43,15 +43,15 @@ function formatSeconds(seconds) {
 // host is held out of the next search either way.
 function failureVerdict(reason = '') {
   if (/never started/i.test(reason)) {
-    return 'The host never started its container, so this is the machine rather than the tier — renting again normally lands on a different one.';
+    return 'The host never started its container — a bad host, not a bad GPU class. Rent again and you will get a different one.';
   }
   if (/download failed/i.test(reason)) {
-    return 'A weight download gave up: one stream exhausted its retries, or the object was refused — the reason names the last error. That host is held out for a day, so renting the same tier again lands on a different one.';
+    return 'A weight download gave up part-way — the reason names the last error. That host is held out for a day, so renting the same GPU class again lands on a different one.';
   }
   if (/download stalled/i.test(reason)) {
-    return 'A weight download was still crawling at the deadline — usually the host\'s link rather than the tier. That host is held out for a day, so the same tier is still worth retrying.';
+    return 'A weight download was still crawling at the deadline — usually the host\'s connection, not the GPU class. That host is held out for a day, so the same class is still worth retrying.';
   }
-  return 'Often the machine rather than the tier — renting again normally lands on a different one.';
+  return 'Usually a bad host, not a bad GPU class. Rent again and you will get a different one.';
 }
 
 // The rung that produces a generation for the least money. Not the cheapest
@@ -552,7 +552,7 @@ function StudioButtons({ machine, onUse, onDetach, busy, applying, leading, shar
           Detach
         </Button>
       ) : (
-        <small className="text-[11px] text-ink3">First use routes this tier&apos;s models through the machine.</small>
+        <small className="text-[11px] text-ink3">First use routes this GPU class&apos;s models through the machine.</small>
       )}
       {shared && !leading && machine.attached ? (
         <small className="text-[11px] text-ink3">

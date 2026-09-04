@@ -12,12 +12,11 @@
 // tolerates either, but the old normalizer stores a Number).
 import { CAMERA_MAP, LENS_MAP, FOCAL_PERSPECTIVE, APERTURE_EFFECT } from '../lib/promptUtils.js';
 import { APERTURE_OPTIONS, CAMERA_OPTIONS, FOCAL_OPTIONS, LENS_OPTIONS } from '../lib/cameraRig.js';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { ChipButton, Menu } from '../ui/Menu.jsx';
 import { Segmented, cx } from '../ui/kit.jsx';
 
-const zh = () => getLang() === 'zh-CN';
 
 function PickerRow({ label, hint, children }) {
   return (

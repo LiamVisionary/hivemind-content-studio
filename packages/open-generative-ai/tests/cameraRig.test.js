@@ -87,14 +87,19 @@ test('Cinema is gone as a page, but ?page=cinema still resolves to Image with th
     assert.doesNotMatch(nav, /page: 'cinema'/, 'no Cinema tab in the sidebar');
     assert.doesNotMatch(nav, /'cinema',/, 'cinema is not a studio page any more');
     assert.match(nav, /cinema: \{ page: 'image', menu: 'camera' \}/, 'the page key still resolves');
-    assert.match(nav, /PAGE_ALIASES\[page\]/, 'isKnownPage accepts the retired key');
+    // Either form is fine; the hardened one uses Object.hasOwn so a key like
+    // 'constructor' cannot answer yes off the prototype.
+    assert.match(nav, /hasOwn\(PAGE_ALIASES, page\)|PAGE_ALIASES\[page\]/, 'isKnownPage accepts the retired key');
 
     const app = read('src/app/App.jsx');
     assert.doesNotMatch(app, /CinemaStudio/);
     assert.match(app, /requestComposerMenu\(alias\.page, alias\.menu\)/);
 
     const image = read('src/studios/ImageStudio.jsx');
-    assert.match(image, /<CameraMenu/, 'the Image composer has the Camera menu');
+    // The composer is its own component now; the studio threads the rig into it
+    // and the menu itself renders there.
+    assert.match(image, /cameraRig=\{s\.cameraRig\}/, 'the studio hands the rig to its composer');
+    assert.match(read('src/studios/image/ImageComposer.jsx'), /<CameraMenu/, 'the Image composer has the Camera menu');
     assert.match(image, /takeComposerMenuRequest\('image', 'camera'\)/, 'and the route can open it');
 
     // Cinema's headline is not lost — the composer placeholder is fixed, so it

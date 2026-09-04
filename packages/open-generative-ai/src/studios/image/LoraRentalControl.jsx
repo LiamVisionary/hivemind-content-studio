@@ -1,12 +1,17 @@
 // Per-card rental control for the LoRA catalog grid.
 //
-// Bottom-left of a card, opposite the version/update cluster. Dev mode gets
-// the full flow: an unregistered LoRA shows "Rental+", which opens the
-// SFW-or-NSFW question in an in-card overlay (the same pattern as the update
-// menu — a floating menu would be clipped by the settings panel); a registered
-// one shows its rating badge and the overlay adds withdraw/re-rate. Outside
-// dev mode the badge is read-only information: the LoRA rides along on newly
+// Bottom-left of a card, opposite the version/update cluster. Where this stack
+// can reach the rental registry the card gets the full flow: an unregistered
+// LoRA shows "Rental+", which opens the SFW-or-NSFW question in an in-card
+// overlay (the same pattern as the update menu — a floating menu would be
+// clipped by the settings panel); a registered one shows its rating badge and
+// the overlay adds withdraw/re-rate. Where it cannot (no control API, a hosted
+// build), the badge is read-only information: the LoRA rides along on newly
 // rented machines.
+//
+// It used to be gated on lib/devMode.js — a ?dev=1 URL parameter that a packaged
+// window has no address bar to type, so the control was unreachable in the very
+// build that ships. Relevance gates it now.
 //
 // The rating is stored per entry so a later NSFW mode can hide "nsfw" rentals
 // by default — today it is categorization only.
@@ -17,7 +22,7 @@ import { Spinner, cx } from '../../ui/kit.jsx';
 
 const RATING_LABEL = { sfw: 'SFW', nsfw: 'NSFW' };
 
-export function LoraRentalControl({ lora, entry, devMode, baseModels, choosing, onToggleChooser }) {
+export function LoraRentalControl({ lora, entry, canManage, baseModels, choosing, onToggleChooser }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const label = lora.displayName || lora.name;
@@ -64,7 +69,7 @@ export function LoraRentalControl({ lora, entry, devMode, baseModels, choosing, 
       );
     }
     if (status === 'error') {
-      if (!devMode) return null;
+      if (!canManage) return null;
       return (
         <button
           type="button"
@@ -86,7 +91,7 @@ export function LoraRentalControl({ lora, entry, devMode, baseModels, choosing, 
           {rating}
         </>
       );
-      if (!devMode) {
+      if (!canManage) {
         return (
           <span
             className="inline-flex items-center gap-0.5 rounded-sm border border-line2 bg-bg1/80 px-1 py-px text-[10px] font-semibold text-ink3"
@@ -114,7 +119,7 @@ export function LoraRentalControl({ lora, entry, devMode, baseModels, choosing, 
         </button>
       );
     }
-    if (!devMode) return null;
+    if (!canManage) return null;
     return (
       <button
         type="button"

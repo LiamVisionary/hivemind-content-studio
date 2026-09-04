@@ -51,9 +51,9 @@ export function modelStatus(model) {
     // The MTPLX slot (HivemindOS's tuned Qwen3-Next server) runs itself; its
     // rows say where they run rather than a RAM estimate our ladder made up.
     if (model.provider === 'mtplx') {
-        if (model.fit === 'loaded') return 'Serving on MTPLX';
-        if (model.fit === 'loading') return 'Starting MTPLX…';
-        return `${formatBytes(model.estimatedLoadBytes)} · via MTPLX`;
+        if (model.fit === 'loaded') return 'Running in the local helper';
+        if (model.fit === 'loading') return 'Starting the local helper…';
+        return `${formatBytes(model.estimatedLoadBytes)} · in the local helper`;
     }
     if (model.fit === 'loaded') return 'Loaded';
     if (model.fit === 'loading') return 'Loading…';

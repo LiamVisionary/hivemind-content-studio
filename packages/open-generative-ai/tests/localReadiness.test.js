@@ -98,9 +98,10 @@ test('a hosted studio never seeds its picker from the desktop catalog', async ()
   const image = await read('../src/studios/ImageStudio.jsx');
   assert.match(image, /isHostedLocalAI\(\) \? \[\] : LOCAL_MODEL_CATALOG/);
   // The Model section explains itself, and Generate refuses with that reason.
-  assert.match(image, /<LocalCatalogNotice/);
+  assert.match(await read('../src/studios/image/ImageSettingsPanel.jsx'), /<LocalCatalogNotice/);
   assert.match(image, /const localBlocked = Boolean\(/);
-  assert.match(image, /disabled=\{generateBlocked\}/);
+  assert.match(image, /generateBlocked=\{generateBlocked\}/);
+  assert.match(await read('../src/studios/image/ImageComposer.jsx'), /disabled=\{generateBlocked\}/);
   // Discovery is re-runnable, not a one-shot at mount.
   assert.match(image, /addEventListener\('hivemind-hub-refresh', onHubRefresh\)/);
   // The default pick is the featured workflow, not whatever is first.

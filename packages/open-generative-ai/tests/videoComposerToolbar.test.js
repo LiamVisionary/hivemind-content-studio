@@ -13,7 +13,11 @@ test('the chips wrap as a group and Generate is a pinned sibling', () => {
     const studio = read('src/studios/VideoStudio.jsx');
     const row = studio.slice(studio.indexOf('<div className="flex items-end gap-2">'), studio.indexOf('/* ---------------- canvas ---------------- */'));
     assert.match(row, /<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">/, 'the chip group wraps');
-    assert.match(row, /<div className="ml-auto flex shrink-0 items-center gap-2">\s*<Button\s+variant="primary"/, 'Generate sits in a pinned sibling group');
+    // The looser gap allows the completion chime, which now sits beside Generate.
+    assert.match(row, /<div className="ml-auto flex shrink-0 items-center gap-2">[\s\S]{0,300}?<Button\s+variant="primary"/, 'Generate sits in a pinned sibling group');
+    // The all-studio completion chime rides beside Generate, not in Advanced.
+    assert.match(row, /<CompletionPingToggle \/>/);
+    assert.doesNotMatch(studio, /checked=\{s\.pingWhenComplete\}/);
     // ONE primary per view REGION (DESIGN.md): Generate owns the composer, and the
     // result row owns exactly one leading next step — Continue scene where the
     // model can chain, New where it cannot. Download and the rest stay neutral,

@@ -142,7 +142,7 @@ export function ClipPrepDialog({
         height: result.height,
       });
     } catch (error) {
-      toast.error(error?.message || 'could not prepare that clip');
+      toast.error(error?.message || 'Could not prepare that clip.');
     } finally {
       setBusy(''); setProgress(0);
     }

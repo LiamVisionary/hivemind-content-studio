@@ -172,6 +172,9 @@ export function UploadPicker({
   ignored = false,
   chipClassName = '',
   keepOpenOnSelect = false,
+  // Extra actions for the panel's footer — the image composer folds "who is
+  // who" and "remove all" in here so attaching is ONE chip rather than three.
+  footer = null,
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -547,6 +550,10 @@ export function UploadPicker({
               })}
             </div>
           )}
+
+          {footer ? (
+            <div className="mt-2.5 flex flex-col gap-2 border-t border-line1 pt-2.5">{footer}</div>
+          ) : null}
 
           {isMulti && count > 0 ? (
             <div className="mt-2.5 flex items-center justify-between border-t border-line1 pt-2.5">

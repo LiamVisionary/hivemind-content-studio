@@ -38,7 +38,7 @@ test('the groups menu scopes the list to the current base model', () => {
     // Saving records the family so new groups scope by family, not just model id.
     assert.match(menu, /loraGroupFromSelection\(getSelection\?\.\(\) \|\| selection, \{ baseModelId, baseLabel, baseModels \}\)/);
     // Both studios feed the matcher their base families.
-    assert.match(read('src/studios/ImageStudio.jsx'), /baseModels=\{s\.loraBaseModels\}/);
+    assert.match(read('src/studios/ImageStudio.jsx'), /baseModels: s\.loraBaseModels,/);
     assert.match(read('src/studios/VideoStudio.jsx'), /baseModels=\{loraModel\.compatibleBaseModels \|\| \[\]\}/);
 });
 

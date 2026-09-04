@@ -537,7 +537,7 @@ export function PromptHelperDialog({
                                 // An MTPLX slot is a server this app adopted rather
                                 // than a model it loaded, so "Unload" is the wrong
                                 // verb for what the button does to it.
-                                label={model.provider === 'mtplx' ? 'Stop the MTPLX server' : `Unload ${model.name}`}
+                                label={model.provider === 'mtplx' ? 'Stop the local helper' : `Unload ${model.name}`}
                                 onClick={(event) => { event.stopPropagation(); void unload(model.id); }}
                             />
                         ) : null)}

@@ -941,7 +941,7 @@ export function StoryStudio({ active = true } = {}) {
       : 'nothing attached';
     toast.success(
       `Sent to the Video studio${where} — ${handoff.seconds}s, ${carried}.`
-      + (unattached ? ` ${unattached} could not travel: this model has no lane for ${unattached === 1 ? 'it' : 'them'}.` : '')
+      + (unattached ? ` ${unattached} picture${unattached === 1 ? '' : 's'} stayed behind — this model can't take reference pictures.` : '')
       + (handoff.seconds < handoff.askedSeconds ? ` Trimmed from ${handoff.askedSeconds}s — that is as long as this model holds a scene.` : ''),
       { duration: 9000 },
     );

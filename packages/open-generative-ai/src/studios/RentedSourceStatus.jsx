@@ -188,7 +188,7 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
           {lockedHere
             ? (zh()
               ? `此标签页已锁定到该机器：它发出的生成在那里运行并加密返回。再次点击该机器可取消锁定（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
-              : `This tab is locked to that machine — its generations run there and return sealed. Click it again to follow the default. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`)
+              : `This tab is locked to that machine — what you make runs there and comes back encrypted. Click it again to follow the default. ${live.length} running, about $${rate.toFixed(2)}/hr in total.`)
             : (zh()
               ? `当前跟随“机器”页的默认选择；点击一台机器即可将此标签页锁定到它（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
               : `Following the Machines default — click a machine to lock this tab to it. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`)}
@@ -204,7 +204,7 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
       <small className="text-[11px] text-ink3">
         {zh()
           ? `生成将在租用的机器上运行并加密返回（${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
-          : `Generations run on your rented machine and return sealed — ${live.length} online, ~$${rate.toFixed(2)}/hr while it stays up.`}
+          : `Made on your rented GPU and encrypted on the way back — ${live.length} running, about $${rate.toFixed(2)}/hr until you stop them.`}
       </small>
     );
   }

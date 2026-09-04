@@ -126,7 +126,7 @@ function VaultUnlockButton({ signedIn }) {
     <button
       type="button"
       onClick={requestVaultUnlock}
-      title={zhUi() ? '此标签页的保险库已锁定——解锁以查看加密媒体与已保存项目' : 'Your vault is locked in this tab — unlock it to open sealed media and saved items'}
+      title={zhUi() ? '已锁定——解锁以查看加密媒体与已保存项目' : 'Locked — unlock to see your encrypted media and saved items'}
       className="inline-flex h-ctl-md items-center gap-1.5 rounded-md border border-honey/50 bg-honey-tint px-3 text-xs font-semibold text-honey transition-colors hover:border-honey"
     >
       <Icon name="unlock" size={14} />

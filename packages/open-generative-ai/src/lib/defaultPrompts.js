@@ -573,6 +573,84 @@ Urethane wheels rolling and clattering over seams in the asphalt, wind rush buil
 non_diegetic_music:
 The track she is listening to, carrying the whole sequence like an anime opening: a warm lo-fi 1990s Japanese city-pop instrumental with a steady drum groove, a round bassline and bright synth chords, slightly tape-saturated as if playing from her cassette, holding one energy from the first shot through the jump.`;
 
+// Ten ways to style one shirt — Liam's Seedance 2.5 prompt (2026-09-03), and
+// the H3 rewrite of it below.
+//
+// Deliberately NOT written with gender tokens or subject stand-ins, unlike the
+// Korean home video and the travel vlog. The subject here is defined by ten
+// women's-wardrobe looks — a crop top, a midi dress, high-waisted wide-leg
+// jeans — so rendering it for a male persona would swap the pronouns and leave
+// him in the midi dress, which is the exact failure the gender-token tests
+// exist to prevent. Same call the fashion lookbook and the screen-reaction
+// starters make: a starter whose CONTENT is a wardrobe is written for the
+// person it was written for, and a different subject is a different starter.
+const SHIRT_STYLING_SEEDANCE_25 = `Create a trendy, ultra-realistic 30-second fashion reel in true 16:9 landscape, featuring a stylish Gen Z female influencer demonstrating 10 ways to style the same oversized pastel-yellow button-up shirt.
+
+Opening — 0–3s: In a bright, minimalist luxury apartment, she holds the shirt on a hanger, looks directly into the camera, smiles naturally, and clearly says: “One shirt, ten ways to style.” Show matching on-screen text: “1 Shirt 🤍 10 Ways to Style.” Her spoken words must be accurate, natural, clearly audible, and perfectly synchronized with her lip movements.
+
+Main Montage — 3–27s: Use energetic whip pans, spin transitions, snap cuts, and match cuts to quickly showcase:
+
+1. Casual Chic — open over a white crop top with wide-leg jeans.
+2. Front Knot — tied at the waist with denim.
+3. Off Shoulder — relaxed styling with sunglasses.
+4. Tucked In — tucked into tailored white trousers with a belt.
+5. Summer Casual — open with denim shorts and iced coffee.
+6. Belted Chic — fully buttoned with a slim belt and black tailored trousers.
+7. Layered Dress — open over a fitted white midi dress.
+8. French Tuck — half-buttoned with rolled sleeves and relaxed jeans.
+9. Effortless Layers — draped over the shoulders with white linen trousers and a black tank.
+10. Monochrome Minimal — buttoned with cream wide-leg trousers.
+
+Include confident walking, posing, spinning, adjusting the collar and sleeves, fixing sunglasses, holding coffee, checking the mirror, and natural smiling. Mix full-body, medium, and detailed close-up shots.
+
+Look & Camera: Bright natural daylight, warm minimalist interiors, luxury Pinterest aesthetic, cinematic handheld movement, shallow depth of field, realistic fabric physics, natural hair and skin movement, premium editorial fashion photography, smooth transitions, ultra-realistic 4K HDR.
+
+Ending — 27–30s: Finish with a rapid, elegant reveal of all 10 looks surrounding the final outfit. On-screen text: “10 Looks. 1 Shirt. 🤍 Which one’s your favorite?”
+
+No additional dialogue or narration after the opening line. Keep the pacing polished, fashionable, energetic, and suitable for a viral Instagram reel.`;
+
+// The same reel in H3's trained three-field format, cut at H3's own 15s
+// ceiling: five looks per clip, chained.
+//
+// What the rewrite has to do that the prose original does not. The looks are
+// TIMED — "3–27s" is a range Seedance reads and H3 does not, so each look
+// becomes a stamped shot 2.2-2.4s apart, which is also what keeps ten of them
+// inside two clips. The identity that Seedance holds from one paragraph is
+// restated per clip and re-established at the top of part 2, shirt included:
+// the shirt is the thing every look has in common, so a continuation that
+// stops describing it renders a different shirt. The spoken opener is the
+// clip's only speech, so it lives in a <d> tag with a speaker id inside shot 1
+// and nowhere else; the beat-synchronised pacing has nowhere to live except
+// non_diegetic_music, so the track is described with the accent interval every
+// look change lands on. On-screen wording is kept to a few large words per
+// card — H3 renders those cleanly and turns small print into garbled
+// letterforms — and the emoji from the original is dropped for the same
+// reason.
+const SHIRT_STYLING_H3_A = `integrated_multimodal_description: A trendy ultra-realistic 16:9 fashion reel shot as premium editorial fashion photography: bright natural daylight through tall windows, a warm minimalist luxury apartment of white walls, pale oak floors, sheer curtains and a few cream linen furnishings, cinematic handheld movement with a light natural float, shallow depth of field, realistic fabric physics, natural hair and skin movement, ultra-realistic 4K HDR. A young woman (S1) is the only person on screen: early twenties, warm mid-tone skin with real texture and visible pores, long dark-brown hair with a soft centre parting falling past her shoulders, minimal glossy makeup, small gold hoop earrings. She wears the same oversized pastel-yellow button-up shirt in every look — the identical shirt each time, the same soft yellow, the same buttons, the same oversized cut — and her face, hair, build and that shirt stay exactly the same in every shot while only the styling around them changes. Every change of look is instantaneous, a single-frame switch carried by a whip pan, a spin or a match cut, with no dissolve and no undressing. One short on-screen caption sits low in the frame per look, a few large clean words at a time and never a paragraph of small print, and this is the only text in the picture. The shot sizes alternate between full-body, medium and detail close-ups.
+[Shot 1] She stands in the bright apartment holding the shirt up on a wooden hanger in front of her, the fabric swinging a little as she lifts it, looks straight down the lens and smiles naturally. (S1) says: <d>[English] One shirt, ten ways to style.</d> Her lip movements match the words exactly. A caption reads 1 SHIRT, 10 WAYS TO STYLE.
+[Shot 2] At 00:03.000, LOOK 01. A whip pan snaps to a full-body shot: she wears the shirt open over a white crop top with high-waisted wide-leg jeans, walks two confident steps toward camera and stops with one hand in a pocket, the open shirt swinging behind her. A caption reads 01 CASUAL CHIC.
+[Shot 3] At 00:05.400, LOOK 02. A spin transition into a medium shot: the shirt is knotted at her waist over straight-leg denim. She turns once on the spot, the knotted tails lifting and settling with real fabric weight, then tugs the knot straight and smiles. A caption reads 02 FRONT KNOT.
+[Shot 4] At 00:07.800, LOOK 03. A detail close-up of her shoulder and collarbone as the shirt sits off one shoulder, then the camera pulls back to a medium shot: she slides a pair of dark sunglasses down onto her nose with one finger and tips her chin toward the lens. A caption reads 03 OFF SHOULDER.
+[Shot 5] At 00:10.200, LOOK 04. A match cut to a full-body shot: the shirt is tucked into tailored white trousers with a slim leather belt. She smooths the front of the shirt into the waistband, drops her hands and holds a straight editorial stance. A caption reads 04 TUCKED IN.
+[Shot 6] At 00:12.600, LOOK 05. A snap cut to a medium shot by the window: the shirt hangs open over denim shorts and she holds a tall iced coffee, the ice shifting in the glass and condensation running down it. She takes one sip, laughs quietly and looks off camera. A caption reads 05 SUMMER CASUAL.
+
+overall_soundscape: A quiet bright apartment high above a city: fabric rustling and snapping with every change of pose, the wooden hanger creaking as the shirt is lifted, denim brushing, soft footsteps crossing a pale oak floor, sunglasses clicking, ice shifting in a tall glass, and a faint wash of traffic far below the windows. The only spoken words anywhere in the clip are the line in the first shot.
+
+non_diegetic_music: A bright upbeat pop track for a fashion reel — a clean four-on-the-floor kick, a light plucked synth hook and a warm rounded bassline at a fast tempo, with a clear accent roughly every two and a half seconds. Every whip pan, spin and change of look lands exactly on one of those accents.`;
+
+const SHIRT_STYLING_H3_B = `integrated_multimodal_description: The same trendy ultra-realistic 16:9 fashion reel continuing without a break, shot as premium editorial fashion photography: bright natural daylight through tall windows, the same warm minimalist luxury apartment of white walls, pale oak floors, sheer curtains and cream linen furnishings, cinematic handheld movement with a light natural float, shallow depth of field, realistic fabric physics, natural hair and skin movement, ultra-realistic 4K HDR. The same young woman (S1) is the only person on screen: early twenties, warm mid-tone skin with real texture and visible pores, long dark-brown hair with a soft centre parting falling past her shoulders, minimal glossy makeup, small gold hoop earrings. She is still wearing the same oversized pastel-yellow button-up shirt she wore in every earlier look — the identical shirt, the same soft yellow, the same buttons, the same oversized cut — and her face, hair, build and that shirt stay exactly the same in every shot while only the styling around them changes. Every change of look is instantaneous, a single-frame switch carried by a whip pan, a spin or a match cut, with no dissolve and no undressing. One short on-screen caption sits low in the frame per look, a few large clean words at a time and never a paragraph of small print, and this is the only text in the picture. Nobody speaks anywhere in this clip.
+[Shot 1] She stands by the window in the look the previous clip ended on, the shirt hanging open over denim shorts and the tall iced coffee still in her hand, breathing and shifting her weight while a strand of hair settles across her cheek. The camera floats gently and holds the framing.
+[Shot 2] At 00:01.500, LOOK 06. A whip pan snaps to a full-body shot: the shirt is fully buttoned and cinched with a slim belt over black tailored trousers. She walks toward the lens at an even confident pace and stops square to camera. A caption reads 06 BELTED CHIC.
+[Shot 3] At 00:03.700, LOOK 07. A spin transition into a medium shot: the shirt hangs open over a fitted white midi dress. She turns away and back, the open panels and the hem of the dress swinging with real weight, then adjusts the collar with both hands. A caption reads 07 LAYERED DRESS.
+[Shot 4] At 00:05.900, LOOK 08. A detail close-up of her hands rolling one sleeve up her forearm, then a match cut to a medium shot: the shirt is half-buttoned and half-tucked into relaxed jeans. She pulls the front hem into the waistband and lets the rest fall. A caption reads 08 FRENCH TUCK.
+[Shot 5] At 00:08.100, LOOK 09. A snap cut to a full-body shot in front of a tall mirror: the shirt is draped over her shoulders like a jacket, sleeves hanging loose, over white linen trousers and a black tank. She checks her reflection, squares the shoulders of the shirt and glances back at the lens. A caption reads 09 EFFORTLESS LAYERS.
+[Shot 6] At 00:10.300, LOOK 10. A match cut to a medium shot: the shirt is buttoned over cream wide-leg trousers, the whole frame in warm off-whites. She poses still and relaxed, one hand at her collar, and holds a calm confident gaze into the lens. A caption reads 10 MONOCHROME MINIMAL.
+[Shot 7] At 00:12.500, she holds that final look dead centre while the frame divides around her into a clean grid of ten small still frames, one for each of the ten looks in the order they were shown, arriving fast one after another until the grid is full. Everything comes to rest and the picture freezes. A caption reads 10 LOOKS, 1 SHIRT — WHICH ONE IS YOUR FAVOURITE?
+
+overall_soundscape: The same quiet bright apartment carried over: fabric rustling and snapping with every change of pose, denim brushing, soft footsteps crossing a pale oak floor, ice shifting in a tall glass, a belt buckle clicking, and a faint wash of traffic far below the windows. It thins out to plain room tone under the final freeze. Nobody speaks anywhere in this clip.
+
+non_diegetic_music: The same bright upbeat pop track continuing without a break — a clean four-on-the-floor kick, a light plucked synth hook and a warm rounded bassline at a fast tempo, with a clear accent roughly every two and a half seconds. Every whip pan, spin and change of look lands exactly on one of those accents, and the last accent hits on the freeze frame.`;
+
 export const DEFAULT_PROMPTS = Object.freeze([
   Object.freeze({
     id: 'korean-home-video-seedance-25',
@@ -603,6 +681,21 @@ export const DEFAULT_PROMPTS = Object.freeze([
       label: 'Whole clip',
       durationSeconds: 30,
       prompt: TRAVEL_VLOG_SEEDANCE_25,
+    })],
+  }),
+  Object.freeze({
+    id: 'shirt-styling-seedance-25',
+    idea: 'shirt-styling',
+    section: 'video',
+    family: 'seedance-2.5',
+    format: 'prose',
+    name: 'One shirt, ten ways to style',
+    summary: 'Ten looks from one oversized shirt, spoken opener and grid outro',
+    note: 'The whole reel in one generation — set the duration to 30s and the aspect ratio to 16:9, which the prompt asks for in its first line. The 🤍 in the two on-screen captions is the first thing to delete if it comes back as a garbled glyph; the words either side of it render fine. To make it your own, swap the shirt and rewrite the ten looks under it — the structure (spoken opener, ten snap-cut looks, grid reveal) is the part that carries.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 30,
+      prompt: SHIRT_STYLING_SEEDANCE_25,
     })],
   }),
   Object.freeze({
@@ -776,6 +869,31 @@ export const DEFAULT_PROMPTS = Object.freeze([
       durationSeconds: 15,
       prompt: FASHION_LOOKBOOK_H3,
     })],
+  }),
+  Object.freeze({
+    id: 'shirt-styling-h3',
+    idea: 'shirt-styling',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-fields',
+    name: 'One shirt, ten ways to style',
+    summary: 'The same ten looks as two chained H3 clips, five looks each',
+    note: 'H3 holds a scene for ~15s, so the reel is two chained clips of five looks each. Set duration to 15s and the aspect ratio to 16:9. Part 2 opens on a hold because the first ~0.9s is the pinned tail of part 1. Nothing is attached — she is defined by the text alone, so rewrite her description to make her yours, and restate it in BOTH parts or part 2 renders a different woman in a different shirt. The looks are timed to 15.0s exactly, so if you add or cut one, move the At MM:SS.mmm stamps with it. Keep each caption to a few large words: H3 renders those cleanly and garbles small print, which is why the original’s 🤍 is not in this version.',
+    parts: [
+      Object.freeze({
+        label: 'Looks 1-5',
+        durationSeconds: 15,
+        prompt: SHIRT_STYLING_H3_A,
+        note: 'Set duration to 15s and generate.',
+      }),
+      Object.freeze({
+        label: 'Looks 6-10',
+        durationSeconds: 15,
+        continuation: true,
+        prompt: SHIRT_STYLING_H3_B,
+        note: 'Press Continue scene on the part 1 result to pin its tail as motion context, then paste this over the armed prompt.',
+      }),
+    ],
   }),
   Object.freeze({
     id: 'anime-skate-multishot-h3',

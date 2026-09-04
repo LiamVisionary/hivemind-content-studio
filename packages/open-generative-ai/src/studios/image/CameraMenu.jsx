@@ -7,13 +7,12 @@
 //
 // UI pattern follows UgcMenu (ChipButton + Menu popover); the block composer
 // lives in src/lib/cameraRig.js, and the controls in studios/CameraControls.jsx.
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { cameraRigSentence } from '../../lib/cameraRig.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
 import { cx } from '../../ui/kit.jsx';
 import { CameraControls } from '../CameraControls.jsx';
 
-const zh = () => getLang() === 'zh-CN';
 
 export function CameraMenu({
   // The rig this composer holds — { camera, lens, focal, aperture }.

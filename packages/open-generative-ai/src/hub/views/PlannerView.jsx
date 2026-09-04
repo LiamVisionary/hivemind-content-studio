@@ -865,7 +865,7 @@ function AdvancedForm({ titleRef }) {
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-ink3">This lane does not choose a generation provider.</p>
+              <p className="text-xs text-ink3">This step does not choose a generation provider.</p>
             )}
           </section>
 

@@ -189,7 +189,7 @@ export const IMAGE_TAB_FIELDS = [
   'referenceRoles', 'ugcVariantIndex', 'ugcRoomIndex', 'customArOpen',
   'selectedAr', 'selectedResolution', 'guidanceScale', 'steps',
   'seed', 'seedText', 'selectedStyle', 'batchCount',
-  'customWidth', 'customHeight', 'sampler', 'scheduler', 'baseSize', 'referenceStrength',
+  'customWidth', 'customHeight', 'sampler', 'scheduler', 'baseSize',
   'coupleMode', 'coupleDirection', 'coupleSplit', 'couplePair', 'coupleShared', 'coupleA', 'coupleB',
   'regionMode', 'regions',
   'characterSheetMode', 'characterSheetPreset',
