@@ -20,6 +20,7 @@ from ..asset_store import AssetStore
 from ..hivemindos_brain import plan_with_local_brain
 from ..machine_privacy import machine_run_receipt
 from ..manifest import load_manifest, write_manifest
+from ..orchestrator import RunRecordUnavailable
 from ..private_access import (
     is_private_text_file,
     private_media_exists,
@@ -307,13 +308,20 @@ def register(app, ctx) -> None:
     @router.post("/api/runs/{run_id}/resume", dependencies=[Depends(require_owner_or_control)])
     def resume(run_id: str, request: Request) -> dict:
         require_visible_run(run_id)
-        return owner_visible(request, runs.resume_run(run_id))
+        try:
+            return owner_visible(request, runs.resume_run(run_id))
+        except RunRecordUnavailable as exc:
+            # The row lists (degraded) but cannot be driven. A sentence, not an
+            # incident id an agent can do nothing with.
+            raise HTTPException(status_code=409, detail=str(exc)) from None
 
     @router.post("/api/runs/{run_id}/retry", dependencies=[Depends(require_owner_or_control)])
     def retry(run_id: str, body: RetryBody, request: Request) -> dict:
         require_visible_run(run_id)
         try:
             return owner_visible(request, runs.retry_step(run_id, body.step_id))
+        except RunRecordUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
         except KeyError as exc:
             # An unknown step id. str() of a KeyError keeps its quotes; the
             # message inside is the store's own sentence.

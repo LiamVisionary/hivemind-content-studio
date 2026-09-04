@@ -3,11 +3,16 @@
 // Title is the brief's title or the lane's name; the opaque run id is the mono
 // subline, never the headline.
 import { memo } from 'react';
-import { cx } from '../../ui/kit.jsx';
+import { cx, Pill } from '../../ui/kit.jsx';
+import { t } from '../../lib/i18n.js';
+import { runRecordFailure } from '../../lib/runRecord.js';
 import { humanize, runDisplayTitle } from '../hubData.js';
 import { StatusPill } from './StatusPill.jsx';
 
 export const RunCard = memo(function RunCard({ run, selected = false, onOpen }) {
+  // A run whose record the studio cannot read still belongs in the list; it
+  // says so on its own card and the repair is one click away in the detail.
+  const record = runRecordFailure(run);
   return (
     <button
       type="button"
@@ -23,9 +28,13 @@ export const RunCard = memo(function RunCard({ run, selected = false, onOpen }) 
         <StatusPill status={run.status} />
       </div>
       <small className="truncate font-mono text-[11px] text-ink3" title={run.run_id}>{run.run_id}</small>
-      <small className="truncate text-xs text-ink3">
-        {run.current_step ? `Step: ${humanize(run.current_step)}` : 'Complete'}
-      </small>
+      {record ? (
+        <Pill tone="danger" className="self-start">{t('runs.recordMissing')}</Pill>
+      ) : (
+        <small className="truncate text-xs text-ink3">
+          {run.current_step ? `Step: ${humanize(run.current_step)}` : 'Complete'}
+        </small>
+      )}
     </button>
   );
 });

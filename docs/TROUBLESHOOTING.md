@@ -221,6 +221,24 @@ thing.
 
 ---
 
+## A production says its record is missing
+
+**You see:** a card in **Productions** with a red **Record missing** tag, and
+opening it shows *"This production's record file is missing, so the studio
+cannot read it."* Everything else in the list is normal.
+
+**Fix:** press **Open storage settings** on the card. The workspace section
+shows the folder this studio reads and writes; if that is not the folder the
+production was made in, the record is in the other one. Moving or renaming the
+studio folder no longer orphans a production — runs are recorded relative to
+that folder — so this now means the file itself is gone.
+
+One broken record only ever costs you that one card. The rest of the list, and
+everything the studio knows about the broken run itself (its steps, its status,
+its history), is still there.
+
+---
+
 ## Smaller things
 
 **A ten-second toast after loading a starter** — `Loaded "…"` followed by one

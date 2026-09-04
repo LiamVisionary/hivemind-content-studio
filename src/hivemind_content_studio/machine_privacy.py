@@ -55,9 +55,16 @@ def machine_run_receipt(run: dict[str, Any]) -> dict[str, Any]:
         if isinstance(artifact, dict):
             role = str(artifact.get("role") or "artifact")[:80]
             roles[role] = roles.get(role, 0) + 1
+    # A run whose manifest cannot be read still lists; an agent has to be able
+    # to tell "nothing to report" from "the record is gone", and the reason
+    # class is a status word, never a path or a traceback.
+    record_status = str(run.get("record_status") or "")[:40]
+    record_reason = str((run.get("record_failure") or {}).get("reason") or "")[:40] if isinstance(run.get("record_failure"), dict) else ""
     return {
         "ok": bool(run.get("ok", True)),
         "privacy": "machine-redacted",
+        **({"record_status": record_status} if record_status else {}),
+        **({"record_reason": record_reason} if record_reason else {}),
         "run_id": str(run.get("run_id") or ""),
         "lane": str(run.get("lane") or ""),
         "status": str(run.get("status") or ""),

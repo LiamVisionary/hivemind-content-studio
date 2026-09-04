@@ -17,6 +17,45 @@ from .run_store import RunStore
 from .stickman import render_stickman_frames
 
 
+_RECORD_SENTENCES = {
+    "missing": "This production's record file is missing, so the studio cannot read it.",
+    "sealed": "This production's record is sealed and could not be unlocked.",
+    "unreadable": "This production's record could not be read.",
+}
+
+
+def _record_failure_reason(exc: BaseException) -> str:
+    """Which of the three ways a manifest stops being readable this is.
+
+    ``load_manifest`` raises three different families and any one of them, in
+    ONE row, used to abort the whole run list: the file is gone (OSError), the
+    file is not a manifest this version understands (ValueError, which
+    JSONDecodeError is), or its private sections could not be decrypted
+    (RuntimeError, i.e. the vault is locked).
+    """
+    if isinstance(exc, OSError):
+        return "missing"
+    if isinstance(exc, ValueError):
+        return "unreadable"
+    return "sealed"
+
+
+class RunRecordUnavailable(RuntimeError):
+    """A run's manifest cannot be read.
+
+    Reading a run TOLERATES this — the envelope degrades so one orphaned row
+    cannot hide every other production. Driving one cannot, so the step paths
+    raise this instead: a sentence a person can read, never the raw traceback.
+    """
+
+    def __init__(self, *, run_id: str, manifest_path: str, reason: str, detail: str):
+        super().__init__(_RECORD_SENTENCES.get(reason, _RECORD_SENTENCES["unreadable"]))
+        self.run_id = run_id
+        self.manifest_path = manifest_path
+        self.reason = reason
+        self.detail = detail
+
+
 class ContentOrchestrator:
     def __init__(
         self,
@@ -86,7 +125,9 @@ class ContentOrchestrator:
     def _process_step(self, state: dict[str, Any], step: str) -> str:
         run_id = state["run_id"]
         manifest_path = state["manifest_path"]
-        manifest = load_manifest(manifest_path)
+        # A run with no readable record cannot be driven — the caller gets the
+        # sentence, not a filesystem traceback behind an incident id.
+        manifest = self._load_record(state)
         artifacts = manifest.get("artifacts", [])
         roles = [item.get("role") for item in artifacts]
         scene_count = len(manifest.get("brief", {}).get("scenes") or [])
@@ -305,8 +346,54 @@ class ContentOrchestrator:
             return {}
         return value if isinstance(value, dict) else {}
 
+    def _load_record(self, state: dict[str, Any]) -> dict[str, Any]:
+        manifest_path = str(state.get("manifest_path") or "")
+        try:
+            return load_manifest(manifest_path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RunRecordUnavailable(
+                run_id=str(state.get("run_id") or ""),
+                manifest_path=manifest_path,
+                reason=_record_failure_reason(exc),
+                detail=f"{type(exc).__name__}: {exc}"[:400],
+            ) from exc
+
+    def _degraded_envelope(self, state: dict[str, Any], failure: RunRecordUnavailable) -> dict[str, Any]:
+        """The row a broken record still deserves.
+
+        One run whose manifest had moved used to raise straight out of the
+        list comprehension below, so a single stale path answered the whole of
+        Productions with a 500 and the owner saw nothing. It becomes a card
+        that says what is wrong and carries the repair with it instead; every
+        other run in the list is unaffected.
+        """
+        return {
+            "ok": False,
+            **state,
+            "brief": {},
+            "providers": {},
+            "publish": {},
+            "composer": {},
+            "user_prompt": "",
+            "next_actions": [],
+            "artifacts": {},
+            "artifact_records": [],
+            "approval_required": False,
+            "cost": state["budget"],
+            "record_status": "unreadable",
+            "record_failure": {
+                "reason": failure.reason,
+                "message": str(failure),
+                "manifest_path": failure.manifest_path,
+                "detail": failure.detail,
+            },
+        }
+
     def _envelope(self, state: dict[str, Any]) -> dict[str, Any]:
-        manifest = load_manifest(state["manifest_path"])
+        try:
+            manifest = self._load_record(state)
+        except RunRecordUnavailable as failure:
+            return self._degraded_envelope(state, failure)
         current = next((step for step in state["steps"] if step["step_id"] == state["current_step"]), None)
         artifacts: dict[str, str] = {}
         artifact_records: list[dict[str, Any]] = []
