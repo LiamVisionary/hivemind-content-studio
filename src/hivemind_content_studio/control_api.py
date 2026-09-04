@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import contextlib
 import hmac
 import json
@@ -15,7 +13,6 @@ import re
 import secrets
 import subprocess
 import sys
-import statistics
 import tempfile
 import threading
 import time
@@ -23,20 +20,16 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict, deque
-from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from html import escape
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import yaml
@@ -70,7 +63,6 @@ from .machine_privacy import machine_operation_receipt, machine_run_receipt
 from .capability_matrix import capability_matrix
 from .media_catalog import media_catalog
 from .media_studio import (
-    normalized_requester_pub,
     sanitize_error_detail,
     smart_mask as run_smart_mask,
     cancel_video as run_media_studio_video_cancel,
@@ -113,10 +105,8 @@ from .private_access import (
     configure_private_cipher,
     e2e_media_exists,
     e2e_media_sidecar,
-    encrypt_private_media,
     is_private_text_file,
     private_media_exists,
-    private_media_sidecar,
     read_e2e_envelope,
     read_private_media,
     read_private_text,
@@ -164,6 +154,120 @@ from .studio_drafts import StudioRunDraft
 from .vault_store import VaultStore
 from .template_catalog import template_report
 from .unified_runtime import unified_runtime_snapshot
+# ── the other half of this module ─────────────────────────────────────────────
+# This file keeps the app object, the middleware chain, the lifespan and
+# main(); every subject's routes live in hivemind_content_studio/api/ (see its
+# __init__). Names are imported here rather than only where they are used
+# because they are re-exported at their old name: tests import them from
+# control_api, and several are PATCHED on this module by name — the route
+# modules read those back off it at call time, which is what keeps
+# `monkeypatch.setattr("…control_api.run_media_studio_video", …)` working
+# after the route moved out.
+from .api.cloud_output import (  # noqa: F401 — re-exported at the old name
+    CLOUD_OUTPUT_MAX_BYTES,
+    CloudOutputFetcher,
+    cloud_output_suffix,
+    fetch_cloud_output,
+)
+from .api.hosts import (  # noqa: F401 — re-exported at the old name
+    PROXY_SECRET_ENV,
+    PROXY_SECRET_HEADER,
+    _LOOPBACK_HOSTS,
+    _LOOPBACK_NAMES,
+    _SAFE_METHODS,
+    _host_name,
+)
+from .api.media_common import (  # noqa: F401 — re-exported at the old name
+    E2E_REQUESTER_HEADER,
+    _INLINE_AUDIO_SUFFIXES,
+    _INLINE_IMAGE_SUFFIXES,
+    _INLINE_VIDEO_SUFFIXES,
+    _e2e_envelope_response,
+    _encrypt_private_media,
+    _private_media_exists,
+    _private_media_response,
+    _PRIVATE_MEDIA_SUFFIX,
+    _private_media_sidecar,
+    _public_media_studio_qa,
+    _public_media_studio_result,
+    _read_private_media,
+    _remove_media_studio_qa_artifacts,
+    _requester_pub,
+    _sniffed_media_suffix,
+    _write_inline_media,
+)
+from .api.models import (  # noqa: F401 — re-exported at the old name
+    AccountCreateBody,
+    AccountPasswordChangeBody,
+    AccountRecoveryChallengeBody,
+    AccountRecoveryResetBody,
+    AccountRenameBody,
+    AccountSetupBody,
+    AccountUnlockBody,
+    CancelBody,
+    CanvasProvenanceBody,
+    CloudOutputAdoptBody,
+    ComfyAttachBody,
+    ComfyDetachBody,
+    ConfirmDeleteBody,
+    DecisionBody,
+    FavoriteBody,
+    HivemindosConnectBody,
+    HivemindosLinkCallbackBody,
+    HivemindosMergeBody,
+    HivemindosTopUpBody,
+    HostedSam3MaskBody,
+    HostedSam3QuoteBody,
+    LaneFreeBody,
+    MediaStudioIngredientImageBody,
+    MediaStudioIngredientPreviewBody,
+    MediaStudioInpaintBody,
+    MediaStudioLoraBody,
+    MediaStudioReferenceAudioBody,
+    MediaStudioReferenceVideoBody,
+    MediaStudioVideoBody,
+    PassBookBody,
+    PassBookModeBody,
+    PassBookResolveBody,
+    PassBookRevokeBody,
+    PassBookUnlockBody,
+    PasskeyAssertionBody,
+    PasskeyChallengeBody,
+    PasskeyRegisterBody,
+    PromptHelperDescribeLookBody,
+    PromptHelperGenerateBody,
+    PromptHelperLoadBody,
+    PromptHelperUnloadBody,
+    RemoteAccessBody,
+    RestorePlanBody,
+    RetryBody,
+    SettingsBody,
+    SimplePlanBody,
+    SpriteMatteBody,
+    SpritePointBody,
+    StoryProducerBody,
+    StudioImageBody,
+    VaultBlobBody,
+    VaultIdentityBody,
+    VaultPassphraseWrap,
+    VaultPrfWrapBody,
+    VaultRecoveryWrapBody,
+    _MAX_DESCRIPTION_CHARS,
+    _MAX_ID_CHARS,
+    _MAX_PROMPT_CHARS,
+    _StagedVideoInputs,
+)
+from .api.timings import (  # noqa: F401 — re-exported at the old name
+    _DEFAULT_VIDEO_SECONDS_PER_WORK_UNIT,
+    _VIDEO_BACKEND_GONE,
+    _VIDEO_RECORD_PROBE_SECONDS,
+    _VIDEO_UNRESPONSIVE_CHECKS,
+    _VIDEO_UNRESPONSIVE_SECONDS,
+    GenerationTimings,
+    _estimate_seconds_for_work,
+    _video_frame_megapixels,
+    _video_timing_signature,
+)
 
 
 log = logging.getLogger("hivemind.studio.control")
@@ -207,1069 +311,10 @@ def _validation_sentence(errors: list[Any]) -> str:
     return " · ".join(parts) or "The request was not valid"
 
 
-class CancelBody(BaseModel):
-    reason: str
-
-
-class RetryBody(BaseModel):
-    step_id: str
-
-
-class DecisionBody(BaseModel):
-    decided_by: str = "owner"
-
-
-class FavoriteBody(BaseModel):
-    favorite: bool
-
-
-class PassBookBody(BaseModel):
-    """Credentials the owner is adding to the machine's shared store.
-
-    Deliberately not a general key-value write: only names the studio actually
-    uses are accepted, so a bug or a hostile page cannot turn this into a way to
-    plant arbitrary environment variables into every Hive app on the machine.
-    """
-
-    values: dict[str, str] = Field(default_factory=dict)
-    overwrite: bool = False
-
-
-class PassBookRevokeBody(BaseModel):
-    """Which machine to stop lending to, named by its DID."""
-
-    did: str = Field(min_length=1, max_length=200)
-
-
-class AccountUnlockBody(BaseModel):
-    account_id: int
-    password: str
-
-
-class AccountSetupBody(BaseModel):
-    name: str = Field(min_length=1, max_length=40)
-    password: str = Field(min_length=1)
-
-
-class AccountCreateBody(BaseModel):
-    name: str = Field(min_length=1, max_length=40)
-    password: str = ""
-
-
-class VaultPassphraseWrap(BaseModel):
-    """The passphrase half of a vault identity, re-wrapped in the browser.
-
-    Nothing here is a secret the server can spend: `salt` is public PBKDF2
-    input and `wrapped_mk_pass` is the master key sealed under a key derived
-    from a passphrase this process never sees.
-    """
-
-    salt: str = Field(min_length=1, max_length=8192)
-    wrapped_mk_pass: str = Field(min_length=1, max_length=8192)
-    kdf: str = Field(default="", max_length=128)
-
-
-class AccountRecoveryChallengeBody(BaseModel):
-    account_id: int
-
-
-class AccountRecoveryResetBody(BaseModel):
-    account_id: int
-    challenge: str = Field(min_length=1, max_length=128)
-    # The nonce this browser decrypted with the recovered vault private key.
-    nonce: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=1)
-    wrap: VaultPassphraseWrap
-
-
-class AccountPasswordChangeBody(BaseModel):
-    current_password: str = Field(min_length=1)
-    password: str = Field(min_length=1)
-    wrap: VaultPassphraseWrap
-
-
-class AccountRenameBody(BaseModel):
-    name: str = Field(min_length=1, max_length=40)
-
-
-class PasskeyChallengeBody(BaseModel):
-    # Absent for a discoverable sign-in, where the passkey itself names the
-    # workspace and the browser picks which one to offer.
-    account_id: int | None = None
-
-
-class PasskeyRegisterBody(BaseModel):
-    credential_id: str = Field(max_length=1024)
-    # SPKI DER from the browser's own PublicKeyCredential.getPublicKey(), which
-    # is why this server needs no CBOR/COSE parser (see accounts.py).
-    public_key: str = Field(max_length=4096)
-    algorithm: int
-    client_data_json: str = Field(max_length=8192)
-    label: str = Field(default="", max_length=60)
-    # Whether this credential can produce a PRF secret, i.e. whether it is able
-    # to unlock the vault itself rather than only prove who is at the keyboard.
-    prf: bool = False
-
-
-class VaultPrfWrapBody(BaseModel):
-    # None removes the enrolment (the passkey still signs you in, it just no
-    # longer carries a copy of the wrapped master key).
-    wrapped_mk: str | None = Field(default=None, max_length=4096)
-
-
-class PasskeyAssertionBody(BaseModel):
-    credential_id: str = Field(max_length=1024)
-    client_data_json: str = Field(max_length=8192)
-    authenticator_data: str = Field(max_length=8192)
-    signature: str = Field(max_length=4096)
-
-
-class PassBookUnlockBody(BaseModel):
-    """Hold access open for a stated period."""
-
-    duration: str = Field(default="1h", max_length=16)
-    keys: list[str] = Field(default_factory=list, max_length=64)
-    app: str = Field(default="", max_length=128)
-    reason: str = Field(default="", max_length=200)
-
-
-class PassBookResolveBody(BaseModel):
-    """Answer a request that is waiting on a person.
-
-    The passkey fields are optional here and required by policy in the route: a
-    machine that has enrolled a passkey should not be able to approve a
-    credential release with a bare click, because then the passkey is decoration.
-    """
-
-    id: str = Field(min_length=1, max_length=64)
-    approve: bool = True
-    remember: str = Field(default="", max_length=16)
-    credential_id: str = Field(default="", max_length=1024)
-    client_data_json: str = Field(default="", max_length=8192)
-    authenticator_data: str = Field(default="", max_length=8192)
-    signature: str = Field(default="", max_length=4096)
-
-
-class PassBookModeBody(BaseModel):
-    """How one key, or one app, is answered."""
-
-    app: str = Field(default="", max_length=128)
-    key: str = Field(default="", max_length=128)
-    mode: str = Field(max_length=16)
-    window: dict[str, Any] | None = None
-
-
-class ConfirmDeleteBody(BaseModel):
-    confirm: bool = False
-
-
-class RemoteAccessBody(BaseModel):
-    enabled: bool = False
-
-
-class CanvasProvenanceBody(BaseModel):
-    models: list[str] = []
-    seeds: list[dict[str, Any]] = []
-
-
-class SettingsBody(BaseModel):
-    # An allow-list on the way in as well as on the way out: settings.py refuses
-    # a key it does not know, so a typo is a sentence rather than a stray row in
-    # the document.
-    values: dict[str, Any] = {}
-    reset: list[str] = []
-
-
-class VaultIdentityBody(BaseModel):
-    identity: dict[str, Any]
-    allow_replace: bool = False
-
-
-class VaultRecoveryWrapBody(BaseModel):
-    """A freshly minted recovery key's copy of the master key.
-
-    Replaces only `wrapped_mk_recovery`, which is what makes "show me a new
-    recovery key" different from rotating the vault: the master key is
-    unchanged, so nothing already sealed has to be re-encrypted.
-    """
-
-    wrapped_mk_recovery: str = Field(min_length=1, max_length=8192)
-
-
-class VaultBlobBody(BaseModel):
-    ciphertext: str
-
-
-class PromptHelperLoadBody(BaseModel):
-    modelId: str
-    unloadOthers: bool = True
-
-
-class PromptHelperUnloadBody(BaseModel):
-    modelId: str
-
-
-class LaneFreeBody(BaseModel):
-    lane: str
-
-
-class ComfyAttachBody(BaseModel):
-    """Point a lane at a ComfyUI the user is already running."""
-
-    url: str
-    lane: str = "default"
-
-
-class ComfyDetachBody(BaseModel):
-    lane: str = "default"
-
-
-class StudioImageBody(BaseModel):
-    """One still, from the provider the studio's picker actually selected.
-
-    ``provider`` is the media catalog's provider id and is REQUIRED: a model id
-    alone is ambiguous (gpt-image-2 exists under an OpenAI API key, an OpenAI
-    OAuth grant and MUAPI, on three different accounts), and guessing which one
-    is a charge on someone else's bill.
-    """
-
-    provider: str
-    model: str = ""
-    prompt: str
-    aspect_ratio: str = "1:1"
-    quality: str = ""
-    seed: int | None = None
-
-
-class CloudOutputAdoptBody(BaseModel):
-    """A finished cloud result the studio wants kept like a local render.
-
-    The URL is the provider's own, and it expires: MUAPI hands back a CDN link
-    that is gone within the day, which is why every Cinema, Lip Sync and cloud
-    Image result used to exist only until the tab closed.
-    """
-
-    url: str = Field(..., max_length=4096)
-    kind: Literal["image", "video", "audio"] = "image"
-    model: str = Field(default="", max_length=200)
-    provider: str = Field(default="", max_length=100)
-
-
-class HivemindosLinkCallbackBody(BaseModel):
-    """What the HivemindOS app posts back: the link it is answering, and the key."""
-
-    nonce: str = Field(default="", max_length=256)
-    token: str = Field(default="", max_length=512)
-
-
-class HivemindosConnectBody(BaseModel):
-    """The owner's HivemindOS account key, or an empty string to disconnect."""
-
-    token: str = Field(default="", max_length=512)
-
-
-class HivemindosMergeBody(BaseModel):
-    """Two or more account keys whose balances should become one."""
-
-    tokens: list[str] = Field(default_factory=list, max_length=8)
-
-
-class HivemindosTopUpBody(BaseModel):
-    """How much to put on the studio's own HivemindOS credit balance.
-
-    Bounded here rather than only at the gateway: an owner cannot mistype a
-    zero into a checkout this studio opened.
-    """
-
-    amountUsd: float = Field(default=5.0, ge=5.0, le=100.0)
-
-
-class StoryProducerBody(BaseModel):
-    """One question the Story studio asks its producer.
-
-    ``task`` is one of story_producer.TASKS. ``brief`` is what the director
-    just typed; ``context`` is everything already locked (the contract, the
-    characters, the location, the board), sent so the answer preserves it
-    instead of quietly inventing a second version of the same character.
-    """
-
-    modelId: str
-    task: str
-    brief: str = ""
-    context: dict | None = None
-
-
-class PromptHelperGenerateBody(BaseModel):
-    modelId: str
-    idea: str
-    targetModel: str = ""
-    mediaType: Literal["video", "image"] = "video"
-    # A start image is a different documented task for MiniMax H3 (I2VA vs
-    # T2VA), which opens with an anchor line the model was trained on.
-    hasFirstFrame: bool = False
-    # A last frame turns the same request into FL2VA (with a start frame) or
-    # L2VA (without) — each has its own anchor line.
-    hasLastFrame: bool = False
-    # A scene chain is armed: this prompt is the next shot of a running scene,
-    # not a new one. Without it the helper answers a line of new dialogue by
-    # inventing a fresh scene, which makes the chained render cut away.
-    isContinuation: bool = False
-    # How the shot being continued was written. The clause above says to keep
-    # the established scene; this is what says WHAT it is. Local-only, like
-    # every other prompt here — it goes to a llama-server on this machine.
-    previousPrompt: str | None = None
-    # What reference mode will condition on: how many pictures, which motion
-    # clips carry their own soundtrack, how many voice clips. The profile
-    # explains the label SCHEME; this says how many of each label exist, so the
-    # helper writes the ones the graph will actually carry.
-    references: dict | None = None
-    # UGC mode is armed in the composer. It layers onto whichever profile the
-    # target model selects rather than replacing it — the format stays, the
-    # judgements inside it invert (speech becomes required, polish becomes the
-    # failure mode).
-    ugc: bool = False
-    # The loaded Hive Persona's gender — "female" / "male" / "nonbinary" — so
-    # the helper writes "the woman"/"her" or "the man"/"his" instead of
-    # guessing. Only the gender: the persona's name is sealed to the owner's
-    # vault and never reaches this host.
-    personaGender: str | None = None
-    # Who is in the shot, one entry per <Subject N>, as the studio's cast
-    # compiler sees it: {"subject": 1, "kind": "persona" | "character",
-    # "gender": "", "name": "", "voice": bool, "look": ""}. A persona's name
-    # is vault-sealed and is discarded unread; a character's is public. When
-    # present this supersedes personaGender, which only knew about one person.
-    # Validated defensively in prompt_profiles.normalize_cast (it lands inside
-    # an instruction), so the field is a plain list here.
-    cast: list | None = None
-    # The clip length the studio is set to, so the written timeline fits inside it.
-    durationSeconds: float | None = None
-    # The start frame itself, as a data URL, for models with a projector: an
-    # I2VA prompt describes the first frame, and describing one it has never
-    # seen is guesswork.
-    imageBase64: str | None = None
-    # Verified character facts (name / casting / work / year) the client's H3
-    # character catalog matched in the idea, one line per character.
-    characterNotes: list[str] | None = None
-    # Revise an existing prompt instead of writing a new one: the prompt to
-    # change, and what the owner wants different about it.
-    currentPrompt: str | None = None
-    revision: str | None = None
-    # Refine currentPrompt into the model's perfect shape: {"detail":
-    # "keep"|"enrich", "shots": "keep"|"more"|"single", "guidance": "..."}.
-    # Validated in prompt_profiles.normalize_refine (advisory knobs, never a
-    # 422); requires currentPrompt like revision does.
-    refine: dict | None = None
-
-
-class PromptHelperDescribeLookBody(BaseModel):
-    """Ask the loaded helper to write a Hive Persona's LOOK from its pictures."""
-
-    # One to three reference pictures of the SAME person, as data URLs. Like a
-    # start frame, they go only to the llama-server this process spawned on
-    # 127.0.0.1 and are never written anywhere. Counted and checked in the
-    # route (not a validator) so a refusal does not echo the pictures back.
-    images: list[str]
-    # The persona's saved gender — "female" / "male" / "nonbinary" — so the
-    # description says "a woman with …" instead of reading one off the
-    # pictures; '' / absent writes "a person with …".
-    gender: str | None = None
-    # Which loaded helper to ask. Absent → whichever one is loaded, because the
-    # persona editor does not own the picker the way the composer's helper does.
-    modelId: str | None = None
-
-
-class MediaStudioLoraBody(BaseModel):
-    id: str
-    strength: float = 1.0
-
-
-# Generous ceilings, stated once. A prompt the MCP would refuse for length
-# used to fail LATE with a gateway message; a 422 here names the field, and
-# the validation handler below turns it into a sentence.
-_MAX_PROMPT_CHARS = 20_000
-_MAX_DESCRIPTION_CHARS = 1_000
-_MAX_ID_CHARS = 64
-
-
-class MediaStudioIngredientImageBody(BaseModel):
-    image_base64: str | None = None
-    image_reference: str | None = None
-    # Bounded like a prompt; the runner's own 1,000-character cut is reported
-    # in the response's warnings rather than applied in silence.
-    description: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
-
-
-@dataclass(slots=True)
-class _StagedVideoInputs:
-    """Every media file a video request decoded onto disk. Named rather than a
-    positional tuple: staging grew from one image to nine kinds of input, and
-    each has to be handed to the runner AND deleted afterwards."""
-
-    image: Path | None = None
-    middle: Path | None = None
-    end: Path | None = None
-    video: Path | None = None
-    motion_context: Path | None = None
-    ingredient_images: list[dict[str, Any]] = field(default_factory=list)
-    reference_images: list[Path] = field(default_factory=list)
-    reference_audios: list[Path] = field(default_factory=list)
-    reference_videos: list[dict[str, Any]] = field(default_factory=list)
-    # Head replacement: the clip being rewritten, and the painted mask.
-    inpaint_source: Path | None = None
-    inpaint_mask: Path | None = None
-    inpaint_mask_video: Path | None = None
-    # Anything staging changed about the request on the owner's behalf (a
-    # shortened note), so the response can say so instead of cutting silently.
-    warnings: list[str] = field(default_factory=list)
-
-    def paths(self) -> list[Path]:
-        return [
-            source
-            for source in [
-                self.image, self.middle, self.end, self.video, self.motion_context,
-                self.inpaint_source, self.inpaint_mask, self.inpaint_mask_video,
-                *(item["image_path"] for item in self.ingredient_images),
-                *self.reference_images,
-                *self.reference_audios,
-                *(item["video_path"] for item in self.reference_videos),
-            ]
-            if source is not None
-        ]
-
-
-class MediaStudioReferenceAudioBody(BaseModel):
-    audio_base64: str | None = None
-    audio_reference: str | None = None
-
-
-class MediaStudioReferenceVideoBody(BaseModel):
-    video_base64: str | None = None
-    video_reference: str | None = None
-    # Condition on the clip's own soundtrack too. Off by default: a downloaded
-    # motion reference usually carries audio nobody wants in the shot, and an
-    # unwanted soundtrack silently spends one of the model's <Audio N> labels.
-    use_audio: bool = False
-    # How the clip is staged for the node. "full" keeps MiniMax H3's own
-    # 768-short-edge reference canvas; "compact" fits it inside 384x1152, never
-    # upscaled — about 3.3x fewer sequence rows and half the step time for the
-    # same motion (same-seed A/B on a rented 5090, 2026-08-21). Measured for
-    # MOTION references only, so it is a per-clip opt-in; the studio holds it
-    # off while the clip is the character reference (no picture attached).
-    canvas: Literal["full", "compact"] = "full"
-
-
-class MediaStudioInpaintBody(BaseModel):
-    """The head-replacement dials. Every one is optional and an unset dial keeps
-    the workflow's own default — the studio does not restate them, so there is
-    one place to change a default rather than two that can drift."""
-
-    sam3_prompt: str = Field(default="", max_length=200)
-    sam3_detection_threshold: float | None = Field(default=None, ge=0.05, le=0.95)
-    sam3_max_objects: int | None = Field(default=None, ge=0, le=64)
-    sam3_detect_interval: int | None = Field(default=None, ge=1, le=64)
-    sam3_object_indices: str = Field(default="", max_length=100)
-    mask_expand: int | None = Field(default=None, ge=-512, le=512)
-    mask_feather: int | None = Field(default=None, ge=0, le=256)
-    mask_despeckle: int | None = Field(default=None, ge=0, le=256)
-    mask_temporal_expand: int | None = Field(default=None, ge=0, le=64)
-    crop_mode: Literal["", "combined", "tracked", "zoomed"] = ""
-    # 0 is "no crop, the whole frame". Between 0 and 1 would be a window smaller
-    # than the subject; media_studio refuses it there, where the message can
-    # explain what the number means.
-    crop_scale: float | None = Field(default=None, ge=0, le=4)
-    crop_megapixels: float | None = Field(default=None, ge=0.1, le=2)
-    paste_expand: int | None = Field(default=None, ge=-512, le=512)
-    paste_feather: int | None = Field(default=None, ge=0, le=256)
-    paste_edge_feather: int | None = Field(default=None, ge=0, le=256)
-
-
-class MediaStudioVideoBody(BaseModel):
-    prompt: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
-    workflow_id: str = Field(default="", max_length=256)
-    studio_lane: str = Field(default="", max_length=512)
-    # The studio's per-tab "Run on" pin (a rental id such as "vast:48352597").
-    run_on: str = Field(default="", max_length=128)
-    reference_description: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
-    ingredient_images: list[MediaStudioIngredientImageBody] = []
-    # MiniMax H3 Reference mode: discrete character/subject pictures carried into
-    # the clip in order (reference N is the prompt's <Picture N>). Distinct from
-    # ingredient_images, which LTX composes into one conditioning sheet.
-    reference_images: list[MediaStudioIngredientImageBody] = []
-    # Voice/timbre clips (<Audio N>) and motion references (<Video N>) for the
-    # same H3 Reference mode. All three reference kinds are optional and mix
-    # freely; only audio may never be the sole reference.
-    reference_audios: list[MediaStudioReferenceAudioBody] = []
-    reference_videos: list[MediaStudioReferenceVideoBody] = []
-    image_base64: str | None = None
-    image_reference: str | None = None
-    middle_image_base64: str | None = None
-    end_image_base64: str | None = None
-    video_base64: str | None = None
-    video_reference: str | None = None
-    # Scene chaining (MiniMax H3): the PREVIOUS clip, decrypted in-browser and
-    # sent inline; its last ~22 frames + audio tail seed the new shot.
-    # Head replacement (MiniMax H3 inpainting): the clip being REWRITTEN, and
-    # the painted region that says which pixels may change. Neither is a source
-    # video (that means "extend this shot") nor a reference (that is
-    # conditioning) — this clip's own pixels and soundtrack are the result.
-    source_video_base64: str | None = None
-    source_video_reference: str | None = None
-    mask_image_base64: str | None = None
-    # A tracked mask CLIP — one white-on-black frame per source frame. What
-    # the hosted masking service returns, and how a lane with no SAM3
-    # checkpoint still gets a tracked mask.
-    mask_video_base64: str | None = None
-    mask_source: Literal["", "manual", "sam3", "sequence"] = ""
-    inpaint: "MediaStudioInpaintBody | None" = None
-    motion_context_base64: str | None = None
-    video_mode: Literal["extend"] = "extend"
-    # THE task. Decided once in the studio (src/lib/videoTasks.js) and forwarded
-    # verbatim; nothing downstream re-derives the job from which media arrived.
-    task: Literal["generate", "extend", "head-swap"] = "generate"
-    # Bounded here, not only in the estimate: NaN, a negative or 1e9 used to
-    # reach the runner untouched and fail a minute later in its own words.
-    duration_seconds: float = Field(default=4, gt=0, le=60)
-    aspect_ratio: str = Field(default="", max_length=16)
-    # "max" is the ~1.0MP native-canvas tier (MiniMax H3's trained 768px short
-    # edge); the studio only offers it for minimax-family workflows.
-    resolution: Literal["", "standard", "high", "max"] = ""
-    # -1 (or omitted) lets the runner pick a random seed; >= 0 is a fixed seed.
-    seed: int | None = None
-    # Optional post-generation grain cleanup on the native MLX LTX path.
-    denoise: Literal["", "light", "strong"] = ""
-    # Negative prompt. On the distilled local lanes this is applied through NAG
-    # (guidance inside cross-attention); those run cfg=1, where a CFG-style
-    # negative prompt does nothing at all.
-    negative_prompt: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
-    # NAG strength. Omitted uses the runner default; <=1 disables guidance.
-    nag_scale: float | None = Field(default=None, ge=0, le=100)
-    head_swap_lora_strength: float | None = Field(default=None, ge=-10, le=10)
-    head_swap_backend: str | None = Field(default=None, max_length=_MAX_ID_CHARS)
-    head_swap_face_enhancer: bool = False
-    # None = leave the workflow's own default alone; only an explicit choice
-    # overrides the registered graph.
-    spectrum: bool | None = None
-    # Fast high-res: MiniMax H3's two-pass latent upscale (sample small, refine
-    # at full size). Same tri-state — None leaves the registered graph alone.
-    fast_high_res: bool | None = None
-    # Sampling-steps override for workflows whose registry maps a steps slot
-    # (MiniMax H3's refinement setting). None keeps the workflow default.
-    steps: int | None = Field(default=None, ge=1, le=100)
-    loras: list[MediaStudioLoraBody] = []
-
-
-class HostedSam3QuoteBody(BaseModel):
-    """What one hosted mask would cost. Measured by the browser, which has
-    already decoded the clip — the price is quoted from these three numbers."""
-
-    frames: int = Field(default=121, ge=1, le=400)
-    width: int = Field(default=1280, ge=16, le=8192)
-    height: int = Field(default=720, ge=16, le=8192)
-
-
-class HostedSam3MaskBody(HostedSam3QuoteBody):
-    # The clip to track, decrypted in-browser and sent inline like every other
-    # reference. This is the one masking path where footage leaves the machine,
-    # which the dialog says beside the button rather than in a policy.
-    video_base64: str
-    prompt: str = Field(default="head", max_length=200)
-    detection_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
-    max_objects: int = Field(default=1, ge=0, le=64)
-    detect_interval: int = Field(default=1, ge=1, le=64)
-    # What the owner approved on the dialog's own price line. The client sends
-    # back the figure it SHOWED, so a price that moved between the quote and the
-    # submit is refused rather than silently charged.
-    maximum_debit_usd: float = Field(default=0.5, gt=0, le=2)
-
-
-class RestorePlanBody(BaseModel):
-    """What the browser measured off the file it is holding.
-
-    Bounded rather than trusted: these numbers only ever come from a local
-    <video> element, but they decide how many chunks the gateway will plan, and
-    a nonsense frame count should be a 422 rather than a ten-thousand-chunk
-    project."""
-
-    frames: int = Field(ge=1, le=10_000_000)
-    fps: float = Field(default=24.0, gt=0, le=480)
-    width: int = Field(ge=16, le=16384)
-    height: int = Field(ge=16, le=16384)
-    options: dict[str, Any] = Field(default_factory=dict)
-
-
-class MediaStudioIngredientPreviewBody(BaseModel):
-    ingredient_images: list[MediaStudioIngredientImageBody] = []
-    aspect_ratio: str = "16:9"
-
-
-class SpritePointBody(BaseModel):
-    x: float = 0.0
-    y: float = 0.0
-    include: bool = True
-
-
-class SpriteMatteBody(BaseModel):
-    """One extracted frame plus what to keep in it.
-
-    The frame arrives inline and decrypted — the browser pulled it out of a
-    clip it was already playing — so nothing here reads the vault, and nothing
-    is written down: the mask goes back in the same response.
-    """
-
-    image_base64: str = ""
-    subject: str = ""
-    points: list[SpritePointBody] = []
-    confidence: float | None = None
-
-
-# First-run fallback before any real duration is recorded, expressed per WORK
-# UNIT (one frame-megapixel) so an unmeasured run still scales with its length
-# and resolution: ~4.5 puts a 4-second 16:9 standard clip (97 frames at 0.34MP)
-# near 150s, and the same clip at the high tier — 2.5x the pixels — near 375s.
-_DEFAULT_VIDEO_SECONDS_PER_WORK_UNIT = 4.5
-
-# When to stop believing a video job is still rendering. Deliberately generous:
-# the gateway is a single-threaded server that a large upload can block for a
-# while, and a false "it died" on a live render is worse than a slow true one.
-# Read at call time so a test can shorten them.
-_VIDEO_UNRESPONSIVE_CHECKS = 5
-_VIDEO_UNRESPONSIVE_SECONDS = 30.0
-_VIDEO_RECORD_PROBE_SECONDS = 10.0
-_VIDEO_BACKEND_GONE = "The video backend stopped responding"
-
-
-def _video_frame_megapixels(aspect_ratio: str, resolution: str) -> float:
-    dims = video_dimensions_for_request(aspect_ratio=aspect_ratio, resolution=resolution)
-    if not dims:
-        # "Match the start frame" sends no aspect ratio, and the frame itself is
-        # already uploaded and unstaged by now. Every bucket within a tier sits
-        # within ~12% of the same pixel count, so the 16:9 bucket stands in.
-        dims = video_dimensions_for_request(aspect_ratio="16:9", resolution=resolution)
-    width, height = dims
-    return (width * height) / 1_000_000
-
-
-def _video_timing_signature(body: "MediaStudioVideoBody") -> tuple[str, str, float]:
-    """A canonical key over the params that change the COST PROFILE (workflow,
-    mode, adapters, post-pass) plus the run's WORK UNITS — frames x megapixels —
-    which are what actually scale the duration. Keeping length and resolution
-    out of the key and in the work units is what lets a measured 4-second
-    standard run estimate an 8-second or high-resolution one, instead of
-    starting over from a flat constant. Metadata only — never prompt text."""
-    workflow = (body.workflow_id or "default").strip() or "default"
-    duration = max(1.0 / 24, min(30.0, float(body.duration_seconds or 4)))
-    frames = max(9, min(721, round(duration * 24) + 1))
-    resolution = (body.resolution or "standard").strip().lower() or "standard"
-    lora_n = len([item for item in body.loras if str(getattr(item, "id", "") or "").strip()])
-    ingredient_n = len(body.ingredient_images)
-    task = (getattr(body, "task", None) or "generate").strip().lower()
-    if task == "head-swap":
-        # Read the task, do not re-infer it from the attachments: a head swap
-        # carries a video AND an image, so the attachment test below calls it an
-        # extension. It is a different cost profile entirely (an order of
-        # magnitude slower here), and averaging the two wrecks both estimates.
-        mode = "head-swap"
-    elif body.motion_context_base64:
-        # Scene chaining samples ~22 extra frames plus a context encode — a
-        # different cost profile from a plain generate at the same duration.
-        mode = "chain"
-    elif body.video_base64 or body.video_reference:
-        mode = "extend"
-    elif body.image_base64 or body.image_reference or body.middle_image_base64 or body.end_image_base64:
-        mode = "i2v"
-    elif ingredient_n:
-        mode = "ingredients"
-    else:
-        mode = "t2v"
-    # The denoise pass is a real re-encode on top of generation, so it belongs in
-    # the key — otherwise filtered runs poison the unfiltered estimate.
-    denoise = (body.denoise or "off").strip().lower() or "off"
-    # A steps override scales sampling time directly (32 steps is ~2x the work
-    # of 15), so runs with different step counts must not share an estimate.
-    steps = f"|steps={int(body.steps)}" if isinstance(body.steps, int) and body.steps > 0 else ""
-    work = frames * _video_frame_megapixels(body.aspect_ratio, resolution)
-    return (
-        f"v2|{workflow}|{mode}|loras={lora_n}|ing={ingredient_n}|dn={denoise}{steps}",
-        workflow,
-        round(work, 3),
-    )
-
-
-def _estimate_seconds_for_work(
-    samples: list[tuple[float, float]], work: float
-) -> float | None:
-    """Duration model: seconds ~= overhead + rate * work. Generation cost is very
-    close to linear in both frame count and pixel count, so measured runs scale
-    to unmeasured configurations: an exact work match wins outright (it already
-    carries every nonlinearity), a single measured work value scales
-    proportionally, and two or more separate the fixed per-run overhead (model
-    load, VAE decode, upload) from the part that grows with the work.
-
-    Mirrors estimateSecondsForWork() in packages/open-generative-ai/src/lib/
-    genProgress.js, which does the same for client-side image timings."""
-    target = round(float(work), 3)
-    if target <= 0:
-        return None
-    by_work: dict[float, list[float]] = defaultdict(list)
-    for sample_work, seconds in samples:
-        if sample_work > 0 and 0 < seconds < 86400:
-            by_work[round(float(sample_work), 3)].append(float(seconds))
-    if not by_work:
-        return None
-    if target in by_work:
-        return round(statistics.median(by_work[target]), 1)
-
-    points = sorted((w, statistics.median(values)) for w, values in by_work.items())
-    if len(points) > 1:
-        (low_work, low_seconds), (high_work, high_seconds) = points[0], points[-1]
-        rate = (high_seconds - low_seconds) / (high_work - low_work)
-        overhead = low_seconds - rate * low_work
-        # A flat/negative slope or a negative intercept means these samples are
-        # dominated by noise rather than by work — scale off the nearest point.
-        if rate > 0 and overhead >= 0:
-            return round(overhead + rate * target, 1)
-    nearest_work, nearest_seconds = min(points, key=lambda point: abs(point[0] - target))
-    return round(nearest_seconds * (target / nearest_work), 1)
-
-
-class GenerationTimings:
-    """Records actual generation durations keyed by a param signature and tagged
-    with the run's work units, so a new run can display an elapsed / expected
-    estimate that scales with clip length and resolution. Owner-local metadata
-    only (durations + opaque signatures), persisted as JSONL — no prompts, no
-    media."""
-
-    def __init__(self, path: Path, per_sig: int = 24, per_workflow: int = 120):
-        self._path = Path(path)
-        self._by_sig: dict[str, deque] = defaultdict(lambda: deque(maxlen=per_sig))
-        self._by_workflow: dict[str, deque] = defaultdict(lambda: deque(maxlen=per_workflow))
-        self._lock = threading.Lock()
-        self._load()
-
-    def _load(self) -> None:
-        try:
-            with self._path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    sig = str(record.get("sig") or "")
-                    seconds = record.get("seconds")
-                    work = record.get("work")
-                    if not sig or not isinstance(seconds, (int, float)) or not (0 < seconds < 86400):
-                        continue
-                    # Pre-work-unit records can't be scaled (their signature held
-                    # the length and resolution instead), so they are left behind.
-                    if not isinstance(work, (int, float)) or work <= 0:
-                        continue
-                    self._by_sig[sig].append((float(work), float(seconds)))
-                    workflow = str(record.get("wf") or "")
-                    if workflow:
-                        self._by_workflow[workflow].append((float(work), float(seconds)))
-        except OSError:
-            return
-
-    def record(self, signature: str, workflow: str, work: float, seconds: float) -> None:
-        if not signature or not (0 < seconds < 86400) or not work > 0:
-            return
-        with self._lock:
-            self._by_sig[signature].append((float(work), float(seconds)))
-            if workflow:
-                self._by_workflow[workflow].append((float(work), float(seconds)))
-            with contextlib.suppress(OSError):
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                with self._path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps({
-                        "sig": signature, "wf": workflow, "work": round(float(work), 3),
-                        "seconds": round(float(seconds), 2), "at": round(time.time()),
-                    }) + "\n")
-
-    def estimate(
-        self,
-        signature: str,
-        workflow: str,
-        work: float,
-        fallback_rate: float | None = None,
-    ) -> float | None:
-        with self._lock:
-            samples = list(self._by_sig.get(signature) or [])
-            workflow_samples = list(self._by_workflow.get(workflow) or [])
-        seconds = _estimate_seconds_for_work(samples, work)
-        if seconds is None and len(workflow_samples) >= 2:
-            seconds = _estimate_seconds_for_work(workflow_samples, work)
-        if seconds is None and fallback_rate and work > 0:
-            seconds = float(fallback_rate) * float(work)
-        return round(seconds, 1) if seconds and seconds > 0 else None
-
-
-_INLINE_IMAGE_SUFFIXES = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/webp": ".webp",
-    "image/heic": ".heic",
-    "image/heif": ".heif",
-}
-
-_INLINE_VIDEO_SUFFIXES = {
-    "video/mp4": ".mp4",
-    "video/quicktime": ".mov",
-    "video/webm": ".webm",
-    "video/x-matroska": ".mkv",
-    "video/x-msvideo": ".avi",
-    "video/x-m4v": ".m4v",
-}
-
-_INLINE_AUDIO_SUFFIXES = {
-    "audio/wav": ".wav",
-    "audio/x-wav": ".wav",
-    "audio/wave": ".wav",
-    "audio/mpeg": ".mp3",
-    "audio/mp3": ".mp3",
-    "audio/flac": ".flac",
-    "audio/x-flac": ".flac",
-    "audio/ogg": ".ogg",
-    "audio/mp4": ".m4a",
-    "audio/x-m4a": ".m4a",
-    "audio/aac": ".aac",
-    # What real recorders actually label AAC-in-MP4: Android's media framework
-    # and anything that went through it say "mp4a-latm" (2026-08-12, a voice
-    # reference rejected on the label alone while the bytes were ordinary m4a).
-    "audio/mp4a-latm": ".m4a",
-    "audio/aacp": ".aac",
-    "audio/x-hx-aac-adts": ".aac",
-    # A browser MediaRecorder produces webm/opus by default, and phone voice
-    # memos arrive as 3gpp/amr or Apple's caf.
-    "audio/webm": ".webm",
-    "audio/opus": ".opus",
-    "audio/3gpp": ".3gp",
-    "audio/amr": ".amr",
-    "audio/x-caf": ".caf",
-}
-
-# Container signatures, for when the LABEL is unknown but the bytes are not.
-# An allow-list of media types is a guess about what clients call things; these
-# are what the file actually is. Checked only after the label misses, so a
-# correctly-labelled file never depends on sniffing.
-_MEDIA_MAGIC = (
-    (b"RIFF", 8, b"WAVE", ".wav"),
-    (b"fLaC", None, None, ".flac"),
-    (b"OggS", None, None, ".ogg"),
-    (b"ID3", None, None, ".mp3"),
-    (b"\x1a\x45\xdf\xa3", None, None, ".webm"),  # EBML: webm/mkv
-    (b"RIFF", 8, b"AVI ", ".avi"),
-    (b"RIFF", 8, b"WEBP", ".webp"),
-    (b"\x89PNG\r\n\x1a\n", None, None, ".png"),
-    (b"\xff\xd8\xff", None, None, ".jpg"),
-)
-
-
-def _sniffed_media_suffix(data: bytes, *, audio: bool) -> str:
-    """The container a blob actually is, or "" when nothing matches."""
-    for prefix, offset, marker, suffix in _MEDIA_MAGIC:
-        if not data.startswith(prefix):
-            continue
-        if marker is not None and data[offset:offset + len(marker)] != marker:
-            continue
-        return suffix
-    # ISO-BMFF (mp4/m4a/mov/3gp) puts its brand at byte 4, so the family is
-    # only distinguishable by intent: the same box carries audio and video.
-    if len(data) >= 12 and data[4:8] == b"ftyp":
-        return ".m4a" if audio else ".mp4"
-    # A bare MPEG audio frame has no header at all, only a sync word.
-    if audio and len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
-        return ".mp3"
-    return ""
-
-_PRIVATE_MEDIA_SUFFIX = ".zenc"
 _MAX_PRIVATE_IMAGE_BYTES = 32 * 1024 * 1024
 _MAX_PRIVATE_VIDEO_BYTES = 100 * 1024 * 1024
 # One number per kind of file: inline voice clips and uploaded ones share it.
 _MAX_PRIVATE_AUDIO_BYTES = 25 * 1024 * 1024
-
-
-def _private_media_sidecar(path: Path) -> Path:
-    return private_media_sidecar(path)
-
-
-def _encrypt_private_media(
-    path: Path,
-    cipher: PrivateFieldCipher,
-    *,
-    scope: str = "media-studio-output",
-) -> bool:
-    return encrypt_private_media(path, scope=scope, cipher=cipher)
-
-
-def _private_media_exists(path: Path) -> bool:
-    return private_media_exists(path)
-
-
-def _read_private_media(
-    path: Path,
-    cipher: PrivateFieldCipher,
-    *,
-    scope: str = "media-studio-output",
-) -> bytes:
-    return read_private_media(path, scope=scope, cipher=cipher)
-
-
-E2E_REQUESTER_HEADER = "X-E2E-Requester-Pub"
-
-
-def _requester_pub(request: Request) -> str:
-    """The caller's own E2E public key, if it presented one.
-
-    A browser that holds a device key sends it here, and this server does
-    nothing with it but pass it on: generated media is sealed to that key by
-    the gateway, so a clip belongs to the device that asked for it rather than
-    to whichever process happened to relay the request. Absent header means the
-    caller has no key of its own and the owner vault is the only recipient."""
-    return normalized_requester_pub(request.headers.get(E2E_REQUESTER_HEADER))
-
-
-def _e2e_envelope_response(envelope: bytes) -> Response:
-    """Serve a client-only E2E envelope verbatim. The browser detects it via
-    X-E2E-Media/Content-Type and decrypts with the vault private key; the server
-    holds no key. Mirrors the media-gateway send_output_file headers."""
-    return Response(
-        content=envelope,
-        media_type="application/vnd.hivemind.e2e+json",
-        headers={
-            "X-E2E-Media": "1",
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
-def _private_media_response(body: bytes, *, media_type: str, range_header: str = "") -> Response:
-    total = len(body)
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Cache-Control": "private, no-store",
-        "Content-Length": str(total),
-        "X-Content-Type-Options": "nosniff",
-    }
-    if range_header:
-        match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
-        if match:
-            start_text, end_text = match.groups()
-            if start_text or end_text:
-                if not start_text:
-                    suffix_length = int(end_text)
-                    start = max(total - suffix_length, 0)
-                    end = total - 1
-                else:
-                    start = int(start_text)
-                    end = min(int(end_text), total - 1) if end_text else total - 1
-                if start >= total or start > end:
-                    return Response(status_code=416, headers={"Content-Range": f"bytes */{total}"})
-                body = body[start:end + 1]
-                headers["Content-Range"] = f"bytes {start}-{end}/{total}"
-                headers["Content-Length"] = str(len(body))
-                return Response(content=body, status_code=206, media_type=media_type, headers=headers)
-    return Response(content=body, media_type=media_type, headers=headers)
-
-
-def _public_media_studio_qa(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    allowed = {
-        "ok",
-        "size_bytes",
-        "duration_seconds",
-        "width",
-        "height",
-        "video_codec",
-        "audio_codecs",
-        "visual_inspection_required",
-        "failures",
-    }
-    return {key: value[key] for key in allowed if key in value}
-
-
-def _remove_media_studio_qa_artifacts(value: object, output_root: Path) -> None:
-    if not isinstance(value, dict) or not value.get("representative_frame"):
-        return
-    frame = Path(str(value["representative_frame"])).expanduser().resolve()
-    qa_root = (output_root / "qa").resolve()
-    if not frame.is_relative_to(qa_root):
-        return
-    with contextlib.suppress(FileNotFoundError):
-        frame.unlink()
-    with contextlib.suppress(OSError):
-        frame.parent.rmdir()
-
-
-def _public_media_studio_result(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    payload: dict[str, Any] = {}
-    job_id = str(value.get("job_id") or value.get("id") or "").strip()
-    if job_id:
-        payload["job_id"] = job_id
-        payload["id"] = job_id
-    provider = str(value.get("provider") or "Media Studio").strip()
-    if provider:
-        payload["provider"] = provider[:160]
-    return payload
-
-
-def _write_inline_media(
-    value: str,
-    destination_dir: Path,
-    *,
-    field_name: str,
-    mime_suffixes: dict[str, str],
-    default_suffix: str,
-    max_bytes: int,
-    label: str = "",
-) -> Path:
-    # ``label`` is what the owner sees ("Picture 2", "Motion clip 1"); the
-    # field name is the wire name and only stands in when no label was given.
-    what = label or field_name
-    raw = value.strip()
-    if not raw:
-        raise ValueError(f"{what} is required")
-    suffix = default_suffix
-    encoded = raw
-    mime = ""
-    if raw.startswith("data:"):
-        header, separator, body = raw.partition(",")
-        if not separator:
-            raise ValueError(f"{what} is not a valid data URL (missing its comma separator)")
-        mime = header.removeprefix("data:").split(";", 1)[0].lower()
-        suffix = mime_suffixes.get(mime, "")
-        encoded = body
-    try:
-        data = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError(f"{what} is not valid base64") from exc
-    if not suffix:
-        # The label is one we do not know. Ask the bytes before refusing: a
-        # media type is what the client CALLS the file, and recorders invent
-        # spellings ("audio/mp4a-latm" for ordinary AAC). Rejecting on the
-        # label alone throws away a perfectly decodable clip.
-        suffix = _sniffed_media_suffix(data, audio=field_name.startswith("audio"))
-    if not suffix:
-        raise ValueError(
-            f"{what} has an unsupported media type ({mime or 'unknown'}) "
-            f"and its contents are not a recognised media container"
-        )
-    if not data:
-        raise ValueError(f"{what} decoded to an empty file")
-    if len(data) > max_bytes:
-        raise ValueError(f"{what} is too large; max {max_bytes // 1024 // 1024} MB")
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    descriptor, filename = tempfile.mkstemp(prefix="media-studio-input-", suffix=suffix, dir=destination_dir)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(data)
-    return Path(filename)
 
 
 def _write_inline_image(value: str, destination_dir: Path, *, label: str = "") -> Path:
@@ -1318,40 +363,6 @@ def _write_inline_audio(value: str, destination_dir: Path, *, label: str = "") -
     )
 
 
-# The only names this studio answers to. A page on any other origin can point
-# its own DNS name at 127.0.0.1 and reach this port; the browser then treats it
-# as same-origin and the request looks local in every way but one — the Host
-# header still carries the attacker's name. That is the whole check.
-_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
-_LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
-_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-
-# Header the tailnet HTTPS proxy presents to prove it is the proxy. Without it
-# x-forwarded-proto/host/for are just headers any caller can write, and three
-# things were derived from them: the session cookie's `secure` flag, the
-# WebAuthn relying-party id, and the login throttle's key. Generated per stack
-# run and handed to both ends by scripts/hivemind-studio-stack.
-PROXY_SECRET_ENV = "CONTENT_STUDIO_PROXY_SECRET"
-PROXY_SECRET_HEADER = "x-studio-proxy-secret"
-
-
-def _host_name(value: str) -> str:
-    """The bare name in a Host header, an Origin, or a bare authority.
-
-    No port, no brackets, lower-cased — so "[::1]:8765", "https://LOCALHOST:8789"
-    and "127.0.0.1" all reduce to something comparable.
-    """
-    candidate = value.strip()
-    if not candidate:
-        return ""
-    if "://" not in candidate:
-        candidate = "//" + candidate
-    try:
-        return (urllib.parse.urlsplit(candidate).hostname or "").lower()
-    except ValueError:
-        return ""
-
-
 def _machine_route_allowed(path: str, method: str) -> bool:
     # /readyz joins /healthz: the shell that launched this process polls it
     # before anyone has signed in, and it says nothing an unlocked studio does
@@ -1374,23 +385,6 @@ def _machine_route_allowed(path: str, method: str) -> bool:
     if method == "GET" and re.fullmatch(r"/api/runs/[^/]+", path):
         return True
     return bool(method == "POST" and re.fullmatch(r"/api/runs/[^/]+/(resume|retry|cancel)", path))
-
-
-class SimplePlanBody(BaseModel):
-    prompt: str
-    provider: str
-    model: str
-    auth: str | None = None
-    promptHelper: bool = True
-    walkthrough: bool = False
-    confirmed: bool = False
-    history: list[dict[str, Any]] = []
-    attachments: list[dict[str, Any]] = []
-    imageSelection: dict[str, str] = {}
-    videoSelection: dict[str, str] = {}
-    seed: int | None = None
-    seedMode: Literal["fixed", "randomize", "increment", "decrement"] | None = None
-    studioMode: Literal["create", "edit", "animate", "workflow"] = "create"
 
 
 def _route_snapshot(value: object) -> dict[str, str]:
@@ -1426,72 +420,6 @@ def _composer_snapshot(value: object) -> dict[str, Any]:
 # owner loses on the next relaunch. Everything below turns one of those links
 # into what a local render already produces: bytes under this workspace's
 # outputs root, sealed there, and indexed in this workspace's own History.
-
-CLOUD_OUTPUT_MAX_BYTES = 256 * 1024 * 1024
-CloudOutputFetcher = Callable[[str], tuple[bytes, str]]
-
-# What a provider may hand back, by the kind the studio asked for. A suffix the
-# History index does not recognise lists as a row nothing will open.
-_CLOUD_OUTPUT_SUFFIXES = {
-    "image": {".png", ".jpg", ".jpeg", ".webp", ".gif"},
-    "video": {".mp4", ".mov", ".webm", ".m4v", ".mkv"},
-    "audio": {".mp3", ".wav", ".m4a"},
-}
-_CLOUD_OUTPUT_DEFAULT_SUFFIX = {"image": ".png", "video": ".mp4", "audio": ".mp3"}
-
-
-def cloud_output_suffix(url: str, media_type: str, kind: str) -> str:
-    """The extension this result is stored under.
-
-    The URL's own extension when it is one this kind can have, then the served
-    content type, then the kind's default. The name is what History reads the
-    media type off, so guessing badly here is what makes a finished clip list
-    as an octet-stream row with no player.
-    """
-    allowed = _CLOUD_OUTPUT_SUFFIXES.get(kind, _CLOUD_OUTPUT_SUFFIXES["image"])
-    candidate = Path(urllib.parse.urlparse(str(url or "")).path or "").suffix.lower()
-    if candidate in allowed:
-        return candidate
-    guessed = (mimetypes.guess_extension(str(media_type or "").split(";")[0].strip()) or "").lower()
-    if guessed == ".jpe":
-        guessed = ".jpg"
-    if guessed in allowed:
-        return guessed
-    return _CLOUD_OUTPUT_DEFAULT_SUFFIX.get(kind, ".png")
-
-
-def fetch_cloud_output(url: str) -> tuple[bytes, str]:
-    """Download a finished cloud result, server-side.
-
-    Server-side because the bytes must be sealed with this workspace's key
-    before they touch disk, and because the browser cannot write to the outputs
-    root at all. A ValueError is something the owner can act on; a RuntimeError
-    is the provider not answering.
-    """
-    parsed = urllib.parse.urlparse(str(url or "").strip())
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("That result address is not one this machine can fetch.")
-    request = urllib.request.Request(
-        parsed.geturl(),
-        headers={"Accept": "*/*", "User-Agent": "hivemind-content-studio"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            declared = response.headers.get("Content-Length") or ""
-            if declared.isdigit() and int(declared) > CLOUD_OUTPUT_MAX_BYTES:
-                raise ValueError("That result is too large to keep on this machine.")
-            payload = response.read(CLOUD_OUTPUT_MAX_BYTES + 1)
-            media_type = response.headers.get_content_type() or ""
-    except ValueError:
-        raise
-    except (OSError, urllib.error.URLError) as exc:
-        raise RuntimeError("The provider's result could not be downloaded.") from exc
-    if len(payload) > CLOUD_OUTPUT_MAX_BYTES:
-        raise ValueError("That result is too large to keep on this machine.")
-    if not payload:
-        raise RuntimeError("The provider's result was empty.")
-    return payload, media_type
-
 
 def build_control_app(
     *,
