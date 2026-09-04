@@ -649,6 +649,13 @@ class Handler(BaseHTTPRequestHandler):
         return routes.not_found(self, method)
 
     def get_health(self, parsed, qs):
+        # `ok` is about THIS process; the lanes are reported separately.
+        # /health used to say ok:true while every ComfyUI was down, so the
+        # supervisor, the MCP status tool and the studio's catalog all
+        # believed the engine was there and the user found out on the first
+        # 502 — after composing a prompt. The lane URLs stay behind the
+        # token: an unauthenticated caller learns that a lane is degraded,
+        # not where a rented machine lives.
         _lanes.refresh_comfy_lanes()
         authed = self.authed(qs)
         lanes = {
@@ -668,6 +675,10 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def get_workflow_key(self, parsed, qs):
+        # Deprecated: old builds exposed a backend-derived workflow metadata
+        # key. ComfyUI Mobile now uses a user-only browser unlock key kept
+        # only in loaded-tab memory, so the backend must not return a
+        # decrypt key.
         return self.send_json({"error": "workflow key endpoint disabled; unlock in the browser"}, status=410)
 
     def get_api_e2e_vault_identity(self, parsed, qs):
@@ -830,6 +841,11 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(_models.public_download_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
 
     def get_api_comfy_prompt_by_client(self, parsed, qs):
+        # Hand a submitter back the prompt id it never received. Staging a
+        # reference job's inputs on a remote lane happens inside the submit
+        # request, so a caller can time out while the job goes on to queue,
+        # run and be harvested with nobody holding its id. Scoped the same
+        # way history is: the requester key that submitted it may read it.
         client_id = unquote(parsed.path.rsplit("/", 1)[-1])
         prompt_id, route = promptroutes.comfy_prompt_id_for_client(client_id)
         if not prompt_id:
@@ -880,6 +896,9 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def get_api_restore_capabilities(self, parsed, qs):
+        # Which machines can restore, and which of them costs money. The
+        # studio needs both to offer "free, on this Mac" and "paid, on the
+        # rented box" as the same button with a different price.
         lanes = []
         for lane_name, lane_url in sorted(_lanes.COMFY_LANES.items()):
             capability = restore.lane_restore_capability(lane_url)
@@ -957,6 +976,11 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def get_api_restore_source(self, parsed, qs):
+        # The original, for the compare view when a project is REOPENED and
+        # the browser no longer holds the file the owner first picked.
+        # Whole-body, no ranges: every other clip in this app reaches the
+        # page as a blob too, and adding a second serving convention for one
+        # route would be the one place seeking silently behaves differently.
         project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
         try:
             source = restore.restore_project_dir(project_id) / "source.mp4"
@@ -1028,6 +1052,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": str(exc)}, 500)
 
     def post_api_lanes_resolve(self, parsed, qs):
+        # Which lane a graph would route to, and what that lane's ComfyUI
+        # was launched with. The MCP's motion-reference guard asks this
+        # before pricing a reference job: its budget was measured with
+        # --vram-headroom, and a lane without the flag is held to the
+        # registry's smaller ceiling (comfy_lane_vram_headroom). Answered
+        # here, not in the MCP, because only the gateway knows the lanes —
+        # the same first-match rules that will route the submission.
         try:
             data = json.loads((self.read_body() or b"{}").decode("utf-8"))
         except (ValueError, json.JSONDecodeError) as exc:
@@ -1210,6 +1241,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": str(exc)}, 500)
 
     def post_api_restore_upload(self, parsed, qs):
+        # The source, as raw bytes, written straight to disk in blocks.
+        #
+        # No JSON, no base64, no copy in memory anywhere along the way: the
+        # start request that follows names the id this hands back. This is
+        # the route that makes a multi-hundred-megabyte restore possible at
+        # all — the old inline-base64 transport cost three full copies and
+        # simply refused past a few hundred megabytes, which is the size of
+        # the footage this studio exists for.
         restore.reap_restore_uploads()
         source_id = f"u{uuid.uuid4().hex[:16]}"
         try:
@@ -1230,6 +1269,9 @@ class Handler(BaseHTTPRequestHandler):
         }, 201)
 
     def post_api_restore(self, parsed, qs):
+        # Start a restoration, or resume one. The same route for both: a
+        # resume is a start that already has finished chunks, and making it
+        # a second endpoint would be two ways to get the plan wrong.
         try:
             # The ordinary JSON cap now, not a 768MB one: the body is a
             # set of dials and a staged id. It still leaves room for the
@@ -1292,6 +1334,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": str(exc)}, 500)
 
     def post_api_restore_plan(self, parsed, qs):
+        # What a render WOULD be, before a byte is uploaded: chunk count,
+        # output size, and which machine would run it. The studio mirrors
+        # this arithmetic to keep its own dials honest; this is the copy
+        # that decides, so the two are compared rather than trusted.
         try:
             data = json.loads((self.read_body() or b"{}").decode("utf-8"))
             plan = config.video_restore.restore_plan(
@@ -1345,6 +1391,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": str(exc)}, 400)
 
     def post_api_restore_finish(self, parsed, qs):
+        # Re-finish, without re-restoring. The expensive half is already on
+        # disk; sharpening, grain, softening and the reframe are one ffmpeg
+        # pass over it.
         try:
             data = json.loads((self.read_body(max_bytes=config.MAX_JSON_BODY_BYTES) or b"{}").decode("utf-8"))
             project_id = util.safe_name(str(data.get("project_id") or ""))
