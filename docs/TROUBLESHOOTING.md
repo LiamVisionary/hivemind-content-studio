@@ -174,7 +174,7 @@ colon is theirs. The other two are transient; try again.
 sign-in rather than a key. The tab opens; finish the sign-in there, come back
 and press **Try again**.
 
-**You see:** **Connect an account** with no provider named. Nothing is connected
+**You see:** **Connect account** with no provider named. Nothing is connected
 at all yet. Open **Providers** in the Advanced group and connect whichever one
 you want to pay.
 
