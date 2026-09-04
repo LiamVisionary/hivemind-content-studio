@@ -122,7 +122,7 @@ test('every studio download goes through the one helper', () => {
     // The studios each carried a byte-identical copy of the download routine;
     // that duplication is how the naming drifted in the first place (Cinema
     // slipped the rule for a while with a `cinema-shot-<ts>.jpg` copy of its own).
-    for (const rel of ['src/studios/ImageStudio.jsx', 'src/studios/VideoStudio.jsx', 'src/studios/LipSyncStudio.jsx', 'src/studios/CinemaStudio.jsx']) {
+    for (const rel of ['src/studios/ImageStudio.jsx', 'src/studios/VideoStudio.jsx', 'src/studios/LipSyncStudio.jsx']) {
         const source = read(rel);
         assert.match(source, /from '\.\.\/lib\/downloadMedia\.js'/, `${rel} must use the shared downloader`);
         assert.doesNotMatch(source, /a\.download = filename;/, `${rel} still has its own copy of the downloader`);

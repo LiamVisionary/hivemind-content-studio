@@ -19,7 +19,8 @@ import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
 import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
 import { Spinner } from '../ui/kit.jsx';
 import { ErrorBoundary } from './ErrorBoundary.jsx';
-import { HUB_PAGES, isKnownPage } from './navConfig.jsx';
+import { HUB_PAGES, PAGE_ALIASES, isKnownPage } from './navConfig.jsx';
+import { requestComposerMenu } from './composerMenuRequest.js';
 import { Shell } from './Shell.jsx';
 import { startApiHeartbeat, stopApiHeartbeat } from './statusStore.js';
 import { StudioTabs } from './StudioTabs.jsx';
@@ -34,7 +35,6 @@ const STUDIO_LOADERS = {
   video: () => import('../studios/VideoStudio.jsx').then((m) => m.VideoStudio),
   sprite: () => import('../studios/SpriteStudio.jsx').then((m) => m.SpriteStudio),
   story: () => import('../studios/StoryStudio.jsx').then((m) => m.StoryStudio),
-  cinema: () => import('../studios/CinemaStudio.jsx').then((m) => m.CinemaStudio),
   lipsync: () => import('../studios/LipSyncStudio.jsx').then((m) => m.LipSyncStudio),
   restore: () => import('../studios/RestoreStudio.jsx').then((m) => m.RestoreStudio),
   'mcp-cli': () => import('../studios/McpCliStudio.jsx').then((m) => m.McpCliStudio),
@@ -76,8 +76,13 @@ export function App() {
   const pageRef = useRef(null);
   const loadedStudiosRef = useRef({}); // synchronous mirror of studioComps for navigate()
 
-  const navigate = useCallback(async (target, { fromHistory = false } = {}) => {
-    if (!isKnownPage(target)) return;
+  const navigate = useCallback(async (requested, { fromHistory = false } = {}) => {
+    if (!isKnownPage(requested)) return;
+    // A retired page key still resolves: it redirects, and asks the control it
+    // folded into to open itself (?page=cinema -> Image, Camera menu).
+    const alias = PAGE_ALIASES[requested];
+    const target = alias ? alias.page : requested;
+    if (alias) requestComposerMenu(alias.page, alias.menu);
     if (target === pageRef.current) return; // active-tab re-press: keep the live view
     const token = ++navTokenRef.current;
 
@@ -173,8 +178,8 @@ export function App() {
 
   // Does this machine hold the MUAPI key? Asked ONCE here, for every studio:
   // each gate reads the answer (modelRunner.needsBrowserKey), so a machine that
-  // already has the key never opens the key dialog — in Image, Video, Lip sync,
-  // Cinema or Sprite, whichever is visited first. A key an older build left in
+  // already has the key never opens the key dialog — in Image, Video, Lip sync
+  // or Sprite, whichever is visited first. A key an older build left in
   // this browser is moved into the shared store on the way.
   useEffect(() => {
     let alive = true;

@@ -3,13 +3,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-// Source-shape pins for the Cinema / Lip sync / shared-dialog fixes. These are
+// Source-shape pins for the Lip sync / shared-dialog fixes. These are
 // JSX files node:test cannot import, so the wiring is asserted on the source;
 // the behaviour itself was driven in the browser.
 const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
 
-test('Cinema and Lip sync route history through the studio helpers, never raw localStorage', () => {
-    for (const [relative, key] of [['src/studios/CinemaStudio.jsx', 'cinema_history'], ['src/studios/LipSyncStudio.jsx', 'lipsync_history']]) {
+test('Lip sync routes history through the studio helpers, never raw localStorage', () => {
+    for (const [relative, key] of [['src/studios/LipSyncStudio.jsx', 'lipsync_history']]) {
         const source = read(relative);
         assert.match(source, /import \{ loadStudioGenerationHistory, saveStudioGenerationHistory \} from '\.\.\/lib\/hivemindStudio\.js';/, `${relative} imports the helpers`);
         assert.match(source, new RegExp(`loadStudioGenerationHistory\\(${key.toUpperCase().replace('_', '_')}_KEY\\)|loadStudioGenerationHistory\\('${key}'\\)`), `${relative} reads through the helper`);
@@ -17,22 +17,10 @@ test('Cinema and Lip sync route history through the studio helpers, never raw lo
         // The only localStorage use left is the preferences normalizer — never the history.
         const rawHistoryWrites = source.match(/localStorage\.setItem\([^)]*HISTORY/g) || [];
         assert.deepEqual(rawHistoryWrites, [], `${relative} must not write history to localStorage itself`);
-        assert.doesNotMatch(source, /localStorage\.getItem\((CINEMA|LIPSYNC)_HISTORY_KEY\)/);
+        assert.doesNotMatch(source, /localStorage\.getItem\(LIPSYNC_HISTORY_KEY\)/);
         // The storage key names are unchanged so the scrub helper can target them.
         assert.match(source, new RegExp(`'${key}'`));
     }
-});
-
-test('Cinema: Generate is disabled with a reason on an empty prompt and downloads use the one helper', () => {
-    const cinema = read('src/studios/CinemaStudio.jsx');
-    assert.match(cinema, /disabled=\{!hasPrompt\}/);
-    assert.match(cinema, /Describe the scene first/);
-    assert.match(cinema, /import \{ downloadMedia \} from '\.\.\/lib\/downloadMedia\.js';/);
-    assert.match(cinema, /imageDownloadName\(CINEMA_MODEL, entry\.timestamp\)/, 'model-derived names');
-    assert.doesNotMatch(cinema, /cinema-shot-\$\{Date\.now\(\)\}\.jpg/, 'the hand-copied downloader is gone');
-    assert.doesNotMatch(cinema, /\|\| '1k'/, "the resolution fallback agrees with the default ('2K')");
-    assert.match(cinema, /AspectRatioPicker/, 'same aspect control as Image/Video');
-    assert.match(cinema, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/, 'Cmd/Ctrl+Enter generates');
 });
 
 test('Lip sync: composer drop routes files by kind, sealed portraits are confirmed before upload, errors are described', () => {
@@ -133,9 +121,7 @@ test('the dead preference copies are gone and MetaRow lives in one place', () =>
     for (const relative of ['src/studios/cinemaPrefs.js', 'src/studios/cinema/cinemaPrefs.js', 'src/studios/lipSyncPrefs.js', 'src/studios/lipsync/lipsyncPrefs.js']) {
         assert.equal(fs.existsSync(path.join(__dirname, '..', relative)), false, `${relative} should be deleted`);
     }
-    assert.match(read('src/studios/CinemaStudio.jsx'), /import \{ MetaRow \} from '\.\/lipsync\/MetaRow\.jsx';/);
     assert.match(read('src/studios/LipSyncStudio.jsx'), /import \{ MetaRow \} from '\.\/lipsync\/MetaRow\.jsx';/);
-    assert.doesNotMatch(read('src/studios/CinemaStudio.jsx'), /function MetaRow/);
     assert.doesNotMatch(read('src/studios/LipSyncStudio.jsx'), /function MetaRow/);
 });
 

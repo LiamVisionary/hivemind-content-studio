@@ -1,4 +1,7 @@
-// Camera rig control — React redesign of the retired vanilla studio.
+// Camera rig control — the body / lens / focal / aperture pickers.
+//
+// Built for the retired Cinema studio; now mounted by the Image composer's
+// Camera menu (studios/image/CameraMenu.jsx), which is where the rig lives.
 //
 // The old wheel-picker (scroll-to-center columns, blurred inactive options, no
 // keyboard access) is replaced by elegant labelled list pickers that surface the
@@ -8,15 +11,13 @@
 // so downstream state stays typed (buildNanoBananaPrompt's FOCAL_PERSPECTIVE lookup
 // tolerates either, but the old normalizer stores a Number).
 import { CAMERA_MAP, LENS_MAP, FOCAL_PERSPECTIVE, APERTURE_EFFECT } from '../lib/promptUtils.js';
-import { t } from '../lib/i18n.js';
+import { APERTURE_OPTIONS, CAMERA_OPTIONS, FOCAL_OPTIONS, LENS_OPTIONS } from '../lib/cameraRig.js';
+import { getLang } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { ChipButton, Menu } from '../ui/Menu.jsx';
 import { Segmented, cx } from '../ui/kit.jsx';
 
-const CAMERA_OPTIONS = Object.keys(CAMERA_MAP);
-const LENS_OPTIONS = Object.keys(LENS_MAP);
-const FOCAL_OPTIONS = Object.keys(FOCAL_PERSPECTIVE).map(Number);
-const APERTURE_OPTIONS = Object.keys(APERTURE_EFFECT);
+const zh = () => getLang() === 'zh-CN';
 
 function PickerRow({ label, hint, children }) {
   return (
@@ -87,20 +88,20 @@ export function CameraControls({ value, onChange }) {
   return (
     <div className="flex flex-col gap-4">
       <ListPicker
-        label={t('cinema.camera')}
+        label={zh() ? '摄像机' : 'Camera'}
         options={CAMERA_OPTIONS}
         value={value.camera}
         hintFor={(v) => CAMERA_MAP[v] || ''}
         onChange={(v) => set({ camera: v })}
       />
       <ListPicker
-        label={t('cinema.lens')}
+        label={zh() ? '镜头' : 'Lens'}
         options={LENS_OPTIONS}
         value={value.lens}
         hintFor={(v) => LENS_MAP[v] || ''}
         onChange={(v) => set({ lens: v })}
       />
-      <PickerRow label={t('cinema.focal')} hint={`${focal}mm · ${FOCAL_PERSPECTIVE[focal] || ''}`}>
+      <PickerRow label={zh() ? '焦距' : 'Focal'} hint={`${focal}mm · ${FOCAL_PERSPECTIVE[focal] || ''}`}>
         <Segmented
           size="sm"
           value={focal}
@@ -108,7 +109,7 @@ export function CameraControls({ value, onChange }) {
           options={FOCAL_OPTIONS.map((f) => ({ value: f, label: String(f) }))}
         />
       </PickerRow>
-      <PickerRow label={t('cinema.aperture')} hint={APERTURE_EFFECT[value.aperture] || ''}>
+      <PickerRow label={zh() ? '光圈' : 'Aperture'} hint={APERTURE_EFFECT[value.aperture] || ''}>
         <Segmented size="sm" value={value.aperture} onChange={(v) => set({ aperture: v })} options={APERTURE_OPTIONS} />
       </PickerRow>
     </div>

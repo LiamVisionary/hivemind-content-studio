@@ -91,8 +91,8 @@ export function McpCliStudio() {
         </div>
         <p className="mb-6 max-w-2xl text-[13px] leading-relaxed text-ink2">
           {zh()
-            ? '这个工作室能做的一切 — 图像、视频、电影、唇语同步、持久运行 — 都可以通过内置的媒体 MCP 服务器和本地 REST API 提供给智能体。同一个引擎，同一份历史，同一条隐私边界。'
-            : 'Everything this studio does — image, video, cinema, lip sync, durable runs — is also available to agents through the built-in media MCP server and the local REST API. Same engine, same history, same privacy boundary.'}
+            ? '这个工作室能做的一切 — 图像、视频、唇语同步、持久运行 — 都可以通过内置的媒体 MCP 服务器和本地 REST API 提供给智能体。同一个引擎，同一份历史，同一条隐私边界。'
+            : 'Everything this studio does — image, video, lip sync, durable runs — is also available to agents through the built-in media MCP server and the local REST API. Same engine, same history, same privacy boundary.'}
         </p>
 
         <div className="flex flex-col gap-4">

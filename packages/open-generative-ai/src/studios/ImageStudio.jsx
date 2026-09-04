@@ -100,6 +100,9 @@ import { LoraSection } from './image/LoraSection.jsx';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
 import { UgcMenu } from './UgcMenu.jsx';
 import { applyUgcFirstFrame, hasUgcFirstFrame, ugcVariantAt } from '../lib/ugcMode.js';
+import { CameraMenu } from './image/CameraMenu.jsx';
+import { applyCameraRig, hasCameraRig, normalizeCameraRig } from '../lib/cameraRig.js';
+import { onComposerMenuRequest, takeComposerMenuRequest } from '../app/composerMenuRequest.js';
 import { GalleryCard, ViewerModal } from './image/GalleryAndViewer.jsx';
 import { CompareViewer } from './image/CompareViewer.jsx';
 import { ExpandDialog } from './image/ExpandDialog.jsx';
@@ -233,6 +236,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // UGC deal counters (which cast / room was dealt last) — session-only.
     ugcVariantIndex: null,
     ugcRoomIndex: null,
+    // The camera rig (body / lens / focal / aperture) the Camera menu writes as
+    // one prose clause. Persisted; whether it is ARMED is read from the prompt.
+    cameraRig: normalizeCameraRig(persistedImagePreferences?.cameraRig),
+    cameraMenuOpen: false,
     localImageModels,
     // Why the local menu looks the way it does: 'discovering' | 'ready' |
     // 'empty' | 'unreachable'. Read by the Model section and by the Generate
@@ -744,6 +751,7 @@ export function ImageStudio({
       characterSheetMode: s.characterSheetMode,
       characterSheetPreset: s.characterSheetPreset,
       regionMode: s.regionMode,
+      cameraRig: s.cameraRig,
       modelSettings: Object.fromEntries(s.modelSettingsById),
       loraSelections: Object.fromEntries(s.loraSelectionsByModel),
     });
@@ -1127,6 +1135,28 @@ export function ImageStudio({
     persistImagePreferences();
     bump();
     promptRef.current?.focus();
+  };
+
+  // The camera rig — what the Cinema studio used to be. One prose clause at the
+  // end of the prompt (body, lens, focal length, depth of field), model-agnostic
+  // and idempotent: applyCameraRig strips whatever clause is already there
+  // before writing the new one, so re-arming replaces rather than stacks.
+  const applyCamera = (rig) => {
+    const prompt = applyCameraRig(s.prompt, rig ? normalizeCameraRig(rig) : null);
+    if (rig) s.cameraRig = normalizeCameraRig(rig);
+    s.prompt = prompt;
+    updateComposerDraft({ prompt });
+    persistImagePreferences();
+    bump();
+  };
+
+  // Moving a control remembers the rig either way; while the clause is in the
+  // prompt it is rewritten in place, so the preview and the prompt never drift.
+  const setCameraRig = (rig) => {
+    if (hasCameraRig(s.prompt)) { applyCamera(rig); return; }
+    s.cameraRig = normalizeCameraRig(rig);
+    persistImagePreferences();
+    bump();
   };
 
   /* ---------------- model selection ---------------- */
@@ -2434,6 +2464,21 @@ export function ImageStudio({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ?page=cinema folded into the Camera menu, and still resolves: the route asks
+  // for the menu by name and the VISIBLE composer opens it. Latched, because the
+  // request lands before this studio has finished loading.
+  useEffect(() => {
+    if (!active) return undefined;
+    const claim = () => {
+      if (!takeComposerMenuRequest('image', 'camera')) return;
+      s.cameraMenuOpen = true;
+      bump();
+    };
+    claim();
+    return onComposerMenuRequest(claim);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
   // Explore dock / hub bridges insert into THIS studio's prompt — but only while
   // it is the visible studio (studios stay mounted-hidden after first visit).
   useEffect(() => {
@@ -3420,6 +3465,15 @@ export function ImageStudio({
               promptRef.current?.focus();
             }}
             onLoadContext={(context) => restoreImageContext(context)}
+          />
+
+          <CameraMenu
+            rig={s.cameraRig}
+            active={hasCameraRig(s.prompt)}
+            open={s.cameraMenuOpen}
+            onOpenChange={(open) => { s.cameraMenuOpen = open; bump(); }}
+            onChange={setCameraRig}
+            onArm={applyCamera}
           />
 
           <UgcMenu
