@@ -12,6 +12,7 @@ import {
 } from '../../ui/kit.jsx';
 import { api, humanize } from '../hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, requestRentedMode } from '../../lib/rentedMachines.js';
+import { ConnectComfyCard } from '../components/ConnectComfyCard.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
 
@@ -1318,6 +1319,15 @@ export function GpuMachinesView({ active }) {
               ) : (
                 <EmptyState icon="cpu" title="No machines running" hint="Rent one below — boxes come up provisioned with the studio models. Pause keeps the disk for a one-minute restart; Destroy stops all billing." />
               )}
+            </section>
+
+            {/* The free lane, next to the paid ones. ComfyUI is optional — the
+                studio boots and sells cloud work without it — so "connect the
+                one you already have" belongs beside "rent one", not behind a
+                setup screen nobody finds. */}
+            <section className="flex flex-col gap-3">
+              <SectionLabel>This machine</SectionLabel>
+              <ConnectComfyCard enabled={active} />
             </section>
 
             <WarmVolumesCard plans={plans} active={active} />

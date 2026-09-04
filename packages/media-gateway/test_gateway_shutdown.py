@@ -167,7 +167,7 @@ class HealthTests(unittest.TestCase):
         self.assertIn('Re-attach it in Machines', body['lanes']['rental9']['error'])
         self.assertEqual(body['lanes']['default']['url'], 'http://127.0.0.1:8188')
 
-    def test_a_local_lane_that_is_off_says_how_to_start_it(self):
+    def test_a_local_lane_that_is_off_says_how_to_connect_one(self):
         app = load_app()
         with patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
              patch.object(app, 'COMFY_REMOTE_LANES', set()), \
@@ -177,7 +177,11 @@ class HealthTests(unittest.TestCase):
             body = self._health(app, authed=False)
 
         self.assertEqual(body['degraded'], ['default'])
-        self.assertIn('Start it from Machines', body['lanes']['default']['error'])
+        # ComfyUI is optional, and this app does not own its lifecycle: the fix
+        # offered is to connect one (or use a lane that is already there), never
+        # a "start it" button the shell cannot honour.
+        self.assertIn('Connect ComfyUI', body['lanes']['default']['error'])
+        self.assertNotIn('Start it', body['lanes']['default']['error'])
         # An unauthenticated caller learns a lane is degraded, not where a
         # rented machine lives.
         self.assertNotIn('url', body['lanes']['default'])
@@ -195,14 +199,37 @@ class HealthTests(unittest.TestCase):
 
         self.assertEqual(calls, ['default'])
 
-    def test_the_local_lane_is_still_never_probed_on_the_prompt_path(self):
-        """comfy_lane_liveness_error() guards submits and stays remote-only: a
-        round trip before every local prompt is a cost with no answer, since the
-        submit itself reports a missing local ComfyUI immediately."""
+    def test_the_local_lane_is_probed_through_the_cache_and_names_the_connect_fix(self):
+        """ComfyUI is optional, so the local lane is probed on the prompt path
+        too — but through the five-second health cache, not a fresh knock.
+
+        The old contract skipped local lanes entirely, on the grounds that the
+        submit reports a missing ComfyUI itself. It reports it as a connection
+        refused from inside urlopen(), which is exactly the raw backend text the
+        studio must never show; and on a machine that never had a ComfyUI it is
+        not an error at all, it is a setup step. A burst of local submits still
+        costs one knock per five seconds.
+        """
+        app = load_app()
+        probes = []
+        with patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app, '_lane_health_cache', {}), \
+             patch.object(app, 'comfy_lane_probe_detail',
+                          lambda lane, timeout=2.0: probes.append(lane) or 'ConnectionRefusedError: nope'):
+            messages = [app.comfy_lane_liveness_error('default') for _ in range(4)]
+
+        self.assertEqual(probes, ['default'], 'the health cache must absorb the burst')
+        for message in messages:
+            self.assertIn('Connect ComfyUI', message)
+            self.assertIn('cloud or rented', message)
+
+    def test_a_local_lane_that_answers_raises_nothing_on_the_prompt_path(self):
         app = load_app()
         with patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
              patch.object(app, 'COMFY_REMOTE_LANES', set()), \
-             patch.object(app, 'urlopen', side_effect=AssertionError('must not probe the local lane')):
+             patch.object(app, '_lane_health_cache', {}), \
+             patch.object(app, 'comfy_lane_probe_detail', lambda lane, timeout=2.0: None):
             self.assertIsNone(app.comfy_lane_liveness_error('default'))
 
 

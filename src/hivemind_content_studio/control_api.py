@@ -61,7 +61,7 @@ from .generation_telemetry import generation_telemetry_snapshot, record_hivemind
 from .identity import version_payload
 from .lanes import LANE_MATRIX
 from . import (
-    comfy_lanes, hivemindos_models, hivemindos_sam3, image_router, local_llm, media_posters,
+    comfy_connect, comfy_lanes, hivemindos_models, hivemindos_sam3, image_router, local_llm, media_posters,
     muapi_proxy, prompt_profiles, provider_models, story_producer, text_models, video_restore,
 )
 from .manifest import load_manifest, write_manifest
@@ -351,6 +351,17 @@ class PromptHelperUnloadBody(BaseModel):
 
 class LaneFreeBody(BaseModel):
     lane: str
+
+
+class ComfyAttachBody(BaseModel):
+    """Point a lane at a ComfyUI the user is already running."""
+
+    url: str
+    lane: str = "default"
+
+
+class ComfyDetachBody(BaseModel):
+    lane: str = "default"
 
 
 class StudioImageBody(BaseModel):
@@ -3023,6 +3034,29 @@ def build_control_app(
             at=time.time(),
         )
         return freed
+
+    # ComfyUI is an OPTIONAL engine, attached like a rented machine rather than
+    # required at boot. These three answer the Connect card: what is on this
+    # disk, what is answering, and "use the one I am already running". Nothing
+    # here writes inside a ComfyUI install — detection is stat() and one GET,
+    # and the attachment lives in this app's own state root.
+    @app.get("/api/comfy/connect", dependencies=[Depends(require_owner)])
+    def comfy_connect_state() -> dict:
+        return {"ok": True, **comfy_connect.snapshot()}
+
+    @app.post("/api/comfy/connect", dependencies=[Depends(require_owner)])
+    def comfy_connect_attach(body: ComfyAttachBody) -> dict:
+        try:
+            state = comfy_connect.attach(body.url, body.lane)
+        except comfy_connect.ConnectError as exc:
+            # 400 with the sentence the card shows: the refusal already names
+            # the fix, so it must not be flattened into a status code.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, **state}
+
+    @app.post("/api/comfy/disconnect", dependencies=[Depends(require_owner)])
+    def comfy_connect_detach(body: ComfyDetachBody) -> dict:
+        return {"ok": True, **comfy_connect.detach(body.lane)}
 
     @app.post("/api/prompt-helper/unload", dependencies=[Depends(require_owner)])
     def prompt_helper_unload(body: PromptHelperUnloadBody) -> dict:

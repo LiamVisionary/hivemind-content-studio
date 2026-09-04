@@ -148,6 +148,18 @@ kill_port() {
   fi
 }
 
+# Is there a ComfyUI checkout for THIS stack to run?
+#
+# ComfyUI is an optional engine, not a prerequisite: the studio boots without
+# one and the owner attaches theirs (or a cloud/rented lane) afterwards. This
+# predicate is also what keeps the stack off a ComfyUI it did not start — the
+# custom-node symlinks and every kill_port on a lane port are behind it, so a
+# machine where the only ComfyUI is somebody's Desktop install on :8188 keeps
+# it when this stack starts, restarts or stops.
+comfy_available() {
+  [ -f "$COMFY/main.py" ] && [ -x "$COMFY/.venv/bin/python" ]
+}
+
 wait_http() {
   local url="$1" timeout="${2:-120}" elapsed=0
   until curl -fsS --max-time 5 "$url" >/dev/null 2>&1; do
@@ -225,6 +237,15 @@ children=()
 start_children() {
   children=()
   log "starting Hivemind Content Studio as one managed app"
+  # ComfyUI is OPTIONAL. This supervisor used to refuse to bring anything up
+  # until an external checkout answered on :8188 — it symlinked custom nodes
+  # into $COMFY, minted its secrets with $COMFY/.venv, waited 150s per lane and
+  # returned 1 on the first one that did not answer, which the loop below
+  # retried every 10s forever. A machine without a hand-built ComfyUI therefore
+  # never saw the studio at all. The control API and the gateway now come up on
+  # their own and lanes are engines you attach afterwards (the studio's Connect
+  # ComfyUI card, /api/comfy/connect).
+  comfy_available || log "no ComfyUI at $COMFY — bringing the studio up without local lanes; connect one from the studio (cloud and rented models need none)"
   log "hardware profile=$ZIMG_ACCELERATOR_PROFILE apple_silicon=$ZIMG_IS_APPLE_SILICON flux2_server=$ZIMG_ENABLE_FLUX2_SERVER asfp8_int8=$COMFY_DEFAULT_ASFP8_INT8_EXT asfp8_fp8=$COMFY_DEFAULT_ASFP8_FP8_EXT"
   # These were truncated with ': >' here, on every start. The supervisor loop
   # below restarts the whole stack automatically after any child exit or failed
@@ -242,6 +263,9 @@ start_children() {
   roll_log "$PRIV/hivemind-content-studio.log"
   roll_log "$PRIV/media-studio-mcp.log"
   roll_log "$PRIV/z-image-tailscale-https-proxy.log"
+  # Custom nodes only ever go into the checkout this stack runs. Nothing here
+  # touches a ComfyUI the app did not start.
+  if comfy_available; then
   if [ -L "$COMFY/custom_nodes/comfyui-mobile-frontend" ] || [ ! -e "$COMFY/custom_nodes/comfyui-mobile-frontend" ]; then
     ln -sfn "$MOBILE" "$COMFY/custom_nodes/comfyui-mobile-frontend"
   else
@@ -265,7 +289,10 @@ start_children() {
     log "cannot install SeedVR2 TensorRT adapter: custom node path is not a symlink"
     return 1
   fi
-  COMFY_PRIVATE_VIEW_TOKEN="$("$COMFY/.venv/bin/python" - <<'PY'
+  fi
+  # Minted with the STUDIO's interpreter, not ComfyUI's: both secrets belong to
+  # this app and a machine with no ComfyUI still has to boot with them.
+  COMFY_PRIVATE_VIEW_TOKEN="$("$STUDIO_PYTHON" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(32))
 PY
@@ -276,15 +303,19 @@ PY
   # the WebAuthn relying-party id and which bucket a failed password counts
   # against, and any caller can write them. Minted per run and given to both
   # ends here, so the two can never drift apart.
-  CONTENT_STUDIO_PROXY_SECRET="$("$COMFY/.venv/bin/python" - <<'PY'
+  CONTENT_STUDIO_PROXY_SECRET="$("$STUDIO_PYTHON" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(32))
 PY
   )"
 
+  # Only the lanes this stack runs itself. With no checkout of ours, whatever
+  # answers on 8188 is the user's own ComfyUI and is not ours to reap.
+  if comfy_available; then
 	  kill_port "$COMFY_DEFAULT_PORT"
 	  kill_port "$COMFY_LTX_PORT"
 	  kill_port "$COMFY_ANIMA_PORT"
+  fi
   kill_port 8787
   kill_port 8788
   kill_port "$MEDIA_STUDIO_MCP_PORT"
@@ -380,6 +411,12 @@ PY
 	    log "rental lanes overlay active: ${RENTAL_COMFY_REMOTE_LANES:-none}"
 	  fi
 
+  # ---- Local ComfyUI lanes: optional from here down --------------------------
+  # The lane URLs stay in $comfy_lanes either way. The gateway needs a populated
+  # lane map (~30 read sites assume a `default` lane exists) and reports each
+  # lane's liveness on /health, so "no ComfyUI" is a lane that does not answer —
+  # never a missing lane, and never a reason to hold the studio back.
+  if comfy_available; then
   cd "$COMFY" || return 1
   ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
   HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
@@ -408,8 +445,11 @@ PY
   log "ComfyUI default lane child pid=$pid port=$COMFY_DEFAULT_PORT"
 
   if ! wait_http "http://127.0.0.1:$COMFY_DEFAULT_PORT/system_stats" 150; then
-    log "ComfyUI default lane did not become healthy in time"
-    return 1
+    # Not fatal any more. A lane that will not start is one engine down, and
+    # holding the control API back over it is what made a machine without
+    # ComfyUI unable to open the app at all. The studio comes up, reports the
+    # lane as unreachable, and cloud and rented work carries on.
+    log "ComfyUI default lane did not become healthy in time; continuing without it"
   fi
 
   local comfy_warm_input="$PRIV/input/mlx_test_selfie.jpg"
@@ -475,8 +515,7 @@ PY
 	    log "ComfyUI LTX lane child pid=$pid port=$COMFY_LTX_PORT gpu_only=1 lora_bypass_mps=1"
 	
 	    if ! wait_http "http://127.0.0.1:$COMFY_LTX_PORT/system_stats" 150; then
-	      log "ComfyUI LTX lane did not become healthy in time"
-	      return 1
+	      log "ComfyUI LTX lane did not become healthy in time; continuing without it"
 	    fi
 	  else
 	    log "ComfyUI LTX lane disabled; non-Apple-Silicon path uses default Comfy lane"
@@ -506,9 +545,10 @@ PY
   log "ComfyUI Anima lane child pid=$pid port=$COMFY_ANIMA_PORT"
 
   if ! wait_http "http://127.0.0.1:$COMFY_ANIMA_PORT/system_stats" 150; then
-    log "ComfyUI Anima lane did not become healthy in time"
-    return 1
+    log "ComfyUI Anima lane did not become healthy in time; continuing without it"
   fi
+  fi
+  # ---- End of the optional local lanes --------------------------------------
 
   cd "$APP" || return 1
   ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
@@ -664,9 +704,13 @@ stop_children() {
     kill -9 "$pid" 2>/dev/null || true
   done
   children=()
+  # Only the lanes this stack runs itself. With no checkout of ours, whatever
+  # answers on 8188 is the user's own ComfyUI and is not ours to reap.
+  if comfy_available; then
 	  kill_port "$COMFY_DEFAULT_PORT"
 	  kill_port "$COMFY_LTX_PORT"
 	  kill_port "$COMFY_ANIMA_PORT"
+  fi
   kill_port 8787
   kill_port 8788
   kill_port "$MEDIA_STUDIO_MCP_PORT"
@@ -789,9 +833,13 @@ launch_start() {
 launch_stop() {
   launchctl bootout "$DOMAIN/$OLD_CF_LABEL" 2>/dev/null || true
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  # Only the lanes this stack runs itself. With no checkout of ours, whatever
+  # answers on 8188 is the user's own ComfyUI and is not ours to reap.
+  if comfy_available; then
 	  kill_port "$COMFY_DEFAULT_PORT"
 	  kill_port "$COMFY_LTX_PORT"
 	  kill_port "$COMFY_ANIMA_PORT"
+  fi
   kill_port 8787
   kill_port 8788
   kill_port "$MEDIA_STUDIO_MCP_PORT"

@@ -377,6 +377,20 @@ COMFY_REMOTE_LANES = parse_remote_comfy_lanes()
 # the file, the next request here picks it up. The env overlay is still written,
 # but only so an attachment survives a restart, never to cause one.
 RENTAL_LANES_FILE = MEDIA_STATE_ROOT / "rental-lanes.json"
+
+# The same live-read trick for the LOCAL engine. ComfyUI is optional: the studio
+# boots without one and the owner attaches theirs from the Connect card
+# (control_api /api/comfy/connect -> comfy_connect.py), which writes this file.
+# Read live for the same reason rentals are: attaching a ComfyUI must not mean
+# restarting the stack and killing whatever is in flight.
+LOCAL_LANES_FILE = MEDIA_STATE_ROOT / "comfy-attachments.json"
+
+# The lane map as the environment configured it. An attachment overwrites an
+# entry and a detach restores it from here — never deletes it. ~30 read sites
+# assume `default` exists, so "no ComfyUI" has to be a lane that does not
+# answer, not a lane that is gone.
+_ENV_COMFY_LANES = dict(COMFY_LANES)
+
 _rental_lanes_lock = threading.Lock()
 _rental_lanes_state = {"mtime": None, "lanes": {}}
 
@@ -422,6 +436,40 @@ def _read_rental_attachments():
         return lanes
 
 
+_local_lanes_lock = threading.Lock()
+_local_lanes_state = {"mtime": None, "lanes": {}, "applied": set()}
+
+
+def _read_local_attachments():
+    """{lane: url} the owner attached from the Connect card. {} when there is
+    no file, which is the normal state on a machine with no ComfyUI."""
+    try:
+        stamp = LOCAL_LANES_FILE.stat().st_mtime_ns
+    except OSError:
+        with _local_lanes_lock:
+            _local_lanes_state["mtime"] = None
+            _local_lanes_state["lanes"] = {}
+        return {}
+    with _local_lanes_lock:
+        if _local_lanes_state["mtime"] == stamp:
+            return _local_lanes_state["lanes"]
+        try:
+            data = json.loads(LOCAL_LANES_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[comfy-lanes] ComfyUI attachment registry unreadable: {exc}", file=sys.stderr)
+            return _local_lanes_state["lanes"]
+        lanes = {}
+        for lane, entry in (data or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            name = re.sub(r"[^a-z0-9_-]", "", str(lane).strip().lower())
+            url = str(entry.get("url") or "").strip().rstrip("/")
+            if name and url:
+                lanes[name] = url
+        _local_lanes_state.update(mtime=stamp, lanes=lanes)
+        return lanes
+
+
 def refresh_comfy_lanes():
     """Fold the live rental attachments into the lane maps, in place.
 
@@ -457,6 +505,21 @@ def refresh_comfy_lanes():
         rented = [(lane, spec["needles"]) for lane, spec in rentals.items() if spec["needles"]]
         COMFY_LANE_RULES[:] = rented + kept
     _rental_lanes_state["applied"] = current
+
+    # Local ComfyUI attachments last, and never over a rented lane: a rental the
+    # owner is paying for outranks a local engine that happens to share a name.
+    attached = {lane: url for lane, url in _read_local_attachments().items() if lane not in current}
+    applied_local = set(_local_lanes_state.get("applied") or ())
+    for lane in applied_local - set(attached):
+        if lane in current:
+            continue
+        if lane in _ENV_COMFY_LANES:
+            COMFY_LANES[lane] = _ENV_COMFY_LANES[lane]
+        else:
+            COMFY_LANES.pop(lane, None)
+    for lane, url in attached.items():
+        COMFY_LANES[lane] = url
+    _local_lanes_state["applied"] = set(attached)
     return COMFY_LANES
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
@@ -512,9 +575,23 @@ def comfy_lane_liveness_error(lane, timeout=4.0):
     stayed attached, and every attempt hung instead of saying so).
 
     One cheap probe before staging turns that into an immediate, true sentence.
+
+    Local lanes are asked too, through the five-second health cache rather than
+    a fresh knock. ComfyUI is OPTIONAL now - the studio boots without one - so
+    "there is no local ComfyUI" is an ordinary state that has to name its fix
+    (attach one from the Connect card, or run this on a cloud or rented model)
+    instead of surfacing as a connection refused from somewhere deep in a
+    submit. The cache is what keeps that off the hot path: a burst of local
+    submits costs one knock per five seconds, not one per prompt.
     """
     if not comfy_lane_is_remote(lane):
-        return None
+        if comfy_lane_health(lane, timeout=min(timeout, 2.0)).get("alive"):
+            return None
+        return (
+            f"ComfyUI is not answering on lane '{lane}'. Connect ComfyUI from the Machines "
+            f"page - attach the address it is serving on - or pick a cloud or rented model "
+            f"for this one."
+        )
     detail = comfy_lane_probe_detail(lane, timeout)
     if detail is None:
         return None
@@ -569,7 +646,12 @@ def comfy_lane_health(lane, timeout=2.0):
             f"the machine behind lane '{lane}' is not answering. Re-attach it in Machines, "
             f"and detach it if the rental has ended."
             if remote else
-            f"ComfyUI is not running on lane '{lane}'. Start it from Machines before generating."
+            # Never "start it": this app does not own that process and a button
+            # that cannot do what it says is worse than no button. ComfyUI is
+            # optional, so the fix is to attach one - or to use a lane that is
+            # already there.
+            f"ComfyUI is not answering on lane '{lane}'. Connect ComfyUI from the Machines "
+            f"page, or use a cloud or rented model instead."
         )
     with _lane_health_lock:
         _lane_health_cache[lane] = (now, dict(entry))
@@ -12579,6 +12661,16 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"could not stage inputs on remote lane '{lane_name}': {e}",
                         "operational": True,
                     }, 502)
+            else:
+                # The local half of the same courtesy. ComfyUI is optional now,
+                # so a machine with none is an ordinary machine — and a submit
+                # against a lane nobody is running used to surface as a raw
+                # connection refused from urlopen() several frames down. One
+                # cached probe (5s TTL) turns it into the sentence with the
+                # button: connect a ComfyUI, or run this in the cloud.
+                liveness_error = comfy_lane_liveness_error(lane_name)
+                if liveness_error:
+                    return self.send_json({"error": liveness_error, "operational": True}, 502)
             # What the MCP priced this graph at, and the card it is about to run
             # on: the pair that turns an OOM (or a clean finish) into a fact
             # about this card size rather than an anecdote.

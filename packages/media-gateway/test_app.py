@@ -4402,7 +4402,9 @@ class RemoteComfyLaneTests(unittest.TestCase):
         the auth - so a rental that was destroyed mid-session still read as
         healthy. Submits staged references into a dead socket, hung, and came
         back as a bare timeout for a machine that no longer existed. The probe
-        has to name that, and it must not fire for the local lane."""
+        has to name that. The local lane is asked too, through the health cache,
+        because ComfyUI is optional and its absence is a setup step with a
+        button rather than a failure at Generate."""
         app = load_app()
         lanes = {'default': 'http://127.0.0.1:8188', 'rental9': 'http://127.0.0.1:18337'}
 
@@ -4413,9 +4415,10 @@ class RemoteComfyLaneTests(unittest.TestCase):
 
         with patch.object(app, 'COMFY_LANES', lanes), \
              patch.object(app, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app, '_lane_health_cache', {}), \
              patch.object(app, 'COMFY_LANE_TOKENS', {}):
-            # The local lane is never probed: it is the process next door.
-            with patch.object(app, 'urlopen', side_effect=AssertionError('must not probe the local lane')):
+            # A local lane that answers is silent, exactly as before.
+            with patch.object(app, 'urlopen', return_value=Answering()):
                 self.assertIsNone(app.comfy_lane_liveness_error('default'))
 
             with patch.object(app, 'urlopen', return_value=Answering()):
@@ -5094,6 +5097,58 @@ class RemoteComfyLaneTests(unittest.TestCase):
                 self.assertEqual(app.comfy_lane_for_prompt_body(graph), 'default')
                 self.assertNotIn('rental47', app.COMFY_LANES)
                 self.assertFalse(app.comfy_lane_is_remote('rental47'))
+
+    def test_connecting_a_comfyui_lights_the_lane_without_a_restart(self):
+        """ComfyUI is optional and attached, not required at boot.
+
+        The Connect card writes comfy-attachments.json; the next request here
+        picks it up, exactly the way a rented machine does. Detaching restores
+        the configured URL rather than removing the lane — ~30 read sites assume
+        `default` exists, so "no ComfyUI" has to be a lane that does not answer.
+        """
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "comfy-attachments.json"
+            with patch.object(app, 'LOCAL_LANES_FILE', registry), \
+                 patch.object(app, 'RENTAL_LANES_FILE', Path(tmp) / "rental-lanes.json"), \
+                 patch.dict(app._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.dict(app._local_lanes_state, {"mtime": None, "lanes": {}, "applied": set()}, clear=False), \
+                 patch.object(app, '_ENV_COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app, 'COMFY_LANE_RULES', []), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()):
+                app.refresh_comfy_lanes()
+                self.assertEqual(app.COMFY_LANES['default'], 'http://127.0.0.1:8188')
+
+                # The owner attaches the ComfyUI Desktop app, which serves :8000.
+                registry.write_text(json.dumps({"default": {"url": "http://127.0.0.1:8000"}}))
+                app.refresh_comfy_lanes()
+                self.assertEqual(app.COMFY_LANES['default'], 'http://127.0.0.1:8000')
+                # An attached LOCAL engine is not a remote lane: its outputs are
+                # on this disk and must not go down the sealed fetch-back path.
+                self.assertFalse(app.comfy_lane_is_remote('default'))
+
+                # Detaching restores the configured lane; it never empties the map.
+                registry.write_text(json.dumps({}))
+                app.refresh_comfy_lanes()
+                self.assertEqual(app.COMFY_LANES['default'], 'http://127.0.0.1:8188')
+
+    def test_a_missing_attachment_registry_is_the_ordinary_state(self):
+        """A machine that has never connected a ComfyUI has no registry file at
+        all. That is not an error and must not empty the lane map."""
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            with patch.object(app, 'LOCAL_LANES_FILE', Path(tmp) / "nothing-here.json"), \
+                 patch.object(app, 'RENTAL_LANES_FILE', Path(tmp) / "rental-lanes.json"), \
+                 patch.dict(app._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.dict(app._local_lanes_state, {"mtime": None, "lanes": {}, "applied": set()}, clear=False), \
+                 patch.object(app, '_ENV_COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app, 'COMFY_LANE_RULES', []), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()):
+                self.assertEqual(app._read_local_attachments(), {})
+                app.refresh_comfy_lanes()
+                self.assertEqual(app.COMFY_LANES, {"default": "http://127.0.0.1:8188"})
 
     def test_the_selected_machine_wins_when_two_lanes_serve_the_same_models(self):
         # Renting two H3 boxes is legitimate; both lanes match the same graph,
