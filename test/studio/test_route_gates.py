@@ -60,18 +60,28 @@ PUBLIC_PATHS = {
     "/civitai/staged/{token}/{filename}",
 }
 
-# The five GETs `_machine_route_allowed` opens for agents and the MCP, which
-# reach the studio with no browser session. Pinned exactly, so a sixth cannot
+# The six GETs `_machine_route_allowed` opens for agents and the MCP, which
+# reach the studio with no browser session. Pinned exactly, so a seventh cannot
 # join them quietly: today the middleware admits these on the PATH alone — the
 # bearer token it describes decides whose workspace they resolve to, not
 # whether they are answered — so anything that can reach 127.0.0.1:8765 can
 # read them.
+#
+# /api/media-models (2026-09-06) is the shared media-model catalog HivemindOS
+# reads to build its /image-gen and /video-gen picker. It is a PROJECTION of
+# the media inventory the simple catalog already caches for the studio's own
+# pickers — model ids, where each runs, readiness sentences and credential
+# NAMES, plus the rows in HivemindOS's own snapshot. No probe runs for the
+# request (a cold cache answers `pending`), so a stranger on this port learns
+# nothing from it that /api/catalog and /api/providers did not already tell
+# them.
 MACHINE_LANE = {
     ("GET", "/api/catalog"),
     ("GET", "/api/providers"),
     ("GET", "/api/runtime"),
     ("GET", "/api/runs"),
     ("GET", "/api/telemetry/generations"),
+    ("GET", "/api/media-models"),
 }
 
 # The frontend. The gate middleware answers these itself: an unauthenticated
@@ -86,6 +96,10 @@ PROBE = "gate-probe"
 
 def _locked_client(tmp_path: Path, monkeypatch) -> tuple[TestClient, object]:
     monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
+    # A media-model catalog build publishes its snapshot under $HIVE_HOME;
+    # pointed into the test's directory so the sweep never writes to the
+    # developer's real ~/.hivemindos.
+    monkeypatch.setenv("HIVE_HOME", str(tmp_path / "hive"))
     cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
     app = build_control_app(
         orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
@@ -147,7 +161,7 @@ def test_every_control_route_is_public_on_purpose_or_refuses_a_stranger(tmp_path
     )
 
 
-def test_the_machine_lane_is_exactly_these_five_reads(tmp_path: Path, monkeypatch) -> None:
+def test_the_machine_lane_is_exactly_these_six_reads(tmp_path: Path, monkeypatch) -> None:
     """What a caller with no session and no token can read, named one by one.
 
     These are reads an agent on this machine makes without a browser session.

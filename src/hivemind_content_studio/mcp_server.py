@@ -30,6 +30,7 @@ from .generation import (
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
 from .intent_service import ContentIntentService
 from .manifest import approve_manifest
+from .media_models import media_model_catalog
 from .machine_privacy import machine_artifact_receipt, machine_next_actions, machine_operation_receipt, machine_run_receipt
 from .metrics import summarize_metrics
 from .orchestrator import ContentOrchestrator
@@ -104,6 +105,10 @@ def build_mcp_server():
     def providers_resource() -> str:
         return json.dumps({"providers": provider_report()}, sort_keys=True)
 
+    @mcp.resource("studio://media-models")
+    def media_models_resource() -> str:
+        return json.dumps({"privacy": "machine-redacted", "catalog": media_model_catalog()}, sort_keys=True)
+
     @mcp.resource("studio://telemetry/generations")
     def generation_telemetry_resource() -> str:
         return json.dumps(generation_telemetry_snapshot(_orchestrator().store), sort_keys=True)
@@ -138,6 +143,15 @@ def build_mcp_server():
     def list_content_providers() -> dict:
         """Return the canonical provider capability/readiness matrix."""
         return {"ok": True, "providers": provider_report()}
+
+    @mcp.tool()
+    def list_media_models(kind: str = "") -> dict:
+        """Every image and video model this machine can reach, in the shared
+        HivemindOS media-model catalog shape: where each runs, what it costs,
+        whether it is ready from HivemindOS chat, and how to run it. `kind`
+        narrows to "image" or "video". Carries no prompts, media, paths or
+        credential values."""
+        return {"ok": True, "privacy": "machine-redacted", "catalog": media_model_catalog(kind.strip().lower() or None)}
 
     @mcp.tool()
     def execute_content_run(brief_path: str, policy: dict | None = None, budget: dict | None = None) -> dict:

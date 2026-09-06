@@ -69,6 +69,11 @@ class MediaModel:
     # when references are attached to the family's normal tier, so offering it
     # as its own tier only strands the user on a graph with no frame inputs.
     routing_only: bool = False
+    # The registry's `requires.image`: the graph cannot start from a prompt
+    # alone. Carried so the shared media-model catalog can tell HivemindOS
+    # which workflows need a picture before it offers them for a text-only
+    # /video-gen. False on a built-in fallback row, which does not know.
+    requires_image: bool = False
 
 
 @dataclass(frozen=True)
@@ -321,6 +326,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
             default_steps=float(defaults["steps"]) if defaults.get("steps") is not None else None,
             beta=bool(workflow.get("beta")),
             routing_only=bool(workflow.get("routing_only")),
+            requires_image=bool((workflow.get("requires") or {}).get("image")) if isinstance(workflow.get("requires"), dict) else False,
         )
     _last_live_media_studio_models = tuple(models.values())
     return _last_live_media_studio_models, True
