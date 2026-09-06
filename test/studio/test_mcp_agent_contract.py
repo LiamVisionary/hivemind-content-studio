@@ -26,11 +26,12 @@ def test_agent_first_mcp_exposes_durable_runs_intents_assets_and_evidence() -> N
         "ingest_content_metrics",
         "diagnose_content_bottleneck",
         "recommend_content_variant",
+        "list_media_models",
     } <= tools
 
     resources = {str(resource.uri) for resource in asyncio.run(server.list_resources())}
     templates = {str(template.uriTemplate) for template in asyncio.run(server.list_resource_templates())}
-    assert {"studio://capabilities", "studio://providers"} <= resources
+    assert {"studio://capabilities", "studio://providers", "studio://media-models"} <= resources
     assert {
         "studio://runs/{run_id}",
         "studio://runs/{run_id}/artifacts",

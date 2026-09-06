@@ -194,4 +194,11 @@ def register(app, ctx) -> None:
 
     app.state.startup_hooks.append(_warm_simple_catalog)
 
+    # Shared with /api/media-models, which PROJECTS this cache's media block
+    # instead of running a readiness sweep of its own: the one refresh thread
+    # serves both, and a machine-lane read never starts a probe.
+    ctx.simple_catalog_cache = simple_catalog_cache
+    ctx.kick_simple_catalog_refresh = _kick_simple_catalog_refresh
+    ctx.simple_catalog_ttl_seconds = SIMPLE_CATALOG_TTL_SECONDS
+
     app.include_router(router)
