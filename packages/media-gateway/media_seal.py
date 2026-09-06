@@ -49,6 +49,26 @@ def seal(plaintext: bytes, public_key) -> dict[str, str]:
     return {"ciphertext": _b64url(ciphertext), "wrapped_dek": _b64url(wrapped_dek)}
 
 
+def load_private_key(pem_bytes: bytes):
+    return serialization.load_pem_private_key(pem_bytes, password=None)
+
+
+def unseal(envelope: dict, private_key) -> bytes:
+    """Inverse of seal(): RSA-OAEP-unwrap iv||dek, then AES-GCM-decrypt.
+
+    Used only to serve a copy that was DELIBERATELY sealed to a key the server
+    holds -- the agent's own <name>.agent-<fp>.e2e. The owner's <name>.e2e is
+    sealed to the vault, which the server cannot open, so this can never turn an
+    owner-private clip into plaintext: there is no key here that unwraps it.
+    """
+    blob = private_key.decrypt(
+        _unb64url(envelope["wrapped_dek"]),
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+    )
+    iv, dek = blob[:12], blob[12:44]
+    return AESGCM(dek).decrypt(iv, _unb64url(envelope["ciphertext"]), None)
+
+
 def read_vault_public_key(vault_db_path: str | Path) -> str | None:
     """Read the owner's vault public key from the studio vault DB (opaque)."""
     path = Path(vault_db_path).expanduser()

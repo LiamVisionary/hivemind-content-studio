@@ -239,6 +239,18 @@ export async function resolveMediaSrc(url) {
         rememberResolved(url, blobUrl, payload.size);
         return blobUrl;
     } catch {
+        // This tab cannot open the envelope. Before giving a verdict, ask
+        // whether it is a workspace-public AGENT generation: those need no
+        // browser key, and the server will serve them decrypted. It only does
+        // so for a clip sealed to the agent key it holds -- a private clip
+        // comes back sealed and unchanged -- so this can reveal an agent gen
+        // without ever exposing private media.
+        const revealed = await tryAgentReveal(url);
+        if (revealed) {
+            noteSealFailure(url, null);
+            rememberResolved(url, revealed.blobUrl, revealed.size);
+            return revealed.blobUrl;
+        }
         // WHICH failure this was depends on what we actually held.
         //
         // 'locked' is not `!vaultReady && !deviceReady`. A browser that has a
@@ -256,6 +268,31 @@ export async function resolveMediaSrc(url) {
         noteSealFailure(url, vaultReady ? 'undecryptable' : 'locked');
         return url; // still fail open — never worse than today
     }
+}
+
+// Ask the server to serve an agent generation decrypted. Returns a blob URL
+// only when it comes back as real media (not another sealed envelope), so a
+// private clip -- which the server never reveals -- simply yields null here and
+// keeps its locked verdict. Only the canvas media route honours the flag; on
+// any other URL the extra query param is ignored and this returns null.
+async function tryAgentReveal(url) {
+    if (typeof url !== 'string' || url.includes('reveal=agent')) return null;
+    const target = url + (url.includes('?') ? '&' : '?') + 'reveal=agent';
+    let response;
+    try {
+        response = await fetch(target, { credentials: 'same-origin', cache: 'no-store' });
+    } catch {
+        return null;
+    }
+    if (!response.ok || isSealedEnvelopeResponse(response)) {
+        try { response.body?.cancel(); } catch { /* already consumed */ }
+        return null;
+    }
+    const type = response.headers.get('Content-Type') || 'application/octet-stream';
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const name = mediaDownloadNameFor(url);
+    const payload = name ? new File([bytes], name, { type }) : new Blob([bytes], { type });
+    return { blobUrl: URL.createObjectURL(payload), size: payload.size };
 }
 
 // Synchronous cache probe so display code can skip loading theater (e.g. the

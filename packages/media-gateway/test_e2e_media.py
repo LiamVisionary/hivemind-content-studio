@@ -140,3 +140,59 @@ def test_gateway_falls_back_to_legacy_when_no_vault_exists(tmp_path):
     # seal must decline (no pubkey) so the caller keeps the legacy path available.
     assert gw.media.seal_output_to_e2e(media) is False
     assert media.exists()  # untouched; legacy encryption would handle it
+
+
+def test_agent_reveal_serves_an_agent_copy_but_never_a_private_clip(tmp_path):
+    """Rule: an agent generation is workspace-public and may be served
+    decrypted; a private clip, sealed only to the vault, never can. The guard
+    is structural -- reveal only ever decrypts <name>.agent-<fp>.e2e, and a
+    private clip has no such copy."""
+    gw = _load_gateway()
+    media = sys.modules["gateway.media"]
+    import media_seal
+
+    # An agent key on disk, pointed at by the module's PEM path.
+    agent = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = tmp_path / "agent-e2e-key.pem"
+    pem.write_bytes(agent.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    media.AGENT_E2E_KEY_PEM = pem
+    media._agent_private_key_cache = {"mtime": None, "key": None}
+    agent_spki = _b64url(agent.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
+    fp = sys.modules["gateway.promptroutes"].requester_fingerprint(agent_spki)
+
+    plaintext = b"\x00\x00\x00\x18ftypmp42 agent clip bytes"
+    base = tmp_path / "cmf-x-minimax_h3_00001_.mp4"
+
+    # 1) An agent copy exists -> reveal returns the plaintext.
+    agent_copy = media.agent_envelope_path_for(base, fp)
+    sealed = media_seal.seal(plaintext, media_seal.load_public_key(agent_spki))
+    sealed["v"] = 1; sealed["media_type"] = "video/mp4"
+    agent_copy.write_text(json.dumps(sealed))
+    revealed = media.reveal_agent_plaintext(base)
+    assert revealed is not None
+    assert revealed[0] == plaintext
+    assert revealed[1] == "video/mp4"
+
+    # 2) A different key's copy (an agent key that has since rotated away) is
+    #    skipped, not served: the current key cannot open it.
+    other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    other_spki = _b64url(other.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
+    base2 = tmp_path / "cmf-y-minimax_h3_00001_.mp4"
+    stale = media.agent_envelope_path_for(base2, sys.modules["gateway.promptroutes"].requester_fingerprint(other_spki))
+    s2 = media_seal.seal(plaintext, media_seal.load_public_key(other_spki)); s2["v"] = 1
+    stale.write_text(json.dumps(s2))
+    assert media.reveal_agent_plaintext(base2) is None
+
+    # 3) A PRIVATE clip -- only <name>.e2e, no agent copy -- can never reveal.
+    owner = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    owner_spki = _b64url(owner.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
+    base3 = tmp_path / "krea2_private_00001_.png"
+    priv = media_seal.seal(b"secret pixels", media_seal.load_public_key(owner_spki)); priv["v"] = 1
+    media.e2e_envelope_path_for(base3).write_text(json.dumps(priv))
+    assert media.reveal_agent_plaintext(base3) is None

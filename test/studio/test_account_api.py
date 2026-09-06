@@ -312,7 +312,7 @@ def test_canvas_history_shows_each_workspace_only_its_own_gateway_outputs(client
         owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
         private_cipher=cipher,
         canvas_history_fetcher=lambda: [dict(record) for record in records],
-        canvas_media_fetcher=lambda name, requester_pub="": (b"sealed:" + Path(name).name.encode(), "application/vnd.hivemind.e2e+json"),
+        canvas_media_fetcher=lambda name, requester_pub="", reveal_agent=False: (b"sealed:" + Path(name).name.encode(), "application/vnd.hivemind.e2e+json"),
     ))
 
     def basenames(view: dict) -> list[str]:

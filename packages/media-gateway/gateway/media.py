@@ -329,6 +329,58 @@ def agent_envelope_path_for(path, fingerprint):
     return path.with_name(f"{path.name}{AGENT_ENVELOPE_PREFIX}{fingerprint}{E2E_MEDIA_SUFFIX}")
 
 
+# Rule: an agent generation is workspace-public, so the studio may ask the
+# gateway to serve it decrypted even when no browser key is present. The ONLY
+# file this will ever decrypt is one sealed to the agent key on this machine --
+# <name>.agent-<fp>.e2e. An owner-private clip has only <name>.e2e, sealed to
+# the vault, which no key here opens, so this can never leak private plaintext.
+AGENT_REVEAL_HEADER = "X-E2E-Agent-Reveal"
+AGENT_E2E_KEY_PEM = Path(os.environ.get(
+    "ZIMG_AGENT_E2E_KEY",
+    str(Path.home() / ".hivemindos/media-studio/secure/agent-e2e-key.pem"),
+))
+_agent_private_key_cache = {"mtime": None, "key": None}
+
+
+def _agent_private_key():
+    """The agent private key, cached against the PEM's mtime, or None."""
+    try:
+        mtime = AGENT_E2E_KEY_PEM.stat().st_mtime_ns if AGENT_E2E_KEY_PEM.is_file() else None
+    except OSError:
+        return None
+    if mtime is None:
+        return None
+    if mtime != _agent_private_key_cache["mtime"]:
+        try:
+            import media_seal
+            _agent_private_key_cache["key"] = media_seal.load_private_key(AGENT_E2E_KEY_PEM.read_bytes())
+            _agent_private_key_cache["mtime"] = mtime
+        except Exception as exc:
+            print(f"[agent-reveal] could not load agent key: {exc}", file=sys.stderr)
+            _agent_private_key_cache["key"] = None
+            _agent_private_key_cache["mtime"] = mtime
+    return _agent_private_key_cache["key"]
+
+
+def reveal_agent_plaintext(path):
+    """Plaintext of an agent copy for `path`, decrypted with the agent key, or
+    None when there is no agent copy or no key. Never touches <name>.e2e."""
+    key = _agent_private_key()
+    if key is None:
+        return None
+    path = Path(path)
+    import media_seal
+    for sib in sorted(path.parent.glob(f"{path.name}{AGENT_ENVELOPE_PREFIX}*{E2E_MEDIA_SUFFIX}")):
+        try:
+            envelope = json.loads(sib.read_text())
+            plain = media_seal.unseal(envelope, key)
+        except Exception:
+            continue  # a copy sealed to a DIFFERENT (older) agent key: skip it
+        media_type = envelope.get("media_type") or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return plain, media_type
+    return None
+
+
 def register_agent_seal_recipient(job_id, spki):
     """Remember that this job's outputs also seal to `spki` (a public SPKI).
 
@@ -690,6 +742,23 @@ def find_exact_output_logical_path(value):
 
 def send_output_file(handler, path):
     path = encrypt_output_file(path)
+    # Agent generations are workspace-public: a signed-in workspace can ask for
+    # them decrypted, no browser key required. This serves plaintext ONLY from a
+    # <name>.agent-<fp>.e2e sealed to the agent key here; a private clip has no
+    # such copy and falls straight through to the sealed-envelope path below.
+    if handler.headers.get(AGENT_REVEAL_HEADER) == "1":
+        revealed = reveal_agent_plaintext(Path(path))
+        if revealed is not None:
+            data, ctype = revealed
+            handler.send_response(200)
+            handler.cors_headers()
+            handler.send_header("Content-Type", ctype)
+            handler.send_header("Cache-Control", "private, no-store, max-age=0")
+            handler.send_header("Pragma", "no-cache")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return
     envelope = e2e_envelope_path_for(Path(path))
     # Same URL, recipient chosen by the key the caller presents: an agent that
     # sends its own X-E2E-Requester-Pub gets the envelope sealed to that key.

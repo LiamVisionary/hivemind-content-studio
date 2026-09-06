@@ -534,7 +534,7 @@ class CanvasGatewayClient:
                 continue
         return records
 
-    def media(self, output_name: str, *, requester_pub: str = "") -> tuple[bytes, str]:
+    def media(self, output_name: str, *, requester_pub: str = "", reveal_agent: bool = False) -> tuple[bytes, str]:
         logical_path = Path(output_name).expanduser().resolve()
         exact_output = any(
             logical_path == root or root in logical_path.parents
@@ -550,6 +550,12 @@ class CanvasGatewayClient:
         if pub:
             # The gateway serves whichever envelope matches the presented key.
             headers["X-E2E-Requester-Pub"] = pub
+        if reveal_agent:
+            # Ask the gateway to serve an agent generation decrypted -- it is
+            # workspace-public, so no browser key is needed. The gateway only
+            # honours this for a file sealed to the agent key it holds; a
+            # private clip has no such copy and comes back sealed, unchanged.
+            headers["X-E2E-Agent-Reveal"] = "1"
         request = urllib.request.Request(f"{self.base_url}{route}", headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=120) as response:

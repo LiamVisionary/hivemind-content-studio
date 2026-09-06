@@ -146,7 +146,14 @@ def register(app, ctx) -> None:
             # that generated this clip gets the copy sealed to itself, everyone
             # else gets the owner's. Without it a device-sealed output would
             # only ever come back in a form the browser cannot open.
-            content, media_type = fetch_canvas_media(output_name, requester_pub=_requester_pub(request))
+            # Agent generations are workspace-public: when the browser asks with
+            # ?reveal=agent (it does after an envelope it cannot open), serve the
+            # agent copy decrypted. require_owner already gates this to the
+            # signed-in workspace, and the gateway only reveals a file sealed to
+            # its agent key -- never a private clip.
+            reveal_agent = request.query_params.get("reveal") == "agent"
+            content, media_type = fetch_canvas_media(
+                output_name, requester_pub=_requester_pub(request), reveal_agent=reveal_agent)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from None
         headers = {"Cache-Control": "private, no-store"}
