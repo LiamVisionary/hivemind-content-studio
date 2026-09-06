@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { t, tf } from '../../lib/i18n.js';
+import { invalidateStudioSettings } from '../../hooks/hooks.js';
 import { isHostedLocalAI, isLocalAIAvailable } from '../../lib/localInferenceClient.js';
 import {
   SETTINGS_SECTIONS, displayValue, isDefault, restartPending, sectionRows, settingLabel,
@@ -182,6 +183,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
     try {
       const body = value === null ? { reset: [key] } : { values: { [key]: value } };
       const result = await api('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
+      invalidateStudioSettings();
       setPayload(result);
       const pending = restartPending(result);
       if (pending.length) setRestart((current) => [...new Set([...current, ...pending])]);
@@ -514,6 +516,13 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
               <Group title={t('settings.network')} hint={t('settings.networkHint')}>
                 <div className="flex flex-col">
                   {rowsFor(current).filter((row) => row.section === 'network').map((row) => (
+                    <SettingRow key={row.key} row={row} busy={saving} onChange={save} />
+                  ))}
+                </div>
+              </Group>
+              <Group title={t('settings.developer')} hint={t('settings.developerHint')}>
+                <div className="flex flex-col gap-2">
+                  {rowsFor(current).filter((row) => row.section === 'developer').map((row) => (
                     <SettingRow key={row.key} row={row} busy={saving} onChange={save} />
                   ))}
                 </div>

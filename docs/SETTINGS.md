@@ -61,6 +61,12 @@ Secrets are not here and cannot be: keys, tokens and passwords live in PassBook,
 | `reaper.grace_seconds` | `60` | no | `HIVEMIND_RENTAL_REAP_GRACE` | How long a failed box is left alone before it is destroyed. |
 | `reaper.bad_machine_hours` | `24` | no | `HIVEMIND_RENTAL_BAD_MACHINE_HOURS` | How long a host that just failed stays out of the running. |
 
+## Developer tools (`developer`)
+
+| Key | Default | Restart | Environment override | What it does |
+| --- | --- | --- | --- | --- |
+| `developer.recovery_tools` | `off` | no | `` | Show recovery tools in History: paste a private key and reseal every clip it opens onto your vault, in the browser. For media sealed to an agent or browser key that has since been lost. |
+
 ## Still environment-only
 
 These are not user settings and have no row above. They are named here so nobody has to

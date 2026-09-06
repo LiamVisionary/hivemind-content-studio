@@ -727,3 +727,62 @@ def test_a_background_finished_clip_is_claimed_for_the_workspace_that_started_it
     canvas_client.post("/api/accounts/sign-out")
     _sign_in(canvas_client, 1, OWNER_PASSWORD)
     assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == []
+
+
+def test_recovery_tools_reseal_replaces_the_envelope_and_keeps_the_old_one(tmp_path, monkeypatch):
+    """The browser opened a clip with some other private key and re-sealed it
+    to the vault; the server's only jobs are to check the shape, swap the file,
+    and keep the previous envelope beside it. And none of that is reachable
+    until developer.recovery_tools is on -- an owner session must not be able
+    to rewrite media files by default."""
+    monkeypatch.setenv("CONTENT_STUDIO_SETTINGS_FILE", str(tmp_path / "settings.json"))
+    from hivemind_content_studio import settings as settings_module
+    settings_module.forget_cached_settings()
+
+    clip = tmp_path / "old-clip.mp4"
+    envelope_path = tmp_path / "old-clip.mp4.e2e"
+    envelope_path.write_text(json.dumps({"v": 1, "media_type": "video/mp4", "wrapped_dek": "A" * 342, "ciphertext": "B" * 64}))
+    records = [{"id": "file-0ld", "status": "success", "created_at": "2026-08-22T07:17:00+00:00",
+                "finished_at": "2026-08-22T07:17:00+00:00", "outputs": [str(clip)]}]
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    client = TestClient(build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret", operator_token="operator-secret",
+        owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
+        private_cipher=cipher,
+        canvas_history_fetcher=lambda: [dict(r) for r in records],
+        canvas_media_fetcher=lambda name, requester_pub="", reveal_agent=False: (b"sealed", "application/vnd.hivemind.e2e+json"),
+    ))
+    _sign_in(client, 1, OWNER_PASSWORD)
+    item = client.get("/api/canvas/history?refresh=1").json()["history"][0]["history_id"]
+
+    # A real 256-byte RSA wrap, base64url, as the browser would send.
+    import base64
+    good = {"v": 1, "media_type": "video/mp4",
+            "wrapped_dek": base64.urlsafe_b64encode(b"\x07" * 256).decode().rstrip("="),
+            "ciphertext": base64.urlsafe_b64encode(b"\x09" * 96).decode().rstrip("=")}
+
+    # Off by default: the door does not exist.
+    assert client.put(f"/api/canvas/history/{item}/reseal", json=good).status_code == 404
+    assert envelope_path.read_text().startswith('{"v": 1, "media_type": "video/mp4", "wrapped_dek": "AAAA')
+
+    assert client.put("/api/settings", json={"values": {"developer.recovery_tools": True}}).status_code == 200
+
+    # Shape is checked before anything is touched.
+    bad = dict(good, wrapped_dek=base64.urlsafe_b64encode(b"\x07" * 128).decode().rstrip("="))
+    assert client.put(f"/api/canvas/history/{item}/reseal", json=bad).status_code == 422
+    assert client.put(f"/api/canvas/history/{item}/reseal", json=dict(good, media_type="not a mime")).status_code == 422
+    assert not (tmp_path / "old-clip.mp4.e2e.superseded").exists()
+
+    # The real thing: new envelope in place, old one kept, nothing deleted.
+    done = client.put(f"/api/canvas/history/{item}/reseal", json=good)
+    assert done.status_code == 200, done.text
+    assert done.json() == {"ok": True, "resealed": True, "kept_previous": True}
+    written = json.loads(envelope_path.read_text())
+    assert written["wrapped_dek"] == good["wrapped_dek"] and written["media_type"] == "video/mp4"
+    assert (tmp_path / "old-clip.mp4.e2e.superseded").read_text().startswith('{"v": 1, "media_type": "video/mp4", "wrapped_dek": "AAAA')
+    assert not (tmp_path / "old-clip.mp4.e2e.partial").exists()
+
+    # An unknown item is a 404, not a write somewhere surprising.
+    assert client.put("/api/canvas/history/canvas_nope/reseal", json=good).status_code == 404
+    settings_module.forget_cached_settings()

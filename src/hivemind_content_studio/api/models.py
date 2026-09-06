@@ -649,3 +649,14 @@ class SimplePlanBody(BaseModel):
     seed: int | None = None
     seedMode: Literal["fixed", "randomize", "increment", "decrement"] | None = None
     studioMode: Literal["create", "edit", "animate", "workflow"] = "create"
+
+
+class CanvasResealBody(BaseModel):
+    """A fresh E2E envelope for one History item, sealed in the browser to the
+    workspace vault. The server never sees plaintext: it only checks the shape
+    and swaps the file, keeping the old one beside it."""
+
+    v: int = 1
+    media_type: str = "application/octet-stream"
+    wrapped_dek: str
+    ciphertext: str

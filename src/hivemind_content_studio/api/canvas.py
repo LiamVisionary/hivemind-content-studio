@@ -6,15 +6,20 @@ may see is ctx.claim_visible and the sync in api/context.py.
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import json
+import os
 import urllib.request
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
 from ..private_access import e2e_media_sidecar
+from ..settings import load_settings
 from .media_common import _private_media_sidecar, _requester_pub
-from .models import CanvasProvenanceBody, ConfirmDeleteBody
+from .models import CanvasProvenanceBody, CanvasResealBody, ConfirmDeleteBody
 
 
 def register(app, ctx) -> None:
@@ -162,5 +167,57 @@ def register(app, ctx) -> None:
             # header it already looks for, not only the content type.
             headers["X-E2E-Media"] = "1"
         return Response(content=content, media_type=media_type, headers=headers)
+
+    @router.put("/api/canvas/history/{history_id}/reseal", dependencies=[Depends(require_owner)])
+    def canvas_output_reseal(history_id: str, body: CanvasResealBody) -> dict:
+        """Replace one item's owner envelope with one the browser just sealed
+        to the workspace vault.
+
+        The recovery door for media sealed to a key that has since been lost:
+        the browser held some other private key (an old agent key, a browser
+        key from a backup), opened the clip with it, and re-sealed the bytes to
+        the vault. This server never sees plaintext -- only a well-formed
+        envelope -- and never deletes: the previous file stays beside the new
+        one as <name>.e2e.superseded, so this is reversible by moving it back.
+
+        Off unless developer.recovery_tools is on: it is a repair tool, not a
+        feature, and an owner session should not be able to rewrite media
+        files by default.
+        """
+        if not load_settings().developer.recovery_tools:
+            raise HTTPException(status_code=404, detail="Recovery tools are off")
+        try:
+            wrapped = base64.urlsafe_b64decode(body.wrapped_dek + "=" * (-len(body.wrapped_dek) % 4))
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="wrapped_dek is not base64url") from None
+        if body.v != 1 or len(wrapped) != 256 or not body.ciphertext or len(body.ciphertext) < 24:
+            raise HTTPException(status_code=422, detail="Not a v1 envelope sealed to an RSA-2048 key")
+        media_type = str(body.media_type or "application/octet-stream")[:80]
+        if "/" not in media_type or any(ch in media_type for ch in " \n\r\t\""):
+            raise HTTPException(status_code=422, detail="media_type is not a MIME type")
+        try:
+            locator = canvas_store().output_name(history_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Canvas output not found") from None
+        base = Path(str(locator)).expanduser()
+        target = base.with_name(base.name + ".e2e")
+        if not target.parent.is_dir():
+            raise HTTPException(status_code=409, detail="This item's media is not on this machine")
+        envelope = json.dumps({"v": 1, "media_type": media_type,
+                               "wrapped_dek": body.wrapped_dek, "ciphertext": body.ciphertext})
+        tmp = target.with_name(target.name + ".partial")
+        tmp.write_text(envelope, encoding="utf-8")
+        # Re-read what was written before anything is displaced.
+        check = json.loads(tmp.read_text(encoding="utf-8"))
+        if len(base64.urlsafe_b64decode(check["wrapped_dek"] + "=" * (-len(check["wrapped_dek"]) % 4))) != 256:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(status_code=500, detail="Envelope did not round-trip")
+        superseded = None
+        if target.exists():
+            superseded = target.with_name(target.name + ".superseded")
+            os.replace(target, superseded)          # keep, never delete
+        os.replace(tmp, target)
+        _forget_canvas_sync()
+        return {"ok": True, "resealed": True, "kept_previous": superseded is not None}
 
     app.include_router(router)

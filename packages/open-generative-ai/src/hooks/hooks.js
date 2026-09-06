@@ -260,3 +260,39 @@ export function useWindowEvent(name, handler) {
     return () => window.removeEventListener(name, handler);
   }, [name, handler]);
 }
+
+// ── studio settings, read-only ────────────────────────────────────────────────
+// One cached fetch of GET /api/settings shared by every consumer; the Settings
+// page owns writing and calls invalidateStudioSettings() after a save so
+// gated UI elsewhere follows without a reload.
+let settingsPromise = null;
+const settingsListeners = new Set();
+
+export function invalidateStudioSettings() {
+    settingsPromise = null;
+    for (const fn of settingsListeners) fn();
+}
+
+function loadStudioSettings() {
+    if (!settingsPromise) {
+        settingsPromise = fetch('/api/settings', { credentials: 'same-origin' })
+            .then((r) => (r.ok ? r.json() : { settings: [] }))
+            .then((payload) => Object.fromEntries((payload.settings || []).map((row) => [row.key, row.value])))
+            .catch(() => ({}));
+    }
+    return settingsPromise;
+}
+
+/** The current value of one studio setting (e.g. 'developer.recovery_tools'), or undefined until loaded. */
+export function useStudioSetting(key) {
+    const [value, setValue] = useState(undefined);
+    useEffect(() => {
+        let alive = true;
+        const read = () => loadStudioSettings().then((all) => { if (alive) setValue(all[key]); });
+        read();
+        settingsListeners.add(read);
+        return () => { alive = false; settingsListeners.delete(read); };
+    }, [key]);
+    return value;
+}
+

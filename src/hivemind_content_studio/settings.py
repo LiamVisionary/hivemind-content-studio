@@ -128,6 +128,14 @@ class PrivacySettings:
 
 
 @dataclass(frozen=True)
+class DeveloperSettings:
+    """Tools that exist for repairing this machine's own data, off by default.
+    Nothing here is needed to make or view content."""
+
+    recovery_tools: bool
+
+
+@dataclass(frozen=True)
 class ReaperSettings:
     """The rental reaper. A box that failed provisioning bills like one that
     works, so this is money, not housekeeping."""
@@ -144,6 +152,7 @@ class StudioSettings:
     network: NetworkSettings
     privacy: PrivacySettings
     reaper: ReaperSettings
+    developer: DeveloperSettings
 
 
 SECTION_TYPES: dict[str, type] = {
@@ -152,6 +161,7 @@ SECTION_TYPES: dict[str, type] = {
     "network": NetworkSettings,
     "privacy": PrivacySettings,
     "reaper": ReaperSettings,
+    "developer": DeveloperSettings,
 }
 
 SECTION_LABELS: dict[str, str] = {
@@ -160,6 +170,7 @@ SECTION_LABELS: dict[str, str] = {
     "network": "Network",
     "privacy": "Privacy & vault",
     "reaper": "Rented GPUs",
+    "developer": "Developer tools",
 }
 
 
@@ -464,6 +475,19 @@ SETTINGS: tuple[Setting, ...] = (
         summary="How long a host that just failed stays out of the running.",
         minimum=0,
         maximum=8760,
+    ),
+    # ── developer ──
+    Setting(
+        key="developer.recovery_tools",
+        kind="bool",
+        env=(),
+        default=False,
+        restart_required=False,
+        summary=(
+            "Show recovery tools in History: paste a private key and reseal "
+            "every clip it opens onto your vault, in the browser. For media sealed to "
+            "an agent or browser key that has since been lost."
+        ),
     ),
 )
 

@@ -9,7 +9,8 @@
 // keep decrypted blob <img> srcs alive across the 10s poll. Destructive deletes
 // go through ConfirmModal and stay open when the delete fails.
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useMediaSealFailure, useMediaSrc } from '../../hooks/hooks.js';
+import { useMediaSealFailure, useMediaSrc, useStudioSetting } from '../../hooks/hooks.js';
+import { RecoverWithKeyDialog } from '../components/RecoverWithKeyDialog.jsx';
 import { registerMediaDownloadName } from '../../lib/e2eMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { downloadMedia } from '../../lib/downloadMedia.js';
@@ -374,6 +375,8 @@ export function HistoryView({ active }) {
   const [confirm, setConfirm] = useState(null); // { kind, entry }
   const [deleting, setDeleting] = useState(false);
   const [preview, setPreview] = useState(null); // output entry
+  const recoveryTools = useStudioSetting('developer.recovery_tools') === true;
+  const [recoverOpen, setRecoverOpen] = useState(false);
 
   const loadMore = useCallback(() => { void loadMoreCanvasHistory(); }, []);
   const sentinelRef = useOnVisible(loadMore, { rootMargin: '900px 0px', resetKey: s.canvasHistory.length });
@@ -470,8 +473,19 @@ export function HistoryView({ active }) {
                 <GroupHeading
                   kicker={t('history.studiosAndCanvas')}
                   title={t('history.outputs')}
-                  right={filtering ? tf('history.ofCount', outputs.length, s.canvasHistory.length) : tf('history.ofCount', s.canvasHistory.length, s.canvasTotal)}
+                  right={(
+                    <span className="flex items-center gap-2">
+                      {recoveryTools ? (
+                        <button type="button" onClick={() => setRecoverOpen(true)}
+                          className="rounded-md border border-line2 bg-bg2 px-2 py-0.5 text-xs text-ink2 transition-colors hover:border-honey hover:text-ink1">
+                          {t('history.recoverWithKey')}
+                        </button>
+                      ) : null}
+                      {filtering ? tf('history.ofCount', outputs.length, s.canvasHistory.length) : tf('history.ofCount', s.canvasHistory.length, s.canvasTotal)}
+                    </span>
+                  )}
                 />
+                {recoveryTools ? <RecoverWithKeyDialog open={recoverOpen} onClose={() => setRecoverOpen(false)} items={s.canvasHistory} /> : null}
                 <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
                   {outputs.map((entry) => (
                     <Windowed key={entry.history_id}>

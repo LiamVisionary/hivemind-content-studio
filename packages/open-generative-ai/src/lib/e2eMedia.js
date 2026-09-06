@@ -297,6 +297,17 @@ async function tryAgentReveal(url) {
 
 // Synchronous cache probe so display code can skip loading theater (e.g. the
 // unlock animation) for media that is already decrypted this session.
+/** Drop everything cached about `url` so the next read fetches and decrypts it
+ * again -- for a clip whose envelope on the server was just replaced. */
+export function forgetResolvedMedia(url) {
+    const entry = blobCache.get(url);
+    if (entry) {
+        try { URL.revokeObjectURL(entry.src); } catch { /* already gone */ }
+        blobCache.delete(url);
+    }
+    noteSealFailure(url, null);
+}
+
 export function peekResolvedMediaSrc(url) {
     const entry = blobCache.get(url);
     if (!entry) return null;
