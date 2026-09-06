@@ -87,10 +87,40 @@ async function storeKeyPair(keyPair) {
     }
 }
 
+/**
+ * Ask the browser to stop evicting this origin's storage.
+ *
+ * Without this an IndexedDB is "best-effort": Chrome and Safari may clear it
+ * under storage pressure, and the user never sees it happen. That is fatal
+ * here, because the private half of this keypair is non-extractable and
+ * origin-scoped — once evicted it cannot be recovered from anywhere, and any
+ * media sealed to it is unopenable forever.
+ *
+ * That is not theoretical. Between 2026-08-10 and 2026-08-26 SEVEN distinct
+ * device keys submitted jobs from this machine, and on 2026-09-06 none of the
+ * three studio origins held any of them: fifteen of the owner's clips had been
+ * sealed to one of those keys and to nothing else (the gateway's vault path was
+ * broken, so no owner copy was written), and they are gone.
+ *
+ * Best-effort by design: a browser that refuses, or has no Storage API, still
+ * gets a working key — it just keeps the old eviction risk, which is why the
+ * durable fix is a SECOND recipient on the server side, not this call.
+ */
+async function requestPersistentStorage() {
+    try {
+        const storage = globalThis.navigator?.storage;
+        if (!storage?.persist) return;
+        if (await storage.persisted?.()) return;
+        await storage.persist();
+    } catch { /* a refusal is not a failure to boot */ }
+}
+
 async function bootstrap() {
     if (!subtle) throw new Error('WebCrypto unavailable');
     let keyPair = await loadStoredKeyPair();
     if (!keyPair) {
+        // Before minting a key worth protecting, ask for storage that lasts.
+        await requestPersistentStorage();
         keyPair = await subtle.generateKey(
             // 2048 to match the owner vault and the gateway's SPKI validator.
             { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
