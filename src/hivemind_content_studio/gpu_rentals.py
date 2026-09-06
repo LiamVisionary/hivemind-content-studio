@@ -1051,13 +1051,22 @@ def _seedvr2_trt_node_archive() -> bytes:
     args" 400. Published like the weights manifest instead: the onstart carries
     one presigned URL, and the same daily sweep deletes it.
     """
+    import gzip
     import io
     import tarfile
 
     buffer = io.BytesIO()
     # mtime=0 so the same source always produces the same bytes — an archive
-    # that differs on every rent is a diff nobody can read.
-    with tarfile.open(fileobj=buffer, mode="w:gz", compresslevel=9) as archive:
+    # that differs on every rent is a diff nobody can read. Two clocks to pin,
+    # not one: each tar member's below, and the gzip header's here. `mode="w:gz"`
+    # stamps the header with the wall clock, so two builds a second apart
+    # differed at byte 4 while every member said 0 — which is how the
+    # byte-identity test passed on a laptop (both calls inside one second) and
+    # failed on the runner (2026-09-07).
+    with (
+        gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=9, mtime=0) as compressed,
+        tarfile.open(fileobj=compressed, mode="w") as archive,
+    ):
         for name in SEEDVR2_TRT_NODE_FILES:
             body = SEEDVR2_TRT_NODE_SOURCE.joinpath(name).read_bytes()
             info = tarfile.TarInfo(name)

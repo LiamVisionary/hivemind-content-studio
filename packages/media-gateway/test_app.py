@@ -1344,6 +1344,13 @@ class ZImageAppTests(unittest.TestCase):
     def test_every_offered_variant_has_its_model_directory(self):
         # The studio should not advertise a model whose weights were deleted.
         app = load_app()
+        # A check on this machine's weights, so it only means something on a
+        # machine that has any: the runner has no ~/comfy/mlx-models at all, and
+        # "every variant is missing" there is the environment, not a stale
+        # table. Skip and say so rather than fail the gateway suite on every
+        # push (it did, 2026-09-07 — the first time this suite ran in CI).
+        if not Path(str(app.config.MLX_MODELS_ROOT)).is_dir():
+            self.skipTest(f"no MLX models root at {app.config.MLX_MODELS_ROOT}")
         missing = {
             name: spec.get('model') for name, spec in app.config.LTX2_MLX_VARIANTS.items()
             if spec.get('model') and not Path(str(spec['model'])).is_dir()
