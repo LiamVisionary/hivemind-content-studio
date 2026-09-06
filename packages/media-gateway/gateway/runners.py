@@ -568,7 +568,9 @@ def _compose_labeled_sheet(sheet_path, rows, cols, square, tiles, header_lines, 
         "header_lines": header_lines,
         "tiles": tiles,
     }
-    composer = Path(__file__).resolve().parent / "bin" / "compose-strength-hunt-sheet.py"
+    # parent.parent: the scripts live in packages/media-gateway/bin/, and this
+    # line moved one directory deeper into gateway/ without following them.
+    composer = Path(__file__).resolve().parent.parent / "bin" / "compose-strength-hunt-sheet.py"
     try:
         proc = subprocess.run(
             [media.SUBPROCESS_PYTHON, str(composer)],

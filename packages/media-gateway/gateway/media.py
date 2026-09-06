@@ -34,7 +34,10 @@ E2E_MEDIA_ENABLED = os.environ.get("ZIMG_E2E_MEDIA", "0") == "1"
 E2E_MEDIA_SUFFIX = ".e2e"
 VAULT_DB = Path(os.environ.get(
     "ZIMG_VAULT_DB",
-    str(Path(os.environ.get("CONTENT_STUDIO_DATA_DIR", str(Path(__file__).resolve().parents[2] / "data"))) / "owner-vault.sqlite3"),
+    # parents[3], not [2]: this line moved from packages/media-gateway/app.py
+    # into packages/media-gateway/gateway/, one directory deeper, and the index
+    # did not move with it — it pointed at packages/ instead of the repo root.
+    str(Path(os.environ.get("CONTENT_STUDIO_DATA_DIR", str(Path(__file__).resolve().parents[3] / "data"))) / "owner-vault.sqlite3"),
 )).expanduser()
 PRIVATE_INPUT_PREFIXES = (
     "media-studio-inline-",

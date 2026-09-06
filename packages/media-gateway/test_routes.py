@@ -165,3 +165,39 @@ class RouteTableTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FileRelativePaths(unittest.TestCase):
+    """Every `__file__`-relative path in the split package still resolves.
+
+    The 2026-09-04 split moved 14,516 lines from packages/media-gateway/app.py
+    into packages/media-gateway/gateway/ — ONE DIRECTORY DEEPER — and the move
+    was verbatim, which is exactly what made this class of bug invisible: the
+    text of `Path(__file__).resolve().parents[2]` did not change, its MEANING
+    did. Two were wrong (the vault DB pointed at packages/, the strength-hunt
+    composer at a bin/ that does not exist). A verbatim move cannot be trusted
+    for anything anchored to __file__, so each one is pinned here.
+    """
+
+    def test_the_vault_db_default_is_under_the_repo_root(self):
+        from gateway import media
+        # The default is <root>/data/…; the root is the directory holding
+        # packages/, never packages/ itself.
+        base = media.VAULT_DB.parent.parent
+        self.assertTrue(
+            (base / "packages" / "media-gateway").is_dir(),
+            f"VAULT_DB is anchored at {base}, which is not the repo root",
+        )
+        self.assertNotEqual(base.name, "packages", "VAULT_DB lost a directory level in the split")
+
+    def test_every_bin_script_the_gateway_shells_out_to_exists(self):
+        import re
+        from pathlib import Path
+        package = Path(__file__).resolve().parent / "gateway"
+        missing = []
+        for source in package.glob("*.py"):
+            text = source.read_text(encoding="utf-8")
+            for name in re.findall(r'"bin"\s*/\s*"([^"]+)"', text):
+                if not (package.parent / "bin" / name).is_file():
+                    missing.append(f"{source.name} -> bin/{name}")
+        self.assertEqual(missing, [], f"gateway modules point at scripts that are not there: {missing}")
