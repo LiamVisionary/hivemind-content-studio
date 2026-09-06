@@ -628,3 +628,102 @@ def test_a_studio_that_is_already_set_up_never_shows_the_setup_card(tmp_path: Pa
     assert already.post("/api/accounts/setup",
                         json={"name": "Hijack", "password": "pw"}).status_code == 409
     _sign_in(already, 1, OWNER_PASSWORD)
+
+
+def test_a_background_finished_clip_is_claimed_for_the_workspace_that_started_it(tmp_path, monkeypatch):
+    """The waited path claims the output name inside the request, so the
+    workspace is in the context. The BACKGROUND finisher runs on no request at
+    all -- and used to claim nothing, leaving the job claimed only by an id
+    that a gateway listing built from a file walk never carries. Once the
+    route entry aged out, the clip surfaced unclaimed: the owner adopted it
+    and the workspace that made it never listed it (2026-08-22: three of a
+    sibling workspace's clips under Owner). The submit path now stashes the
+    workspace on the job and the finisher claims the name with it, even when
+    finished through the control-token poll with no account scope."""
+    def piece(name: str) -> str:
+        path = tmp_path / name
+        path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"0" * 32)
+        return str(path)
+
+    records: list[dict] = []
+    # The finisher is a background task, and asyncio copies the submitting
+    # request's contextvars into it -- so in-process it inherits the sibling's
+    # scope and the bug hides. What happened for real: a rented job outlived a
+    # studio restart, the task died with it, and a later control-token poll
+    # finished the job under NO scope. Spawn finishers with an empty context to
+    # model exactly that; the stashed workspace must then carry the claim.
+    import asyncio as _asyncio
+    import contextvars as _contextvars
+    real_get_running_loop = _asyncio.get_running_loop
+
+    class _DetachedLoop:
+        def __init__(self, loop): self._loop = loop
+        def create_task(self, coro, **kw):
+            return self._loop.create_task(coro, context=_contextvars.Context(), **kw)
+        def __getattr__(self, name): return getattr(self._loop, name)
+
+    monkeypatch.setattr("hivemind_content_studio.api.video.asyncio.get_running_loop",
+                        lambda: _DetachedLoop(real_get_running_loop()))
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_start",
+        lambda **_: {"job_id": "job-bg-1", "uploaded_names": [], "provider": "Media Studio"},
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_check",
+        lambda job_id, **_: {"status": "completed", "failed": False, "error": "",
+                             "video_url": "http://gateway/image/bg-clip.mp4", "progress": 1.0},
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_finish",
+        lambda job_id, **_: {"job_id": job_id, "provider": "Media Studio", "gateway_output": "bg-clip.mp4.e2e"},
+    )
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    app = build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret",
+        operator_token="operator-secret",
+        owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
+        private_cipher=cipher,
+        canvas_history_fetcher=lambda: [dict(record) for record in records],
+        canvas_media_fetcher=lambda name, requester_pub="", reveal_agent=False: (b"sealed:" + Path(name).name.encode(), "application/vnd.hivemind.e2e+json"),
+    )
+    canvas_client = TestClient(app)
+
+    def basenames(view: dict) -> list[str]:
+        return sorted(item["output_basename"] for item in view["history"])
+
+    _sign_in(canvas_client, 1, OWNER_PASSWORD)
+    created = canvas_client.post("/api/accounts", json={"name": "Second", "password": "second-pass"})
+    assert created.status_code == 201, created.text
+    second = int(created.json()["account"]["id"])
+    canvas_client.post("/api/accounts/sign-out")
+
+    # The sibling starts the job (its workspace is stashed on the job) ...
+    _sign_in(canvas_client, second, "second-pass")
+    queued = canvas_client.post("/api/media-studio/video/start",
+                                json={"prompt": "mine", "workflow_id": "ltx23-eros-fast", "duration_seconds": 2})
+    assert queued.status_code == 200, queued.text
+    canvas_client.post("/api/accounts/sign-out")
+
+    # ... and it is FINISHED with no account in scope at all: the control
+    # token, which is how an agent or a supervisor polls. This is the path
+    # that used to leave the output name unclaimed.
+    # A FRESH client: no session cookie at all, so nothing can smuggle the
+    # sibling's scope back in. This is what a supervisor or agent poll is.
+    done = TestClient(app).get("/api/media-studio/video/job/job-bg-1",
+                               headers={"Authorization": "Bearer control-secret"}).json()
+    # A control caller gets a machine receipt, which deliberately omits the
+    # output name; that the job finished is all it may learn. The listings
+    # below are what prove the claim was written for the right workspace.
+    assert done.get("ok") is True, done
+
+    # The gateway later lists the clip as a file-walk record: no job id.
+    records.append({"id": "file-0badc0ffee", "status": "success", "created_at": "2026-08-22T07:17:00+00:00",
+                    "finished_at": "2026-08-22T07:17:00+00:00", "outputs": [piece("bg-clip.mp4")]})
+
+    # The sibling lists it; the owner does not adopt it as unclaimed.
+    _sign_in(canvas_client, second, "second-pass")
+    assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == ["bg-clip.mp4"]
+    canvas_client.post("/api/accounts/sign-out")
+    _sign_in(canvas_client, 1, OWNER_PASSWORD)
+    assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == []

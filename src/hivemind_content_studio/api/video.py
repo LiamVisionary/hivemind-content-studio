@@ -52,6 +52,7 @@ def register(app, ctx) -> None:
     _vault_public_key = ctx._vault_public_key
     cipher = ctx.cipher
     current_account = ctx.current_account
+    account_store = ctx.account_store
     gateway_claims = ctx.gateway_claims
     generation_timings = ctx.generation_timings
     studio_generations = ctx.studio_generations
@@ -495,6 +496,16 @@ def register(app, ctx) -> None:
             return
         entry["finalizing"] = True
         entry["finalizing_loop"] = loop_id
+        # A job's workspace is a property of the JOB, not of whoever finishes
+        # it. The finisher used to run in whatever scope it happened to have:
+        # the submitting request's, copied into the background task -- or none
+        # at all when that task died in a restart and a later control-token
+        # poll picked the job up. With no scope, outputs_root() raised and the
+        # job failed; with the wrong scope, the clip was claimed for the wrong
+        # workspace. Either way a sibling's clip ended up under Owner and out
+        # of its own History. Restore the stashed workspace for the duration.
+        job_account = account_store.get(int(entry["account_id"])) if entry.get("account_id") is not None else None
+        scope_token = current_account.set(job_account) if job_account is not None else None
         try:
             result = await asyncio.to_thread(
                 cp.run_media_studio_video_finish,
@@ -549,6 +560,9 @@ def register(app, ctx) -> None:
                     **failure_fields(classify_exception(exc, default="render_failed")),
                 )
 
+        finally:
+            if scope_token is not None:
+                current_account.reset(scope_token)
     @router.post("/api/media-studio/video/start", dependencies=[Depends(require_owner_or_control)])
     async def start_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
         staged = await asyncio.to_thread(_staged_media_studio_video_inputs, body, request)
@@ -657,6 +671,10 @@ def register(app, ctx) -> None:
             # after this request is gone, and a keyed job only answers to the
             # requester that started it.
             "requester_pub": _requester_pub(request),
+            # Whose clip this will be. The finisher claims the OUTPUT NAME with
+            # it when the name is finally known; the job-id claim above is not
+            # enough on its own (see _finalize_media_studio_video).
+            "account_id": scope.id if scope is not None else None,
         }
         finisher = asyncio.get_running_loop().create_task(_finish_media_studio_video_job(job_id))
         media_studio_finishers.add(finisher)
