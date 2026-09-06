@@ -91,8 +91,19 @@ jobs:
         with:
           enable-cache: true
 
+      # `--extra faceless-webui` is the Redis client the service container
+      # above exists for: test_state's real-Redis tests run whenever
+      # MPT_TEST_REDIS_HOST is set, and they need the package, not just the
+      # server. Until 2026-09-04 streamlit and redis were base dependencies and
+      # `--extra mcp` was the whole developer set; the split moved them behind
+      # this extra and this line did not follow, so 72 test modules stopped
+      # collecting (`toml`, which streamlit had been carrying in) and this job
+      # was red for every push after it. The bundle-shaped install — base
+      # dependencies only — is what the Windows job below syncs, and
+      # test_packaging_extras walks the engine with this whole extra blocked,
+      # so installing it here cannot hide an eager import again.
       - name: Install dependencies
-        run: uv sync --frozen --extra mcp --python ${{ matrix.python-version }}
+        run: uv sync --frozen --extra mcp --extra faceless-webui --python ${{ matrix.python-version }}
 
       # The media-studio MCP contract tests shell out to
       # packages/media-gateway/bin/media-studio-mcp.mjs, which imports
@@ -188,6 +199,27 @@ jobs:
         run: npm run lint
         working-directory: packages/open-generative-ai
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Two studio tests (e2eMedia, mediaSealInterop) and the Canvas E2E media
+      # suite prove the seal format across languages: the gateway's
+      # media_seal.py seals bytes to the vault public key and the browser code
+      # is the only thing that decrypts them. They shell out to the repository
+      # venv — <root>/.venv/bin/python — which this job never created, so both
+      # studio tests failed with ENOENT on every run since they were written
+      # and the Canvas suite skipped itself. The same install the lint job
+      # does; the interpreter is wanted only for `cryptography`.
+      - name: Install the Python the seal tests shell out to
+        run: uv sync --frozen --python 3.11
+
       - name: Run studio tests
         run: npm test
         working-directory: packages/open-generative-ai
@@ -196,8 +228,9 @@ jobs:
         run: npm ci
         working-directory: packages/comfyui-mobile
 
-      # The E2E media suite seals with the repository venv's Python, which this
-      # job does not have; it skips itself and says so rather than failing.
+      # The E2E media suite seals with the repository venv's Python, which the
+      # step above provides. Without it the suite skips itself and says so
+      # rather than failing — which is also why it had never run here.
       - name: Run Canvas tests
         run: npm test
         working-directory: packages/comfyui-mobile
