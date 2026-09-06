@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "generated_by": "scripts/generate_notices.py",
-  "generated_at": "2026-09-04",
+  "generated_at": "2026-09-06",
   "project": {
     "license": "AGPL-3.0-or-later",
     "notices": "THIRD_PARTY_NOTICES.md",
@@ -513,6 +513,12 @@
         "name": "tokenizers",
         "version": "0.22.2",
         "license": "Apache Software License",
+        "url": null
+      },
+      {
+        "name": "tomli-w",
+        "version": "1.2.0",
+        "license": "MIT License",
         "url": null
       },
       {
