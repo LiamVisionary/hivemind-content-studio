@@ -239,10 +239,21 @@ export async function resolveMediaSrc(url) {
         rememberResolved(url, blobUrl, payload.size);
         return blobUrl;
     } catch {
-        // We hold a key and it did not open this envelope: sealed to someone else
-        // (an agent-sealed rental output), or the payload is damaged. Either way
-        // the bytes behind this URL are ciphertext.
-        noteSealFailure(url, 'undecryptable');
+        // WHICH failure this was depends on what we actually held.
+        //
+        // 'locked' is not `!vaultReady && !deviceReady`. A browser that has a
+        // device identity but a LOCKED vault reaches here with deviceReady
+        // true: decryptWithDevice throws on an owner-sealed envelope, there is
+        // no vault to fall back to, and the old blanket verdict called that
+        // "sealed for a different key" — a dead end with no remedy — when the
+        // truth was "this vault is not open yet". Reported live on 2026-09-06,
+        // where every library tile said it and no key was wrong.
+        //
+        // The vault is the only thing that can open an OWNER-sealed envelope,
+        // so without it this tab has no key for this file, whatever else it
+        // holds. Only a vault that IS open and still cannot read the envelope
+        // is genuinely sealed to someone else.
+        noteSealFailure(url, vaultReady ? 'undecryptable' : 'locked');
         return url; // still fail open — never worse than today
     }
 }

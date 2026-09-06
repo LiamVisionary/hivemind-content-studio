@@ -136,3 +136,38 @@ test('E2E media: bytes already in hand are shown without fetching them sealed', 
     assert.equal(media.primeResolvedMedia('/api/media-studio/references/other.png', '/api/media-studio/references/other.png'), false);
     assert.equal(media.peekResolvedMediaSrc('/api/media-studio/references/other.png'), null);
 });
+
+// A locked vault is not a wrong key.
+//
+// Reported live 2026-09-06: every library tile read "Can't decrypt — Sealed for
+// a different key" while the vault identity, its 67 blobs and the machine's
+// field key were all provably intact. The verdict came from a blanket catch.
+// A browser holding a DEVICE identity but a locked vault has deviceReady true,
+// so it skips the `!vaultReady && !deviceReady` locked branch, fails
+// decryptWithDevice on an owner-sealed envelope, has no vault to fall back to,
+// and the throw was called "sealed to someone else" — a dead end offering no
+// way out, when the actual remedy was one unlock.
+//
+// Deliberately textual, and it is the honest form here: reaching that branch
+// needs deviceReady true with vaultReady false, which means a device keypair in
+// IndexedDB — this suite runs in node, where there is none. What can be pinned
+// without pretending otherwise is that the verdict is DERIVED from whether the
+// vault was open, rather than being the constant it used to be.
+test('the seal verdict is decided by whether the vault was open, not assumed', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/lib/e2eMedia.js'), 'utf8');
+    const start = source.indexOf('const bytes = await openEnvelope(');
+    assert.ok(start > 0, 'the decrypt call moved; this guard needs rewriting');
+    const tail = source.slice(start);
+    const verdict = tail.slice(tail.indexOf('} catch'), tail.indexOf('return url;'));
+
+    assert.match(
+        verdict, /noteSealFailure\(url,\s*vaultReady \? 'undecryptable' : 'locked'\)/,
+        'a failed decrypt must read as locked when the vault was shut: only an OPEN '
+        + 'vault that still cannot read an envelope is genuinely a different key',
+    );
+    assert.doesNotMatch(
+        verdict, /noteSealFailure\(url,\s*'undecryptable'\)/,
+        'the constant verdict is the 2026-09-06 bug: it told users their media was '
+        + 'sealed to someone else when their vault was simply not open',
+    );
+});
