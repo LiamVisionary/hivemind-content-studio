@@ -99,7 +99,7 @@ def test_turning_it_on_publishes_only_the_control_api_port(monkeypatch) -> None:
     reading = set_remote_access(True, port=8765, https_port=8765, run=run)
 
     write = next(argv for argv in run.calls if argv[1] == "serve" and argv[2] != "status")
-    assert write == ["/usr/bin/tailscale", "serve", "--bg", "--https=8765", "http://127.0.0.1:8765"]
+    assert write == ["/usr/bin/tailscale", "serve", "--bg", "--yes", "--https=8765", "http://127.0.0.1:8765"]
     # `tailscale serve`, never a proxy of ours and never a generated cert: the
     # certificate is Tailscale's, so the browser shows no warning to explain.
     assert not any("cert" in part or "openssl" in part for argv in run.calls for part in argv)
@@ -261,3 +261,148 @@ def test_a_cold_start_spawns_no_proxy_and_generates_no_certificate() -> None:
 
     # The Canvas port is not published anywhere in the boot path.
     assert "http://$ts_ip:8788" not in stack
+
+
+def test_headless_publish_does_not_replace_another_service(monkeypatch):
+    import pytest
+    _installed(monkeypatch)
+    # Both ports come from the environment when they are not passed, and a
+    # shell that has either exported sends the conflict check at a port the
+    # fixture never published -- the test passed or failed by whose machine
+    # ran it. Pin them, so the defaults are what this asserts about.
+    monkeypatch.delenv("CONTENT_STUDIO_TAILNET_PORT", raising=False)
+    monkeypatch.delenv("CONTENT_STUDIO_CONTROL_PORT", raising=False)
+    run = FakeTailscale(status=_status_json(), serve=_serve_json("http://127.0.0.1:9999"))
+    with pytest.raises(RemoteAccessError, match="Another service"):
+        set_remote_access(True, run=run)
+    assert all(call[1:3] in (["status", "--json"], ["serve", "status"]) for call in run.calls)
+
+
+def test_api_headless_flags_publish_at_startup_and_keep_loopback(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    import uvicorn
+    from hivemind_content_studio import control_api
+    monkeypatch.setenv("CONTENT_STUDIO_TAILNET_PORT", "8765")
+    monkeypatch.setattr(sys, "argv", ["content-studio-api", "--remote-access", "--tailnet-port", "8789"])
+    monkeypatch.delenv("CONTENT_STUDIO_CONTROL_HOST", raising=False)
+    monkeypatch.setenv("CONTENT_STUDIO_CONTROL_PORT", "8877")
+    monkeypatch.setattr(control_api, "configure_logging", lambda: None)
+    app = SimpleNamespace(state=SimpleNamespace(startup_hooks=[]))
+    monkeypatch.setattr(control_api, "build_control_app", lambda: app)
+    calls = []
+    def publish(enabled, **kwargs):
+        calls.append((enabled, kwargs))
+        return {"enabled": True, "url": f"https://{DNS_NAME}:8789/"}
+    monkeypatch.setattr(control_api, "set_remote_access", publish)
+    def run(application, **kwargs):
+        assert calls == []
+        assert kwargs["host"] == "127.0.0.1"
+        for hook in application.state.startup_hooks:
+            hook()
+    monkeypatch.setattr(uvicorn, "run", run)
+    control_api.main()
+    assert calls == [(True, {"port": 8877, "https_port": 8789})]
+
+
+def test_stack_cli_forwards_headless_flags(monkeypatch):
+    from types import SimpleNamespace
+    from hivemind_content_studio import cli
+    calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **kw: calls.append(argv) or SimpleNamespace(returncode=0))
+    args = cli.build_parser().parse_args(["stack", "start", "--remote-access", "--tailnet-port", "8789"])
+    assert args.func(args) == 0
+    assert calls[0][1:] == ["start", "--remote-access", "--tailnet-port", "8789"]
+
+
+def test_api_plain_launch_does_not_publish(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    import uvicorn
+    from hivemind_content_studio import control_api
+    monkeypatch.setenv("CONTENT_STUDIO_TAILNET_PORT", "8765")
+    monkeypatch.setattr(sys, "argv", ["content-studio-api"])
+    monkeypatch.delenv("CONTENT_STUDIO_REMOTE_ACCESS", raising=False)
+    monkeypatch.setattr(control_api, "configure_logging", lambda: None)
+    app = SimpleNamespace(state=SimpleNamespace(startup_hooks=[]))
+    monkeypatch.setattr(control_api, "build_control_app", lambda: app)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: None)
+    control_api.main()
+    assert app.state.startup_hooks == []
+
+
+def test_tailnet_host_and_signin_origin_are_accepted_but_other_hosts_are_not(tmp_path, monkeypatch):
+    monkeypatch.setattr("hivemind_content_studio.control_api.tailnet_hostname", lambda: DNS_NAME)
+    client = _client(tmp_path, monkeypatch, unlock=False)
+    url = f"https://{DNS_NAME}:8789"
+    assert client.get(url + "/").status_code == 200
+    assert client.get("https://attacker.ts.net:8789/").status_code == 400
+    response = client.post(url + "/api/accounts/unlock", headers={"Origin": url},
+                           json={"account_id": 1, "password": OWNER_PASSWORD})
+    assert response.status_code == 200
+    assert "Secure" in response.headers["set-cookie"]
+    assert client.post(url + "/api/accounts/unlock", headers={"Origin": "https://attacker.ts.net"},
+                       json={"account_id": 1, "password": OWNER_PASSWORD}).status_code == 400
+    assert client.post(url + "/api/accounts/unlock", headers={"Origin": f"https://{DNS_NAME}:9999"},
+                       json={"account_id": 1, "password": OWNER_PASSWORD}).status_code == 400
+
+
+def test_a_taken_tailnet_port_does_not_cost_the_local_studio(monkeypatch, capsys):
+    """Publishing runs as a startup hook, so raising there aborts the lifespan
+    and uvicorn exits. A tailnet port another service already holds used to
+    take the whole studio down with it, localhost included."""
+    from hivemind_content_studio import control_api
+
+    def refuse(enabled, **kwargs):
+        raise RemoteAccessError(
+            "Another service is already published on this tailnet port.",
+            "Choose a different --tailnet-port; the existing service was left unchanged.",
+        )
+
+    monkeypatch.setattr(control_api, "set_remote_access", refuse)
+
+    assert control_api.publish_remote_access(port=8765, https_port=8789) is False
+
+    printed = capsys.readouterr().err
+    assert "Remote access is off" in printed
+    assert "Another service" in printed      # what happened
+    assert "--tailnet-port" in printed       # and what the reader does about it
+
+
+def test_a_studio_that_cannot_publish_still_finishes_starting(monkeypatch):
+    """The same thing through main(): the hook fails and uvicorn is still
+    handed a live app on the loopback port."""
+    import sys
+    from types import SimpleNamespace
+
+    import uvicorn
+
+    from hivemind_content_studio import control_api
+
+    monkeypatch.setattr(sys, "argv", ["content-studio-api", "--remote-access", "--tailnet-port", "8789"])
+    monkeypatch.delenv("CONTENT_STUDIO_CONTROL_HOST", raising=False)
+    monkeypatch.setenv("CONTENT_STUDIO_CONTROL_PORT", "8877")
+    monkeypatch.setattr(control_api, "configure_logging", lambda: None)
+    app = SimpleNamespace(state=SimpleNamespace(startup_hooks=[]))
+    monkeypatch.setattr(control_api, "build_control_app", lambda: app)
+
+    def refuse(enabled, **kwargs):
+        raise RemoteAccessError(
+            "Another service is already published on this tailnet port.",
+            "Choose a different --tailnet-port; the existing service was left unchanged.",
+        )
+
+    monkeypatch.setattr(control_api, "set_remote_access", refuse)
+
+    served: list[int] = []
+
+    def run(application, **kwargs):
+        for hook in application.state.startup_hooks:
+            hook()          # this used to raise, and the studio never listened
+        served.append(kwargs["port"])
+
+    monkeypatch.setattr(uvicorn, "run", run)
+
+    control_api.main()
+
+    assert served == [8877]

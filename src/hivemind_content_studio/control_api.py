@@ -104,7 +104,11 @@ from .media_studio import (  # noqa: F401
     start_video as run_media_studio_video_start,
     video_job_record as run_media_studio_video_record,
 )
-from .remote_access import set_remote_access  # noqa: F401
+from .remote_access import (  # noqa: F401
+    RemoteAccessError,
+    set_remote_access,
+    tailnet_hostname,
+)
 from .unified_runtime import unified_runtime_snapshot  # noqa: F401
 from .api.cloud_output import (  # noqa: F401 — re-exported at the old name
     CLOUD_OUTPUT_MAX_BYTES,
@@ -540,6 +544,8 @@ def build_control_app(
             for token in (configured_control_token, configured_operator_token)
         )
 
+    served_tailnet_host = tailnet_hostname()
+
     def _same_site_origin(request: Request) -> bool:
         """Is this write coming from a page the studio actually serves?
 
@@ -557,6 +563,10 @@ def build_control_app(
         name = _host_name(origin)
         if name in _LOOPBACK_NAMES:
             return True
+        # Tailscale Serve preserves Host. Trust only this machine's discovered
+        # name, and require Origin to match the full authority (including port).
+        if served_tailnet_host and name == served_tailnet_host:
+            return origin.rstrip("/") == f"{request.url.scheme}://{request.headers.get('host', '')}"
         forwarded_host = _host_name(_from_proxy(request, "x-forwarded-host"))
         return bool(forwarded_host) and name == forwarded_host
 
@@ -640,16 +650,12 @@ def build_control_app(
         record_access(request.method, request_path, response.status_code, request.scope.get("path_params"))
         return response
 
-    # Added last, so it wraps the account gate above and answers first: a
-    # request for a name this studio does not answer to never reaches the
-    # sign-in routes at all. Starlette compares the name up to the first colon,
-    # so every port passes and no entry needs one — and a BRACKETED literal
-    # (`[::1]:8765`) is refused by the same rule, which is right for a studio
-    # that binds 127.0.0.1 and never answers on ::1. Safe behind the tailnet
-    # proxy, which rewrites Host to 127.0.0.1:8765 before forwarding
-    # (packages/media-gateway/tailscale-https-proxy.js) and carries the address
-    # bar's name in x-forwarded-host instead.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(_LOOPBACK_HOSTS), www_redirect=False)
+    # Tailscale Serve preserves the browser's Host, unlike the retired proxy.
+    # Accept only this node's discovered name, never *.ts.net or arbitrary hosts.
+    allowed_hosts = list(_LOOPBACK_HOSTS)
+    if served_tailnet_host:
+        allowed_hosts.append(served_tailnet_host)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts, www_redirect=False)
 
     def require_control(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
         supplied = authorization.removeprefix("Bearer ").strip() if authorization else ""
@@ -785,8 +791,48 @@ def build_control_app(
     return app
 
 
+def publish_remote_access(*, port: int, https_port: int) -> bool:
+    """Publish the tailnet URL, and never take the studio down failing to.
+
+    This runs as a startup hook, so an exception here aborts the lifespan and
+    uvicorn exits -- a tailnet port some other service already holds used to
+    cost the whole studio, localhost included. Remote access is an extra, not
+    a precondition: name what happened and what fixes it, and serve anyway.
+    """
+    try:
+        status = set_remote_access(True, port=port, https_port=https_port)
+    except RemoteAccessError as exc:
+        detail, remedy = exc.message, exc.remedy
+    else:
+        if status["enabled"]:
+            print(f"Tailnet URL: {status['url']} (workspace sign-in required)", flush=True)
+            return True
+        detail = "Tailscale did not confirm that the studio was published."
+        remedy = "The studio is still reachable on this machine."
+    log.warning("remote access not published: %s %s", detail, remedy)
+    print(
+        f"[content-studio] Remote access is off. {detail} {remedy}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False
+
+
 def main() -> None:
+    import argparse
     import uvicorn
+    from .remote_access import RemoteAccessError, tailnet_https_port
+
+    parser = argparse.ArgumentParser(description="Host Content Studio locally, optionally on your tailnet.")
+    parser.add_argument("--remote-access", action="store_true",
+                        default=os.environ.get("CONTENT_STUDIO_REMOTE_ACCESS") == "1",
+                        help="Enable persistent tailnet-only HTTPS access through Tailscale")
+    parser.add_argument("--tailnet-port", type=int, default=tailnet_https_port(),
+                        help="HTTPS port on the tailnet (default: 8765; use 8789 for the old URL)")
+    args = parser.parse_args()
+    if not 1 <= args.tailnet_port <= 65535:
+        parser.error("--tailnet-port must be between 1 and 65535")
+    os.environ["CONTENT_STUDIO_TAILNET_PORT"] = str(args.tailnet_port)
 
     host = os.environ.get("CONTENT_STUDIO_CONTROL_HOST", "127.0.0.1")
     # 8765 stays the preferred, stable port. A shell that has to fall back
@@ -806,6 +852,10 @@ def main() -> None:
         log.error("refusing to open a newer data format: %s", exc)
         print(f"[content-studio] {exc}", file=sys.stderr, flush=True)
         raise SystemExit(3) from None
+    if args.remote_access:
+        app.state.startup_hooks.append(
+            lambda: publish_remote_access(port=port, https_port=args.tailnet_port)
+        )
     # uvicorn's access log writes the full URL, query string included; the
     # boundary middleware writes a redacted line instead.
     uvicorn.run(app, host=host, port=port, access_log=False)

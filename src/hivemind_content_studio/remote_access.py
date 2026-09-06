@@ -149,6 +149,18 @@ def _audience(identity: dict[str, Any]) -> str:
     )
 
 
+def tailnet_hostname() -> str:
+    """Read this machine's exact MagicDNS name; never accept a wildcard tailnet."""
+    cli = tailscale_cli()
+    if not cli:
+        return ""
+    try:
+        identity = _tailnet_identity(cli, _run)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return identity["dns_name"].lower() if identity["state"] == "Running" else ""
+
+
 def remote_access_status(
     *,
     port: int | None = None,
@@ -167,6 +179,7 @@ def remote_access_status(
         "device": "",
         "https_port": https_port,
         "studio_port": port,
+        "conflict": False,
     }
     cli = tailscale_cli()
     if not cli:
@@ -198,6 +211,7 @@ def remote_access_status(
     url = f"https://{host}/"
     return {
         **base,
+        "conflict": bool(proxied and not enabled),
         "supported": True,
         "enabled": enabled,
         "url": url if enabled else "",
@@ -239,8 +253,13 @@ def set_remote_access(
     status = remote_access_status(port=port, https_port=https_port, run=run)
     if enabled and not status["supported"]:
         raise RemoteAccessError(status["detail"], status["remedy"])
+    if status.get("conflict"):
+        raise RemoteAccessError(
+            "Another service is already published on this tailnet port.",
+            "Choose a different --tailnet-port; the existing service was left unchanged.",
+        )
     argv = (
-        [cli, "serve", "--bg", f"--https={https_port}", f"http://127.0.0.1:{port}"]
+        [cli, "serve", "--bg", "--yes", f"--https={https_port}", f"http://127.0.0.1:{port}"]
         if enabled
         else [cli, "serve", f"--https={https_port}", "off"]
     )
