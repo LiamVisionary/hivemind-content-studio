@@ -680,6 +680,85 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
+  // Workflow preflight and its inline installers (gateway/dependencies.py):
+  // what a lane lacks for a registered workflow, install one or all of it,
+  // watch a job, cancel one, restart the lane so new node packs load.
+  if (pathname === '/local-ai/workflow-dependencies' && req.method === 'GET') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    // `query` is the request's own; `forward` is the allow-listed copy that
+    // reaches the gateway (shadowing the parameter here read an empty set).
+    const forward = new URLSearchParams();
+    for (const key of ['workflow_id', 'run_on', 'lane']) {
+      const value = String(query.get(key) || '').trim();
+      if (value && /^[A-Za-z0-9_.:-]{1,128}$/.test(value)) forward.set(key, value);
+    }
+    if (!forward.get('workflow_id')) return sendJson(res, 400, { error: 'workflow_id required' });
+    try {
+      const report = await requestJson(`${ZIMAGE_URL}/api/workflows/dependencies?${forward}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 45000,
+      });
+      return sendJson(res, 200, report);
+    } catch (error) {
+      return sendJson(res, upstreamStatus(error), { error: error.message });
+    }
+  }
+  if (pathname === '/local-ai/workflow-dependencies/install' && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    try {
+      const body = JSON.parse((await readBody(req, 64 * 1024)).toString('utf8') || '{}');
+      const workflowId = String(body.workflow_id || '').trim();
+      if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(workflowId)) return sendJson(res, 400, { error: 'workflow_id required' });
+      const items = Array.isArray(body.items) ? body.items.map(String).filter((id) => /^[A-Za-z0-9_.:-]{1,200}$/.test(id)).slice(0, 64) : undefined;
+      const runOn = String(body.run_on || '').trim();
+      const outcome = await requestJson(`${ZIMAGE_URL}/api/workflows/dependencies/install`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ workflow_id: workflowId, ...(items ? { items } : {}), ...(runOn ? { run_on: runOn } : {}) }),
+        timeout: 60000,
+      });
+      return sendJson(res, 202, outcome);
+    } catch (error) {
+      return sendJson(res, upstreamStatus(error), { error: error.message });
+    }
+  }
+  if (pathname === '/local-ai/workflow-dependencies/restart' && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    try {
+      const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8') || '{}');
+      const runOn = String(body.run_on || '').trim();
+      const outcome = await requestJson(`${ZIMAGE_URL}/api/workflows/dependencies/restart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(runOn ? { run_on: runOn } : {}),
+        timeout: 30000,
+      });
+      return sendJson(res, 200, outcome);
+    } catch (error) {
+      return sendJson(res, upstreamStatus(error), { error: error.message });
+    }
+  }
+  if (pathname.startsWith('/local-ai/workflow-dependencies/jobs/') && (req.method === 'GET' || req.method === 'DELETE')) {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    const jobId = pathname.slice('/local-ai/workflow-dependencies/jobs/'.length);
+    if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) return sendJson(res, 400, { error: 'Invalid install job id' });
+    try {
+      const job = req.method === 'DELETE'
+        ? await requestJson(`${ZIMAGE_URL}/api/workflows/dependencies/cancel/${encodeURIComponent(jobId)}`, {
+          method: 'POST', headers: { Authorization: `Bearer ${token}` },
+        })
+        : await requestJson(`${ZIMAGE_URL}/api/workflows/dependencies/jobs/${encodeURIComponent(jobId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      return sendJson(res, 200, job);
+    } catch (error) {
+      return sendJson(res, upstreamStatus(error), { error: error.message });
+    }
+  }
   if (pathname.startsWith('/local-ai/loras/')) {
     const token = readToken();
     if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });

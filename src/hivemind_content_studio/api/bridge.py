@@ -59,6 +59,11 @@ def register(app, ctx) -> None:
             # The inspiration finder: Civitai images/videos that carry a
             # reusable prompt. Read-only, same bridge, same Civitai key.
             "local-ai/civitai-images",
+            # Workflow preflight and its inline installers: what the lane
+            # lacks for a registered workflow, install it, restart the lane.
+            "local-ai/workflow-dependencies",
+            "local-ai/workflow-dependencies/install",
+            "local-ai/workflow-dependencies/restart",
         }
         dynamic_local_ai_route = any(
             path.startswith(prefix)
@@ -69,6 +74,7 @@ def register(app, ctx) -> None:
                 "local-ai/lora-preview/",
                 "local-ai/model-preview/",
                 "local-ai/civitai-download/",
+                "local-ai/workflow-dependencies/jobs/",
             )
         ) or (
             # Stopping an image job at the gateway: one id segment, then "cancel".

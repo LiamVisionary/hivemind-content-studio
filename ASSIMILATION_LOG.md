@@ -796,3 +796,80 @@
 - Reason: Upstream ships one 1.1MB HTML file with NO LICENSE (all rights reserved), so nothing could be copied. The valuable part is not its code but which parts of MiniMax H3's prompt grammar a composer must get exactly right, and the shape of a pre-flight check over that grammar.
 - Assimilated: shot timeline grammar, structured camera builder, frame-alignment sentence, prompt check, reference-ownership roles for still-image edits
 - Not assimilated: the composer's HTML/JS, its project format, its AI project-setup import/export, its frame grabber, its visual camera-path planner, and its second camera-move vocabulary
+## 2026-09-06T12:40:41.147792+00:00 - shared-brain
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: shared-brain
+- Decision: inspected
+- Reason: hive-brain answer/recall full-vault: ComfyUI skill says node ops go through ComfyUI-Manager (cm-cli); no existing dependency-preflight note
+
+### Candidates
+- Skills/comfyui/SKILL.md
+  - Decision: selected-donor
+  - Reason: custom node install via ComfyUI-Manager cm-cli; /object_info as the installed-node oracle
+  - Path: `SKILL.md`
+- Skills/local-control-panel-webapps/references/comfyui-lora-manager-installed-ui.md
+  - Decision: rejected
+  - Reason: installed-library UI parity, not a dependency prompt
+## 2026-09-06T12:40:41.179455+00:00 - local-search
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Reason: rg over gateway/studio: persisted download-job system, concurrent download store + pending card, object_info combo lookup, lane request helper, registry model_dependencies schema
+- Selected backbone: local-project:hivemind-content-studio
+
+### Candidates
+- packages/media-gateway/gateway/models.py
+  - Decision: selected
+  - Reason: download job records (history.download_jobs, progress_cb, cancel, .part+rename) = backbone for model installers
+  - Path: `start_civitai_download_job`
+- packages/open-generative-ai/src/lib/civitaiDownloadStore.js
+  - Decision: selected
+  - Reason: keyed concurrent download store with poll loops = backbone for live inline installers
+- packages/open-generative-ai/src/studios/image/PendingLoraCard.jsx
+  - Decision: selected-donor
+  - Reason: progress card UI
+- packages/media-gateway/gateway/models.py:_model_catalog_from_object_info
+  - Decision: selected-donor
+  - Reason: object_info/<class> combo options as installed-model oracle
+- packages/media-gateway/gateway/lanes.py:comfy_lane_request
+  - Decision: selected-donor
+  - Reason: lane-aware authenticated requests
+- packages/media-gateway/workflow-registry.json:model_dependencies
+  - Decision: selected
+  - Reason: existing schema (folder/relativePath/url/bytes/sha256) extended with custom nodes
+- scripts/hivemind-studio-stack custom_nodes symlink installs
+  - Decision: rejected
+  - Reason: boot-time symlinks of repo-shipped nodes, not a runtime installer
+## 2026-09-06T12:47:58.590169+00:00 - local-search
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: local-index
+- Decision: not-assimilated
+- Reason: no local assimilation index present (~/.codex/hive-assimilate/index/chunks.jsonl missing); bounded rg over the project used instead
+## 2026-09-06T12:48:35.353625+00:00 - public-search
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: public-github
+- Decision: not-assimilated
+- Reason: search_github_public.py ran but crashed in its own log step (OSError argument list too long); no public candidate outranked the project's own download-job system + ComfyUI-Manager node map, which the local search already selected as backbone
+## 2026-09-06T13:06:51.369710+00:00 - assimilation-manifest
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: local-project:hivemind-content-studio:packages/media-gateway/gateway/models.py => packages/media-gateway/gateway/dependencies.py, local-project:hivemind-content-studio:packages/media-gateway/gateway/models.py => packages/media-gateway/gateway/dependencies.py, local-project:hivemind-content-studio:packages/media-gateway/bin/media-studio-mcp.mjs => packages/media-gateway/gateway/dependencies.py, local-project:hivemind-content-studio:packages/open-generative-ai/src/lib/civitaiDownloadStore.js => packages/open-generative-ai/src/lib/workflowDependencies.js, local-project:hivemind-content-studio:packages/open-generative-ai/src/studios/image/PendingLoraCard.jsx => packages/open-generative-ai/src/components/WorkflowDependencyPrompt.jsx, local-project:hivemind-content-studio:packages/open-generative-ai/hosted-server.js => packages/open-generative-ai/hosted-server.js, local-project:hivemind-content-studio:src/hivemind_content_studio/gpu_rentals.py => packages/media-gateway/workflow-registry.json, ComfyUI-Manager:extension-node-map.json => packages/media-gateway/gateway/dependencies.py, local-project:hivemind-content-studio:packages/media-gateway/test_app.py => packages/media-gateway/test_app.py
+- Verification: Wrote ASSIMILATION.workflow-dependencies.json with 9 entries and custom_code_assessment=balanced.
+## 2026-09-06T13:06:51.450478+00:00 - verification
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.workflow-dependencies.json: 9 concrete reuse entries, 7 substantive
+## 2026-09-06T13:06:51.504032+00:00 - verification
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Reason: verify_assimilation_manifest passed; gateway test_app.py 253 passed, control API 111 passed, JS 1449 passed (3 pre-existing failures from concurrent uncommitted composer work), live preflight against this Mac's lane reported hardware unsupported + 42.5 GB missing

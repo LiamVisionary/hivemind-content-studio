@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse, urlencode, unquote
 from urllib.request import Request
 from urllib.error import HTTPError
 
-from gateway import config, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, promptroutes, restore, routes, runners, util, workflow_index
+from gateway import config, dependencies as _dependencies, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, promptroutes, restore, routes, runners, util, workflow_index
 
 
 class _MultipartPart:
@@ -862,6 +862,95 @@ class Handler(BaseHTTPRequestHandler):
         with history.download_jobs_lock:
             rec = history.download_jobs.get(jid)
         return self.send_json(_models.public_download_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
+
+    # --- workflow preflight + inline installers (gateway/dependencies.py) ---
+    def _dependency_lane(self, qs, data=None):
+        """The lane a preflight or install is about: the "Run on" pin when it
+        names an attached machine, else the default lane."""
+        run_on = (qs.get("run_on") or [""])[0] if isinstance(qs, dict) else ""
+        if not run_on and isinstance(data, dict):
+            run_on = str(data.get("run_on") or "")
+        if run_on:
+            try:
+                pinned = _lanes.comfy_lane_for_pin(run_on)
+            except _lanes.ComfyLanePinError as exc:
+                raise ValueError(str(exc)) from exc
+            if pinned:
+                return pinned
+        lane = (qs.get("lane") or ["default"])[0] if isinstance(qs, dict) else "default"
+        return lane if lane in _lanes.COMFY_LANES else "default"
+
+    def get_api_workflow_dependencies(self, parsed, qs):
+        workflow_id = (qs.get("workflow_id") or [""])[0].strip()
+        if not workflow_id:
+            return self.send_json({"error": "workflow_id required"}, 400)
+        try:
+            lane = self._dependency_lane(qs)
+            report = _dependencies.check_workflow(workflow_id, lane)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc), "operational": True}, 409)
+        except _dependencies.LaneUnreachable as exc:
+            return self.send_json({"error": str(exc), "operational": True}, 502)
+        report["jobs"] = _dependencies.install_jobs(workflow_id)
+        return self.send_json(report)
+
+    def get_api_workflow_dependency_jobs(self, parsed, qs):
+        workflow_id = (qs.get("workflow_id") or [""])[0].strip() or None
+        return self.send_json({"jobs": _dependencies.install_jobs(workflow_id)})
+
+    def get_api_workflow_dependency_job(self, parsed, qs):
+        jid = parsed.path.rsplit("/", 1)[-1]
+        with history.download_jobs_lock:
+            rec = history.download_jobs.get(jid)
+        if not rec or rec.get("kind") != "dependency":
+            return self.send_json({"error": "not found"}, 404)
+        return self.send_json(_dependencies.public_install_job(rec))
+
+    def post_api_workflow_dependency_install(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+        except ValueError:
+            return self.send_json({"error": "invalid JSON body"}, 400)
+        workflow_id = str(data.get("workflow_id") or "").strip()
+        if not workflow_id:
+            return self.send_json({"error": "workflow_id required"}, 400)
+        wanted = data.get("items")
+        wanted = {str(item) for item in wanted} if isinstance(wanted, list) else None
+        try:
+            lane = self._dependency_lane(qs, data)
+            report = _dependencies.check_workflow(workflow_id, lane)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc), "operational": True}, 409)
+        except _dependencies.LaneUnreachable as exc:
+            return self.send_json({"error": str(exc), "operational": True}, 502)
+        started, refused = [], []
+        for item in report.get("missing") or []:
+            if wanted is not None and item.get("id") not in wanted:
+                continue
+            if not item.get("installable"):
+                refused.append({"id": item.get("id"), "reason": item.get("reason") or (report.get("hardware") or {}).get("reason") or "not installable here"})
+                continue
+            try:
+                started.append(_dependencies.start_install_job(item, workflow_id=workflow_id, lane=lane))
+            except Exception as exc:
+                refused.append({"id": item.get("id"), "reason": str(exc)[:300]})
+        return self.send_json({"ok": True, "lane": lane, "started": started, "refused": refused, "hardware": report.get("hardware")}, 202)
+
+    def post_api_workflow_dependency_cancel(self, parsed, qs):
+        jid = parsed.path.rsplit("/", 1)[-1]
+        rec = _dependencies.cancel_install_job(jid)
+        return self.send_json(_dependencies.public_install_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
+
+    def post_api_workflow_dependency_restart(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+        except ValueError:
+            data = {}
+        try:
+            lane = self._dependency_lane(qs, data)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc), "operational": True}, 409)
+        return self.send_json({"lane": lane, **_dependencies.restart_lane(lane)})
 
     def get_api_comfy_prompt_by_client(self, parsed, qs):
         # Hand a submitter back the prompt id it never received. Staging a

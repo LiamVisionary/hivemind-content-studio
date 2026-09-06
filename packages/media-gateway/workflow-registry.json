@@ -1150,6 +1150,74 @@
     {
       "id": "minimax-h3-turbo",
       "inherits": "minimax-h3",
+      "custom_node_dependencies": [
+        {
+          "name": "ComfyUI-MiniMax-H3-Turbo",
+          "repo": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo",
+          "commit": "55fee864dd7b2976b1c4ce3c3d5f7968f181409f",
+          "class_types": ["MiniMaxH3TurboLoRA"]
+        },
+        {
+          "name": "ComfyUI-Spectrum-MiniMax-H3",
+          "repo": "https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3",
+          "commit": "9395bf98fc60a04c5f588de7b2bb33516a0b622f",
+          "class_types": ["SpectrumApplyMiniMaxH3"]
+        },
+        {
+          "name": "comfyui-kjnodes",
+          "repo": "https://github.com/kijai/ComfyUI-KJNodes",
+          "commit": "35e5956193769d18a13136cdedb73a36a05c73e6",
+          "class_types": ["PathchSageAttentionKJ"]
+        },
+        {
+          "name": "ComfyUI-SolAttn_triton",
+          "repo": "https://github.com/kijai/ComfyUI-SolAttn_triton",
+          "commit": "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc",
+          "class_types": ["SolAttnPatch"]
+        }
+      ],
+      "model_dependencies": [
+        {
+          "folder": "loras",
+          "relativePath": "loras/minimax_h3_turbo_v4_step600_ema.safetensors",
+          "url": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/resolve/main/minimax_h3_turbo_v4_step600_ema.safetensors",
+          "required": true,
+          "bytes": 0,
+          "sha256": ""
+        },
+        {
+          "folder": "diffusion_models",
+          "relativePath": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 20970379616,
+          "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_fp16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+          "required": true,
+          "bytes": 5207808496,
+          "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_audio_vae_fp32.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+          "required": true,
+          "bytes": 605254808,
+          "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+        }
+      ],
       "title": "MiniMax H3 Turbo",
       "beta": true,
       "description": "MiniMax H3 with larryvrh's experimental 4-step Turbo distill LoRA (drbaph ckpt500 pruned-ComfyUI conversion): the same joint video+stereo-audio generation at 6 sampling steps with Spectrum forecasting, benchmarked on a rented RTX 5090 at 68s for a 5s 960x544 clip against 98s for MiniMax H3 \u2014 about 30% faster end to end, and 21s of sampling against 49s. Preview-quality weights from an in-progress training run: keep MiniMax H3 as the quality tier and A/B anything that matters. Runs on the SAME rented machine as MiniMax H3 with no re-provisioning \u2014 the tier ships both the full DiT and this LoRA.",
@@ -1591,6 +1659,96 @@
     },
     {
       "id": "minimax-h3",
+      "hardware": {
+        "accelerator": "cuda",
+        "reason": "MiniMax H3 needs an NVIDIA card: its nvfp4 text encoder only runs on Blackwell (RTX 5090 class), so this machine's ComfyUI cannot run it. Run it on a rented machine instead."
+      },
+      "core_node_classes": [
+        "MiniMaxH3ImageToVideo",
+        "MiniMaxH3TextToVideo",
+        "MiniMaxH3ReferenceToVideo",
+        "MiniMaxH3SigmaShift",
+        "MiniMaxH3Conditioning",
+        "MiniMaxH3TextEncode",
+        "VAEDecodeAudio",
+        "EasyCache",
+        "FrameInterpolationModelLoader",
+        "FrameInterpolate"
+      ],
+      "custom_node_dependencies": [
+        {
+          "name": "ComfyUI-Spectrum-MiniMax-H3",
+          "repo": "https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3",
+          "commit": "9395bf98fc60a04c5f588de7b2bb33516a0b622f",
+          "class_types": ["SpectrumApplyMiniMaxH3"]
+        },
+        {
+          "name": "comfyui-kjnodes",
+          "repo": "https://github.com/kijai/ComfyUI-KJNodes",
+          "commit": "35e5956193769d18a13136cdedb73a36a05c73e6",
+          "class_types": ["PathchSageAttentionKJ"]
+        },
+        {
+          "name": "ComfyUI-SolAttn_triton",
+          "repo": "https://github.com/kijai/ComfyUI-SolAttn_triton",
+          "commit": "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc",
+          "class_types": ["SolAttnPatch"]
+        },
+        {
+          "name": "ComfyUI-H3-Motion-Context",
+          "repo": "https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context",
+          "commit": "c140ae99b8c38f782ebd8564c267b42aacade6a4",
+          "class_types": ["MiniMaxH3MotionContext"]
+        },
+        {
+          "name": "Comfyui_Minimax_h3_latent_Upscaler",
+          "repo": "https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler",
+          "commit": "",
+          "class_types": ["MiniMaxH3LatentUpscaler"]
+        }
+      ],
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 20970379616,
+          "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_fp16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+          "required": true,
+          "bytes": 5207808496,
+          "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_audio_vae_fp32.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+          "required": true,
+          "bytes": 605254808,
+          "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+        },
+        {
+          "folder": "latent_upscale_models",
+          "relativePath": "latent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors",
+          "url": "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/minimax_h3_latent_upscaler_3d_bf16.safetensors",
+          "required": false,
+          "bytes": 0,
+          "sha256": ""
+        }
+      ],
       "media_type": "video",
       "title": "MiniMax H3",
       "description": "MiniMax H3 omni-modal video generation: video and native stereo audio (voice, SFX, music) are denoised jointly in one pass. Text-to-video by default; supply a start image for image-to-video. Runs on an H3-capable CUDA Comfy lane (pruned int8_convrot DiT + Qwen3-VL 32B nvfp4 encoder, ComfyUI >= e377e263 with the Spectrum forecaster node \u2014 see packages/gpu-rentals). Native canvas is a 768px short edge at 24 fps, up to ~15s on the 17k+5 frame grid. Spectrum forecasting is on by default and can be switched off per generation: it predicts about half the transformer steps instead of computing them, which roughly halves sampling time but softens fine detail. Three optional accelerators ride the same graph, all OFF by default and lifted out of the chain entirely when unset, so the default path is unchanged. Measured on a rented RTX 5090 (5s @ 960x544, warm, fixed seed, ComfyUI's own per-prompt timing): no acceleration 60.3s; spectrum (the default) 39.1s; solattn_tau 1.3 34.3s \u2014 NVlabs sparse attention chained onto sage, 11% faster than spectrum at equal-or-better detail and the same take, needs the pinned SolAttn Triton node and pays ~6s of kernel autotune on the first run of a process; easycache 0.2-0.3 41.9s. easycache and spectrum CANNOT combine \u2014 the forecaster disables itself whenever a cache wrapper patches the same model \u2014 and the choice between them is about fidelity, not speed: easycache lands 28-35 dB from the unaccelerated render where spectrum lands ~20 dB, i.e. spectrum reaches a visibly different take at the same seed. fast_high_res is the two-pass lane: sample the first pass at 0.2MP, lift the video latent to the full canvas with a trained H3 latent upscaler (no VAE round trip) and spend only the last 3 sigmas at full size. Off by default; the studio calls it \"Fast high-res\". interpolate 2 runs core RIFE over the decoded frames for 24 -> 48 fps at +2.9s (3 gives 72 fps at +4.0s), leaving clip duration and the sampled frame count alone.",

@@ -25,7 +25,7 @@ from ..machine_privacy import machine_operation_receipt
 from ..media_studio import sanitize_error_detail
 from ..observability import frame_list
 from ..private_access import e2e_media_exists, seal_private_media_e2e
-from ..studio_telemetry import classify_exception, failure_fields, lora_base_for_workflow, new_telemetry_id
+from ..studio_telemetry import classify_exception, failure_fields, lora_base_for_workflow, new_telemetry_id, safe_failure
 from .media_common import (
     _encrypt_private_media,
     _private_media_exists,
@@ -42,6 +42,9 @@ from .timings import (
 )
 
 log = logging.getLogger("hivemind.studio.control")
+# ComfyUI's refusals that mean "this lane lacks something installable": a node
+# class it has not loaded, or a graph whose model files it cannot see.
+DEPENDENCY_FAILURE_CODES = {"missing_node_type", "prompt_outputs_failed_validation", "invalid_prompt", "prompt_no_outputs"}
 
 
 def register(app, ctx) -> None:
@@ -298,6 +301,18 @@ def register(app, ctx) -> None:
         owner = bool(getattr(request.state, "is_owner", False))
         detail = sanitize_error_detail(str(exc)) if owner else "Media generation failed"
         status = 400 if isinstance(exc, (FileNotFoundError, ValueError)) else 503
+        # A lane that lacks a node pack or a model file is repaired by
+        # installing it, and the studio has an installer: name that remedy the
+        # way every other server-named remedy travels (laneError → remedyFor),
+        # with the machine-safe classification beside it. Owner only — the
+        # remedy opens a prompt that installs software on this machine.
+        failure = safe_failure(getattr(exc, "failure", None)) if owner else None
+        if failure and failure.get("code") in DEPENDENCY_FAILURE_CODES:
+            return HTTPException(status_code=status, detail={
+                "message": detail or "Media generation failed",
+                "remedy": "install-dependencies",
+                "failure": failure,
+            })
         return HTTPException(status_code=status, detail=detail or "Media generation failed")
 
     @router.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])

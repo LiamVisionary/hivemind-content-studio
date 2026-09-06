@@ -485,6 +485,9 @@ export const REMEDIES = Object.freeze({
   // one that can, or rent one. The restore lanes are the first rows to say it,
   // and they say it in the one vocabulary rather than a second one.
   'attach-machine': { label: t('failure.openMachines'), action: 'machines' },
+  // A lane that lacks a node pack or a model file: the studio installs it
+  // inline (WorkflowDependencyPrompt) rather than sending anyone to a terminal.
+  'install-dependencies': { label: t('deps.installWhatIsMissing'), action: 'install-dependencies' },
 });
 
 /**

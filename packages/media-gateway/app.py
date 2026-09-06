@@ -19,6 +19,7 @@ if str(BASE) not in sys.path:
 
 from gateway import (  # noqa: E402  (sys.path above is what makes this import work)
     config,
+    dependencies,
     history,
     lanes,
     models,

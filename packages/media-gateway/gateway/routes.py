@@ -75,6 +75,11 @@ ROUTES = (
     Route("GET", "get_api_civitai_images", exact=("/api/civitai/images",)),
     Route("GET", "get_api_civitai_search", exact=("/api/civitai/search",)),
     Route("GET", "get_api_civitai_download", prefixes=("/api/civitai/download/",)),
+    # Workflow preflight: what the lane lacks for a registered workflow, and
+    # the inline installers (gateway/dependencies.py).
+    Route("GET", "get_api_workflow_dependencies", exact=("/api/workflows/dependencies",)),
+    Route("GET", "get_api_workflow_dependency_jobs", exact=("/api/workflows/dependencies/jobs",)),
+    Route("GET", "get_api_workflow_dependency_job", prefixes=("/api/workflows/dependencies/jobs/",)),
     Route("GET", "get_api_comfy_prompt_by_client", prefixes=("/api/comfy/prompt-by-client/",)),
     # Serves a private output when the name is one of ours, and otherwise
     # returns NEXT so the /comfy/ proxy four rows down answers instead.
@@ -113,6 +118,9 @@ ROUTES = (
     Route("POST", "post_api_loras_select", exact=("/api/loras/select",)),
     Route("POST", "post_api_civitai_download", exact=("/api/civitai/download",)),
     Route("POST", "post_api_civitai_cancel_download", prefixes=("/api/civitai/cancel-download/",)),
+    Route("POST", "post_api_workflow_dependency_install", exact=("/api/workflows/dependencies/install",)),
+    Route("POST", "post_api_workflow_dependency_cancel", prefixes=("/api/workflows/dependencies/cancel/",)),
+    Route("POST", "post_api_workflow_dependency_restart", exact=("/api/workflows/dependencies/restart",)),
     Route("POST", "post_comfy", prefixes=("/comfy/", "/mobile/")),
     Route("POST", "post_generate", exact=("/generate", "/api/generate")),
 

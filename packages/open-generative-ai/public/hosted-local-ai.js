@@ -360,6 +360,22 @@
       return jsonFetch(`/local-ai/lora-updates${query}`);
     },
     getCivitaiDownloadJob: (jobId) => jsonFetch(`/local-ai/civitai-download/${encodeURIComponent(jobId)}`),
+    // Workflow preflight and its inline installers (gateway/dependencies.py).
+    checkWorkflowDependencies: ({ workflowId, runOn } = {}) => {
+      const query = new URLSearchParams({ workflow_id: String(workflowId || '') });
+      if (runOn) query.set('run_on', String(runOn));
+      return jsonFetch(`/local-ai/workflow-dependencies?${query}`);
+    },
+    installWorkflowDependencies: ({ workflowId, runOn, items } = {}) => jsonFetch('/local-ai/workflow-dependencies/install', {
+      method: 'POST',
+      body: JSON.stringify({ workflow_id: String(workflowId || ''), ...(runOn ? { run_on: String(runOn) } : {}), ...(Array.isArray(items) ? { items } : {}) }),
+    }),
+    getWorkflowDependencyJob: (jobId) => jsonFetch(`/local-ai/workflow-dependencies/jobs/${encodeURIComponent(jobId)}`),
+    cancelWorkflowDependencyJob: (jobId) => jsonFetch(`/local-ai/workflow-dependencies/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
+    restartWorkflowLane: ({ runOn } = {}) => jsonFetch('/local-ai/workflow-dependencies/restart', {
+      method: 'POST',
+      body: JSON.stringify(runOn ? { run_on: String(runOn) } : {}),
+    }),
     cancelCivitaiDownload: (jobId) => jsonFetch(`/local-ai/civitai-download/${encodeURIComponent(jobId)}`, {
       method: 'DELETE',
     }),

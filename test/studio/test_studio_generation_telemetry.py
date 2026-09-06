@@ -230,9 +230,13 @@ def test_a_refused_start_is_recorded_with_its_code_and_answered_with_the_fix(tmp
         "loras": [{"id": "liam-secret-look-v2.safetensors", "strength": 0.9}],
     })
     assert response.status_code == 503
-    assert "SpectrumApplyMiniMaxH3" in response.json()["detail"]
-    assert "Install that node pack" in response.json()["detail"]
-    assert "redacted" not in response.json()["detail"]
+    # The owner's refusal is the structured shape: the sentence with the fix,
+    # the remedy that opens the installer, the classification beside it.
+    detail = response.json()["detail"]
+    assert "SpectrumApplyMiniMaxH3" in detail["message"]
+    assert "Install that node pack" in detail["message"]
+    assert "redacted" not in detail["message"]
+    assert detail["remedy"] == "install-dependencies"
 
     telemetry = client.get("/api/telemetry/generations").json()
     assert telemetry["summary"] == {**telemetry["summary"], "attempts": 1, "failed": 1}
@@ -389,3 +393,46 @@ def test_an_unclassified_redacted_receipt_still_says_where_the_reason_is(monkeyp
         assert "redacted the reason" in str(exc)
     else:
         raise AssertionError("start_video accepted a refusal")
+
+
+# -- the refusal names its remedy --------------------------------------------
+
+
+def test_a_dependency_refusal_names_the_install_remedy_for_the_owner(tmp_path: Path, monkeypatch) -> None:
+    """The 503 for a lane that lacks a node pack carries the same
+    server-named remedy shape every other repairable failure uses
+    (laneError -> remedyFor), so the studio's callout offers "Install what is
+    missing" instead of a sentence with nowhere to go."""
+    def refusing_start(**kwargs):
+        raise MediaStudioStartError(failure_hint(safe_failure(MISSING_NODE)), failure=MISSING_NODE)
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", refusing_start)
+    client, _ = _client(tmp_path, monkeypatch)
+    response = client.post("/api/media-studio/video/start", json={
+        "prompt": "p", "workflow_id": "minimax-h3-turbo", "image_base64": _png_data_url(), "duration_seconds": 2,
+    })
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["remedy"] == "install-dependencies"
+    assert detail["failure"] == {"code": "missing_node_type", "node_class": "SpectrumApplyMiniMaxH3", "node_id": "30"}
+    assert "SpectrumApplyMiniMaxH3" in detail["message"]
+    assert "p" != detail["message"]
+
+
+def test_a_control_token_caller_gets_no_remedy_and_no_classification(tmp_path: Path, monkeypatch) -> None:
+    """The remedy opens a prompt that installs software on this machine, so
+    it is the owner's; a machine-private control caller keeps the flat,
+    redacted sentence."""
+    def refusing_start(**kwargs):
+        raise MediaStudioStartError("refused", failure=MISSING_NODE)
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", refusing_start)
+    client, _ = _client(tmp_path, monkeypatch)
+    client.cookies.clear()
+    response = client.post(
+        "/api/media-studio/video/start",
+        json={"prompt": "p", "workflow_id": "minimax-h3-turbo", "image_base64": _png_data_url(), "duration_seconds": 2},
+        headers={"Authorization": "Bearer control-secret"},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Media generation failed"

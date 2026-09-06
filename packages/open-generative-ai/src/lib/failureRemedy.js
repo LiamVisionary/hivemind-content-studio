@@ -35,6 +35,14 @@ export async function runFailureRemedy(remedy, handlers = {}) {
   // Where a machine is attached, pinned or rented — the answer for a lane that
   // cannot run the job on this hardware.
   if (action === 'machines') { openPage('machines'); return; }
+  // The lane lacks something installable: the studio opens its dependency
+  // prompt, which installs inline. Without a handler, Machines is the page
+  // where a lane that can run it is attached.
+  if (action === 'install-dependencies') {
+    if (handlers.onInstallDependencies) { handlers.onInstallDependencies(remedy); return; }
+    openPage('machines');
+    return;
+  }
   if (action === 'key') {
     // The MUAPI key has a field in this studio; everything else is set where
     // the shared store is edited.

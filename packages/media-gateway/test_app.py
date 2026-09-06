@@ -3,6 +3,7 @@ import sys
 import io
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -6969,3 +6970,329 @@ class RestoreLanesSayWhyAndWhatToDo(unittest.TestCase):
             self.assertFalse(lane['available'], lane)
             # The whole point: never a greyed row with nothing on it.
             self.assertTrue(lane['remedy'], lane)
+
+
+class WorkflowDependencyTests(unittest.TestCase):
+    """The preflight that runs before Generate (gateway/dependencies.py).
+
+    Liam pressed Generate on MiniMax H3 Turbo on a Mac whose ComfyUI had none
+    of it — no Spectrum node, no H3 weights, an accelerator the model cannot
+    use — and learned so from a refusal. These pin the preflight reading the
+    graph, asking the lane, naming each missing thing with its source, and
+    refusing to install 43 GB onto a card that cannot run them.
+    """
+
+    REGISTRY = {
+        "workflows": [
+            {
+                "id": "base",
+                "hardware": {"accelerator": "cuda", "reason": "needs an NVIDIA card"},
+                "core_node_classes": ["CoreOnlyNode"],
+                "custom_node_dependencies": [
+                    {"name": "Pack-A", "repo": "https://github.com/x/Pack-A", "commit": "abc123", "class_types": ["PackANode"]},
+                ],
+                "model_dependencies": [
+                    {"folder": "vae", "relativePath": "vae/base_vae.safetensors", "url": "https://example.com/base_vae.safetensors", "bytes": 12, "sha256": ""},
+                ],
+            },
+            {"id": "child", "inherits": "base", "api_workflow": "workflows/child.api.json", "hardware": {"accelerator": "mps"}},
+        ]
+    }
+    GRAPH = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "present.safetensors"}},
+        "2": {"class_type": "VAELoader", "inputs": {"vae_name": "base_vae.safetensors"}},
+        "3": {"class_type": "PackANode", "inputs": {}},
+        "4": {"class_type": "CoreOnlyNode", "inputs": {}},
+        "5": {"class_type": "MysteryNode", "inputs": {}},
+        "6": {"class_type": "LoraLoaderModelOnly", "inputs": {"lora_name": "unknown_lora.safetensors"}},
+    }
+    OBJECT_INFO = {
+        "UNETLoader": {"input": {"required": {"unet_name": [["present.safetensors"]]}}},
+        "VAELoader": {"input": {"required": {"vae_name": [["other_vae.safetensors"]]}}},
+        "LoraLoaderModelOnly": {"input": {"required": {"lora_name": [["some_lora.safetensors"]]}}},
+    }
+
+    def _fake_lane(self, accelerator="mps"):
+        info = self.OBJECT_INFO
+
+        class Response:
+            def __init__(self, payload, status=200):
+                self.payload = json.dumps(payload).encode("utf-8")
+                self.status = status
+                self.headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, *_args):
+                return self.payload
+
+        def fake_urlopen(request, timeout=None):
+            path = request.full_url.split("://", 1)[-1].split("/", 1)[-1]
+            if path == "system_stats":
+                return Response({"devices": [{"type": accelerator, "name": accelerator}], "system": {"comfyui_version": "0.26.0"}})
+            if path.startswith("object_info/"):
+                class_type = path.split("/", 1)[-1]
+                return Response({class_type: info[class_type]} if class_type in info else {})
+            raise AssertionError(f"unexpected lane request {path}")
+
+        return fake_urlopen
+
+    def _with_registry(self, tmp_path):
+        registry = tmp_path / "registry.json"
+        registry.write_text(json.dumps(self.REGISTRY), encoding="utf-8")
+        workflows = tmp_path / "workflows"
+        workflows.mkdir()
+        (workflows / "child.api.json").write_text(json.dumps(self.GRAPH), encoding="utf-8")
+        return registry
+
+    def test_inherited_definitions_fold_the_parent_in_with_the_child_winning(self):
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._with_registry(Path(td))
+            resolved = app.dependencies.load_registry(registry)
+        child = resolved["child"]
+        self.assertEqual(child["hardware"]["accelerator"], "mps")
+        self.assertEqual(child["hardware"]["reason"], "needs an NVIDIA card")
+        self.assertEqual([item["name"] for item in child["custom_node_dependencies"]], ["Pack-A"])
+        self.assertNotIn("inherits", child)
+
+    def test_the_preflight_names_each_missing_thing_with_its_source(self):
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            registry = self._with_registry(tmp)
+            resolved = app.dependencies.load_registry(registry)
+            app.dependencies.forget_lane_object_info()
+            with patch.object(app.config, 'BASE', tmp), patch.object(app.config, 'REGISTRY_WORKFLOW_DIR', tmp / 'workflows'), \
+                 patch.object(app.net, 'urlopen', side_effect=self._fake_lane()), \
+                 patch.object(app.dependencies, 'MANAGER_NODE_MAP', tmp / 'no-map.json'):
+                report = app.dependencies.check_workflow("child", "default", registry=resolved)
+        self.assertFalse(report["ok"])
+        self.assertTrue(report["known"])
+        self.assertTrue(report["hardware"]["supported"])  # child asks for mps, the lane is mps
+        by_id = {item["id"]: item for item in report["missing"]}
+        self.assertEqual(sorted(by_id), [
+            "model:base_vae.safetensors", "model:unknown_lora.safetensors",
+            "node:CoreOnlyNode", "node:MysteryNode", "node:PackANode",
+        ])
+        # A registry-named pack is installable from its GitHub repo, at its pin.
+        pack = by_id["node:PackANode"]
+        self.assertTrue(pack["installable"])
+        self.assertEqual(pack["source"]["repo"], "https://github.com/x/Pack-A")
+        self.assertEqual(pack["source"]["commit"], "abc123")
+        # A core node is an update, said in words, never attempted.
+        core = by_id["node:CoreOnlyNode"]
+        self.assertEqual(core["kind"], "comfyui")
+        self.assertFalse(core["installable"])
+        self.assertIn("Update ComfyUI", core["reason"])
+        # A node nobody can attribute is named as such.
+        self.assertFalse(by_id["node:MysteryNode"]["installable"])
+        self.assertIn("No known source", by_id["node:MysteryNode"]["reason"])
+        # A model the registry knows is downloadable; one it does not says where to put it.
+        vae = by_id["model:base_vae.safetensors"]
+        self.assertTrue(vae["installable"])
+        self.assertEqual(vae["bytes"], 12)
+        self.assertEqual(vae["source"]["folder"], "vae")
+        lora = by_id["model:unknown_lora.safetensors"]
+        self.assertFalse(lora["installable"])
+        self.assertIn("ComfyUI/models/loras", lora["reason"])
+        # The present file and the loaders themselves count as satisfied.
+        self.assertGreaterEqual(report["satisfied"], 3)
+        self.assertEqual(report["missing_bytes"], 12)
+
+    def test_an_unsupported_accelerator_blocks_every_install(self):
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            registry = self._with_registry(tmp)
+            resolved = app.dependencies.load_registry(registry)
+            resolved["child"]["hardware"] = {"accelerator": "cuda", "reason": "needs an NVIDIA card"}
+            app.dependencies.forget_lane_object_info()
+            with patch.object(app.config, 'BASE', tmp), patch.object(app.config, 'REGISTRY_WORKFLOW_DIR', tmp / 'workflows'), \
+                 patch.object(app.net, 'urlopen', side_effect=self._fake_lane("mps")), \
+                 patch.object(app.dependencies, 'MANAGER_NODE_MAP', tmp / 'no-map.json'):
+                report = app.dependencies.check_workflow("child", "default", registry=resolved)
+        self.assertFalse(report["hardware"]["supported"])
+        self.assertEqual(report["hardware"]["required"], "cuda")
+        self.assertEqual(report["hardware"]["reason"], "needs an NVIDIA card")
+        self.assertTrue(report["missing"])
+        for item in report["missing"]:
+            self.assertFalse(item["installable"], item["id"])
+            self.assertEqual(item["blocked_by"], "hardware")
+
+    def test_a_comfy_relative_graph_is_read_from_the_comfyui_install(self):
+        """ltx23-regular-fp8 names `comfy:workflows/civitai/...`: on the live
+        Mac that answered "outside the auto-workflow folders" and the whole
+        workflow was reported as unknown, which reads as all clear."""
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            comfy = tmp / "comfy"
+            (comfy / "workflows" / "civitai").mkdir(parents=True)
+            (comfy / "workflows" / "civitai" / "g.json").write_text(json.dumps({"prompt": self.GRAPH}), encoding="utf-8")
+            definition = {"id": "x", "api_workflow": "comfy:workflows/civitai/g.json"}
+            with patch.object(app.config, 'COMFY', comfy), patch.object(app.config, 'REGISTRY_WORKFLOW_DIR', tmp / 'gateway-workflows'):
+                graph = app.dependencies.load_workflow_graph(definition)
+                self.assertIn("PackANode", {node["class_type"] for node in graph.values()})
+                # Outside both roots: refused, never read.
+                (tmp / "elsewhere.json").write_text("{}", encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "outside the workflow folders"):
+                    app.dependencies.load_workflow_graph({"id": "y", "api_workflow": str(tmp / "elsewhere.json")})
+
+    def test_a_node_class_with_spaces_is_asked_for_by_its_quoted_name(self):
+        """"Sol-Attn (tau 0 = off)" is a real node title a pack ships as its
+        class name; unquoted it made urllib refuse the request and the whole
+        preflight died with the connection (HTTP 000 on the live Mac)."""
+        app = load_app()
+        asked = []
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *a): return None
+            def read(self, *a): return b"{}"
+
+        def fake_urlopen(request, timeout=None):
+            asked.append(request.full_url)
+            return Response()
+
+        app.dependencies.forget_lane_object_info()
+        with patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+            self.assertIsNone(app.dependencies.lane_object_info("default", "Sol-Attn (tau 0 = off)"))
+        self.assertTrue(asked[0].endswith("/object_info/Sol-Attn%20%28tau%200%20%3D%20off%29"), asked)
+
+    def test_an_unknown_workflow_is_no_preflight_not_a_clean_bill(self):
+        app = load_app()
+        report = app.dependencies.check_workflow("not-a-workflow", "default", registry={})
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["known"])
+        self.assertEqual(report["missing"], [])
+
+    def test_a_model_download_resumes_its_part_and_verifies_size_and_hash(self):
+        app = load_app()
+        payload = b"0123456789abcdef"
+        digest = hashlib.sha256(payload).hexdigest()
+
+        class Response:
+            def __init__(self, body, status, total):
+                self.body, self.status = body, status
+                self.headers = {"Content-Length": str(len(body))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, n):
+                chunk, self.body = self.body[:n], self.body[n:]
+                return chunk
+
+        seen = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append(request.headers.get("Range"))
+            start = int(str(request.headers.get("Range") or "bytes=0-")[len("bytes="):-1] or 0)
+            return Response(payload[start:], 206 if start else 200, len(payload))
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "models" / "vae" / "file.safetensors"
+            dest.parent.mkdir(parents=True)
+            (dest.parent / "file.safetensors.part").write_bytes(payload[:6])
+            progress = []
+            with patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+                app.dependencies.download_url(
+                    "https://example.com/file.safetensors", dest, expected_bytes=len(payload), sha256=digest,
+                    progress_cb=lambda done, total: progress.append((done, total)),
+                )
+            self.assertEqual(dest.read_bytes(), payload)
+            self.assertFalse((dest.parent / "file.safetensors.part").exists())
+        self.assertEqual(seen, ["bytes=6-"])
+        self.assertEqual(progress[0], (6, len(payload)))
+        self.assertEqual(progress[-1], (len(payload), len(payload)))
+
+    def test_a_bad_hash_discards_the_file_and_says_so(self):
+        app = load_app()
+        payload = b"not the bytes you wanted"
+
+        class Response:
+            status = 200
+            headers = {"Content-Length": str(len(payload))}
+            body = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, n):
+                chunk, self.body = self.body[:n], self.body[n:]
+                return chunk
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "file.safetensors"
+            with patch.object(app.net, 'urlopen', return_value=Response()):
+                with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                    app.dependencies.download_url("https://example.com/f", dest, sha256="00" * 32)
+            self.assertFalse(dest.exists())
+            self.assertFalse(dest.with_suffix(".safetensors.part").exists())
+
+    def test_installs_refuse_unsafe_targets_and_remote_lanes(self):
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(app.config, 'COMFY', Path(td)):
+                with self.assertRaisesRegex(RuntimeError, "github.com only"):
+                    app.dependencies.install_custom_node({"repo": "https://evil.example/x/y"})
+                with self.assertRaisesRegex(RuntimeError, "refusing"):
+                    app.dependencies._model_destination("../etc", "x.safetensors")
+                with self.assertRaisesRegex(RuntimeError, "model extension"):
+                    app.dependencies._model_destination("vae", "script.sh")
+            with patch.object(app.lanes, 'comfy_lane_is_remote', return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "re-provision"):
+                    app.dependencies.start_install_job(
+                        {"id": "model:x.safetensors", "kind": "model", "name": "x.safetensors", "source": {"folder": "vae", "url": "https://e/x"}},
+                        lane="h3",
+                    )
+
+    def test_the_install_route_starts_only_installable_items_and_names_the_rest(self):
+        app = load_app()
+        report = {
+            "missing": [
+                {"id": "node:PackANode", "kind": "custom_node", "installable": True, "source": {"repo": "https://github.com/x/Pack-A", "name": "Pack-A"}},
+                {"id": "node:CoreOnlyNode", "kind": "comfyui", "installable": False, "reason": "Update ComfyUI"},
+            ],
+            "hardware": {"supported": True},
+        }
+        started = []
+
+        def fake_start(item, workflow_id="", lane="default"):
+            started.append((item["id"], workflow_id, lane))
+            return {"id": "job1", "status": "queued", "dependency": item["id"]}
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with patch.object(app.config, 'TOKEN', 'test-token'), \
+             patch.object(app.dependencies, 'check_workflow', return_value=report), \
+             patch.object(app.dependencies, 'start_install_job', side_effect=fake_start):
+            server_thread.start()
+            try:
+                request = app.net.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/workflows/dependencies/install',
+                    data=json.dumps({'workflow_id': 'child'}).encode('utf-8'),
+                    headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with app.net.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                    self.assertEqual(response.status, 202)
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+        self.assertEqual(started, [("node:PackANode", "child", "default")])
+        self.assertEqual([job["id"] for job in payload["started"]], ["job1"])
+        self.assertEqual(payload["refused"], [{"id": "node:CoreOnlyNode", "reason": "Update ComfyUI"}])

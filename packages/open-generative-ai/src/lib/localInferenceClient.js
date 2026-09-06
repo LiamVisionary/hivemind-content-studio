@@ -246,6 +246,40 @@ class LocalInferenceClient {
         return window.localAI.getCivitaiDownloadJob(jobId);
     }
 
+    // ── Workflow preflight + inline installers ─────────────────────────────
+    // What the lane lacks for a registered workflow. Never throws on a studio
+    // without the bridge: an absent preflight is "unknown", not "all clear".
+    async checkWorkflowDependencies(options) {
+        if (!isLocalAIAvailable() || typeof window.localAI.checkWorkflowDependencies !== 'function') {
+            return { ok: true, known: false, missing: [] };
+        }
+        return window.localAI.checkWorkflowDependencies(options);
+    }
+    async installWorkflowDependencies(options) {
+        if (!isLocalAIAvailable() || typeof window.localAI.installWorkflowDependencies !== 'function') {
+            throw new Error('Installing workflow dependencies is available through Unified Studio.');
+        }
+        return window.localAI.installWorkflowDependencies(options);
+    }
+    async getWorkflowDependencyJob(jobId) {
+        if (!isLocalAIAvailable() || typeof window.localAI.getWorkflowDependencyJob !== 'function') {
+            throw new Error('Installing workflow dependencies is available through Unified Studio.');
+        }
+        return window.localAI.getWorkflowDependencyJob(jobId);
+    }
+    async cancelWorkflowDependencyJob(jobId) {
+        if (!isLocalAIAvailable() || typeof window.localAI.cancelWorkflowDependencyJob !== 'function') {
+            throw new Error('Installing workflow dependencies is available through Unified Studio.');
+        }
+        return window.localAI.cancelWorkflowDependencyJob(jobId);
+    }
+    async restartWorkflowLane(options) {
+        if (!isLocalAIAvailable() || typeof window.localAI.restartWorkflowLane !== 'function') {
+            throw new Error('Restarting the lane is available through Unified Studio.');
+        }
+        return window.localAI.restartWorkflowLane(options);
+    }
+
     async cancelCivitaiDownload(jobId) {
         if (!isLocalAIAvailable() || typeof window.localAI.cancelCivitaiDownload !== 'function') {
             throw new Error('Cancelling a Civitai download is available through Unified Studio.');
