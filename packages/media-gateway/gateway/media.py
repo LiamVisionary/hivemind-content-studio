@@ -329,6 +329,34 @@ def agent_seal_recipient_for(job_id):
 SUBPROCESS_PYTHON = os.environ.get("ZIMG_E2E_PYTHON") or sys.executable
 
 
+_vault_missing_warned = False
+
+
+def _warn_vault_db_missing():
+    """Say it once, loudly, when there is no vault database where we look.
+
+    This failed SILENTLY for sixteen days. On 2026-08-21 the accounts migration
+    moved data/owner-vault.sqlite3 into data/accounts/1/vault.sqlite3 and this
+    default was never updated, so vault_public_key_spki() returned None — which
+    sealing_recipients_for_route reads as "no owner vault yet" and answers with
+    a SINGLE recipient: the submitting browser's per-origin device key. Fifteen
+    of the owner's clips were sealed that way, with no vault-openable copy, and
+    nothing anywhere said so. A missing owner key is not a normal condition on a
+    machine that has a vault; it is a silent data-durability failure.
+    """
+    global _vault_missing_warned
+    if _vault_missing_warned:
+        return
+    _vault_missing_warned = True
+    print(
+        f"[e2e-media] WARNING: no vault database at {VAULT_DB}. Harvested media will be "
+        "sealed ONLY to the submitting browser's device key, with no copy the owner's "
+        "vault can open — losing that browser loses the media. Set ZIMG_VAULT_DB to the "
+        "account vault (data/accounts/<id>/vault.sqlite3).",
+        file=sys.stderr,
+    )
+
+
 def vault_public_key_spki():
     """The owner vault public key (base64url spki), or None until the browser
     has created a vault. Read directly from sqlite; cached against the DB mtime."""
@@ -336,6 +364,8 @@ def vault_public_key_spki():
         mtime = VAULT_DB.stat().st_mtime_ns if VAULT_DB.is_file() else None
     except OSError:
         return None
+    if mtime is None:
+        _warn_vault_db_missing()
     if mtime == _vault_public_key_cache["mtime"]:
         return _vault_public_key_cache["spki"]
     spki = None
