@@ -32,13 +32,40 @@ OUTPUT_ENCRYPTION_SUFFIX = ".zenc"
 # the browser holding the passphrase-derived private key can. See media_seal.py.
 E2E_MEDIA_ENABLED = os.environ.get("ZIMG_E2E_MEDIA", "0") == "1"
 E2E_MEDIA_SUFFIX = ".e2e"
-VAULT_DB = Path(os.environ.get(
-    "ZIMG_VAULT_DB",
+def _default_vault_db() -> Path:
+    """Where the owner vault lives, on both sides of the accounts migration.
+
+    Until 2026-08-21 this was data/owner-vault.sqlite3. The migration moved it
+    to data/accounts/<id>/vault.sqlite3 and this default did not follow, so
+    vault_public_key_spki() answered None for sixteen days and every harvested
+    clip was sealed to the submitting browser's device key ALONE -- no copy any
+    vault could open. Nothing said so until the media would not decrypt.
+
+    Prefer the legacy path while it exists, then a single account vault. With
+    more than one account there is no owner to guess and this must not try: the
+    studio sends the account's own key as X-E2E-Owner-Pub per job, and picking
+    one here would seal one workspace's media to another workspace's key.
+    """
     # parents[3], not [2]: this line moved from packages/media-gateway/app.py
     # into packages/media-gateway/gateway/, one directory deeper, and the index
-    # did not move with it — it pointed at packages/ instead of the repo root.
-    str(Path(os.environ.get("CONTENT_STUDIO_DATA_DIR", str(Path(__file__).resolve().parents[3] / "data"))) / "owner-vault.sqlite3"),
-)).expanduser()
+    # did not move with it -- it pointed at packages/ instead of the repo root.
+    data = Path(os.environ.get(
+        "CONTENT_STUDIO_DATA_DIR",
+        str(Path(__file__).resolve().parents[3] / "data"),
+    ))
+    legacy = data / "owner-vault.sqlite3"
+    if legacy.is_file():
+        return legacy
+    vaults = sorted(data.glob("accounts/*/vault.sqlite3"))
+    if len(vaults) == 1:
+        return vaults[0]
+    # Nothing, or ambiguous. Return the legacy path so the warning names a
+    # sensible location, and let the per-job owner key carry correctness.
+    return legacy
+
+
+_ENV_VAULT_DB = os.environ.get("ZIMG_VAULT_DB", "").strip()
+VAULT_DB = Path(_ENV_VAULT_DB) if _ENV_VAULT_DB else _default_vault_db().expanduser()
 PRIVATE_INPUT_PREFIXES = (
     "media-studio-inline-",
     "media-studio-input-",
@@ -386,7 +413,8 @@ def _warn_vault_db_missing():
         f"[e2e-media] WARNING: no vault database at {VAULT_DB}. Harvested media will be "
         "sealed ONLY to the submitting browser's device key, with no copy the owner's "
         "vault can open — losing that browser loses the media. Set ZIMG_VAULT_DB to the "
-        "account vault (data/accounts/<id>/vault.sqlite3).",
+        "account vault (data/accounts/<id>/vault.sqlite3); with several accounts, that "
+        "is the one whose workspace submits these jobs.",
         file=sys.stderr,
     )
 

@@ -6,8 +6,11 @@ reached a block then reaches the same code now - so the mapping below was read
 off the chain that was replaced, and is asserted rather than trusted.
 """
 import importlib.util
+import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 from unittest.mock import patch
 from pathlib import Path
 
@@ -249,3 +252,41 @@ class OwnerIsAlwaysARecipient(unittest.TestCase):
         # Degraded, but never a refusal to seal.
         self.assertEqual(owner, "A" * 392)
         self.assertIsNone(agent)
+
+
+class VaultDbFollowsTheAccountsMigration(unittest.TestCase):
+    """The 2026-08-21 accounts migration renamed the owner vault and this
+    default did not follow, so the gateway sealed sixteen days of harvested
+    media to the submitting browser's device key alone."""
+
+    def _resolve(self, tmp: Path) -> Path:
+        from gateway import media
+        with mock.patch.dict(os.environ, {"CONTENT_STUDIO_DATA_DIR": str(tmp)}, clear=False):
+            return media._default_vault_db()
+
+    def test_the_legacy_flat_vault_still_wins_while_it_exists(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            (tmp / "owner-vault.sqlite3").write_bytes(b"")
+            (tmp / "accounts/1").mkdir(parents=True)
+            (tmp / "accounts/1/vault.sqlite3").write_bytes(b"")
+            self.assertEqual(self._resolve(tmp), tmp / "owner-vault.sqlite3")
+
+    def test_a_migrated_single_account_vault_is_found(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            (tmp / "accounts/1").mkdir(parents=True)
+            (tmp / "accounts/1/vault.sqlite3").write_bytes(b"")
+            # This is the case that silently broke: no flat file any more.
+            self.assertEqual(self._resolve(tmp), tmp / "accounts/1/vault.sqlite3")
+
+    def test_several_accounts_are_never_guessed_between(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            for account in ("1", "2"):
+                (tmp / f"accounts/{account}").mkdir(parents=True)
+                (tmp / f"accounts/{account}/vault.sqlite3").write_bytes(b"")
+            # Picking one would seal one workspace's media to another's key.
+            # The studio sends X-E2E-Owner-Pub per job; this must stay out of it.
+            self.assertEqual(self._resolve(tmp), tmp / "owner-vault.sqlite3")
+            self.assertFalse(self._resolve(tmp).is_file())
