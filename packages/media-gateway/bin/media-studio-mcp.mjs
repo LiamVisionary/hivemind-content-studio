@@ -327,6 +327,53 @@ export function runWithRequester(pub, fn) {
   return normalized ? requesterContext.run({ pub: normalized }, fn) : fn();
 }
 
+// ── private generation ───────────────────────────────────────────────────────
+// An agent generation is workspace-public by default: the output is sealed to
+// the vault AND to this process's agent key, so any agent on the machine can
+// read it. `private: true` on a generate tool changes exactly one thing: the
+// job is submitted with NO requester key and the workspace owner's vault key
+// as the only recipient. The result is sealed like the owner's own private
+// generations -- only their browser, after unlocking the vault, can open it.
+// This process never gets a copy. Fail closed: if no owner key is configured,
+// a private call refuses rather than quietly sealing to the agent.
+const sealContext = new AsyncLocalStorage();
+
+export function runPrivately(fn) {
+  return sealContext.run({ private: true }, fn);
+}
+
+export function isPrivateCall() {
+  return Boolean(sealContext.getStore()?.private);
+}
+
+export function ownerPublicKey() {
+  // The workspace owner's vault public key (base64url SPKI). Public material:
+  // it can only ENCRYPT to the owner. Resolved from env, then a file, then the
+  // conventional sibling of the agent key file that the stack already points
+  // at. See scripts/export_owner_pub.py for how the file is produced.
+  if (process.env.MEDIA_STUDIO_OWNER_PUB) return process.env.MEDIA_STUDIO_OWNER_PUB.trim();
+  const explicit = process.env.MEDIA_STUDIO_OWNER_PUB_FILE;
+  const agentPubFile = process.env.MEDIA_STUDIO_E2E_PUB_FILE;
+  const candidates = [explicit, agentPubFile ? join(dirname(agentPubFile), 'owner-e2e-pub') : ''].filter(Boolean);
+  for (const path of candidates) {
+    try {
+      const value = readFileSync(path, 'utf8').trim();
+      if (value) return value;
+    } catch { /* try the next */ }
+  }
+  return '';
+}
+
+export function __testOwnerPublicKey() {
+  return ownerPublicKey();
+}
+
+// The header decision is the contract; let a test drive requestJson with a
+// stubbed fetch and read exactly what would have gone on the wire.
+export function __testRequestJson(path, opts) {
+  return requestJson(path, opts);
+}
+
 // Exposed for the requester-context test; the precedence it encodes is the
 // difference between a clip belonging to its generator and belonging to us.
 export function __testRequesterPublicKey() {
@@ -4412,8 +4459,21 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
   const headers = { Accept: 'application/json' };
   const authToken = backendToken();
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
-  const requesterPub = requesterPublicKey();
-  if (requesterPub) headers['X-E2E-Requester-Pub'] = requesterPub;
+  if (isPrivateCall()) {
+    // Private: the owner's vault is the ONLY recipient. No requester key, so
+    // the gateway writes no agent copy and this process cannot open the result.
+    const ownerPub = ownerPublicKey();
+    if (!ownerPub) {
+      throw new Error(
+        'private generation needs the workspace owner key and none is configured: '
+        + 'set MEDIA_STUDIO_OWNER_PUB_FILE (see scripts/export_owner_pub.py)',
+      );
+    }
+    headers['X-E2E-Owner-Pub'] = ownerPub;
+  } else {
+    const requesterPub = requesterPublicKey();
+    if (requesterPub) headers['X-E2E-Requester-Pub'] = requesterPub;
+  }
   const init = {
     method,
     headers,
@@ -4445,9 +4505,96 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
     // otherwise every one of them reaches the studio as a bare timeout and the
     // one thing the user could act on is the thing that gets stripped.
     err.machineSafe = Boolean(data?.operational);
+    // A refusal the backend can name without naming the work — a custom node
+    // the lane lacks, a graph its models cannot validate — travels as an
+    // identifiers-only classification next to the raw error, so the redacted
+    // receipt still says what to fix and the telemetry line records why.
+    const failure = classifyGatewayFailure(response.status, data);
+    if (failure) err.failure = failure;
     throw err;
   }
   return data;
+}
+
+const FAILURE_IDENTIFIER = /^[A-Za-z0-9_.:+/-]{1,120}$/;
+const failureIdentifier = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(Math.trunc(value));
+  return typeof value === 'string' && FAILURE_IDENTIFIER.test(value.trim()) ? value.trim() : '';
+};
+
+// The machine-safe shape of a gateway/ComfyUI refusal: a code (ComfyUI's own
+// error `type` when it sent one, else derived from the status), the node class
+// it named, the node id, and up to five node classes from node_errors. Never a
+// message, a value or a path — those can carry the prompt or a model file
+// under the owner's home, which is exactly what redaction protects.
+function classifyGatewayFailure(status, data) {
+  const detail = data?.error && typeof data.error === 'object' && !Array.isArray(data.error) ? data.error : null;
+  const nodeErrors = data?.node_errors && typeof data.node_errors === 'object' ? data.node_errors : null;
+  let code = failureIdentifier(detail?.type).toLowerCase();
+  const nodeClasses = [];
+  if (nodeErrors) {
+    for (const entry of Object.values(nodeErrors)) {
+      const cls = failureIdentifier(entry?.class_type);
+      if (cls && !nodeClasses.includes(cls)) nodeClasses.push(cls);
+      if (nodeClasses.length >= 5) break;
+    }
+  }
+  const nodeClass = failureIdentifier(detail?.extra_info?.class_type) || nodeClasses[0] || '';
+  const nodeId = failureIdentifier(detail?.extra_info?.node_id);
+  if (!code) {
+    if (data?.operational) code = 'operational';
+    else if (status === 401 || status === 403) code = 'unauthorized';
+    else if (status === 404) code = 'not_found';
+    else if (status === 409) code = 'conflict';
+    else if (status >= 500) code = 'backend_error';
+    else if (status >= 400) code = 'rejected';
+    else return null;
+  }
+  const failure = {
+    code,
+    ...(nodeClass ? { node_class: nodeClass } : {}),
+    ...(nodeId ? { node_id: nodeId } : {}),
+    ...(nodeClasses.length ? { node_classes: nodeClasses } : {}),
+  };
+  const message = machineSafeFailureMessage(failure);
+  return message ? { ...failure, message } : failure;
+}
+
+// One sentence made only of the code and the node identifiers, worded the
+// same as studio_telemetry.failure_hint on the Python side so the toast and
+// the Activity page agree.
+function machineSafeFailureMessage(failure) {
+  const nodes = failure.node_class || (failure.node_classes || []).join(', ');
+  switch (failure.code) {
+    case 'missing_node_type':
+      return `The ComfyUI lane that took this job does not have the custom node ${nodes || '(unnamed)'} installed, `
+        + 'so the graph was refused before rendering. Install that node pack on the lane, or run the job on a '
+        + 'machine that has it (the Rented source\'s "Run on" pin), and try again.';
+    case 'prompt_outputs_failed_validation':
+    case 'invalid_prompt':
+    case 'prompt_no_outputs':
+      return `ComfyUI refused the graph before rendering${nodes ? ` (${nodes})` : ''}: usually a model file this lane `
+        + 'does not have. Check the lane\'s models for this workflow and try again.';
+    default:
+      return '';
+  }
+}
+
+function failureForReceipt(failure) {
+  if (!failure || typeof failure !== 'object') return undefined;
+  const { message, ...rest } = failure;
+  return rest;
+}
+
+// One structured stderr line per generation outcome, in BOTH privacy modes
+// (the redacted-to-client log below only ever fired with machine-private on,
+// so with it off a refusal left no server-side trace at all). Identifiers and
+// numbers only; the supervisor keeps this stream in the node-services log.
+function telemetryLine(fields) {
+  const compact = Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && value !== ''),
+  );
+  console.error(`[media-studio-mcp] telemetry ${JSON.stringify({ at: new Date().toISOString(), ...compact })}`);
 }
 
 // Submitting a video is not a quick POST, and a caller that gives up does NOT
@@ -4483,10 +4630,17 @@ async function adoptSubmittedPrompt(clientId) {
   }
 }
 
+// Answers that mean "never queued": ComfyUI's validation refusal, the lane
+// pin conflict, a schema rejection. Nothing to adopt, so nothing to wait for
+// — the reconcile window is for a submit whose answer was LOST, not refused,
+// and spending it on a refusal held the H3 missing-node error for 30s.
+const DEFINITE_REFUSAL_STATUSES = new Set([400, 409, 422]);
+
 async function submitVideoPrompt(body) {
   try {
     return await requestJson('/comfy/api/prompt', { method: 'POST', body, timeoutMs: VIDEO_SUBMIT_TIMEOUT_MS });
   } catch (error) {
+    if (DEFINITE_REFUSAL_STATUSES.has(Number(error?.status))) throw error;
     const clientId = body?.client_id;
     if (!clientId) throw error;
     const adopted = await adoptSubmittedPrompt(clientId);
@@ -4516,6 +4670,7 @@ function fail(error) {
     error: String(error?.message || error?.error || error?.error_type || error),
     status: error?.status,
     response: error?.response,
+    ...(error?.failure ? { failure: failureForReceipt(error.failure) } : {}),
   };
   return {
     isError: true,
@@ -4564,7 +4719,10 @@ function machineFailureReceipt(error) {
     // A machine-safe reason is about the infrastructure, never the job: it is
     // the difference between "MediaStudioError" and "the machine behind this
     // lane is not answering — re-attach it". Everything else stays redacted.
-    ...(error?.machineSafe && error?.message ? { error: String(error.message) } : {}),
+    ...(error?.machineSafe && error?.message
+      ? { error: String(error.message) }
+      : (error?.failure?.message ? { error: String(error.failure.message) } : {})),
+    ...(error?.failure ? { failure: failureForReceipt(error.failure) } : {}),
     prompts_redacted: true,
     media_redacted: true,
   };
@@ -4597,12 +4755,31 @@ function createMediaStudioMcpExpressApp({ host }) {
   return app;
 }
 
-function tool(handler, { privateReceipt = false } = {}) {
+function tool(handler, { privateReceipt = false, name = '' } = {}) {
+  const generates = name.startsWith('media_generate');
   return async (args) => {
+    const startedAt = Date.now();
+    const workflowId = failureIdentifier(args?.workflow_id);
+    // LoRAs are a count here and nowhere else: a name is a download the
+    // owner chose, and this line is kept by the supervisor.
+    const loraCount = Array.isArray(args?.loras) ? args.loras.length : undefined;
     try {
       const result = await handler(args || {});
+      if (generates) {
+        telemetryLine({
+          event: 'tool.ok', tool: name, workflow_id: workflowId, lora_count: loraCount, duration_ms: Date.now() - startedAt,
+          job_id: failureIdentifier(result?.job?.id || result?.submission?.prompt_id || result?.id),
+        });
+      }
       return ok(machinePrivate && privateReceipt ? machineOperationReceipt(result) : result);
     } catch (error) {
+      if (generates || privateReceipt) {
+        telemetryLine({
+          event: 'tool.failed', tool: name, workflow_id: workflowId, lora_count: loraCount, duration_ms: Date.now() - startedAt,
+          status: error?.status, code: error?.failure?.code || (error?.machineSafe ? 'operational' : 'error'),
+          node_class: error?.failure?.node_class, error_type: error?.name,
+        });
+      }
       if (machinePrivate && privateReceipt) {
         // The browser-facing receipt is redacted to a generic MediaStudioError,
         // which makes failures un-debuggable. Log the real reason to stderr only
@@ -4610,6 +4787,9 @@ function tool(handler, { privateReceipt = false } = {}) {
         console.error('[media-studio-mcp] tool failed (redacted to client):', error?.stack || error?.message || error);
         return fail(machineFailureReceipt(error));
       }
+      // Redaction off: the client gets the raw reason, and the server keeps a
+      // line too, so a refusal is findable without the client that saw it.
+      console.error(`[media-studio-mcp] tool ${name || 'call'} failed:`, error?.message || error);
       return fail(error);
     }
   };
@@ -4826,6 +5006,7 @@ function buildServer() {
     description: 'Queue an image generation job. Returns a job snapshot; set wait=true only for short jobs.',
     inputSchema: {
       prompt: z.string().min(1).describe('Private prompt to render. The backend redacts prompts in stored history.'),
+      private: z.boolean().optional().describe('Seal the output to the workspace owner ONLY, like their own private generations: only their browser can open it after unlocking the vault, and this agent gets no copy. Default false: sealed to the owner AND the agent key, readable by any agent on the machine.'),
       workflow_id: z.string().optional().describe('Optional registered image workflow id from media_list_workflows. The workflow selects the backend and defaults.'),
       backend: z.string().optional().describe('Optional backend route, such as comfy-krea2-turbo-identity-edit or mlx-mxfp8-bigloves-klein3-edit.'),
       width: z.number().int().min(64).max(4096).optional(),
@@ -4864,7 +5045,7 @@ function buildServer() {
     }
     const stagedImage = await stageInlineImageFromArgs(args);
     const body = Object.fromEntries(Object.entries(args).filter(([key, value]) => (
-      !['workflow_id', 'wait', 'timeout_s', 'include_urls', 'image_base64', 'image_url'].includes(key) && value !== undefined
+      !['workflow_id', 'wait', 'timeout_s', 'include_urls', 'image_base64', 'image_url', 'private'].includes(key) && value !== undefined
     )));
     if (workflow) {
       for (const [key, value] of Object.entries(workflowDefaults(workflow.id))) {
@@ -4873,15 +5054,12 @@ function buildServer() {
     }
     if (!body.backend && workflow?.backend) body.backend = workflow.backend;
     if (stagedImage) body.image_path = stagedImage;
-    const queued = normalizeRecord(await requestJson('/api/generate', {
-      method: 'POST',
-      body,
-      timeoutMs: 30000,
-    }), { includeUrls });
+    const submit = () => requestJson('/api/generate', { method: 'POST', body, timeoutMs: 30000 });
+    const queued = normalizeRecord(await (args.private ? runPrivately(submit) : submit()), { includeUrls });
     if (!args.wait || !queued.id) return { ...(workflow ? { workflow: publicWorkflow(workflow) } : {}), job: queued };
     const job = await waitForJob(queued.id, { timeoutS: args.timeout_s, includeUrls });
     return { ...(workflow ? { workflow: publicWorkflow(workflow) } : {}), job };
-  }, { privateReceipt: true }));
+  }, { privateReceipt: true, name: 'media_generate_image' }));
 
   server.registerTool('media_generate_video', {
     title: 'Generate Video',
@@ -4891,6 +5069,7 @@ function buildServer() {
       studio_lane: z.string().max(512).optional().describe('Opaque app-tab queue lane. Jobs from one lane run in order; different tabs and media studios remain independent.'),
       run_on: z.string().max(128).optional().describe('The studio\'s per-tab "Run on" pin: the rented machine (rental id, e.g. "vast:48352597") this job runs on when that machine serves the workflow — it is tried ahead of the gateway\'s default routing order. Omit to follow the default. A pin naming a machine that is no longer attached is refused (409) rather than silently re-routed.'),
       prompt: z.string().min(1).optional().describe('Optional positive video prompt. Long natural-language prompts are preserved without a client-side character cap.'),
+      private: z.boolean().optional().describe('Seal the output to the workspace owner ONLY, like their own private generations: only their browser can open it after unlocking the vault, and this agent gets no copy. Default false: sealed to the owner AND the agent key, readable by any agent on the machine.'),
       reference_description: z.string().optional().describe('Ingredients IC-LoRA only: panel-by-panel description of the reference sheet. Omit only when prompt already contains the required Reference Sheet Description and Target Description headings.'),
       ingredient_images: z.array(z.object({
         image_path: z.string().optional(),
@@ -5043,7 +5222,7 @@ function buildServer() {
   }, tool(async (args) => {
     const includeUrls = machinePrivate ? false : args.include_urls;
     const { spec, workflow, settings, body } = await buildVideoPromptBody(args);
-    const submission = await submitVideoPrompt(body);
+    const submission = await (args.private ? runPrivately(() => submitVideoPrompt(body)) : submitVideoPrompt(body));
     const promptId = submission.prompt_id || submission.id;
     if (!promptId) {
       throw new Error(`LTX Eros workflow did not return a prompt id: ${JSON.stringify(submission)}`);
@@ -5083,7 +5262,7 @@ function buildServer() {
         mobile_workflow: spec.mobileWorkflow ? join(ltxErosMobileWorkflowDir, spec.mobileWorkflow) : spec.mobileWorkflowPath,
       },
     };
-  }, { privateReceipt: true }));
+  }, { privateReceipt: true, name: 'media_generate_video' }));
 
   server.registerTool('media_get_job', {
     title: 'Get Job',
@@ -5101,7 +5280,7 @@ function buildServer() {
     const error = new Error('not found');
     error.status = 404;
     throw error;
-  }, { privateReceipt: true }));
+  }, { privateReceipt: true, name: 'media_get_job' }));
 
   server.registerTool('media_list_history', {
     title: 'List History',
@@ -5115,7 +5294,7 @@ function buildServer() {
     const data = await requestJson('/api/history', { timeoutMs: 30000 });
     const history = (data.history || []).slice(0, limit).map((item) => normalizeRecord(item, { includeUrls }));
     return { count: history.length, history };
-  }, { privateReceipt: true }));
+  }, { privateReceipt: true, name: 'media_list_history' }));
 
   server.registerTool('media_list_models', {
     title: 'List Models',
