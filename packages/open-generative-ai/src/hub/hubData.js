@@ -1112,7 +1112,16 @@ export async function loadMoreCanvasHistory() {
   try {
     const payload = await api(`/api/canvas/history?${query.toString()}`);
     const known = new Set(hubState.canvasHistory.map((entry) => entry.history_id));
-    hubState.canvasHistory.push(...(payload.history || []).filter((entry) => !known.has(entry.history_id)));
+    // A NEW array, not push(). HistoryView memoises the rendered list on this
+    // array's identity, so appending in place left `outputs` frozen at whatever
+    // page 1 held: the count climbed to the full total, the grid kept showing 48
+    // cards, and every output older than the newest page was unreachable no
+    // matter how far anyone scrolled. It reads as lost media. Every other writer
+    // here already assigns, which is why only pagination was broken.
+    hubState.canvasHistory = [
+      ...hubState.canvasHistory,
+      ...(payload.history || []).filter((entry) => !known.has(entry.history_id)),
+    ];
     hubState.canvasPage = payload.pagination?.page || hubState.canvasPage + 1;
     hubState.canvasHasMore = Boolean(payload.pagination?.has_more);
     hubState.canvasTotal = Number(payload.pagination?.total || hubState.canvasTotal);

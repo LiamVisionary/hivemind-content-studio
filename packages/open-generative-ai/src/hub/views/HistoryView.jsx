@@ -480,8 +480,26 @@ export function HistoryView({ active }) {
                   ))}
                 </div>
                 {s.canvasHasMore && !filtering ? (
+                  // The sentinel sits inside #content-area, which is overflow-hidden.
+                  // An IntersectionObserver honours ancestor clipping, so in that
+                  // layout it can never report visible and pagination silently stops
+                  // at page 1 -- which hid every output older than the newest 48 and
+                  // read, for a library sealed at rest, exactly like lost media. The
+                  // observer stays (it is the nice path when it works), but the only
+                  // thing standing between someone and the rest of their library is
+                  // now a button they can press.
                   <div ref={sentinelRef} className="flex min-h-[1.5rem] items-center justify-center gap-2 py-4 text-xs text-ink3" aria-live="polite">
-                    {s.canvasLoading ? <><Spinner size={14} className="text-honey" /> {t('history.loadingMore')}</> : null}
+                    {s.canvasLoading ? (
+                      <><Spinner size={14} className="text-honey" /> {t('history.loadingMore')}</>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={loadMore}
+                        className="rounded-md border border-line2 bg-bg2 px-3 py-1.5 text-xs text-ink2 transition-colors hover:border-honey hover:text-ink1"
+                      >
+                        {t('discover.loadMore')} · {tf('history.ofCount', s.canvasHistory.length, s.canvasTotal)}
+                      </button>
+                    )}
                   </div>
                 ) : null}
               </section>
