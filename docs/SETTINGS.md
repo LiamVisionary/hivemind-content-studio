@@ -51,7 +51,7 @@ Secrets are not here and cannot be: keys, tokens and passwords live in PassBook,
 | Key | Default | Restart | Environment override | What it does |
 | --- | --- | --- | --- | --- |
 | `privacy.output_encryption` | `on` | yes | `ZIMG_OUTPUT_ENCRYPTION` | Encrypt finished media at rest. Off writes plain files anyone on this Mac can open. |
-| `privacy.agent_dual_seal` | `off` | yes | `ZIMG_AGENT_DUAL_SEAL` | Also seal agent-requested outputs to the agent that asked for them. |
+| `privacy.agent_dual_seal` | `on` | yes | `ZIMG_AGENT_DUAL_SEAL` | Keep a second copy of generated media that your vault can open, so losing a browser does not lose the media. |
 
 ## Rented GPUs (`reaper`)
 

@@ -425,9 +425,16 @@ SETTINGS: tuple[Setting, ...] = (
         key="privacy.agent_dual_seal",
         kind="bool",
         env=("ZIMG_AGENT_DUAL_SEAL",),
-        default=False,
+        # Default flipped 2026-09-06. Off, a harvested output gets exactly ONE
+        # envelope, sealed to the requesting browser's device key — which is
+        # non-extractable, origin-scoped and evictable by the browser without
+        # warning. Fifteen of the owner's clips were lost to that. On, the
+        # workspace vault is a second recipient and losing a browser stops
+        # meaning losing the media.
+        default=True,
         restart_required=True,
-        summary="Also seal agent-requested outputs to the agent that asked for them.",
+        summary="Keep a second copy of generated media that your vault can open, "
+                "so losing a browser does not lose the media.",
     ),
     # ── reaper ──
     Setting(

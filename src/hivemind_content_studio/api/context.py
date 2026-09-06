@@ -62,6 +62,7 @@ from ..canvas_history import (
 from ..config import ensure_data_format
 from ..generation_telemetry import record_hivemind_generation_metric
 from ..machine_privacy import machine_run_receipt
+from .. import media_studio
 from ..media_studio import sanitize_error_detail
 from ..orchestrator import ContentOrchestrator
 from ..private_access import (
@@ -387,6 +388,12 @@ def build_context(
         os.environ.get("CONTENT_STUDIO_INGREDIENTS_COMPOSITOR")
         or repository_root / "packages/media-gateway/bin/compose-ingredients-sheet.py"
     ).expanduser()
+
+    # Hand that answer to the media-studio client so every gateway job carries
+    # the SUBMITTING account's vault key. Without it the gateway seals a harvest
+    # to the browser's device key alone, and an evicted browser key means the
+    # media can never be opened again by anyone.
+    media_studio.set_owner_spki_provider(lambda: _vault_public_key() or "")
 
     def record_prompt(
         draft: StudioRunDraft,

@@ -34,6 +34,12 @@ from gateway import config, graphs, history as _history, lanes, media, net, util
 COMFY_PROMPT_ROUTES_FILE = config.GATEWAY_STATE_DIR / "comfy-prompt-routes.json"
 COMFY_PROMPT_ROUTES_MAX = 512
 REQUESTER_PUB_HEADER = "X-E2E-Requester-Pub"
+# The SUBMITTING ACCOUNT's vault public key, sent by the studio that relays the
+# job. The gateway cannot work this out for itself: it knows one global vault
+# path, while the studio is account-scoped and is the only party that knows
+# whose workspace a job belongs to. Without it a harvest can only be sealed to
+# the requesting browser, and losing that browser loses the media.
+OWNER_PUB_HEADER = "X-E2E-Owner-Pub"
 comfy_prompt_routes_lock = threading.Lock()
 _comfy_prompt_routes = {}
 _comfy_prompt_routes_loaded = False
@@ -77,7 +83,8 @@ def _persist_comfy_prompt_routes_locked():
         print(f"[comfy-routes] persist failed: {exc}", file=sys.stderr)
 
 
-def record_comfy_prompt_route(prompt_id, lane, requester_spki=None, pushed_inputs=None, client_id=None):
+def record_comfy_prompt_route(prompt_id, lane, requester_spki=None, pushed_inputs=None, client_id=None,
+                              owner_spki=None):
     """Remember which lane runs a Comfy prompt and who may read it back.
 
     The requester key is public material (an RSA SPKI) - safe to persist; it is
@@ -102,6 +109,9 @@ def record_comfy_prompt_route(prompt_id, lane, requester_spki=None, pushed_input
     if spki:
         entry["requester_spki"] = spki
         entry["requester_fp"] = requester_fingerprint(spki)
+    owner = normalized_requester_spki(owner_spki)
+    if owner:
+        entry["owner_spki"] = owner
     if pushed_inputs:
         entry["pushed_inputs"] = [str(name) for name in pushed_inputs]
     if client_id:
@@ -188,8 +198,16 @@ def sealing_recipients_for_route(route):
     ever offering it a copy it could open. With no owner vault yet, likewise:
     one envelope, to the requester, exactly as before.
     """
-    owner = media.vault_public_key_spki()
-    if not media.AGENT_DUAL_SEAL_ENABLED or not owner:
+    # The route's own owner key FIRST. The global VAULT_DB is a single path on a
+    # machine that can hold several workspaces, and it silently pointed at a
+    # file the accounts migration had moved — for sixteen days every harvest was
+    # sealed to one browser device key and nothing else. The studio knows whose
+    # workspace submitted the job and sends its vault key with it; that answer
+    # is both correct per-account and immune to the path being wrong.
+    owner = normalized_requester_spki((route or {}).get("owner_spki")) or media.vault_public_key_spki()
+    if not owner:
+        return sealing_spki_for_route(route), None
+    if not media.AGENT_DUAL_SEAL_ENABLED:
         return sealing_spki_for_route(route), None
     agent = normalized_requester_spki((route or {}).get("requester_spki"))
     return owner, (agent if agent != owner else None)

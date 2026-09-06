@@ -448,6 +448,12 @@ class Handler(BaseHTTPRequestHandler):
             submit_route_meta = {
                 "lane": lane_name,
                 "requester_spki": requester_spki,
+                # Whose workspace this job belongs to, as the studio told us.
+                # The gateway has one vault path and no idea which account is
+                # signed in; without this the harvest can only be sealed to the
+                # browser that asked, and that key is evictable.
+                "owner_spki": promptroutes.normalized_requester_spki(
+                    self.headers.get(promptroutes.OWNER_PUB_HEADER)),
                 "pushed_inputs": pushed_inputs,
                 "packed_rows": priced_rows,
                 "card_vram_gb": card_vram_gb,
@@ -477,6 +483,7 @@ class Handler(BaseHTTPRequestHandler):
                         promptroutes.record_comfy_prompt_route(
                             submitted_pid, submit_route_meta["lane"],
                             requester_spki=submit_route_meta["requester_spki"],
+                            owner_spki=submit_route_meta.get("owner_spki"),
                             pushed_inputs=submit_route_meta["pushed_inputs"],
                             client_id=submit_route_meta["client_id"],
                         )

@@ -35,6 +35,35 @@ TAILSCALE_HTTPS_PORT="8789"
 # What `tailscale serve` publishes on when the studio's remote-access switch is
 # on. Must match DEFAULT_TAILNET_HTTPS_PORT in remote_access.py.
 TAILNET_HTTPS_PORT="${CONTENT_STUDIO_TAILNET_PORT:-8765}"
+# Parse before touching runtime state. launchd needs explicit environment
+# forwarding; it does not inherit the invoking shell's flags.
+STACK_ACTION="${1:-status}"
+[ "$#" -eq 0 ] || shift
+REMOTE_ACCESS="${CONTENT_STUDIO_REMOTE_ACCESS:-0}"
+REMOTE_ACCESS_FLAG=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --remote-access) REMOTE_ACCESS=1; REMOTE_ACCESS_FLAG=1; shift ;;
+    --tailnet-port)
+      [ "$#" -ge 2 ] || { echo "--tailnet-port needs a port" >&2; exit 2; }
+      TAILNET_HTTPS_PORT="$2"; shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+case "$TAILNET_HTTPS_PORT" in
+  ''|*[!0-9]*) echo "Invalid tailnet port" >&2; exit 2 ;;
+esac
+if [ "$TAILNET_HTTPS_PORT" -lt 1 ] || [ "$TAILNET_HTTPS_PORT" -gt 65535 ]; then
+  echo "Tailnet port must be between 1 and 65535" >&2; exit 2
+fi
+if [ "$REMOTE_ACCESS_FLAG" = 1 ]; then
+  case "$STACK_ACTION" in
+    start|restart|supervise) ;;
+    *) echo "--remote-access requires start, restart, or supervise" >&2; exit 2 ;;
+  esac
+fi
+export CONTENT_STUDIO_REMOTE_ACCESS="$REMOTE_ACCESS"
+export CONTENT_STUDIO_TAILNET_PORT="$TAILNET_HTTPS_PORT"
 MEDIA_STUDIO_MCP_PORT="${MEDIA_STUDIO_MCP_PORT:-8796}"
 FLUX2_SERVER_DIR="$STUDIO_ROOT/engines/flux-2-swift-mlx"
 FLUX2_SERVER_BIN="$FLUX2_SERVER_DIR/.build/arm64-apple-macosx/release/Flux2Server"
@@ -681,7 +710,7 @@ PY
   ZIMG_DEBUG_OUTPUT_DIR="$PRIV/debug_outputs" \
   ZIMG_OUTPUT_ENCRYPTION="${ZIMG_OUTPUT_ENCRYPTION:-1}" \
   ZIMG_E2E_MEDIA="${ZIMG_E2E_MEDIA:-1}" \
-  ZIMG_AGENT_DUAL_SEAL="${ZIMG_AGENT_DUAL_SEAL:-0}" \
+  ZIMG_AGENT_DUAL_SEAL="${ZIMG_AGENT_DUAL_SEAL:-1}" \
   ZIMG_USE_FLUX2_SERVER="${ZIMG_ENABLE_FLUX2_SERVER:-0}" \
   ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT="${ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT:-$ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS}" \
   ZIMG_ALLOW_MXFP8_COMFY_FALLBACK="${ZIMG_ALLOW_MXFP8_COMFY_FALLBACK:-0}" \
@@ -811,10 +840,11 @@ PY
   # the three surfaces the collapsed Node service brings up above, and its old
   # port still answers; the block it replaced is quoted there.
 
-  # No tailnet proxy is started here. A cold start binds loopback and nothing
-  # else; the tailnet URL is made only when someone turns the switch on in the
-  # studio, and `tailscale serve` needs no child of ours to hold it open.
-  log "tailnet publishing is off at boot; turn it on in the studio if you want it"
+  # The API startup hook publishes only when explicitly requested. Serve
+  # persists independently of the children, including across stack restarts.
+  local tailnet_url
+  tailnet_url="$(tailnet_studio_url || true)"
+  log "tailnet URL: ${tailnet_url:-not published}"
 }
 
 # Recorded pids, never a name pattern.
@@ -955,6 +985,8 @@ supervise() {
 }
 
 launch_start() {
+  launchctl setenv CONTENT_STUDIO_REMOTE_ACCESS "$REMOTE_ACCESS" || return 1
+  launchctl setenv CONTENT_STUDIO_TAILNET_PORT "$TAILNET_HTTPS_PORT" || return 1
   launchctl bootout "$DOMAIN/$OLD_CF_LABEL" 2>/dev/null || true
   launchctl bootout "$DOMAIN/$OLD_OPEN_GEN_LABEL" 2>/dev/null || true
   launchctl disable "$DOMAIN/$OLD_OPEN_GEN_LABEL" 2>/dev/null || true
@@ -1056,7 +1088,7 @@ status() {
   fi
 }
 
-case "${1:-status}" in
+case "$STACK_ACTION" in
   supervise) supervise ;;
   start) launch_start ;;
   stop) launch_stop ;;
@@ -1066,5 +1098,5 @@ case "${1:-status}" in
     tailnet_url="$(tailnet_studio_url || true)"
     if [ -n "$tailnet_url" ]; then echo "$tailnet_url"; else echo "http://127.0.0.1:$CONTENT_STUDIO_PORT"; fi
     ;;
-  *) echo "Usage: zimage-stack {start|stop|restart|status|url|supervise}" >&2; exit 2 ;;
+  *) echo "Usage: zimage-stack {start|stop|restart|status|url|supervise} [--remote-access] [--tailnet-port PORT]" >&2; exit 2 ;;
 esac

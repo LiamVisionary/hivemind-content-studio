@@ -1093,12 +1093,47 @@ def _requester_headers(requester_pub: str = "") -> dict[str, str]:
     return {"X-E2E-Requester-Pub": pub} if pub else {}
 
 
+# The signed-in account's vault public key, resolved per request.
+#
+# The gateway seals harvested media to whoever asked for it, and until now that
+# was ONLY the browser's device key — a non-extractable, origin-scoped key the
+# browser may evict without warning. Fifteen of the owner's clips were lost that
+# way. The vault has to be a second recipient, and the gateway cannot work out
+# which vault: it knows one path, this process knows the scoped account. So the
+# control API installs a provider here and every gateway call carries the answer.
+_owner_spki_provider: Any = None
+
+
+def set_owner_spki_provider(provider) -> None:
+    """Install the callable that returns the scoped account's vault SPKI."""
+    global _owner_spki_provider
+    _owner_spki_provider = provider
+
+
+def _owner_headers() -> dict[str, str]:
+    """`X-E2E-Owner-Pub` for the account in scope, or nothing.
+
+    Never raises and never blocks a generation: an account with no vault yet, or
+    a caller outside a request, simply gets no header and the old single-recipient
+    behaviour — which is worse, but is not a reason to refuse to generate.
+    """
+    provider = _owner_spki_provider
+    if provider is None:
+        return {}
+    try:
+        pub = normalized_requester_pub(provider() or "")
+    except Exception:
+        return {}
+    return {"X-E2E-Owner-Pub": pub} if pub else {}
+
+
 def _client(descriptor: MediaStudioDescriptor, requester_pub: str = "") -> McpHttpClient:
     token = _token(descriptor)
     if descriptor.auth_env_key and not token:
         raise RuntimeError(f"Missing {descriptor.auth_env_key} for Media Studio")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     headers.update(_requester_headers(requester_pub))
+    headers.update(_owner_headers())
     return McpHttpClient(descriptor.mcp_url, headers=headers)
 
 

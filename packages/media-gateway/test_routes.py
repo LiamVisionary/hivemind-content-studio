@@ -8,6 +8,7 @@ off the chain that was replaced, and is asserted rather than trusted.
 import importlib.util
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -201,3 +202,50 @@ class FileRelativePaths(unittest.TestCase):
                 if not (package.parent / "bin" / name).is_file():
                     missing.append(f"{source.name} -> bin/{name}")
         self.assertEqual(missing, [], f"gateway modules point at scripts that are not there: {missing}")
+
+
+class OwnerIsAlwaysARecipient(unittest.TestCase):
+    """A harvest must never be sealed to the requesting browser alone.
+
+    2026-09-06: fifteen of the owner's clips were sealed to device key
+    01e23578 and to nothing else, then became unopenable when the browser
+    reclaimed that origin's IndexedDB. TWO independent defaults caused it —
+    ZIMG_AGENT_DUAL_SEAL was off, and vault_public_key_spki() had returned None
+    since the accounts migration moved the database it points at. Either one
+    alone is enough to lose media, so both are pinned here.
+    """
+
+    def test_the_route_s_own_owner_key_wins_over_the_global_vault_path(self):
+        from gateway import promptroutes
+        route = {"requester_spki": "A" * 392, "owner_spki": "B" * 392}
+        with patch.object(promptroutes.media, "vault_public_key_spki", lambda: "C" * 392):
+            owner, agent = promptroutes.sealing_recipients_for_route(route)
+        # The studio knows which workspace submitted; the single global path does not.
+        self.assertEqual(owner, "B" * 392)
+        self.assertEqual(agent, "A" * 392)
+
+    def test_a_broken_global_vault_path_no_longer_costs_the_owner_a_copy(self):
+        from gateway import promptroutes
+        route = {"requester_spki": "A" * 392, "owner_spki": "B" * 392}
+        # Exactly the state this machine was in for sixteen days.
+        with patch.object(promptroutes.media, "vault_public_key_spki", lambda: None):
+            owner, agent = promptroutes.sealing_recipients_for_route(route)
+        self.assertEqual(owner, "B" * 392, "the owner must still get an envelope")
+        self.assertEqual(agent, "A" * 392, "and the browser must keep its own")
+
+    def test_dual_seal_is_on_by_default(self):
+        from gateway import media
+        self.assertTrue(
+            media.AGENT_DUAL_SEAL_ENABLED,
+            "off means one envelope, sealed to an evictable browser key, with no way back",
+        )
+
+    def test_with_no_owner_key_anywhere_the_requester_still_gets_its_media(self):
+        from gateway import promptroutes
+        route = {"requester_spki": "A" * 392}
+        with patch.object(promptroutes.media, "vault_public_key_spki", lambda: None):
+            owner, agent = promptroutes.sealing_recipients_for_route(route)
+        # A first-run machine with no vault at all: one envelope, to the asker.
+        # Degraded, but never a refusal to seal.
+        self.assertEqual(owner, "A" * 392)
+        self.assertIsNone(agent)

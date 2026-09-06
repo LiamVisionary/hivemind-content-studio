@@ -283,7 +283,13 @@ def existing_output_path(logical):
 # Off unless ZIMG_AGENT_DUAL_SEAL=1. The recipient is per-job: only jobs whose
 # submit presented X-E2E-Requester-Pub get a second envelope, so the owner's own
 # studio generations stay owner-only.
-AGENT_DUAL_SEAL_ENABLED = os.environ.get("ZIMG_AGENT_DUAL_SEAL", "0") == "1"
+# Default ON since 2026-09-06. Off, a harvest gets exactly ONE envelope — the
+# requesting browser's device key — and that key is non-extractable, origin
+# scoped and evictable by the browser at any time. Fifteen of the owner's clips
+# were lost to precisely that combination. A second envelope costs one more RSA
+# wrap of the same DEK and is what makes the media survive losing a browser.
+# ZIMG_AGENT_DUAL_SEAL=0 still turns it off for anyone who wants the old shape.
+AGENT_DUAL_SEAL_ENABLED = os.environ.get("ZIMG_AGENT_DUAL_SEAL", "1") == "1"
 AGENT_ENVELOPE_PREFIX = ".agent-"
 AGENT_SEAL_JOBS_MAX = 256
 _agent_seal_jobs = {}
