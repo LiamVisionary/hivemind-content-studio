@@ -320,6 +320,34 @@ def register_agent_seal_recipient(job_id, spki):
     return spki
 
 
+# The SUBMITTING ACCOUNT's vault key for a job, remembered the same way and for
+# the same span as the agent's. Kept separate from AGENT_DUAL_SEAL_ENABLED: that
+# flag governs whether a SECOND recipient is added, whereas this is the owner —
+# the recipient that must always exist. Without it seal_output_to_e2e falls back
+# to the single global VAULT_DB path, which the accounts migration emptied.
+_owner_seal_jobs = {}
+
+
+def register_owner_seal_recipient(job_id, spki):
+    """Remember whose vault this job's outputs must also open. Public material."""
+    job_id = str(job_id or "")
+    spki = promptroutes.normalized_requester_spki(spki)
+    if not job_id or not spki:
+        return None
+    with _agent_seal_lock:
+        while len(_owner_seal_jobs) >= AGENT_SEAL_JOBS_MAX:
+            _owner_seal_jobs.pop(next(iter(_owner_seal_jobs)))
+        _owner_seal_jobs[job_id] = spki
+    return spki
+
+
+def owner_seal_recipient_for(job_id):
+    if not job_id:
+        return None
+    with _agent_seal_lock:
+        return _owner_seal_jobs.get(str(job_id))
+
+
 def agent_seal_recipient_for(job_id):
     if not AGENT_DUAL_SEAL_ENABLED or not job_id:
         return None
@@ -431,7 +459,7 @@ def _seal_file_with_helper(spki, source, envelope, media_name):
             pass
 
 
-def seal_output_to_e2e(path, agent_spki=None):
+def seal_output_to_e2e(path, agent_spki=None, owner_spki=None):
     """Seal media to the owner vault public key as <name>.e2e; delete plaintext.
 
     When `agent_spki` is given, the SAME plaintext is additionally sealed to
@@ -444,7 +472,11 @@ def seal_output_to_e2e(path, agent_spki=None):
     vault exists yet). The gateway can encrypt here but can never decrypt.
     """
     path = Path(path).resolve()
-    spki = vault_public_key_spki()
+    # The job's own owner key first, exactly as the harvest path does. The global
+    # VAULT_DB is one path on a machine that can hold several workspaces, and it
+    # pointed at a file the accounts migration had moved — which is what made
+    # every local generation fall back to legacy .zenc instead of sealing.
+    spki = promptroutes.normalized_requester_spki(owner_spki) or vault_public_key_spki()
     if not spki:
         return False
     envelope = e2e_envelope_path_for(path)
@@ -473,7 +505,7 @@ def seal_output_to_e2e(path, agent_spki=None):
     return True
 
 
-def encrypt_output_file(path, agent_spki=None):
+def encrypt_output_file(path, agent_spki=None, owner_spki=None):
     """Encrypt output media in place as <name>.zenc and remove plaintext.
 
     `agent_spki` (optional) adds a second sealed envelope for that recipient on
@@ -488,7 +520,7 @@ def encrypt_output_file(path, agent_spki=None):
     # fall through to the legacy Keychain-key .zenc path unchanged.
     if E2E_MEDIA_ENABLED or e2e_envelope_path_for(path).exists():
         try:
-            if seal_output_to_e2e(path, agent_spki=agent_spki):
+            if seal_output_to_e2e(path, agent_spki=agent_spki, owner_spki=owner_spki):
                 return path
         except Exception as exc:
             print(f"[e2e-media] seal failed for {path.name}; falling back: {exc}", file=sys.stderr)
@@ -562,11 +594,17 @@ def encrypt_outputs(paths, job_id=None):
     envelope sealed to it. Without a job id (or without a registered key) this
     behaves exactly as before — owner-only."""
     agent_spki = agent_seal_recipient_for(job_id)
+    # …and whose vault must be able to open it. Without this the seal falls back
+    # to the single global VAULT_DB path, which the accounts migration emptied —
+    # so every local generation was written as legacy .zenc instead of an
+    # envelope the owner's vault could open.
+    owner_spki = owner_seal_recipient_for(job_id)
     out = []
     for p in paths or []:
         path = Path(p).expanduser().resolve()
         try:
-            out.append(str(encrypt_output_file(path, agent_spki=agent_spki).resolve()))
+            out.append(str(encrypt_output_file(
+                path, agent_spki=agent_spki, owner_spki=owner_spki).resolve()))
         except Exception as e:
             if is_encryptable_output(path):
                 try:

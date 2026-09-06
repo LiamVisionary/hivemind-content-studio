@@ -158,3 +158,42 @@ test('the sign-in URL keeps the host the person actually typed', () => {
     'https://studio.tailnet.example:8765/',
   );
 });
+
+// The ComfyUI runner reading back the image it just made.
+//
+// Gating 8788 on 2026-09-04 broke every local Z-Image generation at its last
+// step: run_z_image_turbo.py fetches '/view?…' with a bare urlopen, has no
+// token support, and lives outside this repo, so it got 401 after the model had
+// already run. The exemption is loopback + GET + two exact paths, and these
+// tests are what keep it that narrow.
+test('a loopback GET of /view is allowed without any credential', async () => {
+  const gate = createCanvasGate({ readGatewayToken: () => 'tok', verifyAccountCookie: async () => false });
+  const req = { method: 'GET', headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+  const verdict = await gate.authorize(req, '/view', 'GET');
+  assert.equal(verdict.allowed, true);
+  assert.equal(verdict.reason, 'loopback-output-read');
+});
+
+test('the exemption does not reach a remote caller, a write, or another path', async () => {
+  const gate = createCanvasGate({ readGatewayToken: () => 'tok', verifyAccountCookie: async () => false });
+  const loopback = { method: 'GET', headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+  const remote = { method: 'GET', headers: {}, socket: { remoteAddress: '100.64.0.7' } };
+
+  // A machine on the tailnet gets nothing.
+  assert.equal((await gate.authorize(remote, '/view', 'GET')).allowed, false);
+  // A write is never a read, even from here.
+  assert.equal((await gate.authorize(loopback, '/view', 'POST')).allowed, false);
+  // The prompt surface — ComfyUI's arbitrary-code door — stays shut.
+  assert.equal((await gate.authorize(loopback, '/prompt', 'GET')).allowed, false);
+  // And no prefix games: this is exact-match only.
+  assert.equal((await gate.authorize(loopback, '/view/../prompt', 'GET')).allowed, false);
+  assert.equal((await gate.authorize(loopback, '/viewer', 'GET')).allowed, false);
+});
+
+test('an IPv4-mapped IPv6 loopback still reads as loopback', async () => {
+  const gate = createCanvasGate({ readGatewayToken: () => 'tok', verifyAccountCookie: async () => false });
+  for (const address of ['::1', '::ffff:127.0.0.1']) {
+    const req = { method: 'GET', headers: {}, socket: { remoteAddress: address } };
+    assert.equal((await gate.authorize(req, '/comfy/view', 'GET')).allowed, true, address);
+  }
+});

@@ -211,6 +211,9 @@ class Handler(BaseHTTPRequestHandler):
         if status == 202 and isinstance(data, dict) and data.get("id"):
             try:
                 media.register_agent_seal_recipient(data["id"], self.headers.get(promptroutes.REQUESTER_PUB_HEADER))
+                # Whose vault must be able to open this job's output, whatever
+                # else it is also sealed to.
+                media.register_owner_seal_recipient(data["id"], self.headers.get(promptroutes.OWNER_PUB_HEADER))
             except Exception as exc:
                 print(f"[agent-seal] register failed: {exc}", file=sys.stderr)
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")

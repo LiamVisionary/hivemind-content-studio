@@ -187,6 +187,23 @@ function refusal(req, studioTarget, { surface = 'the Canvas' } = {}) {
  * @param {number} [options.negativeTtlMs]
  * @param {() => number} [options.now]
  */
+// Output reads that a local process may make without a credential. Exact paths
+// only: a prefix would let /view/../prompt through, and `startsWith` on a proxy
+// path is how open doors are built by accident.
+const LOOPBACK_READ_PATHS = new Set(['/view', '/comfy/view']);
+
+function isLoopbackAddress(address) {
+  const value = String(address || '').replace(/^::ffff:/, '');
+  return value === '127.0.0.1' || value === '::1';
+}
+
+function isLoopbackOutputRead(req, pathname, verb) {
+  if (verb !== 'GET') return false;
+  if (!LOOPBACK_READ_PATHS.has(String(pathname || ''))) return false;
+  const socket = req && (req.socket || req.connection);
+  return isLoopbackAddress(socket && socket.remoteAddress);
+}
+
 function createCanvasGate({
   readGatewayToken,
   verifyAccountCookie,
@@ -224,6 +241,25 @@ function createCanvasGate({
   async function authorize(req, pathname, method) {
     const verb = String(method || (req && req.method) || 'GET').toUpperCase();
     if (isHealthProbe(pathname, verb, healthPaths)) return { allowed: true, reason: 'health' };
+    // The ComfyUI runner reading back the image it just made.
+    //
+    // ~/comfy/ComfyUI/run_z_image_turbo.py fetches ZIMG_VIEW_HTTP + '/view?…'
+    // with a bare urlopen and no credential of any kind — it predates this gate
+    // and lives outside this repository, so it cannot be handed a token. When
+    // 8788 stopped answering unauthenticated calls (2026-09-04) every local
+    // Z-Image generation began failing at the last step with HTTP 401, after
+    // the model had already run.
+    //
+    // This is deliberately the narrowest hole that fixes it: LOOPBACK only, GET
+    // only, and only the two read paths that return an output file. It gives
+    // away nothing, because any process on this machine can already read those
+    // bytes straight off disk. What the gate exists to stop is a browser page
+    // or a remote caller borrowing the gateway's capability token against
+    // ComfyUI's arbitrary-code surface, and that is POST /prompt and the proxy
+    // at large — none of which this touches.
+    if (isLoopbackOutputRead(req, pathname, verb)) {
+      return { allowed: true, reason: 'loopback-output-read' };
+    }
     const configured = String((readGatewayToken && readGatewayToken()) || '').trim();
     const presented = presentedGatewayToken(req);
     if (configured && presented && secretsMatch(presented, configured)) {

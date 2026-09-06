@@ -378,7 +378,11 @@ def mirror_output_to_comfy_output(path, job_id=None):
         return src
     if _media.OUTPUT_ENCRYPTION_ENABLED:
         # Do not duplicate native outputs into a second plaintext directory.
-        return _media.encrypt_output_file(src, agent_spki=_media.agent_seal_recipient_for(job_id))
+        return _media.encrypt_output_file(
+            src,
+            agent_spki=_media.agent_seal_recipient_for(job_id),
+            owner_spki=_media.owner_seal_recipient_for(job_id),
+        )
     config.COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     dst = (config.COMFY_OUTPUT_DIR / util.safe_name(src.name)).resolve()
     if str(dst).startswith(str(config.COMFY_OUTPUT_DIR.resolve())) and dst != src:
