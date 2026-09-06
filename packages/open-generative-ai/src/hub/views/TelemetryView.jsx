@@ -3,7 +3,7 @@
 // Summary tiles, per-provider routing evidence, and recent attempts, all from
 // the /api/telemetry/generations shape via hubData formatters.
 import { Card, EmptyState, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx';
-import { formatTelemetryDuration, humanize, providerLabel, useHub } from '../hubData.js';
+import { formatTelemetryBytes, formatTelemetryDuration, humanize, providerLabel, telemetryAttemptDetail, telemetryAttemptOrigin, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
 import { t, tf } from '../../lib/i18n.js';
@@ -82,20 +82,35 @@ export function TelemetryPanel() {
                 <SectionLabel>{t('activity.latestActivity')}</SectionLabel>
                 {attempts.length ? (
                   <div className="flex flex-col gap-2">
-                    {attempts.map((attempt, i) => (
-                      <div key={`${attempt.run_id}-${i}`} className="flex flex-col gap-1 rounded-lg border border-line1 bg-bg2 p-3">
+                    {attempts.map((attempt, i) => {
+                      const detail = telemetryAttemptDetail(attempt);
+                      const origin = telemetryAttemptOrigin(attempt);
+                      return (
+                      <div key={`${attempt.telemetry_id || attempt.run_id}-${i}`} className="flex flex-col gap-1 rounded-lg border border-line1 bg-bg2 p-3">
                         <div className="flex items-center gap-2">
                           <StatusPill status={attempt.status} />
                           <b className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink1">{humanize(attempt.kind)} · {providerLabel(attempt.provider)}</b>
                         </div>
                         <small className="text-[11px] text-ink3">
                           <span className="font-mono">{attempt.model || t('activity.automatic')}</span> · {formatTelemetryDuration(attempt.duration_ms)} · ${Number(attempt.charged_usd || 0).toFixed(2)}
+                          {Number(attempt.lora_count) > 0 ? ` · ${tf('activity.loras', attempt.lora_count, attempt.lora_base || '')}` : ''}
+                          {attempt.status === 'completed' && attempt.artifact_bytes !== undefined
+                            ? ` · ${Number(attempt.artifact_bytes) > 0 ? formatTelemetryBytes(attempt.artifact_bytes) : t('activity.emptyOutput')}`
+                            : ''}
                         </small>
-                        <small className="truncate text-[11px] text-ink3">
-                          {t('common.run')} <span className="font-mono">{attempt.run_id}</span>{attempt.error_type ? ` · ${attempt.error_type}` : ''}
+                        <small className="text-[11px] text-ink3">
+                          {origin.kind === 'run'
+                            ? <>{t('common.run')} <span className="font-mono">{origin.id}</span></>
+                            : <>{t('activity.studioOrigin')}{origin.id ? <> <span className="font-mono">{origin.id}</span></> : null}</>}
                         </small>
+                        {detail ? (
+                          // The hint is a whole sentence with the fix in it; a
+                          // truncated one would show the problem and hide the fix.
+                          <small className="text-[11px] text-warn" title={detail}>{detail}</small>
+                        ) : null}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <EmptyState

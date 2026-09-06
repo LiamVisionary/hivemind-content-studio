@@ -30,7 +30,7 @@ def register(app, ctx) -> None:
 
     @router.get("/api/telemetry/generations")
     def generation_telemetry(limit: int = 100) -> dict:
-        return generation_telemetry_snapshot(runs.store, limit=limit)
+        return generation_telemetry_snapshot(runs.store, limit=limit, studio_ledger=ctx.studio_generations)
 
     # `unified_runtime_snapshot()` probes all three engines live, each with a
     # 1.5s ceiling, and this is a POLLED route — the supervisor asks it for

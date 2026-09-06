@@ -1159,6 +1159,35 @@ export function formatTelemetryDuration(milliseconds) {
   return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
 }
 
+// The output's size as a short figure; the API sends the byte count and nothing
+// else about the clip. Zero on a completed attempt is the one that matters — a
+// "success" that produced nothing.
+export function formatTelemetryBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return '';
+  if (value < 1024) return `${Math.round(value)} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+// What an attempt's line says after the model and the time: the machine-safe
+// hint the backend's classification became (studio_telemetry.failure_hint), else
+// the bare code, else the exception type a run recorded. Never message text —
+// the API sends none.
+export function telemetryAttemptDetail(attempt) {
+  if (!attempt || typeof attempt !== 'object') return '';
+  return String(attempt.failure_hint || attempt.failure_code || attempt.error_type || '').trim();
+}
+
+// Where an attempt came from: a content run (by id) or the studio's own tab.
+export function telemetryAttemptOrigin(attempt) {
+  if (!attempt || typeof attempt !== 'object') return { kind: 'unknown', id: '' };
+  if (attempt.run_id) return { kind: 'run', id: String(attempt.run_id) };
+  if (attempt.surface === 'studio') return { kind: 'studio', id: String(attempt.workflow_id || attempt.run_on || '') };
+  return { kind: 'unknown', id: '' };
+}
+
 export async function loadGenerationTelemetry({ quiet = false } = {}) {
   try {
     const telemetry = await api('/api/telemetry/generations');

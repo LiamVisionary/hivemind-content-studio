@@ -25,6 +25,7 @@ from ..machine_privacy import machine_operation_receipt
 from ..media_studio import sanitize_error_detail
 from ..observability import frame_list
 from ..private_access import e2e_media_exists, seal_private_media_e2e
+from ..studio_telemetry import classify_exception, failure_fields, lora_base_for_workflow, new_telemetry_id
 from .media_common import (
     _encrypt_private_media,
     _private_media_exists,
@@ -53,6 +54,7 @@ def register(app, ctx) -> None:
     current_account = ctx.current_account
     gateway_claims = ctx.gateway_claims
     generation_timings = ctx.generation_timings
+    studio_generations = ctx.studio_generations
     media_studio_finishers = ctx.media_studio_finishers
     media_studio_input_root = ctx.media_studio_input_root
     media_studio_video_jobs = ctx.media_studio_video_jobs
@@ -443,6 +445,41 @@ def register(app, ctx) -> None:
             return False
         return comfy_lanes._is_busy(url) is True
 
+    def _record_studio_generation(entry: dict[str, Any] | None, status: str, **fields: Any) -> None:
+        """Write one telemetry row for a studio video job. Identifiers and
+        counts only — the ledger drops anything else — and never a reason for
+        the generation itself to fail (see studio_telemetry)."""
+        if not entry or not entry.get("telemetry_id"):
+            return
+        with contextlib.suppress(Exception):
+            started = entry.get("started")
+            studio_generations.record(
+                telemetry_id=entry["telemetry_id"],
+                status=status,
+                kind="video",
+                surface="studio",
+                provider=entry.get("provider") or "Media Studio",
+                model=entry.get("workflow_id") or "automatic",
+                workflow_id=entry.get("workflow_id"),
+                run_on=entry.get("run_on"),
+                lora_count=entry.get("lora_count"),
+                lora_base=entry.get("lora_base"),
+                duration_ms=round((time.perf_counter() - float(started)) * 1000) if started else None,
+                **fields,
+            )
+
+    def _output_bytes(result: dict[str, Any]) -> int:
+        """How big the finished output is — the size the finisher measured, or
+        the local file's before it is sealed. Zero means nothing came back."""
+        declared = result.get("output_bytes")
+        if isinstance(declared, (int, float)) and declared > 0:
+            return int(declared)
+        with contextlib.suppress(OSError, ValueError, TypeError):
+            output = str(result.get("output") or "")
+            if output:
+                return int(Path(output).expanduser().stat().st_size)
+        return 0
+
     async def _finish_media_studio_video_job(job_id: str) -> None:
         """Drive a running job to its terminal state. Kicked off as a background
         task at start and re-entered (idempotently, via the finalizing flag) by
@@ -473,7 +510,13 @@ def register(app, ctx) -> None:
             # is terminal — don't resurrect the entry as done or error.
             if entry.get("status") == "cancelled":
                 return
+            # Measured before sealing: the finisher encrypts the file in place,
+            # and the number wanted is the clip's, not the envelope's.
+            artifact_bytes = _output_bytes(result)
             entry.update(status="done", response=_finalize_media_studio_video(result, float(entry.get("started") or time.perf_counter())))
+            _record_studio_generation(
+                entry, "completed", stage="render", artifact_count=1 if artifact_bytes else 0, artifact_bytes=artifact_bytes,
+            )
             # Record the real duration so future runs of the same shape get a
             # sharper elapsed/expected estimate.
             with contextlib.suppress(Exception):
@@ -501,12 +544,27 @@ def register(app, ctx) -> None:
                     frame_list(exc),
                 )
                 entry.update(status="error", detail=detail)
+                _record_studio_generation(
+                    entry, "failed", stage="render", error_type=type(exc).__name__,
+                    **failure_fields(classify_exception(exc, default="render_failed")),
+                )
 
     @router.post("/api/media-studio/video/start", dependencies=[Depends(require_owner_or_control)])
     async def start_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
         staged = await asyncio.to_thread(_staged_media_studio_video_inputs, body, request)
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
+        # The attempt exists from here, refused or not: a start the backend
+        # turns down is the one kind of failure that used to leave no record.
+        attempt = {
+            "telemetry_id": new_telemetry_id(),
+            "started": started,
+            "workflow_id": body.workflow_id.strip(),
+            "run_on": body.run_on.strip(),
+            # LoRAs as a count and the family they are for — never a name.
+            "lora_count": len(loras),
+            "lora_base": lora_base_for_workflow(body.workflow_id) if loras else "",
+        }
         try:
             queued = await asyncio.to_thread(
                 cp.run_media_studio_video_start,
@@ -548,12 +606,25 @@ def register(app, ctx) -> None:
                 requester_pub=_requester_pub(request),
             )
         except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
+            client_mistake = isinstance(exc, (FileNotFoundError, ValueError))
+            failure = classify_exception(exc, default="invalid_request" if client_mistake else "backend_refused")
+            # The refusal is logged here (it never was) with the same sanitized
+            # sentence the owner's toast gets, and recorded with only its code.
+            log.warning(
+                "video start refused (%s): %s | %s",
+                failure.get("code"), sanitize_error_detail(str(exc)), frame_list(exc),
+            )
+            _record_studio_generation(
+                attempt, "failed", stage="start", error_type=type(exc).__name__, **failure_fields(failure),
+            )
             raise _media_studio_start_failure(exc, request) from None
         finally:
             # start_video uploads the inputs to the gateway before returning,
             # so the staged control-api copies are no longer needed either way.
             _unlink_staged_media_studio_sources(staged)
         job_id = str(queued["job_id"])
+        attempt["provider"] = str(queued.get("provider") or "")
+        _record_studio_generation(attempt, "started", stage="start")
         # The output name is only known at finish; the job id is the earlier
         # handle, and the one that survives a studio restart mid-run.
         scope = current_account.get()
@@ -576,6 +647,11 @@ def register(app, ctx) -> None:
             # about before declaring it dead.
             "last_progress_at": time.time(),
             "run_on": body.run_on.strip(),
+            "telemetry_id": attempt["telemetry_id"],
+            "workflow_id": attempt["workflow_id"],
+            "provider": attempt["provider"],
+            "lora_count": attempt["lora_count"],
+            "lora_base": attempt["lora_base"],
             "uploaded_names": list(queued.get("uploaded_names") or []),
             # Held for the life of the job: the background finisher polls long
             # after this request is gone, and a keyed job only answers to the
@@ -669,6 +745,7 @@ def register(app, ctx) -> None:
                 await _confirm_media_studio_video_backend(job_id, entry)
                 if _video_backend_stopped_responding(entry):
                     entry.update(status="error", detail=_VIDEO_BACKEND_GONE, retryable=True)
+                    _record_studio_generation(entry, "failed", stage="render", failure_code="lane_unreachable")
         if entry["status"] == "done":
             response = entry["response"]
             return response if bool(getattr(request.state, "is_owner", False)) else machine_operation_receipt(response)
@@ -720,6 +797,8 @@ def register(app, ctx) -> None:
                 "interrupted": bool(result), "stopped": bool(result), "backend_state": None,
             }
         if entry is not None:
+            if entry.get("status") == "running":
+                _record_studio_generation(entry, "cancelled", stage="render")
             entry["status"] = "cancelled"
             entry["detail"] = "Cancelled by the owner."
         stopped = bool(outcome.get("stopped"))

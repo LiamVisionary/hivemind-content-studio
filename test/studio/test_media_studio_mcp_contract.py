@@ -3456,3 +3456,108 @@ def test_h3_inpaint_mask_sequence_without_a_clip_is_refused(tmp_path):
         "mask_source": "sequence",
     }, expect_refusal=True)
     assert "needs the mask clip" in reply
+
+
+# ── a refusal the lane can name survives redaction as a classification ─────
+#
+# Liam generated with MiniMax H3 Turbo on the Mac (2026-09-06) and got "the
+# backend redacted the reason (machine-private mode)". ComfyUI had answered
+# 400 missing_node_type — the local lane has no SpectrumApplyMiniMaxH3 custom
+# node — and that reason was reduced to "MediaStudioError" on its way to the
+# studio, because a refusal's message can carry the prompt. The node CLASS
+# cannot: it is the name of an installed package. So the MCP classifies the
+# refusal into identifiers, and the receipt keeps the classification and a
+# sentence made only of it — with the prompt still nowhere in it.
+class _RefusingGateway(_StubGateway):
+    """The lane rejects the graph the way ComfyUI does, prompt echoed back in
+    node_errors the way ComfyUI does it too."""
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        if self.path.rstrip("/") == "/api/lanes/resolve":
+            return _StubGateway.do_POST_lanes(self)
+        if self.path.rstrip("/") in {"/comfy/api/prompt", "/comfy/prompt"}:
+            body = json.dumps({
+                "error": {
+                    "type": "missing_node_type",
+                    "message": "Node 'SpectrumApplyMiniMaxH3' not found. The custom node may not be installed.",
+                    "details": "Node ID '#30'",
+                    "extra_info": {"node_id": "30", "class_type": "SpectrumApplyMiniMaxH3", "node_title": "SpectrumApplyMiniMaxH3"},
+                },
+                "node_errors": {
+                    "30": {
+                        "class_type": "SpectrumApplyMiniMaxH3",
+                        "errors": [{"type": "value_not_in_list", "message": "prompt: NEVER-SHOWN-PROMPT-TEXT not in list", "details": "NEVER-SHOWN-PROMPT-TEXT"}],
+                    },
+                },
+            }).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(404)
+
+
+def _lanes_resolve_reply(self) -> None:
+    body = json.dumps({
+        "lane": "default", "remote": False, "probed": True, "vram_headroom_gb": 0.0, "vram_total_gb": self.card_vram_gb,
+    }).encode()
+    self.send_response(200)
+    self.send_header("Content-Type", "application/json")
+    self.send_header("Content-Length", str(len(body)))
+    self.end_headers()
+    self.wfile.write(body)
+
+
+_StubGateway.do_POST_lanes = _lanes_resolve_reply
+
+
+@contextlib.contextmanager
+def _refusing_gateway():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RefusingGateway)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def test_a_missing_custom_node_is_named_through_machine_private_redaction():
+    with _refusing_gateway() as backend:
+        body = _call_mcp_tool("media_generate_video", {
+            "workflow_id": "minimax-h3-turbo",
+            "prompt": "NEVER-SHOWN-PROMPT-TEXT a red fox trotting through snow",
+            "width": 704,
+            "height": 1216,
+            "duration_seconds": 2,
+        }, backend_url=backend)
+
+    # The HTTP transport answers as an event stream; the receipt is its data line.
+    data_lines = [line[len("data:"):].strip() for line in body.splitlines() if line.startswith("data:")]
+    receipt = json.loads(data_lines[-1] if data_lines else body)
+    result = receipt["result"]
+    assert result["isError"] is True
+    content = result["structuredContent"]
+    assert content["ok"] is False
+    # The raw gateway body (which echoed the prompt) is not forwarded.
+    assert "response" not in content
+    # The classification: identifiers only.
+    assert content["failure"] == {
+        "code": "missing_node_type",
+        "node_class": "SpectrumApplyMiniMaxH3",
+        "node_id": "30",
+        "node_classes": ["SpectrumApplyMiniMaxH3"],
+    }
+    # The sentence with the fix, in place of a bare MediaStudioError.
+    assert "SpectrumApplyMiniMaxH3" in content["error"]
+    assert "Install that node pack" in content["error"]
+    # And the one thing redaction exists for is still not there: not in the
+    # sentence, not in the classification, not anywhere in the receipt.
+    assert "NEVER-SHOWN-PROMPT-TEXT" not in body
+    assert "red fox" not in body
+    assert "not in list" not in body

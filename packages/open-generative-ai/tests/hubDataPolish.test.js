@@ -184,3 +184,33 @@ test('a tick that finds a refresh in flight joins it instead of stacking another
     await hub.pollTick({ quiet: true });
     assert.equal(runsFetches, 2);
 });
+
+// Activity rows for studio generations (2026-09-06): the line under an attempt
+// is the machine-safe hint the backend's classification became, and a studio
+// attempt says "Studio" (with its workflow) where a run says its id. The API
+// sends no message text, so nothing here can show one.
+test('telemetryAttemptDetail prefers the hint, then the code, then the exception type', async () => {
+    const { telemetryAttemptDetail } = await freshHub();
+    assert.equal(telemetryAttemptDetail({ failure_hint: 'Install that node pack', failure_code: 'missing_node_type', error_type: 'X' }), 'Install that node pack');
+    assert.equal(telemetryAttemptDetail({ failure_code: 'out_of_memory', error_type: 'RuntimeError' }), 'out_of_memory');
+    assert.equal(telemetryAttemptDetail({ error_type: 'TimeoutError' }), 'TimeoutError');
+    assert.equal(telemetryAttemptDetail({ status: 'completed' }), '');
+    assert.equal(telemetryAttemptDetail(null), '');
+});
+
+test('telemetryAttemptOrigin tells a run from a studio attempt', async () => {
+    const { telemetryAttemptOrigin } = await freshHub();
+    assert.deepEqual(telemetryAttemptOrigin({ run_id: 'run_1', surface: 'studio' }), { kind: 'run', id: 'run_1' });
+    assert.deepEqual(telemetryAttemptOrigin({ run_id: '', surface: 'studio', workflow_id: 'minimax-h3-turbo' }), { kind: 'studio', id: 'minimax-h3-turbo' });
+    assert.deepEqual(telemetryAttemptOrigin({}), { kind: 'unknown', id: '' });
+});
+
+test('formatTelemetryBytes reads a size and nothing else', async () => {
+    const { formatTelemetryBytes } = await freshHub();
+    assert.equal(formatTelemetryBytes(0), '0 B');
+    assert.equal(formatTelemetryBytes(10), '10 B');
+    assert.equal(formatTelemetryBytes(3 * 1024), '3.0 KB');
+    assert.equal(formatTelemetryBytes(2.5 * 1024 * 1024), '2.5 MB');
+    assert.equal(formatTelemetryBytes(-1), '');
+    assert.equal(formatTelemetryBytes('nope'), '');
+});

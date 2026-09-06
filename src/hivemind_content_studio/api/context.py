@@ -61,6 +61,7 @@ from ..canvas_history import (
 )
 from ..config import ensure_data_format
 from ..generation_telemetry import record_hivemind_generation_metric
+from ..studio_telemetry import StudioGenerationLedger
 from ..machine_privacy import machine_run_receipt
 from .. import media_studio
 from ..media_studio import sanitize_error_detail
@@ -150,6 +151,9 @@ class StudioContext:
     open_gen_dist: Path
     media_studio_input_root: Path
     generation_timings: GenerationTimings
+    # Studio-initiated generation attempts, automatic and prompt-free
+    # (studio_telemetry): read back by /api/telemetry/generations.
+    studio_generations: StudioGenerationLedger
     ingredients_sheet_compositor: Path
 
     # ── shared helpers ───────────────────────────────────────────────────────
@@ -384,6 +388,7 @@ def build_context(
     # here, and the files are named by mkstemp rather than being addressable.
     media_studio_input_root = Path(runs.store.path).parent / "uploads" / "media-studio"
     generation_timings = GenerationTimings(Path(runs.store.path).parent / "generation-timings.jsonl")
+    studio_generations = StudioGenerationLedger.beside(runs.store.path)
     ingredients_sheet_compositor = Path(
         os.environ.get("CONTENT_STUDIO_INGREDIENTS_COMPOSITOR")
         or repository_root / "packages/media-gateway/bin/compose-ingredients-sheet.py"
@@ -696,6 +701,7 @@ def build_context(
         open_gen_dist=open_gen_dist,
         media_studio_input_root=media_studio_input_root,
         generation_timings=generation_timings,
+        studio_generations=studio_generations,
         ingredients_sheet_compositor=ingredients_sheet_compositor,
         record_prompt=record_prompt,
         execute_draft=execute_draft,

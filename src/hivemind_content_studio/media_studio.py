@@ -23,6 +23,7 @@ from .mcp_http import PROTOCOL_VERSION, McpHttpClient
 from .publishing import encode_multipart
 from .qa import qa_video
 from .settings import settings
+from .studio_telemetry import failure_hint, safe_failure
 
 # How long to wait for the MCP to hand back a queued video job. Sized against
 # the two slow stretches inside that call - staging references on the target
@@ -235,6 +236,16 @@ def _request_frame_count(grid: dict[str, Any] | None, duration: float, frame_rat
     if isinstance(grid, dict) and grid.get("modulus"):
         return max(1, _grid_frames_at_least(grid, clip_frames))
     return max(9, min(721, clip_frames + 1))
+
+
+class MediaStudioStartError(RuntimeError):
+    """A start the backend refused, carrying the machine-safe classification it
+    gave (``failure``: a code and, when named, the ComfyUI node class) so the
+    caller can record WHY without keeping any of the message text."""
+
+    def __init__(self, message: str, failure: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.failure = failure
 
 
 def start_video(
@@ -546,6 +557,7 @@ def start_video(
             # tool answered but with no job id, which almost always carries an
             # error/status field explaining why (bad workflow, model not ready…).
             reason = ""
+            failure = None
             if isinstance(queued, dict):
                 job = queued.get("job") if isinstance(queued.get("job"), dict) else {}
                 reason = str(
@@ -556,6 +568,17 @@ def start_video(
                     or _generation_status(queued)
                     or ""
                 ).strip()[:400]
+                # The MCP classifies a refusal it can name without naming the
+                # work (a missing custom node, a graph the lane's models cannot
+                # validate) and sends the classification alongside, redacted or
+                # not. It is identifiers only, so it is kept and recorded.
+                failure = safe_failure(queued.get("failure"))
+            hint = failure_hint(failure)
+            if hint:
+                # The classification has a sentence of its own that already
+                # names the fix; it beats both a raw ComfyUI body and the
+                # "redacted" fallback below.
+                raise MediaStudioStartError(hint, failure=failure)
             if reason in {"", "MediaStudioError"}:
                 # The backend runs machine-private, which redacts a job-specific
                 # failure down to its class name. That is right for a shared
@@ -566,7 +589,7 @@ def start_video(
                     "Re-run with MEDIA_STUDIO_MCP_MACHINE_PRIVATE=0 on the gateway, "
                     "or read the gateway log, to see which workflow or input it refused"
                 )
-            raise RuntimeError(f"Media Studio did not return a job id: {reason}")
+            raise MediaStudioStartError(f"Media Studio did not return a job id: {reason}", failure=failure)
         return {"job_id": job_id, "uploaded_names": list(uploaded_names), "provider": descriptor.app_name}
     except BaseException:
         for uploaded_name in uploaded_names:
@@ -743,6 +766,12 @@ def finish_video(
         destination = destination_root / f"media-studio-{job_id}-{int(time.time())}.mp4"
         local_token = _token(descriptor) if _same_origin(reachable_url, descriptor.upload_base) else ""
         _download(reachable_url, destination, token=local_token)
+        # The size of what came back, for telemetry: it is the one fact about
+        # the output that says "a real clip" versus "nothing" without being
+        # the output (or its name) — see studio_telemetry.
+        output_bytes = 0
+        with contextlib.suppress(OSError):
+            output_bytes = destination.stat().st_size
         if _looks_like_e2e_envelope(destination):
             # The gateway sealed the output to the owner vault and served the
             # envelope. Server-side QA and a local re-encrypted copy are
@@ -754,13 +783,17 @@ def finish_video(
                 "job_id": job_id,
                 "provider": descriptor.app_name,
                 "gateway_output": Path(urlparse(video_url).path).name,
+                "output_bytes": output_bytes,
                 "qa": {"ok": True, "visual_inspection_required": True},
             }
         qa = qa_video(destination, output_dir=destination_root / "qa", require_audio=False)
         qa = _remove_qa_frame(qa, destination_root)
         if not qa["ok"]:
             raise RuntimeError("Media Studio output failed technical QA: " + "; ".join(qa["failures"]))
-        return {"job_id": job_id, "output": str(destination), "qa": qa, "provider": descriptor.app_name}
+        return {
+            "job_id": job_id, "output": str(destination), "output_bytes": output_bytes, "qa": qa,
+            "provider": descriptor.app_name,
+        }
     finally:
         for uploaded_name in (uploaded_names or []):
             with contextlib.suppress(Exception):
