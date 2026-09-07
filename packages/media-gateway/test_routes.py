@@ -8,6 +8,7 @@ off the chain that was replaced, and is asserted rather than trusted.
 import importlib.util
 import os
 import sys
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -185,12 +186,16 @@ class FileRelativePaths(unittest.TestCase):
 
     def test_the_vault_db_default_is_under_the_repo_root(self):
         from gateway import media
-        # The default is <root>/data/…; the root is the directory holding
-        # packages/, never packages/ itself.
-        base = media.VAULT_DB.parent.parent
+        # The default is <root>/data/… — at the top for the legacy flat file,
+        # two deeper for an account vault (data/accounts/<id>/vault.sqlite3).
+        # The invariant is the anchor, not the depth: the root is the directory
+        # holding packages/, never packages/ itself.
+        roots = [base for base in media.VAULT_DB.parents if (base / "packages" / "media-gateway").is_dir()]
+        self.assertTrue(roots, f"VAULT_DB is anchored at {media.VAULT_DB}, which is under no repo root")
+        base = roots[0]
         self.assertTrue(
-            (base / "packages" / "media-gateway").is_dir(),
-            f"VAULT_DB is anchored at {base}, which is not the repo root",
+            media.VAULT_DB.is_relative_to(base / "data"),
+            f"VAULT_DB is {media.VAULT_DB}, which is not under {base / 'data'}",
         )
         self.assertNotEqual(base.name, "packages", "VAULT_DB lost a directory level in the split")
 
@@ -280,13 +285,50 @@ class VaultDbFollowsTheAccountsMigration(unittest.TestCase):
             # This is the case that silently broke: no flat file any more.
             self.assertEqual(self._resolve(tmp), tmp / "accounts/1/vault.sqlite3")
 
-    def test_several_accounts_are_never_guessed_between(self):
+    def _with_accounts(self, tmp: Path, *accounts: str) -> None:
+        for account in accounts:
+            (tmp / f"accounts/{account}").mkdir(parents=True)
+            (tmp / f"accounts/{account}/vault.sqlite3").write_bytes(b"")
+
+    def _accounts_db(self, tmp: Path, owner_id: int) -> None:
+        connection = sqlite3.connect(tmp / "accounts.sqlite3")
+        connection.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT, is_owner INTEGER)")
+        connection.executemany(
+            "INSERT INTO accounts(id, name, is_owner) VALUES(?, ?, ?)",
+            [(1, "Owner", 1 if owner_id == 1 else 0), (2, "Second", 1 if owner_id == 2 else 0)],
+        )
+        connection.commit()
+        connection.close()
+
+    def test_several_accounts_resolve_to_the_owners_vault(self):
+        """Refusing to choose here is what produced a key-less seal, and a
+        key-less seal falls through to legacy `.zenc`, whose Keychain secret
+        every process running as this user can read. This path is only the
+        fallback — the studio still sends X-E2E-Owner-Pub per job — so the
+        question it answers is "whose vault opens an output nobody claimed",
+        and the listing already answers that with the owner."""
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
-            for account in ("1", "2"):
-                (tmp / f"accounts/{account}").mkdir(parents=True)
-                (tmp / f"accounts/{account}/vault.sqlite3").write_bytes(b"")
-            # Picking one would seal one workspace's media to another's key.
-            # The studio sends X-E2E-Owner-Pub per job; this must stay out of it.
+            self._with_accounts(tmp, "1", "2")
+            self._accounts_db(tmp, owner_id=2)
+            self.assertEqual(self._resolve(tmp), tmp / "accounts/2/vault.sqlite3")
+
+    def test_the_owner_is_read_from_the_accounts_table_not_assumed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            self._with_accounts(tmp, "1", "2")
+            self._accounts_db(tmp, owner_id=1)
+            self.assertEqual(self._resolve(tmp), tmp / "accounts/1/vault.sqlite3")
+
+    def test_with_no_accounts_table_the_lowest_numbered_account_is_the_owner(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            # Ten must not sort before two.
+            self._with_accounts(tmp, "2", "10")
+            self.assertEqual(self._resolve(tmp), tmp / "accounts/2/vault.sqlite3")
+
+    def test_with_no_vault_at_all_the_legacy_path_names_where_to_make_one(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
             self.assertEqual(self._resolve(tmp), tmp / "owner-vault.sqlite3")
             self.assertFalse(self._resolve(tmp).is_file())

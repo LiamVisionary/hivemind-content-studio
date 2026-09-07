@@ -1445,6 +1445,10 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
     output_frame_label = f"extend-{extension_output_frames}f" if operation == 'extend' else f"{frames}f"
     out = out_dir / f"{spec.get('output_prefix', 'mlx_ltx_eros_mobile')}_{job_id}_{output_frame_label}.mp4"
     reference_video_path = None
+    # The composed head-swap guide is the owner's footage with their face
+    # burned into a chroma strip. It was staged and never unlinked, so it
+    # outlived every job that made one and waited on the input sweeper.
+    headswap_guide_path = None
     rec = {
         "id": job_id,
         "prompt": _history.PRIVATE_PROMPT_LABEL,
@@ -1660,6 +1664,7 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             # sits in a reserved chroma strip that stays visible for every frame,
             # which is what gives it identity that survives the whole clip.
             guide_path = config.COMFY_INPUT_DIR / '.ltx-reference' / f'{job_id}-headswap.mp4'
+            headswap_guide_path = guide_path
             guide_info = build_bfs_headswap_guide_video(
                 source_video, reference_image, guide_path,
                 region_px=util.int_option(options, 'head_swap_region_px', BFS_HEADSWAP_REGION_PX, 32, 2048),
@@ -1898,9 +1903,11 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
     except Exception as e:
         rec.update({"status": "error", "finished_at": util.now_iso(), "error": str(e), "progress_phase": "error"})
     finally:
-        if reference_video_path:
+        for staged in (reference_video_path, headswap_guide_path):
+            if not staged:
+                continue
             try:
-                reference_video_path.unlink(missing_ok=True)
+                staged.unlink(missing_ok=True)
             except Exception:
                 pass
     _history.append_history(rec)

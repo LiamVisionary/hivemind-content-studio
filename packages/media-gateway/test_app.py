@@ -307,6 +307,112 @@ class ZImageAppTests(unittest.TestCase):
             self.assertTrue(sealed.exists(), 'sealed envelopes are already client-only')
             self.assertTrue(fresh.exists(), 'recent uploads stay usable')
 
+    # --- staged plaintext goes when the machine goes quiet --------------------
+    #
+    # The ceiling on pipeline staging is two hours and cannot simply come down:
+    # a staged input is read when its graph EXECUTES, so a short timer would
+    # delete inputs out from under running generations. Idleness is the signal
+    # instead. These fix the behaviour that let another process on this machine
+    # find and copy the owner's upscale source hours after the job finished.
+
+    def _staged(self, root, name, age):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'pixels')
+        when = time.time() - age
+        os.utime(path, (when, when))
+        return path
+
+    def test_pipeline_staging_goes_as_soon_as_nothing_can_be_reading_it(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'input'
+            staged = self._staged(root, 'media-studio-inline-abc.png', 600)
+            guide = self._staged(root, '.ltx-reference/job-headswap.mp4', 600)
+            upload = self._staged(root, 'user-photo.png', 600)
+            with patch.object(app.config, 'COMFY_INPUT_DIR', root), \
+                 patch.object(app.media, '_nothing_can_be_reading_staged_inputs', lambda: True):
+                removed = app.media.cleanup_staged_private_inputs_once()
+            self.assertEqual(removed, 2)
+            self.assertFalse(staged.exists())
+            self.assertFalse(guide.exists(), 'the composed head-swap guide is pipeline staging')
+            self.assertTrue(upload.exists(), "a person's own upload is theirs to come back to")
+
+    def test_a_running_job_keeps_its_staged_input(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'input'
+            staged = self._staged(root, 'media-studio-inline-abc.png', 600)
+            with patch.object(app.config, 'COMFY_INPUT_DIR', root), \
+                 patch.object(app.media, '_nothing_can_be_reading_staged_inputs', lambda: False):
+                self.assertEqual(app.media.cleanup_staged_private_inputs_once(), 0)
+            self.assertTrue(staged.exists(), 'a generation must never lose its input mid-run')
+
+    def test_freshly_staged_input_is_never_raced(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'input'
+            staged = self._staged(root, 'media-studio-inline-abc.png', 5)
+            with patch.object(app.config, 'COMFY_INPUT_DIR', root), \
+                 patch.object(app.media, '_nothing_can_be_reading_staged_inputs', lambda: True):
+                self.assertEqual(app.media.cleanup_staged_private_inputs_once(), 0)
+            self.assertTrue(staged.exists(), 'accepted-but-not-yet-recorded jobs must survive')
+
+    def test_idleness_counts_an_unreachable_lane_as_busy(self):
+        # Being wrong in this direction costs one sweep of delay; being wrong in
+        # the other kills a generation on a missing file.
+        app = load_app()
+        with patch.object(app.jobs, 'active_jobs', lambda: []), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:1'}), \
+             patch.object(app.lanes, 'comfy_lane_is_remote', lambda lane: False):
+            def refuse(*args, **kwargs):
+                raise OSError('connection refused')
+            with patch.object(app.net, 'urlopen', refuse):
+                self.assertFalse(app.media._nothing_can_be_reading_staged_inputs())
+
+    def test_idleness_needs_an_empty_gateway_and_an_empty_lane_queue(self):
+        app = load_app()
+
+        class _Answer:
+            def __init__(self, payload):
+                self._payload = json.dumps(payload).encode('utf-8')
+
+            def read(self):
+                return self._payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'comfy_lane_is_remote', lambda lane: False):
+            with patch.object(app.jobs, 'active_jobs', lambda: [{'id': 'j1'}]), \
+                 patch.object(app.net, 'urlopen', lambda *a, **k: _Answer({})):
+                self.assertFalse(app.media._nothing_can_be_reading_staged_inputs())
+            with patch.object(app.jobs, 'active_jobs', lambda: []), \
+                 patch.object(app.net, 'urlopen', lambda *a, **k: _Answer({'queue_pending': [['x']]})):
+                self.assertFalse(app.media._nothing_can_be_reading_staged_inputs())
+            with patch.object(app.jobs, 'active_jobs', lambda: []), \
+                 patch.object(app.net, 'urlopen', lambda *a, **k: _Answer({'queue_running': [], 'queue_pending': []})):
+                self.assertTrue(app.media._nothing_can_be_reading_staged_inputs())
+
+    def test_every_prefix_the_pipeline_stages_can_also_be_deleted_on_demand(self):
+        # The prefix tuple is both the sweeper's budget and the delete route's
+        # allowlist, so a staging prefix missing from it is undeletable too.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'input'
+            root.mkdir()
+            for name in ('mcp_audio_1_a.m4a', 'mcp_refvideo_1_a.mp4',
+                         'mcp_inpaint_src_1_a.mp4', 'restore-p1-0001.mp4'):
+                staged = root / name
+                staged.write_bytes(b'pixels')
+                with patch.object(app.config, 'COMFY_INPUT_DIR', root):
+                    self.assertTrue(app.media.delete_private_input(name), name)
+                self.assertFalse(staged.exists(), name)
+
     def test_private_media_defaults_do_not_allow_plaintext_grace_or_token_printing(self):
         source = gateway_source()
         comfy_proxy = (BASE / 'app/comfy/[[...path]]/route.js').read_text(encoding='utf-8')

@@ -72,8 +72,22 @@ the sealing mechanism is complete and this is the contract it will use.
 - **"Encrypted at rest" (`.zenc`) is not private.** It decrypts with a
   Keychain item any process running as the user can read. Everything that
   should be private must be E2E-sealed. All legacy `.zenc` media was migrated
-  to the vault on 2026-09-06 (`packages/media-gateway/migrate_media_to_e2e.py`,
+  to the vault on 2026-09-06 and 2026-09-07
+  (`packages/media-gateway/migrate_media_to_e2e.py`,
   `--vault-db data/accounts/<id>/vault.sqlite3`); do not reintroduce `.zenc`.
+  A seal with no recipient used to fall through to it — on a machine with two
+  workspaces `_default_vault_db()` deliberately refused to choose and returned
+  a path that did not exist, so the sweeper and `send_output_file` sealed with
+  the machine key instead. The fallback is the OWNER account's vault now
+  (`gateway/media.py`), which is the same answer `claim_visible` already gives
+  an unclaimed output, and is the only one of the two no agent can open.
+- **Staged plaintext lives only while a job could still read it.** Inputs are
+  written decrypted into ComfyUI's input dir because `LoadImage` reads files;
+  they are deleted once nothing on this machine is running
+  (`_nothing_can_be_reading_staged_inputs`), with the old two-hour ceiling kept
+  only as a backstop. Do not lengthen either budget, and add any new staging
+  prefix to `PRIVATE_INPUT_PREFIXES` — that tuple is both the sweeper's budget
+  and the delete route's allowlist, so a name missing from it is undeletable.
 
 ## What went wrong once (so it does not again)
 

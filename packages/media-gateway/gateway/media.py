@@ -41,10 +41,20 @@ def _default_vault_db() -> Path:
     clip was sealed to the submitting browser's device key ALONE -- no copy any
     vault could open. Nothing said so until the media would not decrypt.
 
-    Prefer the legacy path while it exists, then a single account vault. With
-    more than one account there is no owner to guess and this must not try: the
-    studio sends the account's own key as X-E2E-Owner-Pub per job, and picking
-    one here would seal one workspace's media to another workspace's key.
+    Prefer the legacy path while it exists, then a single account vault, then
+    the OWNER account's vault.
+
+    Refusing to choose between several accounts was the earlier answer here,
+    on the grounds that picking one would seal one workspace's media to
+    another workspace's key. That reasoning had the trade backwards. This path
+    is only ever the FALLBACK -- the studio sends the submitting account's own
+    key as X-E2E-Owner-Pub per job, and that still decides every job it starts
+    -- so what "no owner to guess" actually produced was no key at all, and a
+    key-less seal falls through to the legacy `.zenc` path whose Keychain
+    secret every process running as this user can read. Sealing an unclaimed
+    output to the owner's vault is the same answer the LISTING already gives
+    it (claim_visible hands everything unclaimed to the owner), and it is the
+    only one of the two that no agent can open.
     """
     # parents[3], not [2]: this line moved from packages/media-gateway/app.py
     # into packages/media-gateway/gateway/, one directory deeper, and the index
@@ -56,12 +66,39 @@ def _default_vault_db() -> Path:
     legacy = data / "owner-vault.sqlite3"
     if legacy.is_file():
         return legacy
-    vaults = sorted(data.glob("accounts/*/vault.sqlite3"))
+    def _account_number(vault: Path) -> tuple[int, str]:
+        # accounts/10 must not sort before accounts/2.
+        try:
+            return (int(vault.parent.name), "")
+        except ValueError:
+            return (1 << 30, vault.parent.name)
+
+    vaults = sorted(data.glob("accounts/*/vault.sqlite3"), key=_account_number)
+    if not vaults:
+        # Nothing yet. Return the legacy path so the warning names a sensible
+        # location for someone to create one.
+        return legacy
     if len(vaults) == 1:
         return vaults[0]
-    # Nothing, or ambiguous. Return the legacy path so the warning names a
-    # sensible location, and let the per-job owner key carry correctness.
-    return legacy
+    accounts_db = data / "accounts.sqlite3"
+    if accounts_db.is_file():
+        try:
+            connection = sqlite3.connect(f"file:{accounts_db}?mode=ro", uri=True, timeout=10)
+            try:
+                row = connection.execute(
+                    "SELECT id FROM accounts WHERE is_owner = 1 ORDER BY id LIMIT 1"
+                ).fetchone()
+            finally:
+                connection.close()
+        except Exception:
+            row = None
+        if row:
+            owner_vault = data / "accounts" / str(int(row[0])) / "vault.sqlite3"
+            if owner_vault.is_file():
+                return owner_vault
+    # No accounts table, or an owner with no vault yet: the lowest-numbered
+    # account is the owner on every machine this studio has ever created.
+    return vaults[0]
 
 
 _ENV_VAULT_DB = os.environ.get("ZIMG_VAULT_DB", "").strip()
@@ -74,8 +111,30 @@ PRIVATE_INPUT_PREFIXES = (
     "mcp_ingredients_",
     "mcp_ltx_",
     "mcp_video_",
+    # Staged by the MCP and the restore runner exactly like the four above.
+    # Their absence from this list was not cosmetic: it put the owner's audio,
+    # reference video, inpaint source/mask and restore chunks on the 24-hour
+    # upload budget instead of the pipeline one, AND made them undeletable
+    # through /api/delete-input, which refuses any name that is not here.
+    "mcp_audio_",
+    "mcp_refvideo_",
+    "mcp_inpaint_",
+    "restore-",
 )
+# Directories under the input root that hold pipeline-generated plaintext
+# rather than something a person uploaded: keyframe caches, the composed
+# head-swap guide, LTX reference clips. Machine-made and content-addressed, so
+# deleting one costs a re-encode and nothing else.
+PRIVATE_INPUT_PIPELINE_DIRS = (".ltx-anchor-cache", ".ltx-anchor-sources", ".ltx-reference")
 PRIVATE_INPUT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_MAX_AGE", "7200"))
+# The ceiling above cannot come down on its own. A staged input is read when
+# its graph EXECUTES, which on a busy lane is many minutes after staging, so a
+# timer short enough to matter would delete inputs out from under running
+# generations. Idleness is the honest signal instead: once no job is in flight
+# anywhere on this machine, no plaintext input is owed to anyone, and one this
+# old can go. Two minutes, not zero, so a job that has just been accepted but
+# not yet recorded is never raced.
+PRIVATE_INPUT_IDLE_GRACE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_IDLE_GRACE", "120"))
 # Uploads that arrive through the generic ComfyUI upload route keep the caller's
 # own filename, so they match none of the staging prefixes above and used to sit
 # in the input directory as plaintext forever. The local generator has to read
@@ -93,6 +152,9 @@ def delete_private_input(name):
     raw = str(name or "").strip()
     if not raw or Path(raw).name != raw or not raw.startswith(PRIVATE_INPUT_PREFIXES):
         raise ValueError("invalid private input filename")
+    # NB: the prefix tuple above is the allowlist for this route as well as the
+    # sweeper's budget, so a staging prefix missing from it cannot be deleted
+    # on demand either.
     root = config.COMFY_INPUT_DIR.expanduser().resolve()
     candidate = (root / raw).resolve()
     if not util._is_under(candidate, root):
@@ -105,9 +167,58 @@ def delete_private_input(name):
     return True
 
 
+def _staged_by_the_pipeline(candidate, root):
+    """Machine-staged plaintext, as opposed to something a person uploaded.
+
+    The distinction decides the budget: pipeline staging goes the moment the
+    machine is idle, while a file the owner uploaded to the Canvas themselves
+    is theirs to come back to and keeps the longer upload budget.
+    """
+    if candidate.name.startswith(PRIVATE_INPUT_PREFIXES):
+        return True
+    try:
+        first = candidate.relative_to(root).parts[0]
+    except (ValueError, IndexError):
+        return False
+    return first in PRIVATE_INPUT_PIPELINE_DIRS
+
+
+def _nothing_can_be_reading_staged_inputs():
+    """True when no job on this machine could still open a staged input.
+
+    Anything unknown counts as busy: a lane that will not answer, an import
+    that fails, a queue shape we do not recognise. The cost of being wrong in
+    that direction is one more sweep of delay; the cost of being wrong in the
+    other is a generation that dies on a missing file.
+    """
+    try:
+        from gateway import jobs as _jobs
+
+        if _jobs.active_jobs():
+            return False
+    except Exception:
+        return False
+    try:
+        from gateway import lanes as _lanes, net as _net
+    except Exception:
+        return False
+    for lane, url in list(getattr(_lanes, "COMFY_LANES", {}).items()):
+        try:
+            if _lanes.comfy_lane_is_remote(lane):
+                # A remote lane reads inputs PUSHED to it, never this dir.
+                continue
+            payload = json.loads(_net.urlopen(f"{url}/queue", timeout=5).read().decode("utf-8"))
+        except Exception:
+            return False
+        if payload.get("queue_running") or payload.get("queue_pending"):
+            return False
+    return True
+
+
 def cleanup_staged_private_inputs_once(
     max_age_seconds=PRIVATE_INPUT_MAX_AGE_SECONDS,
     upload_max_age_seconds=None,
+    idle_grace_seconds=PRIVATE_INPUT_IDLE_GRACE_SECONDS,
 ):
     """Expire plaintext inputs. Pipeline staging (the known prefixes) is short
     lived; anything else — user-named uploads, keyframes, nested reference
@@ -120,16 +231,31 @@ def cleanup_staged_private_inputs_once(
         return 0
     now = time.time()
     deleted = 0
+    # Resolved at most once per sweep, and only if some file is old enough for
+    # the answer to change anything.
+    idle = None
     for candidate in root.rglob("*"):
         if not candidate.is_file():
             continue
         # Already-sealed envelopes are client-only; nothing to expire for privacy.
         if candidate.suffix in (OUTPUT_ENCRYPTION_SUFFIX, E2E_MEDIA_SUFFIX):
             continue
-        limit = max_age_seconds if candidate.name.startswith(PRIVATE_INPUT_PREFIXES) else upload_age
+        pipeline = _staged_by_the_pipeline(candidate, root)
+        limit = max_age_seconds if pipeline else upload_age
         try:
-            if now - candidate.stat().st_mtime < limit:
+            age = now - candidate.stat().st_mtime
+        except OSError:
+            continue
+        if age < limit:
+            # Not yet at the ceiling — but pipeline staging does not have to
+            # wait for it once the machine has gone quiet.
+            if not pipeline or age < idle_grace_seconds:
                 continue
+            if idle is None:
+                idle = _nothing_can_be_reading_staged_inputs()
+            if not idle:
+                continue
+        try:
             candidate.unlink()
             deleted += 1
         except OSError:
@@ -140,7 +266,10 @@ def cleanup_staged_private_inputs_once(
 def private_input_sweeper():
     while True:
         cleanup_staged_private_inputs_once()
-        time.sleep(300)
+        # Once a minute, not once every five: the ceiling is a backstop now and
+        # the real deletion happens on the idle check above, which is only as
+        # timely as this loop.
+        time.sleep(60)
 
 
 def output_encryption_password(create=True):
