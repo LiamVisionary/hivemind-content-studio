@@ -26,6 +26,31 @@ def register(app, ctx) -> None:
     """Register the restore proxy routes."""
     router = APIRouter()
     require_owner = ctx.require_owner
+    _forget_canvas_sync = ctx._forget_canvas_sync
+    current_account = ctx.current_account
+    gateway_claims = ctx.gateway_claims
+
+    def _claim_restore_answer(answer: dict[str, Any]) -> dict[str, Any]:
+        """Stamp whose restoration this is, the moment the gateway names it.
+
+        A restored master lands in the gateway's machine-wide job log under
+        the job id the start (or finish) answer carries, and the log has no
+        notion of accounts. Video and image jobs are claimed for the workspace
+        that starts them; restorations were not, so a non-owner workspace's
+        master was filed under the Owner as unclaimed and never listed where
+        it was made. The answer passes through untouched."""
+        scope = current_account.get()
+        if scope is None or not isinstance(answer, dict):
+            return answer
+        job_id = str(answer.get("id") or "").strip()
+        if job_id:
+            gateway_claims.claim_job(job_id, scope.id)
+        for output in answer.get("outputs") or []:
+            if isinstance(output, str) and output.strip():
+                gateway_claims.claim_output(output.rsplit("/", 1)[-1], scope.id)
+        if job_id or answer.get("outputs"):
+            _forget_canvas_sync()
+        return answer
 
     # --- Video restoration (SeedVR2) -----------------------------------------
     #
@@ -159,12 +184,13 @@ def register(app, ctx) -> None:
                 })
             body = {**body, "credit_token": token}
         try:
-            return await asyncio.to_thread(
+            answer = await asyncio.to_thread(
                 video_restore.client().request, "/api/restore",
                 method="POST", body=body, timeout=video_restore.UPLOAD_TIMEOUT_SECONDS,
             )
         except video_restore.RestoreError as exc:
             raise _restore_error(exc) from None
+        return _claim_restore_answer(answer)
 
     @router.post("/api/restore/finish", dependencies=[Depends(require_owner)])
     async def finish_restore(body: dict[str, Any]) -> dict[str, Any]:
@@ -172,12 +198,13 @@ def register(app, ctx) -> None:
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="A finish request object is required")
         try:
-            return await asyncio.to_thread(
+            answer = await asyncio.to_thread(
                 video_restore.client().request, "/api/restore/finish",
                 method="POST", body=body, timeout=video_restore.UPLOAD_TIMEOUT_SECONDS,
             )
         except video_restore.RestoreError as exc:
             raise _restore_error(exc) from None
+        return _claim_restore_answer(answer)
 
     @router.get("/api/restore/projects", dependencies=[Depends(require_owner)])
     async def restore_projects() -> dict[str, Any]:

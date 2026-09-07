@@ -105,3 +105,17 @@ including an agent copy. It never deletes and never prints media.
   what the PID is. Use `zimage-stack restart`, never per-service restarts.
 - Prefer the shared skill shelf and existing scripts over new helpers; check
   `scripts/` first.
+- **Never submit a graph to a ComfyUI lane directly** (`127.0.0.1:8188`,
+  `:8198`, `:8199`; `/prompt` on the lanes has no auth). A file written into
+  the output root outside the media gateway has no job record and no
+  workspace claim, so the sweeper seals it with the machine key, not a vault,
+  and the library files it under the Owner as unclaimed — whatever workspace
+  the person was working in. Generate through the studio (`/local-ai/*`,
+  `/api/media-studio/*`) or the gateway (`:8787` with `X-E2E-Owner-Pub`), and
+  for a diagnostic render use `PreviewImage` into the lane's temp directory,
+  never `SaveImage`. On 2026-09-07 a reproduction of the Upscale-button bug
+  did exactly this with the owner's own image; the six `repro_*` renders had
+  to be re-sealed and re-claimed by hand.
+- Do not copy the owner's media, or crops of it, into a scratchpad or any
+  other plaintext location, even while debugging. Compare inside the lane
+  (temp/preview) or work on a synthetic image.

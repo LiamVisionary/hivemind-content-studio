@@ -465,3 +465,89 @@ def test_the_upload_really_goes_out_as_a_measured_stream(tmp_path: Path) -> None
     assert seen["reads"] > 1
     # And the gateway token rode along — it is what the browser must never see.
     assert seen["authorized"] is True
+
+
+# --- whose restoration is it -------------------------------------------------
+#
+# A restored master lands in the gateway's machine-wide job log, which has no
+# notion of accounts. Video and image jobs are claimed for the workspace that
+# starts them; restorations were not, so a non-owner workspace's master was
+# filed under the Owner as unclaimed and never listed where it was made.
+
+def _workspace_client(monkeypatch, tmp_path: Path, records: list[dict]) -> TestClient:
+    monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    app = build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        approvals=ApprovalLedger(
+            tmp_path / "approvals.sqlite3", signing_secret="s" * 64, operator_token="operator-secret"),
+        control_token="control-secret",
+        operator_token="operator-secret",
+        owner_access=OwnerAccess.for_testing(password="test-owner-password", cipher=cipher),
+        private_cipher=cipher,
+        canvas_history_fetcher=lambda: [dict(record) for record in records],
+    )
+    return TestClient(app)
+
+
+def _second_workspace(client: TestClient) -> int:
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"}).status_code == 200
+    created = client.post("/api/accounts", json={"name": "Editor", "password": "editor-pass"})
+    assert created.status_code == 201, created.text
+    client.post("/api/accounts/sign-out")
+    editor = int(created.json()["account"]["id"])
+    assert client.post("/api/accounts/unlock", json={"account_id": editor, "password": "editor-pass"}).status_code == 200
+    return editor
+
+
+def _master_record(tmp_path: Path, job_id: str, name: str) -> dict:
+    master = tmp_path / "outputs" / name
+    master.parent.mkdir(parents=True, exist_ok=True)
+    master.write_bytes(b"\x00\x00\x00\x18ftypisom" + b"0" * 64)
+    return {
+        "id": job_id, "status": "success", "outputs": [str(master)],
+        "created_at": "2026-09-07T05:00:00+00:00", "finished_at": "2026-09-07T05:30:00+00:00",
+        "timestamp_source": "gateway-history",
+    }
+
+
+def _listed(client: TestClient) -> list[str]:
+    response = client.get("/api/canvas/history", params={"refresh": "1"})
+    assert response.status_code == 200, response.text
+    return [item.get("output_basename", "") for item in response.json()["history"]]
+
+
+def test_a_restoration_is_listed_in_the_workspace_that_started_it_and_nowhere_else(tmp_path: Path, monkeypatch) -> None:
+    records: list[dict] = []
+    client = _workspace_client(monkeypatch, tmp_path, records)
+    _install(monkeypatch, _FakeGateway(answers={
+        "/api/restore": {"id": "restore-job-1", "project_id": "p1", "status": "queued"},
+    }))
+    _second_workspace(client)
+    started = client.post("/api/restore", json={"video_base64": "AA=="})
+    assert started.status_code == 200 and started.json()["project_id"] == "p1"
+
+    # The gateway finishes later and logs the master machine-wide.
+    records.append(_master_record(tmp_path, "restore-job-1", "restore_p1_master.mp4"))
+    assert _listed(client) == ["restore_p1_master.mp4"]
+
+    client.post("/api/accounts/sign-out")
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"}).status_code == 200
+    assert _listed(client) == []
+
+
+def test_a_refinished_master_is_claimed_by_name_as_well_as_by_job(tmp_path: Path, monkeypatch) -> None:
+    records: list[dict] = []
+    client = _workspace_client(monkeypatch, tmp_path, records)
+    _install(monkeypatch, _FakeGateway(answers={
+        "/api/restore/finish": {
+            "id": "restore-job-2", "project_id": "p2", "status": "success",
+            "outputs": ["/somewhere/on/the/gateway/restore_p2_master.mp4"],
+        },
+    }))
+    _second_workspace(client)
+    assert client.post("/api/restore/finish", json={"project_id": "p2"}).status_code == 200
+    # A file-walk record — no job id the log would know — still finds its owner by name.
+    walked = _master_record(tmp_path, "file-0123456789ab", "restore_p2_master.mp4")
+    records.append(walked)
+    assert _listed(client) == ["restore_p2_master.mp4"]
