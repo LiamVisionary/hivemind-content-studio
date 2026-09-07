@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse, urlencode, unquote
 from urllib.request import Request
 from urllib.error import HTTPError
 
-from gateway import config, dependencies as _dependencies, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, promptroutes, restore, routes, runners, util, workflow_index
+from gateway import config, dependencies as _dependencies, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, private_inputs, promptroutes, restore, routes, runners, util, workflow_index
 
 
 class _MultipartPart:
@@ -714,6 +714,30 @@ class Handler(BaseHTTPRequestHandler):
         if envelope:
             return self.send_json({"workflow": envelope})
         return self.send_json({"error": "no workflow recorded for this output"}, 404)
+
+    def get_private_input(self, parsed, qs):
+        """Serve a staged input from memory to the lane that is about to use it.
+
+        This is the read side of gateway/private_inputs.py: the graph carries a
+        handle where a filename used to be, and the loader node in
+        hivemind-private-media fetches the bytes here instead of ComfyUI
+        opening a plaintext file out of the input directory. Behind the token
+        like everything else, on a loopback-bound port, so the reach is the
+        gateway's own credential plus a 256-bit handle that never lands on
+        disk. An expired or unknown handle is a 404 with no detail: whether a
+        handle ever existed is not something this needs to answer.
+        """
+        payload = private_inputs.fetch(qs.get("handle", [""])[0])
+        if payload is None:
+            return self.send_json({"error": "no such staged input"}, 404)
+        data, media_type = payload
+        self.send_response(200)
+        self.cors_headers()
+        self.send_header("Content-Type", media_type)
+        self.send_header("Cache-Control", "private, no-store, max-age=0")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def get_ws(self, parsed, qs):
         return self.proxy_websocket_to_comfy(parsed)

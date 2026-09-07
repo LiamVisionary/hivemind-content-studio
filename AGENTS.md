@@ -81,6 +81,17 @@ the sealing mechanism is complete and this is the contract it will use.
   the machine key instead. The fallback is the OWNER account's vault now
   (`gateway/media.py`), which is the same answer `claim_visible` already gives
   an unclaimed output, and is the only one of the two no agent can open.
+- **A reference does not become a file at all on a local lane.** The gateway
+  holds the decrypted bytes in memory under a 256-bit handle
+  (`gateway/private_inputs.py`), the graph carries the handle where a filename
+  used to be, and `HivemindLoadPrivateImage`
+  (`packages/comfyui-custom-nodes/hivemind-private-media`) fetches them back
+  over loopback. Every local submit goes through `graphs.private_prompt_body`,
+  which is the only place the swap happens; `test_private_inputs.py` fails if a
+  runner builds its own body. It is gated on the lane reporting the node, and
+  skipped for any non-loopback lane, so a rented lane keeps the filename and
+  the file it needs pushed to it. Measured on a live upscale: the staged
+  plaintext existed for 0.3 s instead of the two hours before it.
 - **Staged plaintext lives only while a job could still read it.** Inputs are
   written decrypted into ComfyUI's input dir because `LoadImage` reads files;
   they are deleted once nothing on this machine is running

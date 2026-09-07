@@ -153,7 +153,7 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
             }
             model_ref = [node_id, 0]
         api_prompt['8']['inputs']['model'] = model_ref
-        body = json.dumps({'prompt': api_prompt, 'client_id': f'zimage-klein3-{job_id}'}).encode('utf-8')
+        body = _graphs.private_prompt_body(api_prompt, f'zimage-klein3-{job_id}', config.COMFY_HTTP_DEFAULT)
         t0 = time.monotonic()
         req = Request(f"{config.COMFY_HTTP_DEFAULT}/prompt", data=body, headers={'Content-Type':'application/json'})
         queued = json.loads(net.urlopen(req, timeout=20).read().decode('utf-8'))
@@ -494,7 +494,7 @@ def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
             options=rec["options"],
             filename_prefix=filename_prefix,
         )
-        body = json.dumps({"prompt": api_prompt, "client_id": f"media-krea2-{job_id}"}).encode("utf-8")
+        body = _graphs.private_prompt_body(api_prompt, f"media-krea2-{job_id}", config.COMFY_HTTP_DEFAULT)
         t0 = time.monotonic()
         req = Request(f"{config.COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
         try:
@@ -688,7 +688,7 @@ def run_comfy_krea2_strength_hunt(job_id, prompt, image_path=None, options=None,
             ))
 
         def submit_and_wait(api_prompt, label, poll_loops):
-            body = json.dumps({"prompt": api_prompt, "client_id": f"media-strhunt-{job_id}"}).encode("utf-8")
+            body = _graphs.private_prompt_body(api_prompt, f"media-strhunt-{job_id}", config.COMFY_HTTP_DEFAULT)
             req = Request(f"{config.COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
             try:
                 queued = json.loads(net.urlopen(req, timeout=30).read().decode("utf-8"))
@@ -873,7 +873,7 @@ def run_comfy_krea2_outpaint(job_id, prompt, image_path, options=None, outpaint=
                 f"(source {source_width}x{source_height}, target {geometry['target_width']}x{geometry['target_height']})"
             )
 
-        body = json.dumps({"prompt": compiled["graph"], "client_id": f"media-outpaint-{job_id}"}).encode("utf-8")
+        body = _graphs.private_prompt_body(compiled["graph"], f"media-outpaint-{job_id}", config.COMFY_HTTP_DEFAULT)
         req = Request(f"{config.COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
         try:
             queued = json.loads(net.urlopen(req, timeout=30).read().decode("utf-8"))
@@ -1001,7 +1001,7 @@ def run_sam3_smart_mask(job_id, image_path, options=None):
             points=options.get("points"),
             confidence=util.float_option(options, "confidence", 0.2, 0.05, 0.95),
         )
-        body = json.dumps({"prompt": api_prompt, "client_id": f"media-smartmask-{job_id}"}).encode("utf-8")
+        body = _graphs.private_prompt_body(api_prompt, f"media-smartmask-{job_id}", config.COMFY_HTTP_DEFAULT)
         req = Request(f"{config.COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
         try:
             queued = json.loads(net.urlopen(req, timeout=30).read().decode("utf-8"))
@@ -1119,7 +1119,7 @@ def run_ltx_director(job_id, project, options=None):
             "seed": options["seed"],
         }
 
-        body = json.dumps({"prompt": graph, "client_id": f"media-ltxdirector-{job_id}"}).encode("utf-8")
+        body = _graphs.private_prompt_body(graph, f"media-ltxdirector-{job_id}", config.COMFY_HTTP_DEFAULT)
         req = Request(f"{config.COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
         try:
             queued = json.loads(net.urlopen(req, timeout=60).read().decode("utf-8"))
@@ -1235,7 +1235,7 @@ def run_comfy_krea2_inpaint(job_id, prompt, image_path, mask_path, options=None)
             profile=config.accelerator_profile(),
             filename_prefix=f"krea2_inpaint_{job_id}",
         )
-        body = json.dumps({"prompt": api_prompt, "client_id": f"media-inpaint-{job_id}"}).encode("utf-8")
+        body = _graphs.private_prompt_body(api_prompt, f"media-inpaint-{job_id}", config.COMFY_HTTP_DEFAULT)
         req = Request(f"{config.COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
         try:
             queued = json.loads(net.urlopen(req, timeout=30).read().decode("utf-8"))
@@ -1518,9 +1518,13 @@ def run_comfy_upscale(job_id, image_path, options=None):
                 "17": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["16", 0], "vae": ["12", 0], "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 8}},
             })
             graph["9"]["inputs"]["images"] = ["17", 0]
-        body = json.dumps({"prompt": graph, "client_id": f"media-upscale-{job_id}"}).encode("utf-8")
+        # Lane first, rewrite second: comfy_http_for_prompt_body reads the graph
+        # to decide where this runs, and whether a staged input may move into
+        # memory depends on which lane that turns out to be.
+        body = _graphs.prompt_body(graph, f"media-upscale-{job_id}")
         lane_url = lanes.comfy_http_for_prompt_body(body, run_on=options.get('run_on'))
         rec["lane"] = lane_url
+        body = _graphs.private_prompt_body(graph, f"media-upscale-{job_id}", lane_url)
         t0 = time.monotonic()
         req = Request(f"{lane_url}/prompt", data=body, headers={"Content-Type": "application/json"})
         try:

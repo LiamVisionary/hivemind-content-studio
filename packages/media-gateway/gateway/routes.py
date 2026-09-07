@@ -61,6 +61,9 @@ ROUTES = (
     Route("GET", "get_workflow_key", exact=("/workflow-key",)),
     Route("GET", "get_api_e2e_vault_identity", exact=("/api/e2e/vault-identity",)),
     Route("GET", "get_workflow_for_output", exact=("/workflow-for-output",)),
+    # A decrypted input held in memory for the lane that is about to load it,
+    # so the owner's reference never becomes a file anyone can copy.
+    Route("GET", "get_private_input", exact=("/internal/private-input",)),
     Route("GET", "get_ws", exact=("/ws",)),
     Route("GET", "get_frontend",
           exact=("/", "/history", "/models", "/workbench", "/favicon.ico"),

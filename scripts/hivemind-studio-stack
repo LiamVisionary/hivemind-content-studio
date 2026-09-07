@@ -26,6 +26,7 @@ APP="$STUDIO_ROOT/packages/media-gateway"
 MOBILE="$STUDIO_ROOT/packages/comfyui-mobile"
 KREA2_IDENTITY_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-krea2-identity"
 SEEDVR2_TRT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-seedvr2-trt"
+PRIVATE_MEDIA_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-private-media"
 OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
 CONTENT_STUDIO="$STUDIO_ROOT"
 TAILSCALE_CLI="/Applications/Tailscale.app/Contents/MacOS/tailscale"
@@ -105,7 +106,7 @@ ZIMG_TOKEN_FILE="${ZIMG_TOKEN_FILE:-$MEDIA_STATE_ROOT/secure/zimg-token}"
 # one of those is a key some dependency could read, log, or ship in a crash
 # report. It also means the machine can seal reads and stop trusting this app
 # by name — a grant is proof of how the process started, which a name is not.
-STUDIO_KEYS="GOOGLE_AI_STUDIO_API_KEY HIVEMINDOS_DASHBOARD_DEVICE_TOKEN
+STUDIO_KEYS="CIVITAI_API_KEY GOOGLE_AI_STUDIO_API_KEY HIVEMINDOS_DASHBOARD_DEVICE_TOKEN
 OPENAI_API_KEY OPENAI_OAUTH_ACCESS_TOKEN OPENAI_OAUTH_ACCOUNT_ID
 OPENAI_OAUTH_EXPIRES_AT OPENAI_OAUTH_REFRESH_TOKEN OPENROUTER_API_KEY
 VENICE_API_KEY XAI_API_KEY"
@@ -432,6 +433,17 @@ start_children() {
     ln -sfn "$SEEDVR2_TRT_NODE" "$COMFY/custom_nodes/hivemind-seedvr2-trt"
   else
     log "cannot install SeedVR2 TensorRT adapter: custom node path is not a symlink"
+    return 1
+  fi
+  # Loads the owner's references straight out of the gateway's memory, so a
+  # decrypted reference never becomes a file in ComfyUI's input directory for
+  # anything on this machine to list and copy. The gateway checks each lane for
+  # this node before it rewrites a graph, so a lane without it keeps the
+  # filename it has always had and nothing breaks either way.
+  if [ -L "$COMFY/custom_nodes/hivemind-private-media" ] || [ ! -e "$COMFY/custom_nodes/hivemind-private-media" ]; then
+    ln -sfn "$PRIVATE_MEDIA_NODE" "$COMFY/custom_nodes/hivemind-private-media"
+  else
+    log "cannot install private media loader: custom node path is not a symlink"
     return 1
   fi
   fi

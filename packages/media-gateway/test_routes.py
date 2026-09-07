@@ -35,6 +35,7 @@ EXPECTED = [
     ('GET', '/workflow-key', 'get_workflow_key'),
     ('GET', '/api/e2e/vault-identity', 'get_api_e2e_vault_identity'),
     ('GET', '/workflow-for-output', 'get_workflow_for_output'),
+    ('GET', '/internal/private-input', 'get_private_input'),
     ('GET', '/ws', 'get_ws'),
     ('GET', '/', 'get_frontend'),
     ('GET', '/history', 'get_frontend'),

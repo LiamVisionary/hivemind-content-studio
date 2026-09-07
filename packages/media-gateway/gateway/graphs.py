@@ -5,13 +5,15 @@ import math
 import os
 import re
 import subprocess
+import time
+from urllib.parse import urlparse
 import sys
 import zlib
 import shutil
 from pathlib import Path
 from urllib.request import Request
 
-from gateway import config, history, jobs, lanes, loras as _loras, native_mlx, net, util
+from gateway import config, history, jobs, lanes, loras as _loras, native_mlx, net, private_inputs, util
 
 
 def _prompt_nodes_from_body(body):
@@ -380,8 +382,139 @@ def _auto_find_text_node(graph, start_id, seen=None):
     return None, None
 
 
+# --- inputs that never become files -----------------------------------------
+#
+# A staged reference is decrypted owner media sitting in ComfyUI's input dir as
+# a plaintext PNG. Swapping the LoadImage that reads it for the private loader
+# (packages/comfyui-custom-nodes/hivemind-private-media) moves those bytes into
+# the gateway's memory under a handle, and the file is deleted at submit.
+#
+# Gated on the lane actually having the node. A lane without it keeps the
+# filename it has always had, so installing this pack is what turns the
+# behaviour on and removing it turns it off -- there is no window where a graph
+# names a node the lane cannot resolve.
+PRIVATE_LOADER_CLASS = "HivemindLoadPrivateImage"
+_private_loader_lanes = {}
+_PRIVATE_LOADER_TTL_SECONDS = 300
+
+
+def _is_loopback_lane(lane_url):
+    """Only a lane on this machine can fetch from this machine's memory.
+
+    A rented lane reads inputs PUSHED to it and resolves the gateway address to
+    its own loopback, where nothing is listening — so a remote lane that
+    happened to have the pack installed would fail every load. It keeps the
+    filename, and the staged file it needs stays on disk to be pushed.
+    """
+    try:
+        host = (urlparse(str(lane_url)).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def lane_loads_private_inputs(lane_url):
+    """Does this lane have the private loader installed? Cached briefly."""
+    if not lane_url or not _is_loopback_lane(lane_url):
+        return False
+    cached = _private_loader_lanes.get(lane_url)
+    now = time.monotonic()
+    if cached and now - cached[1] < _PRIVATE_LOADER_TTL_SECONDS:
+        return cached[0]
+    present = False
+    try:
+        payload = net.urlopen(f"{lane_url}/object_info/{PRIVATE_LOADER_CLASS}", timeout=10).read()
+        present = PRIVATE_LOADER_CLASS in json.loads(payload.decode("utf-8") or "{}")
+    except Exception:
+        present = False
+    _private_loader_lanes[lane_url] = (present, now)
+    return present
+
+
+def _staged_input_path(value):
+    """The staged plaintext file a LoadImage input names, or None.
+
+    Only pipeline staging qualifies: a name the gateway itself wrote. A file
+    the owner uploaded to the Canvas under their own name is theirs and stays
+    where they can pick it again.
+    """
+    from gateway import media as _media
+
+    name = str(value or "").strip()
+    if not name or not name.startswith(_media.PRIVATE_INPUT_PREFIXES):
+        return None
+    name = re.sub(r"\s*\[(?:input|output|temp)\]$", "", name)
+    if Path(name).name != name:
+        return None
+    try:
+        candidate = (config.COMFY_INPUT_DIR / name).resolve()
+    except OSError:
+        return None
+    if not util._is_under(candidate, config.COMFY_INPUT_DIR.resolve()) or not candidate.is_file():
+        return None
+    return candidate
+
+
+def route_private_inputs(prompt, lane_url):
+    """Rewrite staged LoadImage nodes to load from memory. Returns the graph.
+
+    Never raises into a generation: anything unexpected leaves that node
+    exactly as it was, which is the behaviour this replaced.
+    """
+    if not isinstance(prompt, dict) or not lane_loads_private_inputs(lane_url):
+        return prompt
+    for node in prompt.values():
+        if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        staged = _staged_input_path(inputs.get("image"))
+        if staged is None:
+            continue
+        try:
+            payload = staged.read_bytes()
+            handle = private_inputs.stage(payload, "image/png")
+        except Exception as exc:
+            print(f"[private-input] left {staged.name} on disk: {exc}", file=sys.stderr)
+            continue
+        node["class_type"] = PRIVATE_LOADER_CLASS
+        node["inputs"] = {
+            key: value for key, value in inputs.items() if key not in ("image", "upload")
+        }
+        node["inputs"]["handle"] = handle
+        try:
+            staged.unlink()
+        except OSError as exc:
+            print(f"[private-input] staged copy of {staged.name} could not be removed: {exc}", file=sys.stderr)
+    return prompt
+
+
+def prompt_body(prompt, client_id=""):
+    """The encoded /prompt body, with nothing moved.
+
+    For the one thing that has to happen BEFORE the lane is known: lane
+    selection reads the graph to decide where it runs, and the rewrite depends
+    on which lane that turns out to be. Never submit this — submit the result
+    of private_prompt_body once the lane is settled.
+    """
+    body = {"prompt": prompt}
+    if client_id:
+        body["client_id"] = client_id
+    return json.dumps(body).encode("utf-8")
+
+
+def private_prompt_body(prompt, client_id, lane_url):
+    """The encoded /prompt body, with staged inputs moved into memory first.
+
+    Every local submit goes through here so the rewrite cannot be forgotten at
+    one call site; test_private_inputs.py asserts that no submit builds its own.
+    """
+    return prompt_body(route_private_inputs(prompt, lane_url), client_id)
+
+
 def _auto_submit_prompt(lane_url, graph, client_id):
-    body = json.dumps({"prompt": graph, "client_id": client_id}).encode("utf-8")
+    body = private_prompt_body(graph, client_id, lane_url)
     req = Request(f"{lane_url}/prompt", data=body, headers={"Content-Type": "application/json"})
     return json.loads(net.urlopen(req, timeout=30).read().decode("utf-8"))
 
