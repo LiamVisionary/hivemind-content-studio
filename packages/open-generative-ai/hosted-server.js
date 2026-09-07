@@ -44,6 +44,20 @@ function readToken() {
   try { return fs.readFileSync(ZIMAGE_TOKEN_FILE, 'utf8').trim(); } catch { return ''; }
 }
 
+// The submitting workspace's vault public key, as the studio sent it along
+// with the job. Public material (an RSA SPKI, base64url) and the recipient the
+// gateway seals the job's outputs to — so a render started in one workspace
+// opens in that workspace's browser and nowhere else. Without it the gateway
+// falls back to a single machine-wide vault path, which on a machine with more
+// than one workspace names nobody, and writes a legacy server-decryptable file
+// instead. Forwarded to the gateway only, on the routes that start a job.
+const OWNER_PUB_HEADER = 'x-e2e-owner-pub';
+const OWNER_PUB_SHAPE = /^[A-Za-z0-9_-]{100,4000}$/;
+function ownerPubHeaders(req) {
+  const value = String(req.headers[OWNER_PUB_HEADER] || '').trim();
+  return OWNER_PUB_SHAPE.test(value) ? { 'X-E2E-Owner-Pub': value } : {};
+}
+
 // Everything below this line proxies with the gateway's own capability token
 // attached — it queues local generations, and it spends the owner's Civitai key
 // — so the port has to say who is asking before it forwards anything. Same
@@ -1163,7 +1177,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       }
       const submitted = await requestJson(`${ZIMAGE_URL}/api/generate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...ownerPubHeaders(req) },
         body: JSON.stringify(payload),
       });
       return sendJson(res, 202, submitted);
@@ -1182,7 +1196,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       };
       const submitted = await requestJson(`${ZIMAGE_URL}/api/interpolate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...ownerPubHeaders(req) },
         body: JSON.stringify(payload),
         timeout: 180000,
       });
@@ -1203,7 +1217,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       };
       const submitted = await requestJson(`${ZIMAGE_URL}/api/smart-mask`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...ownerPubHeaders(req) },
         body: JSON.stringify(payload),
         timeout: 120000,
       });
@@ -1229,7 +1243,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       };
       const submitted = await requestJson(`${ZIMAGE_URL}/api/ltx-director`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...ownerPubHeaders(req) },
         body: JSON.stringify(payload),
         timeout: 120000,
       });
@@ -1250,7 +1264,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       };
       const submitted = await requestJson(`${ZIMAGE_URL}/api/episode`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...ownerPubHeaders(req) },
         body: JSON.stringify(payload),
         timeout: 180000,
       });
@@ -1272,7 +1286,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       if (body.run_on) payload.run_on = String(body.run_on).slice(0, 128);
       const submitted = await requestJson(`${ZIMAGE_URL}/api/upscale`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...ownerPubHeaders(req) },
         body: JSON.stringify(payload),
       });
       return sendJson(res, 202, submitted);

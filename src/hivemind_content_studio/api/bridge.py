@@ -11,6 +11,7 @@ import asyncio
 import json
 import mimetypes
 import re
+import urllib.parse
 import urllib.request
 from typing import Annotated
 
@@ -18,14 +19,93 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .. import civitai_post
-from ..media_studio import local_gateway_token, sanitize_error_detail
+from ..media_studio import local_gateway_token, normalized_requester_pub, sanitize_error_detail
 from ..settings import settings as studio_settings
+
+
+# The bridge routes that START a gateway job. Each answers with the job's id,
+# and each produces media the gateway seals and lists machine-wide — so each is
+# a moment the studio has to say whose workspace is asking (see open_gen_api).
+JOB_STARTING_ROUTES = frozenset({
+    "local-ai/generate",
+    "local-ai/upscale",
+    "local-ai/interpolate",
+    "local-ai/episode",
+    "local-ai/smart-mask",
+    "local-ai/ltx-director",
+})
+OWNER_PUB_HEADER = "X-E2E-Owner-Pub"
+_JOB_POLL_PATH = re.compile(r"^local-ai/job/([A-Za-z0-9_.:%-]+)$")
 
 
 def register(app, ctx) -> None:
     """Register the bridge, the open-gen API proxy and the Civitai staging routes."""
     router = APIRouter()
     require_owner = ctx.require_owner
+    _forget_canvas_sync = ctx._forget_canvas_sync
+    _vault_public_key = ctx._vault_public_key
+    current_account = ctx.current_account
+    gateway_claims = ctx.gateway_claims
+
+    def _owner_pub_headers() -> dict[str, str]:
+        """The signed-in workspace's vault public key, for the gateway to seal
+        to. Never raises and never blocks a generation: a workspace with no
+        vault yet simply sends nothing and gets the machine-key fallback."""
+        try:
+            pub = normalized_requester_pub(_vault_public_key() or "")
+        except Exception:
+            return {}
+        return {OWNER_PUB_HEADER: pub} if pub else {}
+
+    def _claim_bridge_answer(path: str, method: str, content: bytes) -> None:
+        """Stamp whose job this is, at the two moments the bridge learns it.
+
+        Image renders reach the gateway through this proxy — browser, studio,
+        node bridge, gateway — and the gateway's history is machine-wide with
+        no notion of accounts. Video jobs are claimed for the workspace that
+        starts them; image jobs were not, so a non-owner workspace's renders
+        listed under nobody: the owner saw them as unclaimed, the workspace
+        that made them saw nothing at all. The job id is claimed when the 202
+        hands it over, and every output name when a poll reports the finish —
+        the name is what the listing agrees on once the job log has rolled.
+        """
+        scope = current_account.get()
+        if scope is None:
+            return
+        try:
+            payload = json.loads(content or b"{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+        if method == "POST" and path in JOB_STARTING_ROUTES:
+            job_id = str(payload.get("id") or "").strip()
+            if job_id:
+                gateway_claims.claim_job(job_id, scope.id)
+                _forget_canvas_sync()
+            return
+        poll = _JOB_POLL_PATH.match(path) if method == "GET" else None
+        if poll is None or payload.get("status") != "success":
+            return
+        job_id = urllib.parse.unquote(poll.group(1))
+        claimed = gateway_claims.account_for(gateway_claims.job_key(job_id))
+        if claimed is not None and claimed != scope.id:
+            # Another workspace's job; watching it does not make it yours.
+            return
+        names = [
+            urllib.parse.unquote(str(url).split("?", 1)[0].rsplit("/", 1)[-1])
+            for url in (payload.get("image_urls") or [])
+            if isinstance(url, str) and url.strip()
+        ]
+        if not names:
+            return
+        if claimed is None:
+            # An unclaimed job polled by a workspace is that workspace's —
+            # one started before claims existed, or by a studio since restarted.
+            gateway_claims.claim_job(job_id, scope.id)
+        for name in names:
+            gateway_claims.claim_output(name, scope.id)
+        _forget_canvas_sync()
 
     # /local-ai/* is the same bridge without the prefix — the unified frontend
     # served at "/" calls it same-origin (hosted-local-ai.js apiBase = '').
@@ -90,6 +170,14 @@ def register(app, ctx) -> None:
         # is how workflows the bridge cannot see in its own registry get resolved).
         query = str(request.url.query or "")[:2048]
         upstream_url = f"{studio_settings().network.bridge_url}/{path}" + (f"?{query}" if query else "")
+        # A job started here is sealed by the gateway, and the gateway has one
+        # vault path for a machine that can hold several workspaces — on such a
+        # machine that path names nobody, and every render fell back to the
+        # machine key. The workspace's own vault key travels with the job
+        # instead, exactly as the video path sends it (media_studio._owner_headers).
+        # Resolved here, on the request, not in the thread below.
+        starts_job = request.method == "POST" and path in JOB_STARTING_ROUTES
+        owner_headers = _owner_pub_headers() if starts_job else {}
 
         def forward() -> tuple[bytes, int, str]:
             # The bridge authenticates its callers now (canvas-gate, same two
@@ -99,6 +187,7 @@ def register(app, ctx) -> None:
             # server-side: it is set on the outbound request and never on the
             # response the browser gets back.
             headers = {"Content-Type": request.headers.get("content-type", "application/json")}
+            headers.update(owner_headers)
             token = local_gateway_token()
             if token:
                 headers["Authorization"] = f"Bearer {token}"
@@ -156,6 +245,8 @@ def register(app, ctx) -> None:
                 if said:
                     payload = {**payload, "error": said, "detail": said, "message": said}
                     return JSONResponse(payload, status_code=status)
+        elif status < 300 and "json" in content_type.lower():
+            _claim_bridge_answer(path, request.method, content)
         return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
 
     # --- posting a creation to Civitai -------------------------------------
