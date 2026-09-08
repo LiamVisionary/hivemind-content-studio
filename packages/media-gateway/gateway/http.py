@@ -418,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
                 if liveness_error:
                     return self.send_json({"error": liveness_error, "operational": True}, 502)
                 try:
-                    pushed_inputs = promptroutes.push_prompt_inputs_to_lane(body, lane_name)
+                    pushed_inputs, body = promptroutes.stage_prompt_inputs_on_lane(body, lane_name)
                 except Exception as e:
                     # Also operational: a staging failure is the transport
                     # giving out mid-upload, which the liveness probe above

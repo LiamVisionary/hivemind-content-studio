@@ -1,12 +1,18 @@
 """ComfyUI API graph work: reading a prompt body, the BigLove/Krea2/H3
 builders, the auto-workflow filler, and the native-MLX route detectors."""
+import base64
 import json
 import math
+import mimetypes
 import os
 import re
 import subprocess
+import tempfile
 import time
+import uuid
 from urllib.parse import urlparse
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import sys
 import zlib
 import shutil
@@ -393,6 +399,15 @@ def _auto_find_text_node(graph, start_id, seen=None):
 # filename it has always had, so installing this pack is what turns the
 # behaviour on and removing it turns it off -- there is no window where a graph
 # names a node the lane cannot resolve.
+# Which stock loader each private one replaces, and the input that names the
+# file. Only loaders with a SINGLE typed output are here: VideoHelperSuite's
+# VHS_LoadVideo returns (IMAGE, frame_count, audio, video_info) and swapping it
+# for a one-output node would break every downstream link in the graph.
+PRIVATE_LOADERS = {
+    "LoadImage": ("HivemindLoadPrivateImage", "image"),
+    "LoadVideo": ("HivemindLoadPrivateVideo", "file"),
+    "LoadAudio": ("HivemindLoadPrivateAudio", "audio"),
+}
 PRIVATE_LOADER_CLASS = "HivemindLoadPrivateImage"
 _private_loader_lanes = {}
 _PRIVATE_LOADER_TTL_SECONDS = 300
@@ -413,22 +428,40 @@ def _is_loopback_lane(lane_url):
     return host in ("127.0.0.1", "localhost", "::1", "[::1]")
 
 
-def lane_loads_private_inputs(lane_url):
-    """Does this lane have the private loader installed? Cached briefly."""
-    if not lane_url or not _is_loopback_lane(lane_url):
+def lane_has_private_node(lane_url, class_name):
+    """Does this lane have that private loader installed? Cached briefly.
+
+    Asked per class, because a lane can be running an older copy of the pack
+    that has the image loader and not the video one; swapping in a node it
+    cannot resolve would 400 the whole graph.
+    """
+    if not lane_url or not class_name:
         return False
-    cached = _private_loader_lanes.get(lane_url)
+    key = (lane_url, class_name)
+    cached = _private_loader_lanes.get(key)
     now = time.monotonic()
     if cached and now - cached[1] < _PRIVATE_LOADER_TTL_SECONDS:
         return cached[0]
     present = False
     try:
-        payload = net.urlopen(f"{lane_url}/object_info/{PRIVATE_LOADER_CLASS}", timeout=10).read()
-        present = PRIVATE_LOADER_CLASS in json.loads(payload.decode("utf-8") or "{}")
+        payload = net.urlopen(f"{lane_url}/object_info/{class_name}", timeout=10).read()
+        present = class_name in json.loads(payload.decode("utf-8") or "{}")
     except Exception:
         present = False
-    _private_loader_lanes[lane_url] = (present, now)
+    _private_loader_lanes[key] = (present, now)
     return present
+
+
+def lane_loads_private_inputs(lane_url):
+    """Can this lane take its inputs from THIS machine's memory?
+
+    Loopback only: a rented lane resolves the gateway address to its own
+    loopback, where nothing is listening. Rented lanes get the sealed-file
+    route instead (stage_private_inputs_on_remote_lane).
+    """
+    if not lane_url or not _is_loopback_lane(lane_url):
+        return False
+    return lane_has_private_node(lane_url, PRIVATE_LOADER_CLASS)
 
 
 def _staged_input_path(value):
@@ -455,39 +488,121 @@ def _staged_input_path(value):
     return candidate
 
 
+def _private_loader_targets(prompt):
+    """Every (node, private class, staged file) this graph could move."""
+    targets = []
+    if not isinstance(prompt, dict):
+        return targets
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        replacement = PRIVATE_LOADERS.get(str(node.get("class_type") or ""))
+        if replacement is None:
+            continue
+        private_class, source_key = replacement
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        staged = _staged_input_path(inputs.get(source_key))
+        if staged is None:
+            continue
+        targets.append((node, private_class, source_key, staged))
+    return targets
+
+
+def _rewrite_loader(node, private_class, source_key, extra_inputs):
+    node["class_type"] = private_class
+    node["inputs"] = {
+        key: value
+        for key, value in (node.get("inputs") or {}).items()
+        if key not in (source_key, "upload")
+    }
+    node["inputs"].update(extra_inputs)
+
+
 def route_private_inputs(prompt, lane_url):
-    """Rewrite staged LoadImage nodes to load from memory. Returns the graph.
+    """Move staged inputs into memory for a lane on this machine.
 
     Never raises into a generation: anything unexpected leaves that node
     exactly as it was, which is the behaviour this replaced.
     """
-    if not isinstance(prompt, dict) or not lane_loads_private_inputs(lane_url):
+    if not isinstance(prompt, dict) or not _is_loopback_lane(lane_url):
         return prompt
-    for node in prompt.values():
-        if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
-            continue
-        inputs = node.get("inputs")
-        if not isinstance(inputs, dict):
-            continue
-        staged = _staged_input_path(inputs.get("image"))
-        if staged is None:
+    for node, private_class, source_key, staged in _private_loader_targets(prompt):
+        if not lane_has_private_node(lane_url, private_class):
             continue
         try:
-            payload = staged.read_bytes()
-            handle = private_inputs.stage(payload, "image/png")
+            handle = private_inputs.stage(
+                staged.read_bytes(),
+                mimetypes.guess_type(staged.name)[0] or "application/octet-stream",
+            )
         except Exception as exc:
             print(f"[private-input] left {staged.name} on disk: {exc}", file=sys.stderr)
             continue
-        node["class_type"] = PRIVATE_LOADER_CLASS
-        node["inputs"] = {
-            key: value for key, value in inputs.items() if key not in ("image", "upload")
-        }
-        node["inputs"]["handle"] = handle
+        _rewrite_loader(node, private_class, source_key, {"handle": handle})
         try:
             staged.unlink()
         except OSError as exc:
             print(f"[private-input] staged copy of {staged.name} could not be removed: {exc}", file=sys.stderr)
     return prompt
+
+
+def stage_private_inputs_on_remote_lane(prompt, lane_name):
+    """Put this graph's inputs on a rented lane as ciphertext, not plaintext.
+
+    A rented lane cannot reach this machine's memory, so it needs the bytes as
+    a file — but not as a readable one. Each staged input is encrypted under a
+    key made for this job alone, the ciphertext is pushed, and the key travels
+    in the graph. The lane decrypts in memory; the plaintext never lands on a
+    disk this owner does not control.
+
+    What that buys is RESIDUE, and it is worth being exact about. Whoever runs
+    the rented box can read its memory and its ComfyUI history while the job is
+    running, and renting means trusting it for that long — the model has to see
+    the pixels. What they cannot do is keep them: when the machine is recycled
+    to the next tenant or imaged by the provider, what is left is ciphertext
+    whose key was never written down.
+
+    Returns the pushed names for the post-harvest scrub, or None when this lane
+    cannot do it and the caller should fall back to the plaintext push.
+    """
+    lane_url = lanes.COMFY_LANES.get(lane_name) or ""
+    targets = _private_loader_targets(prompt)
+    if not targets:
+        return None
+    if not all(lane_has_private_node(lane_url, private_class) for _, private_class, _, _ in targets):
+        return None
+    pushed = []
+    for node, private_class, source_key, staged in targets:
+        try:
+            key = os.urandom(32)
+            iv = os.urandom(12)
+            ciphertext = AESGCM(key).encrypt(iv, staged.read_bytes(), None)
+            sealed_name = f"hivemind-sealed-{uuid.uuid4().hex}.bin"
+            _push_sealed_input(lane_name, sealed_name, ciphertext)
+        except Exception as exc:
+            print(f"[private-input] could not seal {staged.name} for {lane_name}: {exc}", file=sys.stderr)
+            return None
+        _rewrite_loader(node, private_class, source_key, {
+            "sealed_file": sealed_name,
+            "sealed_key": base64.urlsafe_b64encode(iv + key).decode("ascii").rstrip("="),
+        })
+        pushed.append(sealed_name)
+    return pushed
+
+
+def _push_sealed_input(lane_name, name, ciphertext):
+    """Hand the rented lane the ciphertext through the same upload route the
+    plaintext push uses, so there is one transport to keep working."""
+    from gateway import promptroutes as _promptroutes
+
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as handle:
+        handle.write(ciphertext)
+        staged = Path(handle.name)
+    try:
+        _promptroutes._push_file_to_lane_input(lane_name, name, staged)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def prompt_body(prompt, client_id=""):

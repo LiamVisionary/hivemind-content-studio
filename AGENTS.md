@@ -84,14 +84,34 @@ the sealing mechanism is complete and this is the contract it will use.
 - **A reference does not become a file at all on a local lane.** The gateway
   holds the decrypted bytes in memory under a 256-bit handle
   (`gateway/private_inputs.py`), the graph carries the handle where a filename
-  used to be, and `HivemindLoadPrivateImage`
-  (`packages/comfyui-custom-nodes/hivemind-private-media`) fetches them back
-  over loopback. Every local submit goes through `graphs.private_prompt_body`,
-  which is the only place the swap happens; `test_private_inputs.py` fails if a
-  runner builds its own body. It is gated on the lane reporting the node, and
-  skipped for any non-loopback lane, so a rented lane keeps the filename and
-  the file it needs pushed to it. Measured on a live upscale: the staged
-  plaintext existed for 0.3 s instead of the two hours before it.
+  used to be, and the loaders in
+  `packages/comfyui-custom-nodes/hivemind-private-media` fetch them back over
+  loopback. This covers stills, reference video and voice clips:
+  `LoadImage` → `HivemindLoadPrivateImage`, `LoadVideo` →
+  `HivemindLoadPrivateVideo`, `LoadAudio` → `HivemindLoadPrivateAudio`
+  (`graphs.PRIVATE_LOADERS`). VideoHelperSuite's loaders are deliberately NOT
+  in that table — `VHS_LoadVideo` returns four values and swapping it for a
+  one-output node would break every downstream link. Every local submit goes
+  through `graphs.private_prompt_body`, the only place the swap happens;
+  `test_private_inputs.py` fails if a runner builds its own body. Gated per
+  class on the lane reporting that node. Measured live: the staged plaintext
+  existed 0.3 s instead of two hours.
+- **A rented lane gets ciphertext, never plaintext.**
+  `graphs.stage_private_inputs_on_remote_lane` encrypts each staged input under
+  an AES-GCM key made for that job alone, pushes the ciphertext through the
+  same upload route, and puts the key in the graph; the node decrypts in
+  memory. What this protects is RESIDUE — whoever runs the box can read its
+  memory and its ComfyUI history while the job runs, and renting means
+  trusting it for that long, but what is left when the machine is recycled to
+  the next tenant is ciphertext whose key was never written down. A rental
+  without the pack falls back to the old plaintext push, so this is inert
+  until rentals are provisioned with it.
+- **A native runner cannot take bytes from memory.** ltx-2-mlx and friends read
+  a PATH, so the file must exist while the subprocess runs. It must not outlive
+  the job: `run_native_mlx_ltx_video` clears its keyframes and reference stills
+  in a `finally`. Files the job MADE always go; files it was HANDED go only
+  when they carry a staging prefix, because one of them may be a picture the
+  owner uploaded to the Canvas themselves.
 - **Staged plaintext lives only while a job could still read it.** Inputs are
   written decrypted into ComfyUI's input dir because `LoadImage` reads files;
   they are deleted once nothing on this machine is running

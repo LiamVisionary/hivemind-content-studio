@@ -1634,6 +1634,65 @@ class ZImageAppTests(unittest.TestCase):
             self.assertEqual(command[cfg_arg + 1], '4.0')
             self.assertEqual(app.jobs.jobs['job-keyed']['status'], 'success')
 
+    def test_native_mlx_ltx_runner_clears_the_keyframes_it_was_handed(self):
+        """A native runner hands its media to a subprocess by PATH, so the file
+        has to exist while ltx-2-mlx reads it. It does not have to outlive the
+        job: before this, the owner's start/middle/end keyframes waited on the
+        idle sweeper, which on a machine that generates all day is hours."""
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            input_dir = root / 'input'
+            output_dir = root / 'output'
+            ltx_dir = root / 'ltx-2-mlx'
+            model_path = root / 'model.safetensors'
+            input_dir.mkdir()
+            output_dir.mkdir()
+            ltx_dir.mkdir()
+            model_path.write_bytes(b'model')
+            # Staged by the pipeline from what the browser decrypted...
+            staged = input_dir / 'media-studio-inline-deadbeefdeadbeef.png'
+            staged.write_bytes(b'a keyframe the owner chose')
+            # ...and a picture the owner uploaded to the Canvas themselves.
+            own_upload = input_dir / 'holiday.png'
+            own_upload.write_bytes(b'their own file')
+
+            def fake_run(_job_id, _rec, command, **_kwargs):
+                # The file must still be readable while the subprocess runs.
+                self.assertTrue(staged.exists(), 'the runner must not lose its input mid-run')
+                out = Path(command[command.index('-o') + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b'video' * 600)
+                return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
+
+            variants = {key: dict(value) for key, value in app.config.LTX2_MLX_VARIANTS.items()}
+            variants['regular-q8-distilled']['model'] = str(model_path)
+
+            with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app.config, 'COMFY', root), \
+                 patch.object(app.config, 'OUT_DIR', output_dir), \
+                 patch.object(app.config, 'LTX2_MLX_DIR', ltx_dir), \
+                 patch.object(app.config, 'LTX2_MLX_VARIANTS', variants), \
+                 patch.object(app.native_mlx, '_run_native_ltx_subprocess', side_effect=fake_run), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'mirror_output_to_comfy_output', side_effect=lambda path, job_id=None: path):
+                app.native_mlx.run_native_mlx_ltx_video('job-cleanup', {
+                    'variant': 'regular-q8-distilled',
+                    'prompt': 'private keyed ltx prompt',
+                    'image_path': staged.name,
+                    'images': [
+                        {'image_path': staged.name, 'frame': 0, 'strength': 1.0, 'role': 'start'},
+                        {'image_path': own_upload.name, 'frame': 24, 'strength': 0.8, 'role': 'end'},
+                    ],
+                    'options': {'width': 480, 'height': 832, 'frames': 25, 'frame_rate': 24, 'seed': 7},
+                })
+
+            self.assertEqual(app.jobs.jobs['job-cleanup']['status'], 'success')
+            self.assertFalse(staged.exists(), 'pipeline staging must not outlive its job')
+            self.assertTrue(own_upload.exists(), "a person's own upload is theirs to come back to")
+
     def test_native_mlx_ltx_runner_uses_extend_command_for_source_video(self):
         app = load_app()
         with TemporaryDirectory() as td:

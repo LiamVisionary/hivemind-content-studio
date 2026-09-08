@@ -286,6 +286,38 @@ def push_prompt_inputs_to_lane(body, lane):
     return pushed
 
 
+def stage_graph_inputs_on_lane(graph, body, lane):
+    """Put a graph's inputs on a rented lane, sealed when the lane can take
+    them that way and plaintext when it cannot.
+
+    `graph` is rewritten in place, so a caller that re-encodes from it submits
+    the sealed form. Returns the staged names for the post-harvest scrub.
+    """
+    sealed = graphs.stage_private_inputs_on_remote_lane(graph, lane)
+    if sealed is not None:
+        return sealed
+    return push_prompt_inputs_to_lane(body, lane)
+
+
+def stage_prompt_inputs_on_lane(body, lane):
+    """The same decision for a caller that only holds the encoded body.
+
+    Returns (staged names, body) — the body is re-encoded when the graph was
+    rewritten, and handed back unchanged when it was not.
+    """
+    try:
+        payload = json.loads(body)
+        graph = payload.get("prompt") if isinstance(payload, dict) else None
+    except Exception:
+        graph = None
+    if isinstance(graph, dict):
+        sealed = graphs.stage_private_inputs_on_remote_lane(graph, lane)
+        if sealed is not None:
+            payload["prompt"] = graph
+            return sealed, json.dumps(payload).encode("utf-8")
+    return push_prompt_inputs_to_lane(body, lane), body
+
+
 def _comfy_history_output_refs(history):
     refs = []
     for node_out in ((history or {}).get("outputs") or {}).values():

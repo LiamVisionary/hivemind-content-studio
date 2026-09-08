@@ -1445,6 +1445,12 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
     output_frame_label = f"extend-{extension_output_frames}f" if operation == 'extend' else f"{frames}f"
     out = out_dir / f"{spec.get('output_prefix', 'mlx_ltx_eros_mobile')}_{job_id}_{output_frame_label}.mp4"
     reference_video_path = None
+    # Everything this job staged as a plaintext file for the subprocess to
+    # read: keyframes, reference stills. Cleared in the finally below. The
+    # anchor-canvas cache is deliberately NOT in here — it is content-addressed
+    # and reused across jobs, and the prefix guard in the finally skips it
+    # anyway; the idle sweep is what clears that.
+    _job_staged_inputs = [item["path"] for item in keyframes if item.get("path")]
     # The composed head-swap guide is the owner's footage with their face
     # burned into a chroma strip. It was staged and never unlinked, so it
     # outlived every job that made one and waited on the input sweeper.
@@ -1531,6 +1537,7 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             if not source_video.exists() or not any(util._is_under(source_video, root) for root in allowed):
                 raise RuntimeError("head-swap source video is outside private Comfy storage or does not exist")
             reference_image = _resolve_native_ltx_image_path(native.get('reference_image_path'))
+            _job_staged_inputs.append(reference_image)
             if not reference_image.exists() or not any(util._is_under(reference_image, root) for root in allowed):
                 raise RuntimeError("head-swap face image is outside private Comfy storage or does not exist")
             # The BFS adapter is what teaches the model to read the reserved strip
@@ -1570,6 +1577,7 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 raise RuntimeError("input video is outside private Comfy storage or does not exist")
         elif operation == 'ic-lora':
             reference_image = _resolve_native_ltx_image_path(native.get('reference_image_path'))
+            _job_staged_inputs.append(reference_image)
             if not reference_image.exists() or not any(util._is_under(reference_image, root) for root in allowed):
                 raise RuntimeError("IC-LoRA reference image is outside private Comfy storage or does not exist")
             if not native_loras:
@@ -1903,11 +1911,31 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
     except Exception as e:
         rec.update({"status": "error", "finished_at": util.now_iso(), "error": str(e), "progress_phase": "error"})
     finally:
+        # A native runner hands its media to a subprocess by PATH, so unlike a
+        # ComfyUI lane it cannot take the bytes from memory — the file has to
+        # exist while ltx-2-mlx reads it. What it does not have to do is
+        # outlive the job: without this the owner's keyframes and reference
+        # stills waited on the idle sweeper, which on a machine that generates
+        # all day is hours. Only pipeline staging is touched; a picture the
+        # owner uploaded to the Canvas under their own name is theirs to keep.
+        # This job made these two; they always go.
         for staged in (reference_video_path, headswap_guide_path):
             if not staged:
                 continue
             try:
-                staged.unlink(missing_ok=True)
+                Path(staged).unlink(missing_ok=True)
+            except Exception:
+                pass
+        # These the job was HANDED, and one of them may be a picture the owner
+        # uploaded to the Canvas under their own name — theirs to come back to.
+        # Only pipeline staging goes.
+        for staged in _job_staged_inputs:
+            if not staged:
+                continue
+            try:
+                candidate = Path(staged)
+                if candidate.name.startswith(_media.PRIVATE_INPUT_PREFIXES):
+                    candidate.unlink(missing_ok=True)
             except Exception:
                 pass
     _history.append_history(rec)

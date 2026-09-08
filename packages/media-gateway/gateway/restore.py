@@ -614,7 +614,7 @@ def _restore_chunk_on_lane(project, chunk, *, source_name, lane_name, lane_url, 
             raise RuntimeError(
                 f"lane '{lane_name}' is remote and its outputs must be sealed: create the owner vault first"
             )
-        pushed_inputs = promptroutes.push_prompt_inputs_to_lane(body, lane_name)
+        pushed_inputs = promptroutes.stage_graph_inputs_on_lane(graph, body, lane_name)
 
     request = Request(
         f"{lane_url}/prompt",
