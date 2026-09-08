@@ -57,6 +57,7 @@ from .api import hivemindos as hivemindos_routes
 from .api import image as image_routes
 from .api import ingredients as ingredients_routes
 from .api import lanes as lanes_routes
+from .api import media_models as media_models_routes
 from .api import muapi as muapi_routes
 from .api import oauth as oauth_routes
 from .api import passbook as passbook_routes
@@ -326,6 +327,11 @@ def _machine_route_allowed(path: str, method: str) -> bool:
         "/api/providers",
         "/api/runtime",
         "/api/telemetry/generations",
+        # The shared media-model catalog: a projection of /api/catalog and
+        # /api/providers in the vocabulary HivemindOS reads, holding model
+        # ids, readiness sentences and credential NAMES — nothing the three
+        # reads above do not already hand a caller on this port.
+        "/api/media-models",
     }:
         return True
     if path == "/api/runs" and method in {"GET", "POST"}:
@@ -760,6 +766,7 @@ def build_control_app(
         accounts_routes,
         shell_routes,
         catalog_routes,
+        media_models_routes,
         bridge_routes,
         prompting_routes,
         hivemindos_routes,
@@ -782,6 +789,9 @@ def build_control_app(
         approvals_routes,
     ):
         routes.register(app, ctx)
+    # Staged plaintext a crashed request left behind goes at boot, and
+    # hourly after that. Registered here because build_context has no app.
+    app.state.startup_hooks.append(ctx.start_media_studio_staging_sweeper)
 
     # Registered last so every API route above wins; serves root-level build
     # files the unified frontend references absolutely (/hosted-local-ai.js,

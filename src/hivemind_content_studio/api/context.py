@@ -150,6 +150,10 @@ class StudioContext:
     repository_root: Path
     open_gen_dist: Path
     media_studio_input_root: Path
+    # Clears staged plaintext a crash left behind; started by the app,
+    # which is the only side that has startup hooks.
+    start_media_studio_staging_sweeper: Any
+    sweep_media_studio_staging: Any
     generation_timings: GenerationTimings
     # Studio-initiated generation attempts, automatic and prompt-free
     # (studio_telemetry): read back by /api/telemetry/generations.
@@ -383,10 +387,68 @@ def build_context(
         os.environ.get("CONTENT_STUDIO_FRONTEND_DIST")
         or repository_root / "packages/open-generative-ai/dist"
     ).expanduser()
-    # Staging for external tools (ComfyUI reads plaintext from here and the
-    # sweeper removes it). Deliberately NOT per-account: nothing durable lives
-    # here, and the files are named by mkstemp rather than being addressable.
+    # Staging for external tools: the owner's browser decrypts a reference or a
+    # keyframe and posts it inline, and it lands here in plaintext because the
+    # gateway and ComfyUI can only take a file. Deliberately NOT per-account:
+    # nothing durable lives here, and the files are named by mkstemp rather
+    # than being addressable.
+    #
+    # Each request unlinks its own in a `finally` — but only on the paths that
+    # reach one. This comment used to say a sweeper removed the rest and no
+    # sweeper existed, so a crash between staging and the unlink left the
+    # owner's decrypted media here for good: six such files from 2026-08-12
+    # were still on disk on 2026-09-07. _sweep_media_studio_staging below is
+    # now that sweeper.
     media_studio_input_root = Path(runs.store.path).parent / "uploads" / "media-studio"
+    # Nothing here is meant to outlive the request that made it. An hour is far
+    # past the longest staging-to-submit path (a multi-hundred-megabyte clip
+    # transcoded and uploaded) and far short of leaving plaintext lying about.
+    MEDIA_STUDIO_STAGING_MAX_AGE_SECONDS = float(
+        os.environ.get("CONTENT_STUDIO_STAGING_MAX_AGE", "3600")
+    )
+
+    def _sweep_media_studio_staging(*, everything: bool = False) -> int:
+        """Delete staging this machine can no longer be using.
+
+        `everything` is for boot, where nothing can be in flight by definition,
+        so a crash leftover from the last run goes immediately rather than
+        waiting out its hour.
+        """
+        root = media_studio_input_root
+        if not root.is_dir():
+            return 0
+        cutoff = time.time() - MEDIA_STUDIO_STAGING_MAX_AGE_SECONDS
+        removed = 0
+        for candidate in root.iterdir():
+            if not candidate.is_file():
+                continue
+            try:
+                if not everything and candidate.stat().st_mtime > cutoff:
+                    continue
+                candidate.unlink()
+                removed += 1
+            except OSError:
+                continue
+        if removed:
+            log.info("cleared %d staged media file(s) the studio no longer needs", removed)
+        return removed
+
+    def _media_studio_staging_sweeper() -> None:
+        while True:
+            time.sleep(600)
+            try:
+                _sweep_media_studio_staging()
+            except Exception:  # a sweep must never take the studio down
+                log.exception("staged media sweep failed")
+
+    def _start_media_studio_staging_sweeper() -> None:
+        _sweep_media_studio_staging(everything=True)
+        threading.Thread(
+            target=_media_studio_staging_sweeper,
+            name="media-studio-staging-sweeper",
+            daemon=True,
+        ).start()
+
     generation_timings = GenerationTimings(Path(runs.store.path).parent / "generation-timings.jsonl")
     studio_generations = StudioGenerationLedger.beside(runs.store.path)
     ingredients_sheet_compositor = Path(
@@ -700,6 +762,8 @@ def build_context(
         repository_root=repository_root,
         open_gen_dist=open_gen_dist,
         media_studio_input_root=media_studio_input_root,
+        start_media_studio_staging_sweeper=_start_media_studio_staging_sweeper,
+        sweep_media_studio_staging=_sweep_media_studio_staging,
         generation_timings=generation_timings,
         studio_generations=studio_generations,
         ingredients_sheet_compositor=ingredients_sheet_compositor,
