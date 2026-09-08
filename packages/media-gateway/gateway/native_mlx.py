@@ -2,12 +2,14 @@
 video - and the head-swap guide builder. No ComfyUI in the path."""
 import hashlib
 import json
+import contextlib
 import os
 import re
 import select
 import subprocess
 import threading
 import time
+import sys
 import tempfile
 import uuid
 import shutil
@@ -1330,10 +1332,72 @@ def native_job_cancel_requested(job_id):
         return bool((jobs.jobs.get(job_id) or {}).get('cancel_requested'))
 
 
-def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
+# Turn the anonymous-input path off without a deploy if a tool ever stops
+# reading /dev/fd. On by default: measured against ltx-2-mlx's own
+# load_image_and_preprocess, through `uv run`, which is the real command shape.
+ANONYMOUS_NATIVE_INPUTS = os.environ.get("ZIMG_ANONYMOUS_NATIVE_INPUTS", "1") != "0"
+
+
+@contextlib.contextmanager
+def _anonymous_input_arguments(cmd, paths):
+    """Hand the subprocess its media with no name for anything else to open.
+
+    A native runner reads a PATH, so the bytes cannot come from memory the way
+    a ComfyUI lane's do — but the path does not have to be one that exists. The
+    file is copied into a temporary that is unlinked while still open, so the
+    inode survives only as this process's descriptor, and the child is given
+    `/dev/fd/N` instead of a filename. For the length of the render there is
+    nothing in any directory to list, and the original named copy is removed as
+    soon as the nameless one is made.
+
+    Measured before shipping: ltx-2-mlx's own decode_image and
+    load_image_and_preprocess read /dev/fd/N and return the same bfloat16
+    tensor they return from a file, and the descriptor survives `uv run`.
+
+    Any path that cannot be made anonymous keeps its filename, so a failure
+    here costs privacy rather than the render.
+    """
+    if not ANONYMOUS_NATIVE_INPUTS or not paths:
+        yield cmd, ()
+        return
+    handles = []
+    mapping = {}
+    try:
+        for source in paths:
+            try:
+                original = Path(source)
+                payload = original.read_bytes()
+                descriptor, temporary = tempfile.mkstemp(suffix=original.suffix)
+                os.write(descriptor, payload)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                # The name goes here, while the descriptor keeps the bytes.
+                os.unlink(temporary)
+                os.set_inheritable(descriptor, True)
+                handles.append(descriptor)
+                mapping[str(original)] = f"/dev/fd/{descriptor}"
+                if original.name.startswith(_media.PRIVATE_INPUT_PREFIXES):
+                    original.unlink(missing_ok=True)
+            except Exception as exc:
+                print(f"[private-input] {source} keeps its filename: {exc}", file=sys.stderr)
+        rewritten = [mapping.get(str(argument), argument) for argument in cmd]
+        yield rewritten, tuple(handles)
+    finally:
+        for descriptor in handles:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400, anonymize_paths=()):
     """Run ltx-2-mlx while publishing tqdm progress from both output streams."""
     if native_job_cancel_requested(job_id):
         raise NativeJobCancelled(f"job {job_id} was cancelled before the render started")
+    with _anonymous_input_arguments(cmd, anonymize_paths) as (cmd, inherited):
+        return _spawn_native_ltx_subprocess(job_id, rec, cmd, cwd=cwd, env=env, timeout=timeout, inherited=inherited)
+
+
+def _spawn_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400, inherited=()):
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -1341,6 +1405,8 @@ def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
+        # The nameless inputs, handed to the child as descriptors it inherits.
+        pass_fds=inherited,
         # Its own process group, so shutdown can kill the whole render — the
         # runner spawns workers of its own, and terminating only the parent
         # leaves them holding the GPU.
@@ -1844,6 +1910,10 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 cwd=str(config.LTX2_MLX_DIR),
                 env=env,
                 timeout=util.int_option(options, 'runtime_timeout_seconds', 2400, 60, 14400),
+                # The owner's keyframes and reference stills go in nameless: the
+                # render is the long part, and for all of it there is nothing in
+                # any directory for another process to find.
+                anonymize_paths=[str(path) for path in _job_staged_inputs if path],
             )
             elapsed = round(time.monotonic() - t0, 2)
             stdout = proc.stdout.strip()

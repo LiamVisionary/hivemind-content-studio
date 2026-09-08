@@ -106,12 +106,21 @@ the sealing mechanism is complete and this is the contract it will use.
   the next tenant is ciphertext whose key was never written down. A rental
   without the pack falls back to the old plaintext push, so this is inert
   until rentals are provisioned with it.
-- **A native runner cannot take bytes from memory.** ltx-2-mlx and friends read
-  a PATH, so the file must exist while the subprocess runs. It must not outlive
-  the job: `run_native_mlx_ltx_video` clears its keyframes and reference stills
-  in a `finally`. Files the job MADE always go; files it was HANDED go only
-  when they carry a staging prefix, because one of them may be a picture the
-  owner uploaded to the Canvas themselves.
+- **A native runner gets a path that does not exist.** ltx-2-mlx reads a PATH,
+  so the bytes cannot come from memory the way a ComfyUI lane's do — but the
+  path does not have to name anything. `_anonymous_input_arguments` copies each
+  input into a temporary that is unlinked while still open, so the inode
+  survives only as a descriptor, and passes the child `/dev/fd/N` (`pass_fds`).
+  The named copy is deleted the moment the nameless one exists, so for the
+  whole render there is nothing in any directory to list. Measured end to end
+  before shipping: the production command with `--image /dev/fd/3` and the
+  named file already gone rendered 25 frames whose first frame is RGB
+  (39,118,89) against a keyframe of (40,120,90) — the tool really read it.
+  Turn it off with `ZIMG_ANONYMOUS_NATIVE_INPUTS=0`; a path that cannot be made
+  nameless keeps its filename, so a failure costs privacy, never the render.
+  `run_native_mlx_ltx_video` still clears its staging in a `finally` as the
+  backstop: files the job MADE always go, files it was HANDED go only when they
+  carry a staging prefix, because one may be a picture the owner uploaded.
 - **Staged plaintext lives only while a job could still read it.** Inputs are
   written decrypted into ComfyUI's input dir because `LoadImage` reads files;
   they are deleted once nothing on this machine is running

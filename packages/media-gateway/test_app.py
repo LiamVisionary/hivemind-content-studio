@@ -1693,6 +1693,63 @@ class ZImageAppTests(unittest.TestCase):
             self.assertFalse(staged.exists(), 'pipeline staging must not outlive its job')
             self.assertTrue(own_upload.exists(), "a person's own upload is theirs to come back to")
 
+    def test_a_native_input_goes_to_the_subprocess_with_no_name(self):
+        """A native runner reads a PATH, so the bytes cannot come from memory —
+        but the path does not have to be one that exists. The file is copied
+        into a temporary that is unlinked while still open, and the child is
+        handed /dev/fd/N. For the length of the render there is nothing in any
+        directory to list."""
+        app = load_app()
+        with TemporaryDirectory() as td:
+            staged = Path(td) / 'media-studio-inline-deadbeef.png'
+            staged.write_bytes(b'\x89PNG\r\n\x1a\n' + b'the owner\'s keyframe')
+            cmd = ['uv', 'run', 'ltx-2-mlx', '--image', str(staged), '0', '1.0']
+
+            with app.native_mlx._anonymous_input_arguments(cmd, [str(staged)]) as (rewritten, inherited):
+                self.assertEqual(len(inherited), 1)
+                swapped = rewritten[rewritten.index('--image') + 1]
+                self.assertTrue(swapped.startswith('/dev/fd/'), swapped)
+                self.assertNotIn(str(staged), rewritten, 'no filename may reach the command line')
+                self.assertFalse(staged.exists(), 'the named copy goes as soon as the nameless one exists')
+                # And the bytes are really there for a process holding the fd.
+                self.assertEqual(os.pread(inherited[0], 8, 0), b'\x89PNG\r\n\x1a\n')
+            with self.assertRaises(OSError):
+                os.fstat(inherited[0])  # closed when the render is over
+
+    def test_a_child_process_can_read_the_nameless_input(self):
+        # The whole point: an inherited descriptor, no directory entry.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            staged = Path(td) / 'media-studio-inline-deadbeef.bin'
+            staged.write_bytes(b'exactly these bytes')
+            with app.native_mlx._anonymous_input_arguments(['x', str(staged)], [str(staged)]) as (rewritten, inherited):
+                path = rewritten[1]
+                result = subprocess.run(
+                    [sys.executable, '-c', 'import sys;sys.stdout.write(open(sys.argv[1],"rb").read().decode())', path],
+                    pass_fds=inherited, capture_output=True, text=True, timeout=60,
+                )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'exactly these bytes')
+
+    def test_a_file_that_cannot_be_made_nameless_keeps_its_filename(self):
+        # Failing here must cost privacy, never the render.
+        app = load_app()
+        cmd = ['uv', 'run', '--image', '/does/not/exist.png']
+        with app.native_mlx._anonymous_input_arguments(cmd, ['/does/not/exist.png']) as (rewritten, inherited):
+            self.assertEqual(rewritten, cmd)
+            self.assertEqual(inherited, ())
+
+    def test_the_anonymous_path_can_be_turned_off_without_a_deploy(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            staged = Path(td) / 'media-studio-inline-deadbeef.png'
+            staged.write_bytes(b'pixels')
+            with patch.object(app.native_mlx, 'ANONYMOUS_NATIVE_INPUTS', False):
+                with app.native_mlx._anonymous_input_arguments(['x', str(staged)], [str(staged)]) as (rewritten, inherited):
+                    self.assertEqual(rewritten, ['x', str(staged)])
+                    self.assertEqual(inherited, ())
+            self.assertTrue(staged.exists())
+
     def test_native_mlx_ltx_runner_uses_extend_command_for_source_video(self):
         app = load_app()
         with TemporaryDirectory() as td:
