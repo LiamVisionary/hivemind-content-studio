@@ -922,6 +922,13 @@ export function GpuMachinesView({ active }) {
   // The one failure whose repair is a restart rather than another poll: a
   // control API older than this build, missing the rental planner route.
   const [needsRestart, setNeedsRestart] = useState(false);
+  // What repairs a marketplace that is not configured, as the server names it
+  // (`marketplace.remedy`: 'connect-account' | 'passbook' | ''). Keyed off the
+  // field rather than the sentence: since 2026-09-07 hosted rentals bill the
+  // owner's HivemindOS credits and need no marketplace key on this machine,
+  // so the ordinary "nothing configured" state is repaired by connecting the
+  // account on the Models page — a button, not a restart.
+  const [marketRemedy, setMarketRemedy] = useState('');
   const [renting, setRenting] = useState(false);
   const [prefer, setPrefer] = useState('balanced');
   const [destroyingId, setDestroyingId] = useState(null);
@@ -935,6 +942,19 @@ export function GpuMachinesView({ active }) {
   const refresh = useCallback(async (withOffers) => {
     try {
       const rentalData = await api('/api/gpu-rentals');
+      if (rentalData.marketplace?.configured === false) {
+        // No marketplace on this machine answers 200 now (2026-09-07) — a
+        // state, not an outage — with the reason in the body: keys never
+        // added, or sealed behind a locked vault. Shown exactly where the 503
+        // used to land, and nothing else moves: no machines and no plans
+        // until it is done.
+        setNeedsRestart(false);
+        setMarketRemedy(rentalData.marketplace.remedy || '');
+        if (hasDataRef.current) setStale(rentalData.marketplace.detail);
+        else setLoadError(rentalData.marketplace.detail);
+        return;
+      }
+      setMarketRemedy('');
       setRentals(rentalData.rentals || []);
       setAccount(rentalData.account || null);
       setFailures((rentalData.failures || []).filter(
@@ -980,10 +1000,25 @@ export function GpuMachinesView({ active }) {
       // last good data and say quietly that it went stale; only a view with
       // NOTHING on it gets the hard error.
       setNeedsRestart(Boolean(err?.needsRestart));
+      setMarketRemedy('');
       if (hasDataRef.current) setStale(message);
       else setLoadError(message);
     }
   }, []);
+
+  // The action beside a marketplace notice. The server's sentence stays the
+  // sentence; only the button changes with `marketRemedy`.
+  const connectAccountAction = marketRemedy === 'connect-account'
+    ? (
+      <Button
+        size="sm"
+        icon="plug"
+        onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'models' } }))}
+      >
+        Connect HivemindOS account
+      </Button>
+    )
+    : null;
 
   useEffect(() => {
     if (!active) {
@@ -1199,10 +1234,15 @@ export function GpuMachinesView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+      {/* refresh: a function, not the shared event — this page's rentals, plans
+          and account come from its OWN 30 s poll, which the hub event does not
+          drive, and withOffers re-quotes the marketplace prices with them. The
+          error banner's "Try again" only exists once a load has failed. */}
       <HubToolbar
         kicker="Owner compute"
         title="Rented GPUs"
         subtitle="Billed per second while running"
+        refresh={() => refresh(true)}
       />
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         {loadError && (
@@ -1214,7 +1254,7 @@ export function GpuMachinesView({ active }) {
             <small className="min-w-0 flex-1 text-[12px] text-danger">{loadError}</small>
             {needsRestart
               ? <StudioRestartAction />
-              : (
+              : connectAccountAction || (
                 <Button size="sm" icon="refresh" onClick={() => refresh(true)}>
                   Try again
                 </Button>
@@ -1242,7 +1282,7 @@ export function GpuMachinesView({ active }) {
               {' '}{stale}{' '}
               Retrying every {Math.round(POLL_MS / 1000)}s.
             </span>
-            {needsRestart ? <StudioRestartAction /> : null}
+            {needsRestart ? <StudioRestartAction /> : connectAccountAction}
           </Card>
         )}
         {failures.length > 0 && (

@@ -214,3 +214,24 @@ test('formatTelemetryBytes reads a size and nothing else', async () => {
     assert.equal(formatTelemetryBytes(-1), '');
     assert.equal(formatTelemetryBytes('nope'), '');
 });
+
+test('a History card whose output has no recorded workflow is "unavailable", from a 200', async () => {
+    // 2026-09-07: the workflow route answers 200 + workflow:null for an output
+    // with no graph behind it (an imported file) instead of a 404, so the
+    // background read on every card is not a console error per card. The hub
+    // must read that exactly as it read the 404: unavailable, cached, no retry.
+    const hub = await freshHub();
+    const calls = [];
+    globalThis.fetch = async (url) => {
+        calls.push(String(url));
+        return jsonResponse({ ok: true, workflow: null, unavailable: 'Exact Canvas workflow is unavailable for this output' });
+    };
+    hub.hubState.canvasHistory = [{ history_id: 'canvas_imported', media_type: 'image', file_format: 'png' }];
+
+    assert.equal(await hub.inspectCanvasHistoryEntry('canvas_imported', { allowBridge: false }), null);
+    assert.equal(hub.hubState.canvasSetups.canvas_imported.unavailable, true);
+    assert.equal(calls.length, 1);
+    // Asked again, the cached "none" answers — the request is not repeated.
+    assert.equal(await hub.inspectCanvasHistoryEntry('canvas_imported', { allowBridge: false }), null);
+    assert.equal(calls.length, 1);
+});

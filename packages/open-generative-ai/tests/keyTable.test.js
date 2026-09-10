@@ -145,6 +145,10 @@ const REVIEWED_SHAPES = [
     // "Cancel this production?" over "Cancel production" — and collapsing them
     // would leave the modal with a title or a button, not both.
     'cancel production',
+    // The same pair again, for the composer's "Start fresh": the menu item and
+    // the dialog's confirm button are one key ('common.startFresh'), and
+    // 'common.startFreshTitle' is the question that key's press now asks.
+    'fresh start',
 ];
 
 test('no two keys say the same thing in different words', async () => {
@@ -276,7 +280,11 @@ const COVERED = [
     'hub/views/models/AssetDetail.jsx',
     'hub/views/models/CivitaiBrowser.jsx',
     'hub/views/models/InstalledAssets.jsx',
+    'hub/views/models/ModelDetail.jsx',
     'hub/views/models/RunnableModels.jsx',
+    // The one control that decides what leaves the machine inside a file. Its
+    // words ARE the consent, so they are decided in one place.
+    'studios/frame/DownloadAction.jsx',
     // The studios' advanced panels — the dials behind the fold, which is where
     // a hint gets written twice because nobody has both open at once.
     'studios/image/ImageSettingsPanel.jsx',

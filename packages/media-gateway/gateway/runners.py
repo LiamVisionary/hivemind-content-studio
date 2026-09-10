@@ -335,7 +335,7 @@ def run_comfy_api_image(job_id, prompt, options=None):
                 raise RuntimeError(
                     f"lane '{lane_name}' is remote and its outputs must be sealed: create the owner vault first"
                 )
-            pushed_inputs = promptroutes.push_prompt_inputs_to_lane(body, lane_name)
+            pushed_inputs = promptroutes.stage_graph_inputs_on_lane(graph, body, lane_name)
         t0 = time.monotonic()
         client_id = f"zimage-auto-{job_id}"
         try:

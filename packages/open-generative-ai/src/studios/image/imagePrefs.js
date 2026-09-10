@@ -270,3 +270,23 @@ export function startFreshPatch() {
         lastSubmittedContext: null,
     };
 }
+
+// What that press is about to take, in the words a person would use — the list
+// the confirm dialog reads out. It lives beside the patch ON PURPOSE: a dialog
+// that promises one thing while startFreshPatch clears another is worse than no
+// dialog, so the two are edited together or not at all. Only what is actually
+// there is named; an empty list means there is nothing to lose and nothing to
+// ask about.
+export function startFreshSummary(s) {
+    const engine = s || {};
+    const items = [];
+    if (String(engine.prompt || '').trim()) items.push('what you typed');
+    const pictures = Array.isArray(engine.uploadedImageUrls) ? engine.uploadedImageUrls.length : 0;
+    if (pictures) items.push(`${pictures} attached picture${pictures === 1 ? '' : 's'}`);
+    const regions = Array.isArray(engine.regions) ? engine.regions.length : 0;
+    if (regions) items.push(`${regions} region box${regions === 1 ? '' : 'es'}`);
+    if ([engine.coupleShared, engine.coupleA, engine.coupleB].some((text) => String(text || '').trim())) {
+        items.push('the couple character text');
+    }
+    return items;
+}

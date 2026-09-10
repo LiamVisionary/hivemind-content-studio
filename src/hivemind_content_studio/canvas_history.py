@@ -429,6 +429,16 @@ class CanvasHistoryStore:
         }
 
 
+class CanvasWorkflowMissing(RuntimeError):
+    """The output exists and the gateway recorded no workflow for it.
+
+    An imported file, or a render older than the workflow index. Distinct from
+    the gateway being unreachable: History probes every card that scrolls into
+    view, and this answer may be cached and never asked again, while an outage
+    must not be.
+    """
+
+
 class CanvasGatewayClient:
     def __init__(
         self,
@@ -572,6 +582,10 @@ class CanvasGatewayClient:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise CanvasWorkflowMissing("Exact Canvas workflow is unavailable for this output") from exc
+            raise RuntimeError("Exact Canvas workflow is unavailable for this output") from exc
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise RuntimeError("Exact Canvas workflow is unavailable for this output") from exc
         workflow = payload.get("workflow") if isinstance(payload, dict) else None

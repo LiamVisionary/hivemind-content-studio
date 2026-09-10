@@ -1,15 +1,29 @@
 // Models tab — what this machine can actually generate with.
 //
-// Until now this list only existed inside each studio's picker, so there was no
-// answer to "what is installed and what can it do" without opening a studio and
-// scrolling a dropdown. Each card names the workflow, what it accepts, and hands
-// straight over to the studio that runs it.
-import { useMemo, useState } from 'react';
+// Until this page existed the list only lived inside each studio's picker, so
+// there was no answer to "what is installed and what can it do" without opening
+// a studio and scrolling a dropdown.
+//
+// The first version of this grid answered that question in the wrong currency.
+// Every card carried an id in monospace, a pixel size, a step count and a row of
+// base-model chips — six technical facts about a lane, none of which tells you
+// what the model MAKES. A page of those reads as a config file. So the card now
+// shows the two things a person chooses by, a picture and a sentence, and every
+// number moved behind a click: the card opens ModelDetail, which is where the
+// id, the defaults and the accepted inputs live for the times they matter.
+//
+// The picture comes from the bridge (lib/modelArt.js → model-artwork.js), which
+// matches the model on Civitai and Hugging Face and keeps the answer. A model
+// nothing matched keeps a tinted tile of its own colour rather than a hole.
+import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { filterModels, modelCapabilityChips, modelTypeLabel, sortModels } from '../../../lib/modelLibrary.js';
+import { filterModels, modelTypeLabel, sortModels } from '../../../lib/modelLibrary.js';
+import { loadModelCard, modelBlurb } from '../../../lib/modelArt.js';
 import { localAI, isLocalAIAvailable } from '../../../lib/localInferenceClient.js';
-import { Button, EmptyState, Pill, Segmented, TextInput } from '../../../ui/kit.jsx';
+import { Button, EmptyState, Pill, Segmented, TextInput, cx } from '../../../ui/kit.jsx';
 import { Icon } from '../../../ui/icons.jsx';
+import { ModelArt } from './ModelArt.jsx';
+import { ModelDetail } from './ModelDetail.jsx';
 import { openModelInStudio } from './openInStudio.js';
 import { t, tf } from '../../../lib/i18n.js';
 
@@ -61,60 +75,66 @@ function MachineMemory() {
   );
 }
 
-function Chip({ children }) {
-  return (
-    <span className="rounded-sm bg-bg3 px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink3">{children}</span>
-  );
-}
-
-function ModelCard({ model }) {
-  const chips = modelCapabilityChips(model);
-  const isVideo = String(model.type || '').toLowerCase() === 'video';
+function ModelCard({ model, onOpen }) {
+  const [card, setCard] = useState(null);
   const unavailable = model.ready === false;
+  const isVideo = String(model.type || '').toLowerCase() === 'video';
+
+  useEffect(() => {
+    let alive = true;
+    void loadModelCard(model).then((resolved) => { if (alive) setCard(resolved); });
+    return () => { alive = false; };
+  }, [model.id]);
+
   return (
-    <div className="flex flex-col gap-3 rounded-md border border-line1 bg-bg2 p-3.5 transition-colors hover:border-line2">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <h3 className="min-w-0 truncate text-[13px] font-semibold text-ink1">{model.name}</h3>
-            {model.featured ? <Pill tone="honey">{t('localModels.featured')}</Pill> : null}
-          </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-ink3">{model.description}</p>
+    // The whole card opens the model. It is a button, not a div with a click
+    // handler, so it is reachable by keyboard and announced as one thing.
+    <button
+      type="button"
+      onClick={() => onOpen(model, card)}
+      className={cx(
+        'group flex flex-col overflow-hidden rounded-md border border-line1 bg-bg2 text-left',
+        'transition-colors hover:border-line2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-honey/60',
+      )}
+    >
+      <div className="relative">
+        <ModelArt model={model} card={card} className="aspect-[4/3] w-full" />
+        <div className="pointer-events-none absolute inset-x-2 top-2 flex items-start justify-between gap-2">
+          <Pill tone="neutral" className="bg-bg0/70 backdrop-blur-sm">{modelTypeLabel(model)}</Pill>
+          {/* Only the exception is worth a badge. A green "Ready" on every card
+              is a row of noise that makes the one offline model harder to see. */}
+          {unavailable ? <Pill tone="warn" dot className="bg-bg0/70 backdrop-blur-sm">{t('providers.offline')}</Pill> : null}
         </div>
-        {/* Two facts, two pills: what kind of model, and whether it can run
-            right now — a ready model used to show a green "Image" and an
-            offline one lost its type. */}
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Pill tone="neutral">{modelTypeLabel(model)}</Pill>
-          <Pill tone={unavailable ? 'warn' : 'ok'} dot>{unavailable ? t('providers.offline') : t('common.ready')}</Pill>
+        {/* Straight to the studio without reading the details first. */}
+        <div className="absolute inset-x-2 bottom-2 flex justify-end opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+          <Button
+            size="sm"
+            variant="primary"
+            icon={isVideo ? 'video' : 'image'}
+            disabled={unavailable}
+            title={isVideo ? t('runnable.openInVideo') : t('runnable.openInImage')}
+            onClick={(event) => { event.stopPropagation(); openModelInStudio(model); }}
+          >
+            {t('runnable.open')}
+          </Button>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        {chips.map((chip) => <Chip key={chip}>{chip}</Chip>)}
-        {(model.compatibleBaseModels || []).slice(0, 2).map((base) => <Chip key={base}>{base}</Chip>)}
+      <div className="flex min-w-0 flex-col gap-1 p-3">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <h3 className="min-w-0 truncate text-[13px] font-semibold text-ink1">{model.name}</h3>
+          {model.featured ? <Icon name="star" size={12} className="shrink-0 text-honey" /> : null}
+        </div>
+        <p className="line-clamp-2 text-xs leading-relaxed text-ink3">{modelBlurb(model, card)}</p>
       </div>
-
-      <div className="mt-auto flex items-center justify-between gap-2 pt-0.5">
-        <span className="min-w-0 truncate font-mono text-[10px] text-ink3" title={model.id}>{model.id}</span>
-        <Button
-          size="sm"
-          variant="neutral"
-          icon={isVideo ? 'video' : 'image'}
-          disabled={unavailable}
-          onClick={() => openModelInStudio(model)}
-          title={isVideo ? t('runnable.openInVideo') : t('runnable.openInImage')}
-        >
-          {t('runnable.open')}
-        </Button>
-      </div>
-    </div>
+    </button>
   );
 }
 
 export function RunnableModels({ models, loading, onOpenStore = null }) {
   const [type, setType] = useState('all');
   const [query, setQuery] = useState('');
+  const [opened, setOpened] = useState(null);
 
   const counts = useMemo(() => ({
     all: models.length,
@@ -157,8 +177,10 @@ export function RunnableModels({ models, loading, onOpenStore = null }) {
 
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         {visible.length ? (
-          <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
-            {visible.map((model) => <ModelCard key={model.id} model={model} />)}
+          <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(220px,1fr))]">
+            {visible.map((model) => (
+              <ModelCard key={model.id} model={model} onOpen={(picked, card) => setOpened({ model: picked, card })} />
+            ))}
           </div>
         ) : (
           <EmptyState
@@ -179,6 +201,15 @@ export function RunnableModels({ models, loading, onOpenStore = null }) {
           />
         )}
       </div>
+
+      {opened ? (
+        <ModelDetail
+          model={opened.model}
+          card={opened.card}
+          onOpenStore={onOpenStore}
+          onClose={() => setOpened(null)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -185,6 +185,12 @@ class LaunchSpec:
     network_volume_id: str | None = None
     data_center_ids: list[str] = field(default_factory=list)
     volume_mount_path: str = "/workspace"
+    # The consumer price this box was quoted at — the offer's marked-up
+    # figure the Rent button showed. Only the hosted transport reads it: the
+    # worker refuses to rent when the live rate has moved past it, which is
+    # the same "a few cents either side" promise gpu_rentals.rent_price_cap
+    # keeps studio-side. The direct transport ignores it.
+    quoted_usd_per_hour: float | None = None
 
 
 @dataclass

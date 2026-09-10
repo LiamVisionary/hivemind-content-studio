@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LocalModelManager } from '../../dialogs/LocalModelManager.jsx';
 import { mapHivemindWorkflowModels } from '../../lib/hivemindStudio.js';
 import { localAI } from '../../lib/localInferenceClient.js';
+import { forgetModelCards } from '../../lib/modelArt.js';
 import { Button, IconButton, Segmented, Spinner } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { useHub } from '../hubData.js';
@@ -56,6 +57,10 @@ export function ModelsView({ active }) {
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
+    // Rescan means ask again — including the card lookups, which are otherwise
+    // held for the session. A card that failed, or one the bridge has since
+    // re-resolved, is picked up by the press rather than by a reload.
+    forgetModelCards();
     try {
       // A dead workflow catalog used to be swallowed into an empty Models tab
       // ("No matching models"); it is reported in the banner like the library.

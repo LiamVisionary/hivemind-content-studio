@@ -186,6 +186,9 @@ export function postMetaFromEntry(entry, measured = {}) {
   const cfg = Number(entry?.cfg ?? entry?.guidanceScale);
   if (Number.isFinite(cfg) && cfg > 0) meta.cfgScale = cfg;
   if (entry?.sampler) meta.sampler = String(entry.sampler);
+  // The stamper has always had a "Schedule type" slot and nothing ever filled
+  // it; a sampler without its schedule does not reproduce.
+  if (entry?.scheduler) meta.scheduler = String(entry.scheduler);
   if (measured.width && measured.height) meta.size = `${measured.width}x${measured.height}`;
   // Resource links, when the studio could tie LoRAs to this exact output.
   if (Array.isArray(entry?.civitaiResources) && entry.civitaiResources.length) {

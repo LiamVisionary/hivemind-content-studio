@@ -8,6 +8,19 @@ const H3_MODEL = { modelId: 'hivemind-media:minimax-h3', modelFamily: 'minimax' 
 const LTX_MODEL = { modelId: 'hivemind-media:ltx23-regular-fp8', modelFamily: 'ltx-2.3' };
 const SEEDANCE_MODEL = { modelId: 'seedance-v2.0-t2v' };
 const SEEDANCE_25_MODEL = { modelId: 'seedance-2.5-text-to-video' };
+// A discovered local image workflow, shaped as hosted-local-models.js hands it
+// to the studio (id, registry family, backend, and what the graph exposes).
+const KREA2_MODEL = {
+    id: 'comfy-krea2-turbo-identity-edit',
+    family: 'krea-2',
+    backend: 'comfy-krea2-turbo-identity-edit',
+    supportsLoras: true,
+    samplers: ['euler_ancestral', 'deis_3m', 'deis_2m', 'res_2s', 'res_2m', 'res_3m',
+        'dpmpp_2m', 'dpmpp_2m_sde', 'euler', 'uni_pc', 'ddim'],
+    schedulers: ['beta', 'bong_tangent', 'simple', 'sgm_uniform', 'karras',
+        'exponential', 'normal', 'linear_quadratic', 'kl_optimal', 'beta57'],
+    aspectRatios: ['1:1', '4:3', '3:4', '16:9', '9:16'],
+};
 
 test('every starter is fully described and targets a known family', async () => {
     const { DEFAULT_PROMPTS, PROMPT_FAMILIES, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
@@ -29,7 +42,14 @@ test('every starter is fully described and targets a known family', async () => 
         assert.ok(slots.length >= 1, `${entry.id} offers at least one prompt`);
         for (const slot of slots) {
             assert.ok(slot.label, `${entry.id} slot labelled`);
-            assert.ok(slot.durationSeconds > 0, `${entry.id}/${slot.label} declares its length`);
+            // A length is a VIDEO property. An image starter's equivalent — what
+            // you commit to by loading the row — is its recipe, checked below.
+            if (entry.section === 'video') {
+                assert.ok(slot.durationSeconds > 0, `${entry.id}/${slot.label} declares its length`);
+            } else {
+                assert.equal(slot.durationSeconds, undefined,
+                    `${entry.id}/${slot.label} claims no length it cannot have`);
+            }
             assert.ok(slot.prompt.trim().length > 200, `${entry.id}/${slot.label} carries a real prompt`);
         }
     }
@@ -105,12 +125,17 @@ test('only the starters written for the selected model are listed', async () => 
     assert.deepEqual(defaultPromptsFor('video', { modelId: 'kling-v2.5-turbo-pro-t2v' }), []);
     assert.deepEqual(defaultPromptsFor('video', { modelId: 'hivemind-media:ltx23-eros-v14-comfy', modelFamily: 'ltx' }), []);
     assert.deepEqual(defaultPromptsFor('video', null), []);
-    // The image studio has no starters yet and must not be handed the video ones.
+    // The two shelves never cross: a video model is not handed image starters
+    // and an image workflow is not handed video ones, whatever it is called.
     assert.deepEqual(defaultPromptsFor('image', H3_MODEL), []);
+    assert.deepEqual(defaultPromptsFor('video', KREA2_MODEL), []);
 });
 
 test('an idea is split at each model\'s own ceiling, and every variant adds back up', async () => {
-    const { DEFAULT_PROMPTS, defaultPromptTotalSeconds, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
+    const { DEFAULT_PROMPTS: ALL, defaultPromptTotalSeconds, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
+    // A ceiling is how long one generation runs, so this whole test is about the
+    // video shelf; an image starter renders one frame and has no length to split.
+    const DEFAULT_PROMPTS = ALL.filter((entry) => entry.section === 'video');
     // What the studio will actually offer as a duration, per family: H3 goes to
     // 15s and other local workflows to 10s (hivemindStudio.js), Seedance 2.0 caps
     // its enum at 15, and only Seedance 2.5 reaches 30.

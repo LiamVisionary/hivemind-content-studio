@@ -10,7 +10,7 @@
 //
 // UI pattern follows CameraMotionMenu (ChipButton + Menu popover); the cast bank
 // and the block composers live in src/lib/ugcMode.js.
-import { ugcClock, ugcTimeline, ugcVariantAt } from '../lib/ugcMode.js';
+import { UGC_DEFAULT_FORMAT, UGC_FORMATS, ugcClock, ugcFormat, ugcTimeline, ugcVariantAt } from '../lib/ugcMode.js';
 import { ChipButton, Menu } from '../ui/Menu.jsx';
 import { cx } from '../ui/kit.jsx';
 
@@ -42,6 +42,9 @@ export function UgcMenu({
   // the pictures, not a dealt description — say so where the cast is previewed.
   // A short line like "Cheryl — the woman in your 3 reference pictures".
   subject = '',
+  // Which ad format is armed (or would be). Video only: the first-frame stack
+  // the image composer arms is the selfie one whatever the video is doing.
+  formatId = UGC_DEFAULT_FORMAT,
   durationSeconds = null,
   // True when the current model offers 9:16, so arming can say whether it is
   // also going to switch the aspect ratio rather than doing it invisibly.
@@ -50,9 +53,11 @@ export function UgcMenu({
 }) {
   const armed = Boolean(active);
   const nextIndex = Number.isInteger(variantIndex) ? variantIndex + 1 : 0;
-  // Armed shows the cast you have; off shows the one arming would deal.
-  const cast = ugcVariantAt(armed ? variantIndex : nextIndex, { gender });
   const video = mode === 'video';
+  const format = ugcFormat(video ? formatId : UGC_DEFAULT_FORMAT);
+  // Armed shows the cast you have; off shows the one arming would deal. The
+  // setting comes from the format's own bank, so the preview has to ask for it.
+  const cast = ugcVariantAt(armed ? variantIndex : nextIndex, { gender, format: format.id });
   const timeline = ugcTimeline(durationSeconds);
 
   return (
@@ -64,10 +69,10 @@ export function UgcMenu({
           // persona, not camera: the Video composer's Camera chip wears the
           // camera glyph, and two of them sat side by side on H3.
           icon="persona"
-          label={armed ? `UGC · ${'cast '}${cast.index + 1}` : 'UGC'}
+          label={armed ? `UGC · ${video ? format.label : `cast ${cast.index + 1}`}` : 'UGC'}
           active={open || armed}
           onClick={toggle}
-          title="Phone-selfie UGC mode — every deal is a different person, room, light and beat set"
+          title="UGC mode — pick an ad format, and every deal is a different person, setting, light and beat set"
         />
       )}
     >
@@ -75,9 +80,32 @@ export function UgcMenu({
         <div className="flex flex-col gap-2">
           <p className="text-[11px] leading-relaxed text-ink2">
             {video
-              ? 'Writes a visible UGC brief into the prompt — cast, room, a named light source, phone-mic audio, and a hook / body / CTA timeline sized to this clip.'
+              ? 'Writes a visible UGC brief into the prompt — cast, setting, a named light source, phone-mic audio, and a hook / body / CTA timeline sized to this clip.'
               : 'Writes the first-frame realism stack — real skin texture, a named light source, a lived-in background, 9:16.'}
           </p>
+
+          {/* Switching format keeps whatever lines are already written: one
+              script, many versions, is what a batch is. */}
+          {video ? (
+            <div className="flex flex-wrap gap-1">
+              {UGC_FORMATS.map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  title={entry.hint}
+                  onClick={() => { onArm?.(armed ? cast.index : nextIndex, entry.id); close(); }}
+                  className={cx(
+                    'rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors',
+                    entry.id === format.id && armed
+                      ? 'border-honey/50 bg-honey-tint text-honey'
+                      : 'border-line1 bg-bg1 text-ink2 hover:border-line2 hover:text-ink1',
+                  )}
+                >
+                  {entry.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
 
           <div className="flex flex-col gap-1 rounded-md border border-line1 bg-bg0 px-2 py-2">
             <div className="pb-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">
@@ -86,6 +114,9 @@ export function UgcMenu({
                 : 'Next cast'}
             </div>
             <CastRow label="Who">{subject || cast.person}</CastRow>
+            {video && format.id !== UGC_DEFAULT_FORMAT ? (
+              <CastRow label="Format">{format.hint}</CastRow>
+            ) : null}
             <CastRow label="Where">
               {cast.room.place}, {cast.room.light}. {cast.room.detail}
             </CastRow>
@@ -124,7 +155,7 @@ export function UgcMenu({
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => { onArm?.(nextIndex); close(); }}
+              onClick={() => { onArm?.(nextIndex, format.id); close(); }}
               className="rounded-sm border border-honey/50 bg-honey-tint px-2 py-1 text-[11px] font-semibold text-honey transition-colors hover:border-honey"
             >
               {armed
@@ -134,7 +165,7 @@ export function UgcMenu({
             {armed ? (
               <button
                 type="button"
-                onClick={() => { onArm?.(null); close(); }}
+                onClick={() => { onArm?.(null, format.id); close(); }}
                 title="Remove the UGC block from the prompt"
                 className={cx(
                   'rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold',

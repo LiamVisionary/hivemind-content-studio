@@ -46,6 +46,44 @@ setup card by seeding the owner with `CONTENT_STUDIO_OWNER_PASSWORD_HASH` (the
 SHA-256 hex digest of the passphrase) and `CONTENT_STUDIO_OWNER_NAME`. See
 [First sign-in and vault recovery](#first-sign-in-and-vault-recovery).
 
+### Headless access from other devices
+
+Enable tailnet-only HTTPS while starting the local stack:
+
+```bash
+uv run content-studio stack start --remote-access --tailnet-port 8789
+# Equivalent: npm run stack:start -- --remote-access --tailnet-port 8789
+```
+
+This keeps the original `https://<this-mac>.ts.net:8789/` address. Omit
+`--tailnet-port` to use 8765. `restart` and foreground `supervise` accept the
+same flags. For the API alone, use
+`uv run content-studio-api --remote-access --tailnet-port 8789`.
+Headless process managers can instead set `CONTENT_STUDIO_REMOTE_ACCESS=1`
+and `CONTENT_STUDIO_TAILNET_PORT=8789`; the stack forwards both through launchd.
+
+For an already-running studio, no restart is needed:
+
+```bash
+uv run content-studio remote-access enable --tailnet-port 8789
+uv run content-studio remote-access status --tailnet-port 8789
+uv run content-studio remote-access disable --tailnet-port 8789
+```
+
+Tailscale must be installed, connected, and have HTTPS certificates enabled.
+The command prints the URL; workspace sign-in is still required. Only the
+control API is published, and access remains subject to your tailnet's rules.
+Publishing failures fail API startup; the managed stack logs the failure and
+retries. The stack start command returns after handing the job to launchd, so
+check the URL or readiness before treating the server as ready.
+
+Tailscale Serve persists across server stops and restarts. Omitting the flag
+means "do not enable at startup", not "disable an existing share". Use the
+`disable` command above to remove it. Keep the same `--tailnet-port` (or
+`CONTENT_STUDIO_TAILNET_PORT`) on subsequent launches so the app's remote-access
+switch tracks that share. Stopping the local server makes its URL unavailable
+until the server starts again.
+
 ## Configuration
 
 This machine's settings — where models and output live, which optional engines run,

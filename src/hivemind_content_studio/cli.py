@@ -63,7 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     stack = sub.add_parser("stack", help="Start, stop, inspect, or restart the complete local media stack")
     stack.add_argument("action", choices=["start", "stop", "restart", "status", "url", "supervise"], nargs="?", default="status")
+    stack.add_argument("--remote-access", action="store_true", help="Enable persistent tailnet HTTPS access at startup")
+    stack.add_argument("--tailnet-port", type=int, help="Tailnet HTTPS port; use 8789 for the legacy URL")
     stack.set_defaults(func=cmd_stack)
+
+    remote = sub.add_parser("remote-access", help="Manage tailnet access for an already-running studio")
+    remote.add_argument("action", choices=["enable", "disable", "status"])
+    remote.add_argument("--tailnet-port", type=int, help="Tailnet HTTPS port (default: 8765)")
+    remote.set_defaults(func=cmd_remote_access)
 
     telemetry = sub.add_parser("telemetry", help="Inspect privacy-safe generation performance and reliability")
     telemetry_sub = telemetry.add_subparsers(dest="telemetry_command", required=True)
@@ -333,7 +340,28 @@ def cmd_stack(args: argparse.Namespace) -> int:
     script = Path(__file__).resolve().parents[2] / "scripts" / "hivemind-studio-stack"
     if not script.is_file():
         raise RuntimeError(f"Unified stack supervisor is missing: {script}")
-    return subprocess.run([str(script), args.action], check=False).returncode
+    argv = [str(script), args.action]
+    if args.remote_access:
+        argv.append("--remote-access")
+    if args.tailnet_port is not None:
+        argv.extend(["--tailnet-port", str(args.tailnet_port)])
+    return subprocess.run(argv, check=False).returncode
+
+
+def cmd_remote_access(args: argparse.Namespace) -> int:
+    from .remote_access import RemoteAccessError, remote_access_status, set_remote_access
+
+    if args.tailnet_port is not None and not 1 <= args.tailnet_port <= 65535:
+        print("--tailnet-port must be between 1 and 65535", file=sys.stderr)
+        return 2
+    try:
+        status = (remote_access_status(https_port=args.tailnet_port) if args.action == "status"
+                  else set_remote_access(args.action == "enable", https_port=args.tailnet_port))
+    except RemoteAccessError as exc:
+        print(f"{exc.message} {exc.remedy}", file=sys.stderr)
+        return 1
+    print(json.dumps(status, indent=2))
+    return 0 if args.action == "status" or status["enabled"] == (args.action == "enable") else 1
 
 
 def cmd_plan(args: argparse.Namespace) -> int:

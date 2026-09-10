@@ -299,3 +299,129 @@ test('ugcSubjectLabel names the person the brief will be about', () => {
   // The brief builder itself is reachable for callers that hold the pieces.
   assert.match(ugcReferenceBrief(ugcVariantAt(0), { durationSeconds: 8, persona: { images: ['/a'] } }), /^subject_definitions:/);
 });
+
+// ---------------------------------------------------------------------------
+// Ad formats. Everything above is the phone-selfie confessional this module
+// began as; these are the four app-ad formats added beside it, and the
+// invariants that keep switching between them from corrupting the prompt.
+
+const PERSONA = {
+    name: 'Cheryl',
+    gender: 'female',
+    images: ['/api/media-studio/references/a.png', '/api/media-studio/references/b.png'],
+    videos: [],
+    audios: ['/api/media-studio/references/v.wav'],
+};
+
+test('every format is complete, and only the selfie is filmed by its own subject', async () => {
+    const { UGC_FORMATS, UGC_DEFAULT_FORMAT, ugcVariantAt, ugcVideoBrief } = await import('../src/lib/ugcMode.js');
+    assert.equal(UGC_FORMATS.length, 5);
+    assert.equal(UGC_FORMATS[0].id, UGC_DEFAULT_FORMAT, 'the selfie stays the default and the first row');
+    const openings = new Set();
+    for (const format of UGC_FORMATS) {
+        assert.ok(format.id && format.label && format.hint, `${format.id} labelled`);
+        // The opening line is the anchor the strip finds, so two formats sharing
+        // one would make switching leave the old brief in the box.
+        assert.ok(!openings.has(format.opening), `${format.id} opens on a line of its own`);
+        openings.add(format.opening);
+        assert.ok(format.places.length >= 4, `${format.id} has a setting bank to deal from`);
+        for (const key of ['hook', 'body', 'cta']) {
+            assert.ok(format.slots[key]?.note, `${format.id}/${key} says what the line is`);
+            assert.ok([1, 2].includes(format.slots[key].speaker), `${format.id}/${key} names its speaker`);
+        }
+        // A format with a second speaker must define them, or the brief cites an
+        // (S2) that nothing in the prompt introduces.
+        const two = Object.values(format.slots).some((slot) => slot.speaker === 2);
+        assert.equal(two, format.extraSubjects.length > 0, `${format.id}: S2 exists exactly when it is defined`);
+        // Only the selfie's subject holds the phone, so only the selfie may deal
+        // the beat about re-framing with the other hand.
+        const beats = ugcVariantAt(1, { format: format.id }).beats.join(' ');
+        if (format.id !== UGC_DEFAULT_FORMAT) {
+            assert.doesNotMatch(beats, /\bphone\b/, `${format.id} deals no phone-in-hand beat`);
+        }
+        const brief = ugcVideoBrief(ugcVariantAt(1, { format: format.id }), { durationSeconds: 15, format: format.id });
+        assert.ok(brief.startsWith(format.opening), `${format.id} opens on its anchor`);
+        assert.ok(brief.trimEnd().endsWith(format.closing), `${format.id} closes on its anchor`);
+        for (const label of ['HOOK', 'BODY', 'CTA']) {
+            assert.match(brief, new RegExp(`^${label} `, 'm'), `${format.id} keeps the ${label} label`);
+        }
+    }
+});
+
+test('each format deals its own settings — a street interview has no bathroom in it', async () => {
+    const { UGC_FORMATS, UGC_ROOMS, ugcVariantAt } = await import('../src/lib/ugcMode.js');
+    // The whole reason places moved onto the format: borrowing the confessional
+    // rooms put the street interview on the edge of a bath.
+    for (const format of UGC_FORMATS.filter((entry) => entry.id !== 'selfie')) {
+        for (let deal = 0; deal < 8; deal += 1) {
+            const { room } = ugcVariantAt(deal, { format: format.id });
+            assert.ok(format.places.includes(room), `${format.id} deal ${deal} comes from its own bank`);
+            assert.ok(!UGC_ROOMS.includes(room), `${format.id} deal ${deal} is not a selfie room`);
+        }
+    }
+});
+
+test('switching format replaces the brief and keeps the words already written', async () => {
+    const { applyUgcVideoBrief, readUgcScript, ugcFormatInPrompt, ugcVariantAt, UGC_FORMATS } = await import('../src/lib/ugcMode.js');
+    // "Build one strong script, then make ten versions of it" — which only works
+    // if the labels stay put across a format change, and if the old brief comes
+    // out when the new one goes in.
+    let prompt = applyUgcVideoBrief('', ugcVariantAt(0, { format: 'selfie' }), { durationSeconds: 15, format: 'selfie' });
+    prompt = prompt
+        .replace('⟨your opening line⟩', 'my GPA is a 3.9')
+        .replace('⟨the rest of what they say⟩', 'and I did not read a single textbook')
+        .replace('⟨your closing line⟩', 'I just use the app');
+    for (const format of UGC_FORMATS) {
+        prompt = applyUgcVideoBrief(prompt, ugcVariantAt(2, { format: format.id }), { durationSeconds: 15, format: format.id });
+        assert.equal(ugcFormatInPrompt(prompt), format.id, `${format.id} is what the prompt now holds`);
+        // Exactly one brief in the box, never two.
+        for (const other of UGC_FORMATS) {
+            const count = prompt.split(other.opening).length - 1;
+            assert.equal(count, other.id === format.id ? 1 : 0, `${format.id}: no leftover ${other.id} brief`);
+        }
+        assert.deepEqual(readUgcScript(prompt), {
+            hook: 'my GPA is a 3.9',
+            body: 'and I did not read a single textbook',
+            cta: 'I just use the app',
+        }, `${format.id} carried the script across`);
+    }
+    // And turning it off leaves nothing behind, from whichever format was last on.
+    assert.equal(applyUgcVideoBrief(prompt, null, { durationSeconds: 15 }), '');
+});
+
+test('a second speaker is defined, numbered S2, and never the one the pictures define', async () => {
+    const { UGC_FORMATS, ugcReferenceBrief, ugcVariantAt } = await import('../src/lib/ugcMode.js');
+    const { checkH3Prompt } = await import('../src/lib/h3PromptCheck.js');
+    for (const format of UGC_FORMATS) {
+        const cast = ugcVariantAt(2, { gender: 'female', format: format.id });
+        const brief = ugcReferenceBrief(cast, { durationSeconds: 15, persona: PERSONA, format: format.id });
+        // The attached pictures are always the person on camera, so a voice clone
+        // binds to the creator and not to whoever is talking at them. Crossing
+        // these is what put the wrong voice in the wrong fighter's mouth before.
+        assert.match(brief, /<Subject 1> speaks as S1\./);
+        assert.match(brief, /<Audio 1> is the voice-timbre reference for <Subject 1> \(S1\)\./);
+        const speaksS2 = /\(S2\) says:/.test(brief);
+        assert.equal(speaksS2, format.extraSubjects.length > 0, `${format.id}: S2 speaks only where S2 exists`);
+        if (speaksS2) {
+            assert.match(brief, /<Subject 2> [^\n]*speaks as S2/, `${format.id} introduces S2 before it speaks`);
+            assert.match(brief, /\(S2\)/, `${format.id} soundscape accounts for S2`);
+        }
+        // It is an H3 six-section prompt, and arming one must not raise a
+        // STRUCTURAL Prompt Check finding. Two codes are expected and are the
+        // feature working: `placeholder-left` is Check pointing at the author
+        // blanks the brief ships on purpose, and `tag-unbacked` is it noticing
+        // the reference rows are not really attached in this test.
+        const EXPECTED = new Set(['placeholder-left', 'tag-unbacked']);
+        const findings = checkH3Prompt({ prompt: brief, durationSeconds: 15 }).findings.map((f) => f.code);
+        assert.deepEqual(findings.filter((code) => !EXPECTED.has(code)), [],
+            `${format.id} reference brief is structurally clean (${findings.join(', ')})`);
+    }
+});
+
+test('a preference round-trips the format and falls back to the selfie', async () => {
+    const { normalizeVideoPreferences } = await import('../src/lib/videoPreferences.js');
+    const prefs = (extra) => normalizeVideoPreferences({ modelId: 'hivemind-media:minimax-h3', ...extra });
+    assert.equal(prefs({ ugcFormat: 'mad-professor' }).ugcFormat, 'mad-professor');
+    assert.equal(prefs({ ugcFormat: 'not-a-format' }).ugcFormat, 'selfie');
+    assert.equal(prefs({}).ugcFormat, 'selfie');
+});

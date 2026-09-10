@@ -5,11 +5,13 @@
  * the Z-Image token.
  */
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const { loadHostedImageModels, loadHostedWorkflowModels, missingWeightFiles } = require('./hosted-local-models');
+const modelArtwork = require('./model-artwork');
 const { defaultAutoWorkflowDirs, discoverAutoImageWorkflows } = require('./auto-workflow-discovery');
 // Generated from src/hivemind_content_studio/identity.py.
 const identity = require('./identity.json');
@@ -576,6 +578,198 @@ function slimCivitaiItem(item) {
   };
 }
 
+/* ---------------- model cards: artwork, blurb and links ---------------- */
+//
+// What the Models page draws on a card. The registry knows a workflow's id and
+// its step count; it does not know what the model looks like, who made it or
+// where to read about it — and those are the things a person actually chooses
+// by. model-artwork.js goes and finds them; this is the part that talks to the
+// network, keeps the answer, and hands the browser a local URL for the picture.
+//
+// The same three rules as every other remote surface here: the browser never
+// opens a connection to Civitai, Hugging Face or anywhere else (this process
+// does it), only allowlisted hosts are fetched, and the body is bounded.
+const MODEL_CARD_DIR = path.join(MEDIA_STATE_ROOT, 'cache/model-cards');
+const MODEL_CARD_INDEX = path.join(MODEL_CARD_DIR, 'index.json');
+const MODEL_ART_DIR = path.join(MODEL_CARD_DIR, 'art');
+// Card art is drawn at about 400 px. Storing the 6 MB press render a model repo
+// ships would make every visit to the page pay for a picture nobody sees at
+// that size, so what is cached is a card-sized copy.
+const MODEL_ART_EDGE = 720;
+const MODEL_ART_SOURCE_MAX_BYTES = 16 * 1024 * 1024;
+const MODEL_ART_TYPES = { '.webp': 'image/webp', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif' };
+
+// libvips, from the Media Studio's own install (Next ships it). Optional in the
+// same way server.js treats it: without it the original bytes are cached and
+// the browser scales them, which works and costs more.
+let sharp = null;
+try {
+  sharp = require(require.resolve('sharp', { paths: [path.join(ROOT, '..', 'media-gateway')] }));
+} catch {
+  sharp = null;
+}
+
+// Hugging Face serves repo files through a signed CDN redirect (us.aws.cdn.hf.co,
+// cas-bridge.xethub.hf.co), and Civitai's image host 301s to its storage bucket,
+// so the redirect target is host-checked rather than the first URL only.
+function isArtworkHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return isCivitaiHost(host)
+    || host === 'civitai.red' || host.endsWith('.civitai.red')
+    || host === 'huggingface.co' || host.endsWith('.huggingface.co')
+    || host.endsWith('.hf.co') || host.endsWith('.xethub.hf.co');
+}
+
+function readCardIndex() {
+  try {
+    const data = JSON.parse(fs.readFileSync(MODEL_CARD_INDEX, 'utf8'));
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCardIndex(index) {
+  try {
+    fs.mkdirSync(MODEL_CARD_DIR, { recursive: true });
+    fs.writeFileSync(MODEL_CARD_INDEX, JSON.stringify(index));
+  } catch (error) {
+    console.error(`[open-generative-ai-hosted] model card cache not written: ${error.message}`);
+  }
+}
+
+// Every LTX lane searches for the same model, so the key is what was SEARCHED
+// FOR rather than which workflow asked: six lanes then share one lookup, and
+// the six cards paint from one answer.
+function cardCacheKey(model) {
+  return modelArtwork.modelSearchQueries(model).join('|').toLowerCase() || String(model.id || '');
+}
+
+function artHashFor(url) {
+  return crypto.createHash('sha1').update(String(url)).digest('hex');
+}
+
+// The cached file, whatever it was stored as: a libvips build re-encodes
+// everything to webp, and a machine without one keeps the original bytes under
+// their own extension so the content type it is served with stays true.
+function artFilePath(hash) {
+  for (const [ext, type] of Object.entries(MODEL_ART_TYPES)) {
+    const file = path.join(MODEL_ART_DIR, `${hash}${ext}`);
+    if (fs.existsSync(file)) return { file, type };
+  }
+  return null;
+}
+
+// Fetch once, keep forever: card art does not change, and re-fetching it on
+// every visit would mean this machine telling Civitai which models it runs
+// every time the page opens.
+async function cacheArtwork(url) {
+  const target = String(url || '');
+  if (!/^https:\/\//.test(target)) return '';
+  let parsed = null;
+  try {
+    parsed = new URL(target);
+  } catch {
+    return '';
+  }
+  if (!isArtworkHost(parsed.hostname)) return '';
+  const hash = artHashFor(target);
+  if (artFilePath(hash)) return hash;
+  // Civitai serves a transform segment in the path: asking for a still at
+  // card width is 216 KB where the original of a video preview is 85 MB.
+  const source = isCivitaiHost(parsed.hostname) ? civitaiThumbnailUrl(parsed, true) : target;
+  try {
+    const remote = await requestBuffer(source, { 'User-Agent': modelArtwork.USER_AGENT }, {
+      maxBytes: MODEL_ART_SOURCE_MAX_BYTES,
+      maxRedirects: 4,
+      allowHost: isArtworkHost,
+    });
+    fs.mkdirSync(MODEL_ART_DIR, { recursive: true });
+    if (sharp) {
+      const rendered = await sharp(remote.buffer)
+        .rotate()
+        .resize({ width: MODEL_ART_EDGE, height: MODEL_ART_EDGE, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 80 })
+        .toBuffer();
+      fs.writeFileSync(path.join(MODEL_ART_DIR, `${hash}.webp`), rendered);
+      return hash;
+    }
+    const extension = Object.entries(MODEL_ART_TYPES)
+      .find(([, type]) => type === String(remote.contentType || '').split(';')[0].trim());
+    if (!extension) return '';
+    fs.writeFileSync(path.join(MODEL_ART_DIR, `${hash}${extension[0]}`), remote.buffer);
+    return hash;
+  } catch {
+    return '';
+  }
+}
+
+// One lookup at a time per cache key: a page of seventeen cards asks for six
+// distinct models at once, and without this each of the six would be resolved
+// as many times as it has lanes.
+const cardLookups = new Map();
+
+async function modelCard(model) {
+  const key = cardCacheKey(model);
+  if (!key) return { ...modelArtwork.EMPTY_CARD };
+  const index = readCardIndex();
+  const entry = index[key];
+  const age = entry ? Date.now() - Number(entry.at || 0) : Infinity;
+  // A matched card is good for a week. Two things are worth asking again
+  // sooner: a model nothing matched (it may have been published since), and a
+  // match whose picture failed to download — a slow CDN must not leave a card
+  // blank for seven days.
+  const settled = entry && entry.card && entry.card.source && !entry.card.artPending;
+  const ttl = settled ? modelArtwork.CARD_TTL_MS : modelArtwork.MISS_TTL_MS;
+  if (entry && age < ttl) return entry.card;
+  if (cardLookups.has(key)) return cardLookups.get(key);
+  const lookup = (async () => {
+    const token = readToken();
+    const card = await modelArtwork.resolveModelCard(model, {
+      getJson: (url) => requestJson(url, { headers: { 'User-Agent': modelArtwork.USER_AGENT }, timeout: 20000 }),
+      getText: async (url) => {
+        const body = await requestBuffer(url, { 'User-Agent': modelArtwork.USER_AGENT }, {
+          maxBytes: 512 * 1024,
+          maxRedirects: 4,
+          allowHost: isArtworkHost,
+        });
+        return body.buffer.toString('utf8');
+      },
+      // The keyed search spends the owner's Civitai key, which lives in the
+      // gateway — so this leg only exists while the gateway is reachable.
+      civitaiSearch: token
+        ? (query) => requestJson(`${ZIMAGE_URL}/api/civitai/search?query=${encodeURIComponent(query)}&${modelArtwork.CIVITAI_LOOKUP}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 30000,
+        })
+        : undefined,
+    });
+    const artHash = card.artUrl ? await cacheArtwork(card.artUrl) : '';
+    // The remote URL is deliberately dropped here: the browser gets this
+    // bridge's own path, and nothing on the page can reach the CDN directly.
+    const stored = {
+      source: card.source,
+      sourceName: card.sourceName,
+      sourceUrl: card.sourceUrl,
+      artSource: artHash ? card.artSource : '',
+      artHash,
+      // A picture was found and could not be fetched. Kept so the TTL above can
+      // treat it as unfinished rather than as "this model has no artwork".
+      artPending: Boolean(card.artUrl) && !artHash,
+      about: card.about,
+      links: card.links,
+      stats: card.stats,
+      matched: card.matched,
+    };
+    const next = readCardIndex();
+    next[key] = { at: Date.now(), card: stored };
+    writeCardIndex(next);
+    return stored;
+  })().finally(() => cardLookups.delete(key));
+  cardLookups.set(key, lookup);
+  return lookup;
+}
+
 // Second line, behind the gate above, and a different attack: a page on any
 // other site can point its own DNS name at 127.0.0.1 and reach this port, and
 // the browser will then treat it as same-origin — the Host header is the one
@@ -967,6 +1161,53 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       return send(res, 200, local.buffer, {
         'Content-Type': local.contentType,
         'Cache-Control': 'private, max-age=3600',
+      });
+    } catch {
+      return sendText(res, 404, 'not found');
+    }
+  }
+  // What a model card draws: its picture, a paragraph about it, and where to
+  // read more. The workflow's own fields come from the registry when this bridge
+  // knows the id (image lanes and every registered video lane); a caller may
+  // also describe a model this bridge cannot see — the studio's video catalog
+  // lives in the Media Studio MCP — and those fields are bounded here.
+  if (pathname === '/local-ai/model-card' && req.method === 'GET') {
+    const id = String(query.get('id') || '').slice(0, 120);
+    const known = listWorkflowModels().find((entry) => entry.id === id);
+    const model = known || {
+      id,
+      name: String(query.get('name') || '').slice(0, 120),
+      family: String(query.get('family') || '').slice(0, 60),
+      compatibleBaseModels: baseModelsFromQuery(query.get('base')),
+    };
+    if (!model.id && !model.name) return sendJson(res, 400, { error: 'A model card needs a model' });
+    try {
+      // artHash becomes a path below; artPending is bookkeeping for the cache's
+      // own retry window and means nothing to the page.
+      const { artHash, artPending, ...card } = await modelCard(model);
+      return sendJson(res, 200, {
+        id,
+        ...card,
+        // The picture is served from this process, never from the CDN it came
+        // from: the page must not open a connection to a third party.
+        artPath: artHash ? `/local-ai/model-art/${artHash}` : '',
+      });
+    } catch (error) {
+      return sendJson(res, upstreamStatus(error), { error: error.message });
+    }
+  }
+  // The cached copy of that picture. Nothing is fetched here — a hash that was
+  // never resolved is simply not found.
+  if (pathname.startsWith('/local-ai/model-art/')) {
+    const hash = pathname.slice('/local-ai/model-art/'.length);
+    if (!/^[0-9a-f]{40}$/.test(hash)) return sendText(res, 400, 'bad art reference');
+    const stored = artFilePath(hash);
+    if (!stored) return sendText(res, 404, 'not found');
+    try {
+      return send(res, 200, fs.readFileSync(stored.file), {
+        'Content-Type': stored.type,
+        // Immutable: the file is named after the URL its bytes came from.
+        'Cache-Control': 'private, max-age=604800',
       });
     } catch {
       return sendText(res, 404, 'not found');

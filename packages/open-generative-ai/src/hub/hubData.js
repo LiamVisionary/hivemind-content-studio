@@ -1245,7 +1245,15 @@ async function canvasWorkflowPayload(entry) {
   if (!hubState.canvasWorkflowPayloads[entry.history_id]) {
     hubState.canvasWorkflowPayloads[entry.history_id] = await api(`/api/canvas/history/${encodeURIComponent(entry.history_id)}/workflow`);
   }
-  return hubState.canvasWorkflowPayloads[entry.history_id];
+  const payload = hubState.canvasWorkflowPayloads[entry.history_id];
+  // An output with no recorded graph (an imported file, a render older than the
+  // workflow index) answers 200 with workflow:null rather than a 404, so the
+  // background read on every History card is not a console error per card.
+  // Thrown in the bridge's own words: the callers' "unavailable" reading holds.
+  if (payload && payload.workflow == null) {
+    throw new Error(payload.unavailable || 'Exact Canvas workflow is unavailable for this output');
+  }
+  return payload;
 }
 
 async function requestCanvasBridge(entry, action = 'inspect', { allowBridge = true } = {}) {

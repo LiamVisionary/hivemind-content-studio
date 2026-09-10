@@ -300,6 +300,19 @@
     };
   }
 
+  // One model's artwork, blurb and links. The bridge matches it on Civitai and
+  // Hugging Face and keeps the answer, so this is a cheap call after the first
+  // one — and the picture comes back as a path on this bridge, never a CDN URL.
+  async function modelCard(model) {
+    const query = new URLSearchParams({ id: String(model?.id || '') });
+    if (model?.name) query.set('name', String(model.name));
+    if (model?.family) query.set('family', String(model.family));
+    const bases = Array.isArray(model?.compatibleBaseModels) ? model.compatibleBaseModels.filter(Boolean) : [];
+    if (bases.length) query.set('base', bases.join(','));
+    const data = await jsonFetch(`/local-ai/model-card?${query}`);
+    return { ...data, artUrl: data.artPath ? `${apiBase}${data.artPath}` : '' };
+  }
+
   async function searchCivitai(params) {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(params || {})) {
@@ -342,6 +355,7 @@
     searchCivitai,
     searchCivitaiImages,
     listCivitaiBaseModels: () => jsonFetch('/local-ai/civitai-base-models'),
+    modelCard,
     downloadBinary: async () => ({ ok: true, source: 'hosted' }),
     listModels: () => jsonFetch('/local-ai/models'),
     listLoras,

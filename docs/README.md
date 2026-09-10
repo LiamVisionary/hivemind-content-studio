@@ -27,6 +27,7 @@ Neither names a port, a process or a repository path.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | One control plane, three engines: the durable state machine, the boundaries, provider routing, the side-effect gates |
 | [E2E_ENCRYPTION_DESIGN.md](E2E_ENCRYPTION_DESIGN.md) | What is sealed with which key, and why no passphrase can be reset |
 | [RESTORE_STUDIO.md](RESTORE_STUDIO.md) | The SeedVR2 restoration rail: chunks, checkpoints, the three machines and the finishing pass |
+| [MEDIA_MODEL_CATALOG.md](MEDIA_MODEL_CATALOG.md) | The image and video model inventory the studio shares with HivemindOS: the three places, what a row says and never carries, the route and MCP tool, the snapshot each app reads when the other is closed |
 | [MONETIZATION.md](MONETIZATION.md) | The revenue loop the runs feed |
 
 ## Roadmaps

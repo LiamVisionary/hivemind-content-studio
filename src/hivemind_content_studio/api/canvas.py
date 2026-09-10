@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
+from ..canvas_history import CanvasWorkflowMissing
 from ..private_access import e2e_media_sidecar
 from ..settings import load_settings
 from .media_common import _private_media_sidecar, _requester_pub
@@ -77,6 +78,18 @@ def register(app, ctx) -> None:
             raise HTTPException(status_code=404, detail="Canvas output not found") from None
         try:
             workflow = fetch_canvas_workflow(output_name)
+        except CanvasWorkflowMissing as exc:
+            # A recorded output with no graph behind it is an answer, not a
+            # failure (2026-09-07): History reads this for every card that
+            # scrolls into view, and a 404 here was a red console line per
+            # imported file on every visit. The 404 below stays for an
+            # unreachable gateway, which the client must not cache as "none".
+            return {
+                "ok": True,
+                "workflow": None,
+                "unavailable": str(exc),
+                "media_url": f"/api/canvas/history/{urllib.parse.quote(history_id)}/media",
+            }
         except RuntimeError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {

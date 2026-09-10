@@ -398,11 +398,19 @@ def test_the_shared_blocklist_is_merged_but_never_blocks_renting(tmp_path: Path,
     monkeypatch.setattr(gpu_rentals.requests, "get", explode)
     assert gpu_rentals.recent_bad_machine_ids() == set()
 
-    # And with no gateway configured nothing is fetched at all.
+    # And with no override the worker at its DEFAULT address is asked — the
+    # same resolver every hosted call uses (2026-09-07). conftest pins the
+    # override to a dead port for the suite; dropping it here shows the default.
     monkeypatch.delenv("HIVEMIND_GPU_RENTALS_GATEWAY_URL")
-    monkeypatch.setattr(gpu_rentals.requests, "get",
-                        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not call out")))
-    assert gpu_rentals.recent_bad_machine_ids() == set()
+    asked: list[str] = []
+
+    def record(url, **_kwargs):
+        asked.append(url)
+        return Response()
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", record)
+    assert gpu_rentals.recent_bad_machine_ids() == {5150, 77, 5151}
+    assert asked == [f"{gpu_rentals.rental_gateway.DEFAULT_GATEWAY_URL}/v1/bad-machines"]
 
 
 def test_a_box_that_never_boots_its_container_is_called_out(tmp_path: Path, monkeypatch) -> None:
@@ -718,6 +726,12 @@ def test_account_state_reports_burn_and_runway(tmp_path: Path, monkeypatch) -> N
     # that holds the second marketplace off — without this line the balance
     # under test is summed with a live RunPod account over the network.
     monkeypatch.setattr(runpod_provider.RunPodProvider, "configured", lambda self: False)
+    # And the transport pin (conftest _rentals_use_the_direct_transport): with
+    # it gone, a developer machine with a HivemindOS account connected routes
+    # this very call to the hosted worker and the balance under test is the
+    # one HivemindOS purse, not the Vast figure the fake below answers.
+    monkeypatch.setenv("HIVEMIND_GPU_RENTALS_TRANSPORT", "direct")
+    monkeypatch.setenv("HIVEMIND_GPU_RENTALS_GATEWAY_URL", "https://127.0.0.1:9")
 
     def handler(method, path, payload):
         if path == "/v0/users/current/":
@@ -1410,13 +1424,17 @@ def test_presign_r2_get_is_deterministic_sigv4(monkeypatch) -> None:
     assert "X-Amz-Signature=" in url
 
 
-def test_no_marketplace_configured_maps_to_503(tmp_path: Path, monkeypatch) -> None:
+def test_no_marketplace_configured_is_a_state_the_list_reports(tmp_path: Path, monkeypatch) -> None:
     """"Nothing is set up" and "everything is sold out" must not look alike.
 
     Both render as an empty machine list, and they need opposite responses
     from the user — one is a missing API key, the other is a market to wait
     out. Now that a provider with no key is skipped rather than raising, the
     total-absence case has to say so explicitly or it degrades into silence.
+
+    It says so in the BODY of a 200 (2026-09-07), not as a 503: every mounted
+    studio polls this list for its Rented source, and a machine that never
+    rented anything answered a console error every 30 s.
     """
     client = _client(tmp_path, monkeypatch)
     # build_control_app re-applies the shared hive env, so clear the keys AFTER
@@ -1424,10 +1442,15 @@ def test_no_marketplace_configured_maps_to_503(tmp_path: Path, monkeypatch) -> N
     for key in ("VAST_API_KEY", "RUNPOD_API_KEY", "RUNPOD_MANAGEMENT_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     response = client.get("/api/gpu-rentals")
-    assert response.status_code == 503
-    detail = response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True and body["rentals"] == [] and body["account"] is None
+    assert body["marketplace"]["configured"] is False
+    detail = body["marketplace"]["detail"]
     # Names every marketplace it could have used, not just the first.
     assert "VAST_API_KEY" in detail and "RUNPOD_API_KEY" in detail
+    # The actions keep refusing: an offer search with nobody to ask is a 503.
+    assert client.get("/api/gpu-rentals/offers?tier=image").status_code == 503
 
 
 def test_one_configured_marketplace_is_enough(tmp_path: Path, monkeypatch) -> None:

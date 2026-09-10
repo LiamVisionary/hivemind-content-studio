@@ -9,7 +9,10 @@
     <meta name="color-scheme" content="dark" />
     <meta name="description" content="Hivemind Content Studio — a private, unified AI media studio. Image, video, cinema, lip sync, ComfyUI canvas, durable production runs, and local model management in one app." />
     <title>Hivemind Content Studio</title>
-    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- use-credentials: a manifest is fetched WITHOUT cookies unless told
+         otherwise, and every path here sits behind the workspace gate, so the
+         bare link 401'd on each load. -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <script>
       // Installable-app shell (adapted from Mix-Studio, GPL-3.0): the worker

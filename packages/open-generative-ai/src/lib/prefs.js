@@ -43,7 +43,16 @@ export const DEFAULT_PREFS = Object.freeze({
   sections: {},
   inspoFilters: null,
   discoverFilters: null,
+  // Per studio, because the answer genuinely differs: pictures get posted to
+  // boards that read their metadata, clips get sent to people. Off is the
+  // default on both — see UNENCRYPTED_DOWNLOAD_STUDIOS below.
+  unencryptedDownload: {},
 });
+
+// The studios that have a download menu, and therefore a switch of their own.
+// An unknown key is dropped on read: a typo must not become a second setting
+// nobody can find, and a studio that stops existing must not leave one behind.
+export const UNENCRYPTED_DOWNLOAD_STUDIOS = Object.freeze(['image', 'video']);
 
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -81,6 +90,12 @@ export function normalizePrefs(raw) {
       if (key) sections[key] = Boolean(value);
     }
   }
+  const unencryptedDownload = {};
+  if (isPlainObject(source.unencryptedDownload)) {
+    for (const studio of UNENCRYPTED_DOWNLOAD_STUDIOS) {
+      if (source.unencryptedDownload[studio]) unencryptedDownload[studio] = true;
+    }
+  }
   return {
     v: PREFS_VERSION,
     lang: typeof source.lang === 'string' ? source.lang : '',
@@ -90,6 +105,7 @@ export function normalizePrefs(raw) {
     sections,
     inspoFilters: filtersWithoutTypedText(source.inspoFilters),
     discoverFilters: filtersWithoutTypedText(source.discoverFilters),
+    unencryptedDownload,
   };
 }
 
@@ -197,6 +213,30 @@ export function setSectionOpen(storageKey, open) {
   if (sectionOpen(storageKey, null) === next) return false;
   setPrefs({ sections: { ...prefs().sections, [storageKey]: next } });
   return true;
+}
+
+// ── saving a file with its settings written in ──────────────────────────────
+//
+// Off means the studio's download menu offers the stamped save but will not
+// perform it; on means one press writes the prompt, seed, model and LoRAs into
+// the file. It is a switch rather than a per-press confirmation because the
+// people who want it want it for a session's worth of work — and it is stored
+// per studio because turning it on for reference sheets should not also turn it
+// on for the clips you send to your group chat.
+//
+// Safe to keep in plaintext storage: it records that a door is unlocked, never
+// anything typed. The settings themselves stay sealed in the vault either way.
+
+export function allowsUnencryptedDownload(studio) {
+  return Boolean(prefs().unencryptedDownload[studio]);
+}
+
+export function setAllowUnencryptedDownload(studio, allowed) {
+  if (!UNENCRYPTED_DOWNLOAD_STUDIOS.includes(studio)) return false;
+  const next = { ...prefs().unencryptedDownload };
+  if (allowed) next[studio] = true; else delete next[studio];
+  setPrefs({ unencryptedDownload: next });
+  return Boolean(allowed);
 }
 
 // ── the per-studio generation blobs ─────────────────────────────────────────

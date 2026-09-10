@@ -10,7 +10,9 @@
 // starters that ship with the app, filtered to the model that is selected right
 // now — each is a finished prompt in that model's own format, so the ones for
 // other models are hidden rather than listed. They are not vault data, so they
-// show even while the vault is locked.
+// show even while the vault is locked. Both studios draw from it: the image
+// shelf is filtered by the selected local workflow's family exactly as the video
+// shelf is filtered by the selected video model's.
 //
 // A starter row takes one of three shapes, and which one it takes is a property
 // of the starter, not a display choice:
@@ -174,6 +176,10 @@ export function SavedPromptsMenu({
       // that don't know these fields ignore them.
       timeline: entry.timeline === true,
       durationSeconds: Number(slot.durationSeconds) || 0,
+      // An image starter's recipe — steps, CFG, sampler pair, output size, the
+      // LoRA it was written around. Null on the video shelf, where the settings
+      // that matter are the two fields above.
+      setup: entry.setup || null,
     });
     let name = entry.name;
     if (entry.variants?.length) name = `${entry.name} — ${slot.name}`;

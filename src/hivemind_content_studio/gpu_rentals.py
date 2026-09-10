@@ -57,6 +57,10 @@ from .rental_providers import (
 # view shops in, so Vast (where every benchmark was measured) comes first.
 from .rental_providers import vast as _vast_provider  # noqa: F401
 from .rental_providers import runpod as _runpod_provider  # noqa: F401
+# The hosted transport: with a HivemindOS account connected, every provider
+# call above goes through the worker and this machine holds no marketplace
+# key at all. Read at call time, never cached — see rental_providers/gateway.
+from .rental_providers import gateway as rental_gateway
 
 CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 R2_BUCKET = "hivemind-rental-models"
@@ -666,7 +670,15 @@ class GpuRentalError(ProviderError):
     `except` at the route boundary and keep their own status codes. Every
     caller that used to catch GpuRentalError must now catch ProviderError —
     otherwise a Vast 429 would escape as a 500 instead of the 502 it is.
+
+    `remedy` names the button that repairs it ("connect-account", "passbook")
+    so the Machines view can offer the action instead of matching the
+    sentence — the same contract hivemindos_models.HivemindosModelsError keeps.
     """
+
+    def __init__(self, message: str, status_code: int = 502, *, remedy: str = "") -> None:
+        super().__init__(message, status_code)
+        self.remedy = remedy
 
 
 def _env(name: str) -> str:
@@ -2453,6 +2465,17 @@ def _shut_marketplace_keys() -> list[str]:
     API key they already bought is how an afternoon disappears.
 
     Same predicate as provider_models._held_but_shut, asked of the rental keys.
+
+    "Sealed" is the diagnosis, not a measurement: what is measured is that the
+    store names the key and the process does not have it, and there is a
+    second way to get there. Seen 2026-09-07 on this machine: the vault was
+    OPEN and the Machines view still read "the marketplace keys are sealed",
+    because the stack launcher hands each service only the keys on its
+    STUDIO_KEYS allowlist (`passbook run --only`, since 2026-08-30) and the
+    marketplace keys were never on it. `ps eww` on the studio pid settles
+    which: the key is either on the command's environment or it is not. Both
+    states are direct-transport concerns; on the hosted transport this machine
+    is not supposed to hold a marketplace key, and this is never consulted.
     """
     try:
         from .shared_env import stored_key_names
@@ -2483,27 +2506,85 @@ def _require_a_marketplace() -> list:
     whose vault is locked has no credentials AND no missing keys, and telling
     that owner to "set VAST_API_KEY in the environment" sends them to buy a
     second key for an account they are already paying for.
+
+    And since 2026-09-07 a fourth, which is now the ordinary one: no account.
+    The hosted transport needs no key on this machine at all — the worker
+    holds them — so a studio with nothing connected and nothing in the
+    environment is told to connect its HivemindOS account, not to go and buy
+    marketplace keys. The PassBook diagnosis is kept for the machine that has
+    FORCED the direct transport; there, and only there, a sealed store is
+    the thing in the way.
     """
     providers = rental_providers.configured_providers()
-    if not providers:
-        shut = _shut_marketplace_keys()
-        if shut:
+    if providers:
+        return providers
+    transport = rental_gateway.transport()
+    forced_direct = os.environ.get(rental_gateway.TRANSPORT_ENV, "").strip().lower() == rental_gateway.TRANSPORT_DIRECT
+    if transport == rental_gateway.TRANSPORT_GATEWAY:
+        # An account is connected (or the gateway is forced). Nothing is
+        # configured because the worker said so, or could not be asked — and
+        # market() remembers which, with the status the route should answer.
+        try:
+            market = rental_gateway.market()
+        except ProviderError as exc:
             raise GpuRentalError(
-                f"the marketplace keys ({', '.join(shut)}) are in this machine's "
-                f"shared store, but sealed — the vault is locked. Sign in to "
-                f"PassBook (`passbook signin`) and restart the stack to unlock "
-                f"them; they are not missing.",
-                status_code=503,
-            )
-        names = " or ".join(
-            f"{p.label} ({' or '.join(getattr(p, 'env_names', ())) or p.key.upper() + '_API_KEY'})"
-            for p in rental_providers.all_providers()
-        )
+                str(exc), status_code=exc.status_code,
+                remedy="connect-account" if exc.status_code == 401 else "",
+            ) from exc
+        labels = ", ".join(
+            str(entry.get("label") or entry.get("key"))
+            for entry in (market.get("providers") or []) if isinstance(entry, dict)
+        ) or "any marketplace"
         raise GpuRentalError(
-            f"no GPU marketplace is configured — set {names} in the environment",
+            f"the hosted GPU marketplace has no provider key set for {labels} right now — "
+            "nothing on this machine to fix; try again in a few minutes",
             status_code=503,
         )
-    return providers
+    if not forced_direct:
+        # Transport auto, no token: the repair is an account, whatever the
+        # shared store holds — on this rail the machine's own keys are not
+        # supposed to matter, so a sealed one is not the problem to raise.
+        raise GpuRentalError(rental_gateway.CONNECT_MESSAGE, status_code=503, remedy="connect-account")
+    shut = _shut_marketplace_keys()
+    if shut:
+        raise GpuRentalError(
+            f"the marketplace keys ({', '.join(shut)}) are in this machine's "
+            f"shared store, but sealed — the vault is locked. Sign in to "
+            f"PassBook (`passbook signin`) and restart the stack to unlock "
+            f"them; they are not missing.",
+            status_code=503, remedy="passbook",
+        )
+    names = " or ".join(
+        f"{p.label} ({' or '.join(getattr(p, 'env_names', ())) or p.key.upper() + '_API_KEY'})"
+        for p in rental_providers.all_providers()
+    )
+    raise GpuRentalError(
+        f"no GPU marketplace is configured — set {names} in the environment, "
+        f"or unset {rental_gateway.TRANSPORT_ENV} and connect your HivemindOS account",
+        status_code=503,
+    )
+
+
+def marketplace_setup() -> dict:
+    """The marketplace state the machine LIST carries: `configured`, and when
+    not, the sentence and the button that repairs it.
+
+    `_require_a_marketplace`'s refusal as a value. The list answers 200
+    carrying it (gpu_rentals_index): "no marketplace" is the state every
+    studio poll meets on a Mac that never rented anything, not an outage.
+    `remedy` is "connect-account" | "passbook" | "" — the Machines view keys
+    its button off this rather than matching the sentence.
+    """
+    try:
+        _require_a_marketplace()
+    except GpuRentalError as exc:
+        return {"configured": False, "detail": str(exc), "remedy": exc.remedy}
+    return {"configured": True, "detail": "", "remedy": ""}
+
+
+def marketplace_setup_notice() -> str:
+    """Why no marketplace can be asked here, or "" when one is configured."""
+    return marketplace_setup()["detail"]
 
 
 def _marketplace_failure(provider, exc: ProviderError) -> dict:
@@ -2864,6 +2945,31 @@ def account_state(instances: list[Instance] | None = None) -> dict:
     """
     if instances is None:
         instances = _all_instances()
+    if rental_gateway.transport() == rental_gateway.TRANSPORT_GATEWAY:
+        # ONE purse. The worker bills HivemindOS credit whichever marketplace
+        # the box came from, so per-provider balances do not exist here and
+        # the affordability check below reads this row whatever the rung.
+        burn = _running_burn(instances)
+        try:
+            credit = rental_gateway.balance_usd()
+        except ProviderError:
+            credit = None
+        purse = {
+            "provider": rental_gateway.PURSE_KEY,
+            "label": rental_gateway.PURSE_LABEL,
+            "credit_url": rental_gateway.CREDIT_URL,
+            "credit": credit,
+            "usd_per_hour_running": burn,
+            "hours_remaining": round(credit / burn, 1) if credit is not None and burn > 0 else None,
+            "machines_running": sum(1 for i in instances if i.state != "stopped"),
+        }
+        return {
+            "credit": credit,
+            "usd_per_hour_running": burn,
+            "hours_remaining": purse["hours_remaining"],
+            "machines_running": purse["machines_running"],
+            "providers": [purse],
+        }
     per_provider = []
     for provider in rental_providers.configured_providers():
         mine = [i for i in instances if i.provider == provider.key]
@@ -2978,7 +3084,12 @@ def _assert_affordable(provider_key: str, count: int, usd_per_hour: float) -> No
         state = account_state()
     except ProviderError:
         return  # Never block a rental because the balance call itself failed.
-    mine = next((p for p in state["providers"] if p["provider"] == provider_key), None)
+    purses = state["providers"]
+    mine = next((p for p in purses if p["provider"] == provider_key), None)
+    if mine is None and len(purses) == 1 and purses[0]["provider"] == rental_gateway.PURSE_KEY:
+        # The hosted transport: one HivemindOS purse pays for every
+        # marketplace, so it is the account to check whichever rung this is.
+        mine = purses[0]
     if not mine or mine["credit"] is None:
         return
     needed = round((mine["usd_per_hour_running"] + usd_per_hour * count) * MIN_FUNDED_HOURS, 2)
@@ -2986,11 +3097,11 @@ def _assert_affordable(provider_key: str, count: int, usd_per_hour: float) -> No
         return
     running = mine["machines_running"]
     raise GpuRentalError(
-        f"${mine['credit']:.2f} {provider.label} credit is not enough to run "
+        f"${mine['credit']:.2f} {mine.get('label') or provider.label} credit is not enough to run "
         f"{count} more machine{'s' if count > 1 else ''} at ${usd_per_hour:.3f}/hr"
         + (f" alongside the {running} already running" if running else "")
         + f" — {MIN_FUNDED_HOURS:.0f}h needs ${needed:.2f}. "
-        f"Add credit at {provider.credit_url} or rent fewer.",
+        f"Add credit at {mine.get('credit_url') or provider.credit_url} or rent fewer.",
         status_code=402,
     )
 
@@ -3130,6 +3241,13 @@ def create_rental(
                     min_down_mbps=tier_min_down_mbps(tier),
                     network_volume_id=(volume or {}).get("volume_id"),
                     data_center_ids=[volume["data_center_id"]] if volume and volume.get("data_center_id") else [],
+                    # The price this ask was shown at — the figure the hosted
+                    # worker holds the live rate to. Per offer rather than the
+                    # button's number: a fallback within the cap is quoted at
+                    # ITS price, and a pin the search no longer lists was
+                    # rented at the quote by definition.
+                    quoted_usd_per_hour=price_of.get((candidate.provider, candidate.native),
+                                                     max_usd_per_hour),
                 ))
             except ProviderError as exc:
                 if not provider.ask_evaporated(exc):
@@ -3835,14 +3953,14 @@ BAD_MACHINE_COOLDOWN_SECONDS = int(os.environ.get("HIVEMIND_RENTAL_BAD_MACHINE_H
 
 def _shared_bad_machine_ids() -> set[int]:
     """Machines that failed the HOSTED renter, which rents from this same Vast
-    account. Empty unless HIVEMIND_GPU_RENTALS_GATEWAY_URL is configured.
+    account. Asked of the worker at rental_gateway.url() — the same resolver
+    every hosted call uses, so the default applies here too; the env override
+    predates the hosted transport and still works.
 
     Fails open on purpose: a blocklist is an optimisation, and a gateway that
     is slow or down must never be the reason a machine cannot be rented.
     """
-    base = os.environ.get("HIVEMIND_GPU_RENTALS_GATEWAY_URL", "").strip().rstrip("/")
-    if not base:
-        return set()
+    base = rental_gateway.url()
     shared: set[int] = set()
     try:
         response = requests.get(
@@ -4182,6 +4300,17 @@ def destroy_rental(rental_id: str | int) -> dict:
 # anyone is watching. Backs off further when the account has no studio boxes.
 REAPER_INTERVAL_SECONDS = 180
 REAPER_IDLE_INTERVAL_SECONDS = 900
+# The hosted worker meters a rental in prepaid ten-minute blocks and can only
+# reserve the next block while it holds THIS account's token — which it has
+# exactly when this studio lists its instances. A reservation the worker has
+# not settled inside the credit authority's 15-minute TTL is released, and a
+# rental whose meter goes unfed past its grace is destroyed as abandoned
+# ("keepalive-lapsed"). So while any hosted rental exists — paused ones too,
+# their disk still meters — the sweep lists at least this often. 150 s rather
+# than the 180 s the contract allows, because a sweep also probes every box
+# (seconds each) and the cadence is measured from the previous LIST, not from
+# the end of the previous sweep.
+GATEWAY_KEEPALIVE_SECONDS = 150
 
 
 def _reaper_loop(stopping: threading.Event | None = None) -> None:
@@ -4192,15 +4321,23 @@ def _reaper_loop(stopping: threading.Event | None = None) -> None:
     delay = REAPER_INTERVAL_SECONDS
     while not stopping.wait(delay):
         try:
-            managed = [i for i in _all_instances() if i.label.startswith(STUDIO_LABEL_PREFIX)]
-            # Probe the beacon only for studio boxes: the phase this turns on
-            # is the whole reason for the sweep.
-            for entry in reap_failed_rentals([_instance_dto(i, probe=True) for i in managed]):
-                spent = entry.get("usd_spent")
-                cost = f"${spent:.2f} spent" if spent is not None else "cost unknown"
-                print(f"[gpu-rentals] destroyed failed rental {entry['rental_id']} "
-                      f"({cost}): {entry['reason']}", flush=True)
+            instances = _all_instances()
+            managed = [i for i in instances if i.label.startswith(STUDIO_LABEL_PREFIX)]
+            if RENTAL_AUTOREAP:
+                # Probe the beacon only for studio boxes: the phase this turns
+                # on is the whole reason for the sweep. With autoreap off the
+                # list above is still made — it is the keepalive — but nothing
+                # is probed or destroyed; that switch exists to keep a box
+                # alive for a hand recovery.
+                for entry in reap_failed_rentals([_instance_dto(i, probe=True) for i in managed]):
+                    spent = entry.get("usd_spent")
+                    cost = f"${spent:.2f} spent" if spent is not None else "cost unknown"
+                    print(f"[gpu-rentals] destroyed failed rental {entry['rental_id']} "
+                          f"({cost}): {entry['reason']}", flush=True)
             delay = REAPER_INTERVAL_SECONDS if managed else REAPER_IDLE_INTERVAL_SECONDS
+            if instances and rental_gateway.transport() == rental_gateway.TRANSPORT_GATEWAY:
+                # Everything the worker lists is this account's and metered.
+                delay = min(delay, GATEWAY_KEEPALIVE_SECONDS)
         except Exception:
             # A marketplace hiccup must not kill the sweeper for the process
             # lifetime.
@@ -4300,8 +4437,10 @@ def register_gpu_rental_routes(app, require_owner) -> None:
         if not isinstance(stopping, threading.Event):
             stopping = threading.Event()
         threading.Thread(target=_warm, name="gpu-rental-warm", daemon=True).start()
-        if not RENTAL_AUTOREAP:
-            return
+        # Started whatever RENTAL_AUTOREAP says: the loop is also the hosted
+        # meter's keepalive, and a debugging switch must not be what lets a
+        # rental lapse. The switch is honoured inside the loop, where it
+        # keeps the sweep from probing or destroying anything.
         threading.Thread(target=_reaper_loop, args=(stopping,), name="gpu-rental-reaper", daemon=True).start()
 
     # The control app runs these from its lifespan handler; an app without
@@ -4372,6 +4511,23 @@ def register_gpu_rental_routes(app, require_owner) -> None:
 
     @app.get("/api/gpu-rentals", dependencies=[Depends(require_owner)])
     def gpu_rentals_index() -> dict:
+        marketplace = marketplace_setup()
+        if not marketplace["configured"]:
+            # A state, not an outage (2026-09-07). Every mounted studio polls
+            # this list for its Rented source, and the 503 a machine with no
+            # marketplace keys used to answer was a red console line every
+            # 30 s, forever. Offers, plan and POST still refuse with the 503 —
+            # those are actions; this is the list. The Machines view reads the
+            # sentence off `marketplace` and shows it where the 503 landed,
+            # with the button `remedy` names beside it.
+            return {
+                "ok": True,
+                "rentals": [],
+                "tiers": list(TIERS),
+                "failures": [],
+                "account": None,
+                "marketplace": marketplace,
+            }
         # ok:true like the rest of the studio API (additive; the list is
         # under its own keys).
         return {"ok": True, **_guard(_rentals_payload)}

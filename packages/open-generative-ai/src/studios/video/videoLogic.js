@@ -786,14 +786,19 @@ export function selectHivemindWorkflowTransition(prev, target, c) {
   return applyModelDefaults(s, c);
 }
 
-// "+ New" (old newPromptBtn, 2940-2962): a fresh prompt with every input
-// cleared. The MODEL stays when it can start a text prompt where it is — every
-// Hivemind local workflow can — so "+ New" after an H3 run is still H3 with
-// the same format settings; only a model that cannot run without its input (a
-// cloud image-to-video sibling, a video tool) falls back to the default
-// text-to-video model of the same source.
-export function newPromptTransition(prev, c) {
-  const cleared = {
+// "Start fresh" (the composer's `more` menu, and "New" under a finished clip;
+// old newPromptBtn, 2940-2962): every INPUT cleared, back to a blank canvas.
+//
+// The model is not an input. Whatever lane you picked survives a blank canvas —
+// the same rule the Image studio has always followed — so an image-to-video
+// model waits for its next start frame rather than silently hopping to the
+// default cloud text-to-video model and taking the clip length, aspect,
+// resolution and advanced values with it (applyModelDefaults rewrites all of
+// them). `imageMode` and `v2vMode` describe the MODEL, not the composer, so
+// they stay with it, and the generate guards already say what a kept model is
+// still missing ("Please upload a start frame image first").
+export function newPromptTransition(prev) {
+  return {
     ...prev,
     prompt: '',
     imageUrl: null,
@@ -809,16 +814,33 @@ export function newPromptTransition(prev, c) {
     denoise: '',
     videoUrl: null,
     videoName: null,
-    v2vMode: false,
   };
-  if (keepsModelWhenCleared(prev)) {
-    // Local workflows are selected with imageMode true (the start frame is an
-    // optional input, not a mode) — keep that shape so a later start-frame pick
-    // stays on this model instead of hopping to the first in the list.
-    return { ...cleared, imageMode: isHivemindVideoModelId(prev.modelId) };
-  }
-  const s = withSelectedModel({ ...cleared, imageMode: false }, defaultTextToVideoModelFor(prev, c));
-  return applyModelDefaults(s, c);
+}
+
+// What that press is about to take, in the words a person would use — the list
+// the confirm dialog reads out. It lives beside the transition ON PURPOSE: a
+// dialog that promises one thing while the patch above clears another is worse
+// than no dialog, so the two are edited together or not at all. Only what is
+// actually there is named; an empty list means there is nothing to lose and
+// nothing to ask about.
+export function startFreshSummary(setup) {
+  const s = setup || {};
+  const count = (value) => (Array.isArray(value) ? value.length : 0);
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const items = [];
+  if (String(s.prompt || '').trim()) items.push('what you typed');
+  if (s.imageUrl) items.push('the start frame');
+  const keyframes = (s.endImageUrl ? 1 : 0) + (s.ltxMiddleUrl ? 1 : 0) + (s.ltxEndUrl ? 1 : 0);
+  if (keyframes) items.push(plural(keyframes, 'other keyframe', 'other keyframes'));
+  const pictures = count(s.referenceImageUrls);
+  if (pictures) items.push(plural(pictures, 'attached picture', 'attached pictures'));
+  const clips = count(s.referenceVideos);
+  if (clips) items.push(plural(clips, 'attached clip', 'attached clips'));
+  const voices = count(s.referenceAudios);
+  if (voices) items.push(plural(voices, 'attached voice', 'attached voices'));
+  if (s.persona) items.push('the loaded persona');
+  if (s.videoUrl) items.push('the source clip');
+  return items;
 }
 
 // Extend flow (old extendBtn, 2964-2978).
@@ -885,6 +907,8 @@ export function applyRestoredPreferences(prev, preferences, c) {
   // two once that hydrates (a chip must never claim a phrase the prompt lacks).
   if (Array.isArray(preferences.cameraMotionIds) && preferences.cameraMotionIds.length) s.cameraMotionIds = [...preferences.cameraMotionIds];
   if (typeof preferences.restylePresetId === 'string' && preferences.restylePresetId) s.restylePresetId = preferences.restylePresetId;
+  if (typeof preferences.emotionDirectionId === 'string' && preferences.emotionDirectionId) s.emotionDirectionId = preferences.emotionDirectionId;
+  if (typeof preferences.ugcFormat === 'string' && preferences.ugcFormat) s.ugcFormat = preferences.ugcFormat;
   // An in-progress scene chain survives reload: the pointer is opaque and the
   // clip stays sealed. videoRequestPlan re-gates it, so a stale value on a
   // non-chaining model is inert.

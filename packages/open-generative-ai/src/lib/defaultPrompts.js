@@ -31,6 +31,12 @@
 // Part durations are what the prompt's own timeline adds up to, and are checked
 // against the beats in tests: a shot stamped at or past the end of its part is a
 // beat that never renders.
+//
+// The IMAGE section (lib/imageStarters.js) is the same shelf under the same
+// rules, with time swapped for a recipe: an image starter has no duration and no
+// continuation, and instead carries a `setup` block — steps, CFG, sampler pair,
+// output size, LoRAs — because on an image model those numbers are as much a
+// part of the prompt as the words are.
 
 import { isLtxFamilyModel, isMinimaxFamilyModel } from './videoTasks.js';
 
@@ -45,12 +51,18 @@ import { renderSubjectTemplate } from './subjectTemplate.js';
 // ideas, kept in their own module because they are a body of CONTENT rather
 // than more of this file's per-model rewrites of one scene.
 import { ANIMATION_STARTERS } from './animationStarters.js';
+// The image shelf. Kept apart for the same reason the animation one is: it is a
+// body of CONTENT, and it answers to a different half of the contract below.
+import { IMAGE_STARTERS } from './imageStarters.js';
 
 export const PROMPT_FAMILIES = Object.freeze({
   'seedance-2.5': 'Seedance 2.5',
   seedance: 'Seedance 2.0 / 1.5 / Lite',
   minimax: 'MiniMax H3',
   ltx: 'LTX 2.3',
+  // Image. The registry family of the local Krea 2 Turbo workflow, verbatim, so
+  // imagePromptFamilyOf can read it straight off the discovered model.
+  'krea-2': 'Krea 2 Turbo',
 });
 
 // Verbatim from Liam's Seedance 2.5 prompt (2026-08-11), and the source text
@@ -947,7 +959,15 @@ export const DEFAULT_PROMPTS = Object.freeze([
       }),
     ],
   }),
+  ...IMAGE_STARTERS,
 ]);
+
+// Which families the image shelf actually ships prompts for. Derived rather than
+// listed: a starter added for a new workflow becomes selectable by adding it to
+// the shelf, and a family with nothing written for it can never be matched.
+const IMAGE_STARTER_FAMILIES = new Set(
+  DEFAULT_PROMPTS.filter((entry) => entry.section === 'image').map((entry) => entry.family),
+);
 
 /**
  * Which starter-prompt family a studio setup (or catalog model entry) belongs
@@ -971,6 +991,32 @@ export function promptFamilyOf(source) {
   if (isLtxFamilyModel(source)) return /eros/i.test(id) ? '' : 'ltx';
   if (/^seedance-2\.5-/.test(id)) return 'seedance-2.5';
   return /^seedance-/.test(id) ? 'seedance' : '';
+}
+
+// The fallback identity for a model that reached the studio without a registry
+// family: the desktop catalog and auto-discovered drop-ins carry a backend but
+// no family, and the backend is what the gateway dispatches on anyway.
+const IMAGE_FAMILY_BY_BACKEND = Object.freeze({
+  'comfy-krea2-turbo-identity-edit': 'krea-2',
+});
+
+/**
+ * The same question for an image model, which is a different kind of object.
+ *
+ * `source` is the discovered LOCAL workflow (hosted-local-models.js), or null
+ * when a cloud model is selected — no image starter is written for a cloud
+ * model, so null is an ordinary answer and not a missing case. The registry
+ * family is read first, because that is what the workflow declares about itself.
+ *
+ * An unknown family answers '' rather than itself, so a workflow that happens to
+ * share a name with a VIDEO family cannot pull that family's prompts into the
+ * image menu.
+ */
+export function imagePromptFamilyOf(source) {
+  if (!source) return '';
+  const family = String(source.family || '');
+  if (family && IMAGE_STARTER_FAMILIES.has(family)) return family;
+  return IMAGE_FAMILY_BY_BACKEND[String(source.backend || '')] || '';
 }
 
 /**
@@ -1010,7 +1056,9 @@ export function defaultPromptSlots(entry) {
  * starter section at all.
  */
 export function defaultPromptsFor(section, source, { gender: override = undefined } = {}) {
-  const family = promptFamilyOf(source);
+  // Two model vocabularies, one shelf: a video setup is asked through the
+  // registry-family predicates, an image workflow through what it declares.
+  const family = section === 'image' ? imagePromptFamilyOf(source) : promptFamilyOf(source);
   if (!family) return [];
   // `source` is the studio's setup, so it also carries which persona is loaded;
   // the starters written about "the subject" are rendered for that character —
@@ -1055,8 +1103,26 @@ export function renderDefaultPrompt(entry, gender = '') {
   };
 }
 
-/** "Seedance 2.5 · 30s · Candid early-2000s camcorder day" for the menu row. */
+/**
+ * "Seedance 2.5 · 30s · Candid early-2000s camcorder day" for the menu row, and
+ * "Krea 2 Turbo · 3:4 · 8 steps · Drawn anime girls…" for an image one.
+ *
+ * The middle segment is the same slot in both: what you are committing to by
+ * loading this row. On a video model that is a length; on an image model it is
+ * the shape and the step count the recipe runs at, which is the thing that
+ * differs between two prompts for the same model. The exact pixel size stays out
+ * of it — the Format panel shows that the moment the setup lands.
+ */
 export function describeDefaultPrompt(entry) {
+  if (entry?.section === 'image') {
+    const setup = entry.setup || {};
+    return [
+      PROMPT_FAMILIES[entry.family] || entry.family,
+      setup.aspectRatio,
+      Number(setup.steps) > 0 ? `${setup.steps} steps` : '',
+      entry.summary,
+    ].filter(Boolean).join(' · ');
+  }
   const parts = entry?.parts?.length || 0;
   const variants = entry?.variants?.length || 0;
   const seconds = defaultPromptTotalSeconds(entry);

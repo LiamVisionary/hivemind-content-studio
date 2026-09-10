@@ -14,6 +14,7 @@ from typing import Any
 import requests
 
 from . import Instance, LaunchSpec, Offer, OfferQuery, Provider, ProviderError, register, response_error_text
+from . import gateway
 
 # Vast is mid-migration to /api/v1 and deprecating v0 per-endpoint. Probed
 # 2026-08-05: instances LIST is v1-only (v0 returns deprecated_endpoint), but
@@ -44,12 +45,22 @@ def _api_key() -> str:
     raise ProviderError("VAST_API_KEY is not configured in the environment", status_code=503)
 
 
-def request(method: str, path: str, payload: dict | None = None) -> dict:
+def request(method: str, path: str, payload: dict | None = None, *,
+            quoted_usd_per_hour: float | None = None) -> dict:
     """One Vast API call, with its rate-limiter handled.
 
     Module-level rather than a method so the test suite has a single seam to
-    fake the whole marketplace at.
+    fake the whole marketplace at — which is also why the hosted transport is
+    chosen HERE and not around this function: the no-network guard in
+    conftest patches this name, and a gateway path beside it would be a call
+    the guard never sees. `quoted_usd_per_hour` only means something to the
+    worker (it refuses a create whose live rate moved past the quote); the
+    direct transport checks the price studio-side and ignores it.
     """
+    if gateway.routes("vast"):
+        body = gateway.call("vast", method, path, payload, quoted_usd_per_hour=quoted_usd_per_hour)
+        return body if isinstance(body, dict) else {}
+
     def _send() -> tuple[Any, dict]:
         response = _session.request(
             method,
@@ -127,10 +138,18 @@ def _ssh_endpoints(instance: dict) -> list[tuple[str, str]]:
 class VastProvider:
     key = "vast"
     label = "Vast.ai"
-    credit_url = "vast.ai"
     env_names = ENV_NAMES
 
+    @property
+    def credit_url(self) -> str:
+        # Where the money is topped up depends on who is billing: the worker
+        # spends HivemindOS credit, the direct transport spends the Vast
+        # account's own.
+        return gateway.CREDIT_URL if gateway.routes(self.key) else "vast.ai"
+
     def configured(self) -> bool:
+        if gateway.routes(self.key):
+            return gateway.configured(self.key)
         return any(os.environ.get(name, "").strip() for name in ENV_NAMES)
 
     # --- shopping ----------------------------------------------------------
@@ -212,6 +231,11 @@ class VastProvider:
     def create(self, spec: LaunchSpec) -> str:
         if not spec.offer_id:
             raise ProviderError("Vast rents a specific ask; no offer was chosen", status_code=400)
+        # The quote goes to the worker only. Every fake of `request` in the
+        # suite (and the direct transport itself) takes three arguments, and
+        # the direct transport has nowhere to send a quote anyway.
+        extra = ({"quoted_usd_per_hour": spec.quoted_usd_per_hour}
+                 if gateway.routes(self.key) and spec.quoted_usd_per_hour is not None else {})
         body = request("PUT", f"/v0/asks/{spec.offer_id}/", {
             "client_id": "me",
             "image": spec.image,
@@ -227,7 +251,7 @@ class VastProvider:
             # pubkey-only, so publishing it concedes nothing ComfyUI does not
             # already keep on loopback — RunPod has always mapped 22 this way.
             "env": {f"-p {port}:{port}": "1" for port in (22, *spec.expose_ports)},
-        })
+        }, **extra)
         return str(body.get("new_contract"))
 
     @staticmethod
@@ -303,6 +327,11 @@ class VastProvider:
         request("PUT", f"/v0/instances/{native_id}/", {"state": "running"})
 
     def credit(self) -> float:
+        if gateway.routes(self.key):
+            # The worker refuses /v0/users/current/ — that is the platform's
+            # balance, not this account's. What this account spends is its
+            # HivemindOS credit.
+            return gateway.balance_usd()
         # v0 only — /v1/users/current/ 404s (Vast's migration is per-endpoint).
         body = request("GET", "/v0/users/current/")
         return round(float(body.get("credit") or 0.0), 4)

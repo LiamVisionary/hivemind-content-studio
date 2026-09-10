@@ -111,6 +111,12 @@ test('a value that is not a public key is not forwarded as one', async () => {
   assert.equal(seen[0].ownerPub, undefined);
 });
 
+// Deliberately textual: this is an absence claim over every job-starting route,
+// and hosted-server.js is a Node HTTP bridge with no rendered form — the three
+// tests above drive the mechanism itself over real sockets. What sockets cannot
+// show is the route that is NOT here yet: a seventh handler added without the
+// spread would seal to the machine key and no passing test would notice, so the
+// six call sites are read as a set.
 test('every route that starts a job forwards the key', () => {
   // The submit calls are the six routes the studio proxy knows as
   // job-starting (JOB_STARTING_ROUTES in api/bridge.py); a new one added

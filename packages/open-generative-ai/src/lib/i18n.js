@@ -131,6 +131,20 @@ export const STRINGS = {
     'app.refresh': 'Refresh',
     'app.refreshTitle': 'Refresh catalog, runs and history',
     'app.widenSidebar': 'Widen the sidebar',
+    // The sidebar's utility row and search, which took over from the retired topbar.
+    'app.paletteLabel': 'Search everything',
+    'app.paletteTitle': 'Search pages, tabs, prompts and models',
+    'app.lockStudio': 'Sign out and lock this studio',
+    'app.unlockVault': 'Unlock vault',
+    // The update affordance beside the build line. Reasons are words the shell
+    // returns; the sentences a person reads live here.
+    'app.updateReady': (version) => `Update to v${version}`,
+    'app.updateTitle': (version) => `Install v${version} and relaunch`,
+    'app.update.unsigned-channel': 'This build has no update key, so it cannot verify a download. Fetch the release from GitHub instead.',
+    'app.update.no-update': 'This is already the newest build.',
+    'app.update.failed': 'The update could not be installed. Fetch the release from GitHub instead.',
+    'app.update.no-shell': 'Updates install from the desktop app. Fetch the release from GitHub instead.',
+    'app.unlockVaultTitle': 'Locked — unlock to see your encrypted media and saved items',
     'app.collapseSidebar': 'Collapse to icons',
     'app.more': 'More',
 
@@ -164,6 +178,8 @@ export const STRINGS = {
     'common.generate': 'Generate',
     'common.clearReferences': 'Clear',
     'common.startFresh': 'Start fresh',
+    'common.startFreshTitle': 'Start fresh?',
+    'common.keepWhatIHave': 'Keep what I have',
     'common.generating': 'Generating…',
     'common.download': 'Download',
     'common.cancel': 'Cancel',
@@ -194,6 +210,29 @@ export const STRINGS = {
     'common.switchToCloud': 'Switch to cloud',
     'common.connect': 'Connect',
     'common.detach': 'Detach',
+
+    // ---- Taking a generation out of the studio ---------------------------
+    // Download is the plain save and has always been `common.download`. These
+    // are the three things behind its arrow, and they are worded around ONE
+    // fact a person has no other way to learn: the studio's outputs carry no
+    // readable settings, because the settings are sealed in the vault rather
+    // than written into the file. "Unencrypted" is the switch's own word for
+    // undoing that, and the hint under it says what it actually costs — a
+    // recipe cannot be taken back out of a copy somebody already has.
+    'download.moreWays': 'More ways to save this',
+    'download.unencrypted': 'Download unencrypted',
+    'download.unencryptedHint': 'Writes the prompt, seed, model and LoRAs into the file itself.',
+    'download.writingSettings': 'Writing settings…',
+    'download.noSettingsRecorded': 'The studio has no recorded settings for this output.',
+    'download.settingsSaved': 'Saved with its settings written in.',
+    'download.settingsNotWritten': 'Saved — but the settings could not be written into this file.',
+    'download.settingsFailed': 'Could not write the settings into that file. Download still works.',
+    'download.share': 'Share…',
+    'download.shareHint': 'Opens your system share sheet. Sends the file only — no settings.',
+    'download.shareUnsupported': 'This browser cannot open a share sheet. Use Download instead.',
+    'download.shareFailed': 'Sharing did not complete. Use Download instead.',
+    'download.allowUnencrypted': 'Allow unencrypted downloads',
+    'download.allowUnencryptedHint': 'Off, a saved file is only its pixels. On, anyone you send it to can read how it was made — and you cannot take that back out of their copy.',
 
     // ---- Where work runs -------------------------------------------------
     // ONE vocabulary for the three bills. The image/video picker said "This
@@ -262,6 +301,7 @@ export const STRINGS = {
     'composer.improveTitle': 'Refine the prompt, or add style tags',
     'composer.improveDisabled': 'Type an idea below first — the helper refines what is in the box',
     'composer.dismissHelper': 'Dismiss prompt helper',
+    'composer.clearPrompt': 'Clear what you typed (the attached pictures stay)',
     'composer.etaTitle': 'Estimated from your own past runs at these settings',
     'composer.cancelTitle': 'Cancel the current generation and reset',
     'composer.refine': 'Refine',
@@ -336,6 +376,7 @@ export const STRINGS = {
     'image.placeholderTransform': 'Describe how to transform this image (optional)',
     'image.generateTooltip': 'Generate AI image from prompt',
     'image.multiImageNote': 'images selected — describe the transformation (optional)',
+    'image.generationTime': 'Generation time',
     'ar.square': 'Square',
     'ar.portrait': 'Portrait',
     'ar.landscape': 'Landscape',
@@ -889,6 +930,13 @@ export const STRINGS = {
 
 
     // ---- The studios' advanced panels -------------------------------------
+    // The Image drawer's section headings. 'Output' is not here because Restore
+    // already owns that word — one phrase, one key, whichever surface asks.
+    'imagePanel.look': 'Look',
+    'imagePanel.control': 'Control',
+    'imagePanel.sampling': 'Sampling',
+    'imagePanel.avoid': 'Avoid',
+    'imagePanel.references': 'References',
     'imagePanel.aspectRatio': 'Aspect ratio',
     'imagePanel.aspectFromReference': 'Matches your reference image — the edit keeps its proportions.',
     'imagePanel.aboutPerImage': (eta) => `About ${eta} per image`,
@@ -1095,6 +1143,49 @@ export const STRINGS = {
     'runnable.videoModelsHint': 'Video models come from the studio catalog and run in the Video studio — open it to see what is installed.',
     'runnable.nothingInstalledHint': 'Nothing installed yet. The Engine tab lists what this machine can run and installs it for you.',
     'runnable.browseModels': 'Browse models to install',
+
+    /* ---- model cards: the picture, the blurb, and where they came from ---- */
+    // A model's own words are not in this repository, so the bridge matches the
+    // model on Civitai and Hugging Face and these say which of them answered.
+    // Attribution is never implied: a card that could not be matched confidently
+    // says "closest match" instead of presenting a guess as the model's page.
+    'modelCard.readOnCivitai': 'Read on Civitai',
+    'modelCard.readOnCivitaiMirror': 'Read on the Civitai mirror',
+    'modelCard.artFromCivitai': 'Artwork from Civitai.',
+    'modelCard.artFromHuggingFace': 'Artwork from Hugging Face.',
+    'modelCard.readOnHuggingFace': 'Read on Hugging Face',
+    'modelCard.matchedCivitai': (name) => `Matched to ${name} on Civitai.`,
+    'modelCard.matchedHuggingFace': (name) => `Matched to ${name} on Hugging Face.`,
+    'modelCard.guessedCivitai': (name) => `Closest match on Civitai: ${name} — it may not be this exact build.`,
+    'modelCard.guessedHuggingFace': (name) => `Closest match on Hugging Face: ${name} — it may not be this exact build.`,
+    'modelCard.about': 'What this model is',
+    'modelCard.abilities': 'What it can do',
+    'modelCard.thisLane': 'What this workflow does',
+    'modelCard.technical': 'Technical details',
+    'modelCard.needsPicture': 'Needs a picture to start from',
+    'modelCard.fromPrompt': 'Works from a written prompt',
+    'modelCard.referenceImages': (count) => `Takes up to ${count} reference pictures`,
+    'modelCard.oneReference': 'Takes a reference picture',
+    'modelCard.loras': 'Runs with LoRAs',
+    'modelCard.promptHelper': 'Can write the prompt for you',
+    'modelCard.upToSeconds': (seconds) => `Clips up to ${seconds} seconds`,
+    'modelCard.motionContext': 'Carries motion and room tone into the next shot',
+    'modelCard.headReplacement': 'Replaces a head in footage you already have',
+    'modelCard.missingWeights': 'Some of this model\u2019s files are not on this machine yet.',
+    'modelCard.engineOffline': 'The engine that runs this model is not answering.',
+    'modelCard.notAvailable': 'This model cannot run on this machine right now.',
+    'modelCard.identifier': 'Model id',
+    'modelCard.family': 'Model family',
+    'modelCard.backend': 'Lane',
+    'modelCard.baseModels': 'Base models',
+    'modelCard.defaults': 'Defaults',
+    'modelCard.guidance': 'Guidance',
+    'modelCard.samplers': 'Samplers',
+    'modelCard.aspectRatios': 'Aspect ratios',
+    'modelCard.accepts': 'Accepted inputs',
+    'modelCard.copyId': 'Copy model id',
+    'modelCard.idCopied': 'Model id copied.',
+    'modelCard.beta': 'Beta',
 
     'assets.kindLora': 'LoRA',
     'assets.kindCheckpoint': 'Checkpoint',

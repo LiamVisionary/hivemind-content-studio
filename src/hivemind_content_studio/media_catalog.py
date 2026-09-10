@@ -69,6 +69,17 @@ class MediaModel:
     # when references are attached to the family's normal tier, so offering it
     # as its own tier only strands the user on a graph with no frame inputs.
     routing_only: bool = False
+    # What the workflow's own registry entry says it does. The studios used to
+    # print "<provider> workflow" under every video model because this field did
+    # not exist here, so seventeen models shared one sentence that described none
+    # of them — while the registry had a paragraph for each. Empty on a built-in
+    # fallback row, which predates the live read.
+    description: str = ""
+    # The registry's `requires.image`: the graph cannot start from a prompt
+    # alone. Carried so the shared media-model catalog can tell HivemindOS
+    # which workflows need a picture before it offers them for a text-only
+    # /video-gen. False on a built-in fallback row, which does not know.
+    requires_image: bool = False
 
 
 @dataclass(frozen=True)
@@ -305,6 +316,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
         models[workflow_id] = MediaModel(
             id=workflow_id,
             label=label,
+            description=str(workflow.get("description") or "").strip(),
             reference_roles=("start", "reference"),
             max_reference_images=None,
             limit_source="live Media Studio MCP workflow registry",
@@ -321,6 +333,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
             default_steps=float(defaults["steps"]) if defaults.get("steps") is not None else None,
             beta=bool(workflow.get("beta")),
             routing_only=bool(workflow.get("routing_only")),
+            requires_image=bool((workflow.get("requires") or {}).get("image")) if isinstance(workflow.get("requires"), dict) else False,
         )
     _last_live_media_studio_models = tuple(models.values())
     return _last_live_media_studio_models, True

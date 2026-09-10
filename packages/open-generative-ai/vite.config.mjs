@@ -75,8 +75,12 @@ export default defineConfig({
             // it: cookies are scoped by host and not by port, so a browser
             // signed in to the studio on 127.0.0.1:8765 sends its session
             // cookie here too, and this proxy forwards it.
+            // OPENGEN_LOCAL_AI_PROXY points the same proxy somewhere else — a
+            // second bridge on another port, or a small forwarder that presents
+            // the gateway token — which is how this page is verified without
+            // signing in. Unset, nothing changes.
             '/local-ai': {
-                target: 'http://127.0.0.1:8794',
+                target: process.env.OPENGEN_LOCAL_AI_PROXY || 'http://127.0.0.1:8794',
                 changeOrigin: true,
             },
         }

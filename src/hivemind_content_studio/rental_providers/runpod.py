@@ -47,6 +47,7 @@ from typing import Any
 import requests
 
 from . import Instance, LaunchSpec, Offer, OfferQuery, Provider, ProviderError, register, response_error_text
+from . import gateway
 
 REST_BASE = "https://rest.runpod.io/v1"
 GRAPHQL_URL = "https://api.runpod.io/graphql"
@@ -74,8 +75,13 @@ def _api_key() -> str:
     raise ProviderError("RUNPOD_API_KEY is not configured in the environment", status_code=503)
 
 
-def request(method: str, path: str, payload: dict | None = None) -> Any:
-    """A pods call, against the REST API."""
+def request(method: str, path: str, payload: dict | None = None, *,
+            quoted_usd_per_hour: float | None = None) -> Any:
+    """A pods call, against the REST API — or through the worker, decided here
+    for the same reason as vast.request: this name is the seam the no-network
+    guard patches, so the hosted path has to run inside it."""
+    if gateway.routes("runpod"):
+        return gateway.call("runpod", method, path, payload, quoted_usd_per_hour=quoted_usd_per_hour)
     response = _session.request(
         method,
         f"{REST_BASE}{path}",
@@ -108,6 +114,15 @@ def graphql(query: str) -> dict:
     failure here has to be read out of the body — treating the 200 as success
     is how a broken query becomes an empty rung that looks sold out.
     """
+    if gateway.routes("runpod"):
+        # The worker allows exactly two queries (the catalog and the runtime
+        # one below) and answers the provider body verbatim, `errors` array
+        # included — so the same read applies.
+        body = gateway.call("runpod", "POST", "/graphql", {"query": query})
+        body = body if isinstance(body, dict) else {}
+        if body.get("errors"):
+            raise ProviderError(f"RunPod GraphQL failed: {str(body.get('errors'))[:200]}", status_code=502)
+        return body.get("data") or {}
     response = _session.post(
         GRAPHQL_URL,
         json={"query": query},
@@ -277,10 +292,17 @@ def bootstrap_command(onstart: str) -> list[str]:
 class RunPodProvider:
     key = "runpod"
     label = "RunPod"
-    credit_url = "runpod.io/console/billing"
     env_names = ENV_NAMES
 
+    @property
+    def credit_url(self) -> str:
+        # Same as Vast: the worker bills HivemindOS credit, the direct
+        # transport bills the RunPod account.
+        return gateway.CREDIT_URL if gateway.routes(self.key) else "runpod.io/console/billing"
+
     def configured(self) -> bool:
+        if gateway.routes(self.key):
+            return gateway.configured(self.key)
         return any(os.environ.get(name, "").strip() for name in ENV_NAMES)
 
     # --- shopping ----------------------------------------------------------
@@ -406,6 +428,10 @@ class RunPodProvider:
         # skip. A network volume replaces the pod's own volume disk (RunPod
         # docs) and pins the pod to the volume's data center — which is why
         # the caller names the data centers, and why volumeInGb stays 0.
+        if spec.network_volume_id and gateway.routes(self.key):
+            # The worker refuses a body carrying networkVolumeId (400); say so
+            # before the round trip, with the alternative.
+            raise ProviderError(gateway.WARM_VOLUMES_UNAVAILABLE, status_code=400)
         if spec.network_volume_id:
             payload["networkVolumeId"] = spec.network_volume_id
             payload["volumeMountPath"] = spec.volume_mount_path or "/workspace"
@@ -418,7 +444,11 @@ class RunPodProvider:
             # rents on Secure Cloud whatever the default tier is — and bills
             # the secure price, which is why warm offers are quoted at it.
             payload["cloudType"] = "SECURE"
-        body = request("POST", "/pods", payload)
+        # The quote goes to the worker only — see vast.create for why the
+        # direct transport (and every fake of `request`) never sees it.
+        extra = ({"quoted_usd_per_hour": spec.quoted_usd_per_hour}
+                 if gateway.routes(self.key) and spec.quoted_usd_per_hour is not None else {})
+        body = request("POST", "/pods", payload, **extra)
         pod_id = body.get("id") if isinstance(body, dict) else None
         if not pod_id:
             raise ProviderError(f"RunPod did not return a pod id: {json.dumps(body)[:200]}")
@@ -533,6 +563,10 @@ class RunPodProvider:
         request("POST", f"/pods/{native_id}/start")
 
     def credit(self) -> float:
+        if gateway.routes(self.key):
+            # `clientBalance` is the platform's RunPod balance and the worker
+            # refuses the query (400). This account spends HivemindOS credit.
+            return gateway.balance_usd()
         data = graphql("{ myself { clientBalance } }")
         return round(float((data.get("myself") or {}).get("clientBalance") or 0.0), 4)
 
@@ -542,8 +576,15 @@ class RunPodProvider:
     # or not a pod is using it; this is the "no download at all" provisioning
     # path, and the reason it is RunPod-only is that a marketplace box's disk
     # dies with the box.
+    #
+    # Not on the hosted transport: a volume is a platform resource the worker
+    # does not lend out, so creating or deleting one is refused here with the
+    # worker's sentence, and the list is what the worker would answer — empty,
+    # without a round trip.
 
     def create_network_volume(self, name: str, size_gb: int, data_center_id: str) -> str:
+        if gateway.routes(self.key):
+            raise ProviderError(gateway.WARM_VOLUMES_UNAVAILABLE, status_code=400)
         body = request("POST", "/networkvolumes",
                        {"name": name, "size": int(size_gb), "dataCenterId": data_center_id})
         volume_id = body.get("id") if isinstance(body, dict) else None
@@ -552,10 +593,14 @@ class RunPodProvider:
         return str(volume_id)
 
     def list_network_volumes(self) -> list[dict]:
+        if gateway.routes(self.key):
+            return []
         body = request("GET", "/networkvolumes")
         return [v for v in (body if isinstance(body, list) else []) if isinstance(v, dict)]
 
     def delete_network_volume(self, volume_id: str) -> None:
+        if gateway.routes(self.key):
+            raise ProviderError(gateway.WARM_VOLUMES_UNAVAILABLE, status_code=400)
         request("DELETE", f"/networkvolumes/{volume_id}")
 
 

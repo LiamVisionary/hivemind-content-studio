@@ -242,7 +242,10 @@ export function mapHivemindWorkflowModels(catalog) {
         tier: workflow.tier || null,
         beta: Boolean(workflow.beta),
         name: workflow.label || workflow.id,
-        description: `${provider.label || 'Studio'} workflow`,
+        // The registry writes a paragraph per workflow; this used to throw it
+        // away and label all seventeen "Media Studio workflow", which described
+        // none of them. The provider's name is the fallback, not the answer.
+        description: String(workflow.description || '').trim() || `${provider.label || 'Studio'} workflow`,
         type: 'video',
         family: 'hivemind-media-studio',
         // Registry family (ltx-2.3 / ltx / minimax): drives which controls

@@ -115,3 +115,39 @@ test('the Canvas editor asks the shell for the Models page instead of a second t
     assert.match(hubData, /event\.data\?\.type !== 'hivemind-navigate'/);
     assert.match(hubData, /event\.origin !== canvasFrameOrigin\(\)/);
 });
+
+// ── model cards ────────────────────────────────────────────────────────────
+// The picture and the paragraph on a model card come from Civitai and Hugging
+// Face, which means the bridge — not the browser — is what talks to them. These
+// are the rules that keeps true, and they are written claims about the wiring:
+// which host may be fetched, what is allowed to reach the page, and that the
+// bytes are stored once rather than re-fetched on every visit.
+
+const bridgeRoutes = fs.readFileSync(path.join(__dirname, '../../../src/hivemind_content_studio/api/bridge.py'), 'utf8');
+
+test('card art is fetched by the bridge, host-checked, and stored once', () => {
+    assert.match(hostedServer, /function isArtworkHost/);
+    // Hugging Face serves repo files through a signed CDN redirect, so the
+    // redirect target is checked too — not just the first URL.
+    assert.match(hostedServer, /host\.endsWith\('\.hf\.co'\)/);
+    assert.match(hostedServer, /allowHost: isArtworkHost/);
+    assert.match(hostedServer, /maxBytes: MODEL_ART_SOURCE_MAX_BYTES/);
+    // Fetched once and kept: re-fetching would tell Civitai which models this
+    // machine runs every time the page is opened.
+    assert.match(hostedServer, /if \(artFilePath\(hash\)\) return hash;/);
+    // Card-sized, not press-sized.
+    assert.match(hostedServer, /fit: 'inside', withoutEnlargement: true/);
+});
+
+test('the browser is handed this bridge’s own path, never the CDN url', () => {
+    assert.match(hostedServer, /artPath: artHash \? `\/local-ai\/model-art\/\$\{artHash\}` : ''/);
+    // The route serves what is already stored; a hash nobody resolved is a 404,
+    // not a fetch someone else's page can trigger.
+    assert.match(hostedServer, /if \(!\/\^\[0-9a-f\]\{40\}\$\/\.test\(hash\)\) return sendText\(res, 400, 'bad art reference'\)/);
+    assert.match(shim, /artUrl: data\.artPath \? `\$\{apiBase\}\$\{data\.artPath\}` : ''/);
+});
+
+test('both card routes exist on the studio’s own allow-list', () => {
+    assert.match(bridgeRoutes, /"local-ai\/model-card",/);
+    assert.match(bridgeRoutes, /"local-ai\/model-art\/",/);
+});

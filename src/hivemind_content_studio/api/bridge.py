@@ -1,4 +1,5 @@
-"""Same-origin proxies: the local-inference bridge and the Civitai handoff.
+"""Same-origin proxies: the local-inference bridge, the Civitai handoff, and
+the one route that writes an output's settings back into the file.
 
 Moved out of control_api.py unchanged (2026-09-04). The staged-media route is
 reachable without a session on purpose; the reason, and the check that stands
@@ -10,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import pathlib
 import re
+import tempfile
 import urllib.parse
 import urllib.request
 from typing import Annotated
@@ -139,6 +142,10 @@ def register(app, ctx) -> None:
             # The inspiration finder: Civitai images/videos that carry a
             # reusable prompt. Read-only, same bridge, same Civitai key.
             "local-ai/civitai-images",
+            # A model's artwork, blurb and links, matched on Civitai and Hugging
+            # Face by the bridge and cached there. Read-only; the picture itself
+            # comes back through the model-art prefix below.
+            "local-ai/model-card",
             # Workflow preflight and its inline installers: what the lane
             # lacks for a registered workflow, install it, restart the lane.
             "local-ai/workflow-dependencies",
@@ -153,6 +160,7 @@ def register(app, ctx) -> None:
                 "local-ai/loras/",
                 "local-ai/lora-preview/",
                 "local-ai/model-preview/",
+                "local-ai/model-art/",
                 "local-ai/civitai-download/",
                 "local-ai/workflow-dependencies/jobs/",
             )
@@ -372,5 +380,81 @@ def register(app, ctx) -> None:
         """Drop a staging as soon as the post is made or abandoned, rather than
         leaving plaintext to wait out its TTL."""
         return {"ok": True, "dropped": await asyncio.to_thread(civitai_post.drop_staged, token)}
+
+    # --- writing the settings into a file the owner keeps -------------------
+    #
+    # Everything this studio saves is sealed and ComfyUI runs with
+    # --disable-metadata, so a downloaded picture carries no prompt, no seed and
+    # no model: the settings live encrypted in the owner's vault, beside the
+    # output rather than inside it. That is the right default — a file that
+    # announces its prompt announces it to everyone it is ever sent to — and it
+    # is also why "which settings made this?" cannot be answered by any tool but
+    # this one.
+    #
+    # This route is the deliberate exception, asked for one file at a time from
+    # the studio's download menu, behind a toggle that has to be turned on
+    # first. It writes the SAME A1111 `parameters` block the Civitai handoff
+    # writes (civitai_post.stamp), because that is the format the ecosystem
+    # reads — Civitai, A1111, ComfyUI, every metadata viewer.
+    #
+    # Not the Civitai staging route, and deliberately not built on it: staging
+    # mints a public token, holds plaintext for half an hour and enforces
+    # Civitai's own ceilings, none of which belong to saving a file to your own
+    # disk. Here the bytes arrive decrypted, are stamped in a temporary
+    # directory that is removed before the response is sent, and go straight
+    # back to the browser that asked.
+    @router.post("/api/media/stamp-settings", dependencies=[Depends(require_owner)])
+    async def media_stamp_settings(
+        file: UploadFile = File(...),
+        meta: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Return the uploaded media with its generation settings written in.
+
+        Answers with the ORIGINAL bytes when the stamp could not be written (no
+        Pillow, no ffmpeg, a container that will not carry tags) rather than
+        failing: the person asked to save their file, and `X-Settings-Embedded`
+        tells the studio whether the settings actually travelled so it can say
+        so instead of implying they did.
+        """
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="That file is empty.")
+        try:
+            parsed_meta = json.loads(meta) if meta else {}
+            if not isinstance(parsed_meta, dict):
+                parsed_meta = {}
+        except json.JSONDecodeError:
+            parsed_meta = {}
+        content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+        if not content_type:
+            content_type = mimetypes.guess_type(file.filename or "")[0] or ""
+
+        def _stamped() -> tuple[bytes, bool]:
+            # A named temporary DIRECTORY, not a file: _stamp_video remuxes to a
+            # sibling path and replaces the original, so the stamper needs a
+            # place of its own. Removed on the way out of this block, which is
+            # before anything is returned — plaintext lives here for exactly as
+            # long as the stamp takes.
+            with tempfile.TemporaryDirectory(prefix="hive-stamp-") as tmp:
+                path = pathlib.Path(tmp) / (pathlib.Path(file.filename or "media").name or "media")
+                path.write_bytes(data)
+                embedded = civitai_post.stamp(path, content_type, parsed_meta)
+                return path.read_bytes(), bool(embedded)
+
+        try:
+            stamped, embedded = await asyncio.to_thread(_stamped)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not write the settings into that file.") from exc
+        return Response(
+            content=stamped,
+            media_type=content_type or "application/octet-stream",
+            headers={
+                "Cache-Control": "no-store",
+                # Whether the settings actually travelled INSIDE the file. The
+                # studio reports the false case rather than claiming a stamp it
+                # did not make.
+                "X-Settings-Embedded": "1" if embedded else "0",
+            },
+        )
 
     app.include_router(router)

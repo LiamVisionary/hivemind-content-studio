@@ -311,6 +311,35 @@ def _no_marketplace_calls_from_tests(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _rentals_use_the_direct_transport(monkeypatch):
+    """Every rental test drives the DIRECT transport unless it says otherwise.
+
+    Since 2026-09-07 the default transport follows the owner's HivemindOS
+    account: a connected token routes every marketplace call through the hosted
+    worker, and this machine's own VAST/RUNPOD keys stop mattering. On the
+    developer's machine that token IS present — so without this pin the fakes
+    of `vast.request` in the suites above would be faking a transport the
+    provider no longer takes, `configured()` would ask the worker instead of
+    the environment, and every "no marketplace is configured" assertion would
+    read the connect-your-account sentence instead. The same shape of trap as
+    the shared hive env: what is on the developer's machine must not decide
+    what a test asserts.
+
+    The worker's URL is pinned to a port nothing serves as well, because its
+    default is now the live worker and the bad-machines list is fetched from
+    it on every offer ranking. test_rental_gateway.py sets both explicitly —
+    the transport is what that file is about.
+    """
+    monkeypatch.setenv("HIVEMIND_GPU_RENTALS_TRANSPORT", "direct")
+    monkeypatch.setenv("HIVEMIND_GPU_RENTALS_GATEWAY_URL", "https://127.0.0.1:9")
+    from hivemind_content_studio.rental_providers import gateway
+
+    gateway.forget_market()
+    yield
+    gateway.forget_market()
+
+
+@pytest.fixture(autouse=True)
 def _no_ssh_probes_from_tests(monkeypatch, request):
     """No test may open a real SSH connection while probing a rental's door.
 

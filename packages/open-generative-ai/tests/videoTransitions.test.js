@@ -66,7 +66,7 @@ test('every setup transition runs without reaching an unbound helper', async () 
         // Each of these both changes the model and re-derives its defaults, which
         // is where an unbound helper hides.
         const cases = {
-            newPrompt: () => logic.newPromptTransition(onH3, catalogs),
+            newPrompt: () => logic.newPromptTransition(onH3),
             extend: () => logic.extendTransition(onH3, catalogs),
             startFrameCleared: () => logic.startFrameClearedTransition({ ...onH3, modelId: catalogs.allI2V[1].id }, catalogs),
             startFrameSelected: () => logic.startFrameSelectedTransition(initial, '/api/x.png', catalogs).setup,
@@ -108,7 +108,7 @@ test('changing the model always rewrites the family it is gated on', async () =>
         }
         // "+ New" no longer leaves at all: H3 generates from text, so a fresh
         // prompt stays on it — and the family stays truthful WITH it.
-        const fresh = logic.newPromptTransition(onH3, catalogs);
+        const fresh = logic.newPromptTransition(onH3);
         assert.equal(fresh.modelId, H3.id, '+ New keeps the H3 model');
         assert.equal(fresh.modelFamily, 'minimax');
 
@@ -169,8 +169,15 @@ test('the registry model reaches the studio whole', async () => {
 // "+ New" and clearing a source clip used to land on allT2V[0] — the first CLOUD
 // model — while the Source stayed Local: the Model chip named Seedance Lite with
 // a cloud icon, the picker (filtered to local models) did not list it, and
-// Generate opened the API-key modal. Every reset now respects the source.
-test('"+ New" and clearing a clip never hop a Local session onto a cloud model', async () => {
+// Generate opened the API-key modal.
+//
+// Start fresh no longer moves the model AT ALL, which settles that class of bug
+// rather than steering around it: the model is not one of the inputs the press
+// clears, so a cleared image-to-video model waits for its next start frame
+// (Generate says so) instead of hopping to a text-to-video sibling and taking
+// the clip length, aspect, resolution and advanced values with it. Clearing the
+// clip, a different door, still respects the source the old way.
+test('Start fresh clears every input and leaves the model exactly where it was', async () => {
     const restore = stubBrowserGlobals();
     try {
         const logic = await loadLogic('no-cloud-hop');
@@ -188,7 +195,7 @@ test('"+ New" and clearing a clip never hop a Local session onto a cloud model',
             ...initial, modelId: H3.id, modelName: H3.name, modelFamily: 'minimax', imageMode: true, localMode: true,
             prompt: 'a shot', imageUrl: '/api/x.png', referenceImageUrls: ['/api/r.png'], duration: 3,
         }, catalogs);
-        const fresh = logic.newPromptTransition({ ...onH3, duration: 3 }, catalogs);
+        const fresh = logic.newPromptTransition({ ...onH3, duration: 3 });
         assert.equal(fresh.modelId, H3.id);
         assert.equal(fresh.prompt, '');
         assert.equal(fresh.imageUrl, null);
@@ -208,30 +215,77 @@ test('"+ New" and clearing a clip never hop a Local session onto a cloud model',
         assert.equal(cleared.modelId, LTX.id, 'clearing the clip keeps the local model');
         assert.equal(cleared.localMode, true);
 
-        // A video TOOL, Local (an edge the picker hides, but the state can hold
-        // it): "+ New" has to leave it, and lands on a LOCAL workflow.
-        const onTool = logic.selectV2VModelTransition({ ...initial, localMode: true }, logic.v2vModels[0], catalogs);
-        const offTool = logic.newPromptTransition(onTool, catalogs);
-        assert.ok(isLocal(offTool.modelId), `a Local session lands on a local model, got ${offTool.modelId}`);
-        assert.equal(offTool.v2vMode, false);
+        // A video TOOL keeps itself and its mode: the source clip is gone, the
+        // tool is still selected, and Generate asks for the next clip.
+        const onTool = logic.selectV2VModelTransition({ ...initial, localMode: true, videoUrl: '/api/c.mp4' }, logic.v2vModels[0], catalogs);
+        const offTool = logic.newPromptTransition(onTool);
+        assert.equal(offTool.modelId, onTool.modelId, 'a video tool survives Start fresh');
+        assert.equal(offTool.v2vMode, true, 'and stays in the mode that model runs in');
+        assert.equal(offTool.videoUrl, null, 'while the clip it was fed is gone');
+        assert.equal(offTool.localMode, onTool.localMode, 'and the source is left as it was found');
+        // Note what is NOT asserted: that a Local session ends up on a local
+        // model. Start fresh cannot introduce that mismatch any more, because it
+        // moves no model — so it also no longer quietly REPAIRS a session that
+        // was already in one. Fixing a mismatched source belongs to the picker
+        // that made it, not to a press that says it clears the composer.
 
-        // Cloud stays cloud: a cloud image-to-video model falls back to a cloud
-        // text-to-video model of its own family.
+        // A cloud image-to-video model keeps ITSELF — the start frame is what
+        // goes, not the lane the user chose, and the settings that came with it
+        // are still there when the next frame is attached.
         const cloudI2V = catalogs.allI2V.find((m) => !isLocal(m.id) && m.family
             && catalogs.allT2V.some((t) => t.family === m.family && !isLocal(t.id)));
         const onCloudI2V = logic.applyModelDefaults(
             logic.withSelectedModel({ ...initial, localMode: false, imageMode: true, imageUrl: '/api/x.png' }, cloudI2V), catalogs,
         );
-        const offCloud = logic.newPromptTransition(onCloudI2V, catalogs);
-        assert.ok(!isLocal(offCloud.modelId), 'a cloud session stays on a cloud model');
-        assert.equal(offCloud.imageMode, false);
-        const landed = logic.resolveVideoModel(offCloud.modelId, catalogs);
-        assert.equal(landed.family, cloudI2V.family, 'and on the text-to-video sibling of the same family');
+        const offCloud = logic.newPromptTransition({ ...onCloudI2V, duration: onCloudI2V.duration });
+        assert.equal(offCloud.modelId, cloudI2V.id, 'a cloud image-to-video model is kept, not swapped for a sibling');
+        assert.equal(offCloud.imageMode, true, 'and keeps the mode it runs in');
+        assert.equal(offCloud.imageUrl, null, 'while the start frame is gone');
+        assert.equal(offCloud.duration, onCloudI2V.duration, 'and its format settings were never re-derived');
+        assert.equal(offCloud.ar, onCloudI2V.ar);
+        assert.equal(offCloud.resolution, onCloudI2V.resolution);
+        assert.equal(offCloud.modelFamily, onCloudI2V.modelFamily, 'the family gate still answers for the kept model');
 
         // A plain cloud text-to-video model simply keeps itself.
         const cloudT2V = catalogs.allT2V.find((m) => !isLocal(m.id));
         const onCloudT2V = logic.selectRegularModelTransition({ ...initial, localMode: false, prompt: 'x' }, cloudT2V, catalogs);
-        assert.equal(logic.newPromptTransition(onCloudT2V, catalogs).modelId, cloudT2V.id);
+        assert.equal(logic.newPromptTransition(onCloudT2V).modelId, cloudT2V.id);
+    } finally {
+        restore();
+    }
+});
+
+// The list the confirm dialog reads out. It has to name what is ACTUALLY
+// attached: a dialog that promises to clear a persona nobody loaded teaches
+// people to stop reading it.
+test('startFreshSummary names what is attached, and nothing that is not', async () => {
+    const restore = stubBrowserGlobals();
+    try {
+        const logic = await loadLogic('fresh-summary');
+        // An empty composer has nothing to lose — which is what lets the studio
+        // skip the dialog rather than asking about an empty list.
+        assert.deepEqual(logic.startFreshSummary({}), []);
+        assert.deepEqual(logic.startFreshSummary({ prompt: '  ', referenceImageUrls: [] }), []);
+        assert.deepEqual(logic.startFreshSummary({ prompt: 'a shot' }), ['what you typed']);
+        assert.deepEqual(logic.startFreshSummary({ imageUrl: '/a.png' }), ['the start frame']);
+        assert.deepEqual(logic.startFreshSummary({ endImageUrl: '/b.png', ltxEndUrl: '/c.png' }), ['2 other keyframes']);
+        assert.deepEqual(logic.startFreshSummary({ referenceVideos: ['/v.mp4'] }), ['1 attached clip']);
+        assert.deepEqual(logic.startFreshSummary({ referenceAudios: ['/a.wav', '/b.wav'] }), ['2 attached voices']);
+        assert.deepEqual(logic.startFreshSummary({ persona: { id: 'x' } }), ['the loaded persona']);
+        assert.deepEqual(logic.startFreshSummary({ videoUrl: '/clip.mp4' }), ['the source clip']);
+        assert.deepEqual(
+            logic.startFreshSummary({ prompt: 'a shot', imageUrl: '/a.png', referenceImageUrls: ['/r.png', '/s.png'] }),
+            ['what you typed', 'the start frame', '2 attached pictures'],
+        );
+        // Everything the transition clears can be named by the summary, and the
+        // summary of a cleared setup is empty — which is the only guarantee that
+        // the dialog and the patch have not drifted apart.
+        const cleared = logic.newPromptTransition({
+            prompt: 'a shot', imageUrl: '/a.png', endImageUrl: '/b.png', ltxMiddleUrl: '/m.png', ltxEndUrl: '/e.png',
+            referenceImageUrls: ['/r.png'], referenceVideos: ['/v.mp4'], referenceAudios: ['/a.wav'],
+            persona: { id: 'x' }, videoUrl: '/clip.mp4', videoName: 'clip.mp4',
+        });
+        assert.deepEqual(logic.startFreshSummary(cleared), []);
     } finally {
         restore();
     }

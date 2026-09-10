@@ -206,6 +206,32 @@ class LocalInferenceClient {
         };
     }
 
+    // ── Model cards ───────────────────────────────────────────────────────
+    // A model's picture, the paragraph that describes it and the pages it came
+    // from — matched by the bridge on Civitai and Hugging Face, and cached there.
+    // Absent on a build whose bridge predates the route, which is why the Models
+    // page asks before it draws a picture at all.
+    supportsModelCards() {
+        return isLocalAIAvailable() && typeof window.localAI.modelCard === 'function';
+    }
+
+    /** Never throws: card art is an enhancement, and a lookup that failed must
+     *  leave the model listed rather than take the page down with it. */
+    async modelCard(model) {
+        if (!this.supportsModelCards()) return null;
+        try {
+            const card = await window.localAI.modelCard({
+                id: model?.workflowId || model?.id,
+                name: model?.name,
+                family: model?.workflowFamily || model?.family,
+                compatibleBaseModels: model?.compatibleBaseModels,
+            });
+            return card && typeof card === 'object' ? card : null;
+        } catch {
+            return null;
+        }
+    }
+
     // Civitai's own base-model vocabulary for the browse filter. Never throws: the
     // filter falls back to the values the search results carry.
     async listCivitaiBaseModels() {

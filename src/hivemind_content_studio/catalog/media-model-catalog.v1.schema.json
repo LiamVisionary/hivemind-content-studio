@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivemindos.com/schemas/media-model-catalog.v1.json",
+  "title": "HivemindOS media model catalog",
+  "description": "One inventory of every image and video generation runtime and model a machine can reach, published identically by HivemindOS and Hivemind Content Studio so either app can read the other's discovery. Carries no prompts, media, credential values, Tailnet IPs or private absolute paths.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "app",
+    "generatedAt",
+    "sources",
+    "models"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "app": {
+      "type": "string",
+      "enum": [
+        "hivemindos",
+        "hivemind-content-studio"
+      ]
+    },
+    "generatedAt": {
+      "type": "string",
+      "minLength": 20
+    },
+    "machineName": {
+      "type": "string"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "kind",
+          "app",
+          "available",
+          "detail"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "this-machine",
+              "fleet",
+              "content-studio",
+              "hivemindos-credits",
+              "your-accounts",
+              "rented"
+            ]
+          },
+          "app": {
+            "type": "string",
+            "enum": [
+              "hivemindos",
+              "hivemind-content-studio"
+            ]
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "machineName": {
+            "type": "string"
+          },
+          "needs": {
+            "type": "string"
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "kind",
+          "id",
+          "label",
+          "provider",
+          "providerLabel",
+          "sourceId",
+          "place",
+          "placeLabel",
+          "available",
+          "ready",
+          "cost",
+          "capabilities",
+          "execute"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "image",
+              "video"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1
+          },
+          "providerLabel": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "place": {
+            "type": "string",
+            "enum": [
+              "this-machine",
+              "fleet",
+              "hivemindos-credits",
+              "your-accounts"
+            ]
+          },
+          "placeLabel": {
+            "type": "string",
+            "minLength": 1
+          },
+          "machineName": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "credential": {
+            "type": "string",
+            "enum": [
+              "api-key",
+              "sign-in",
+              ""
+            ]
+          },
+          "cost": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "label"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "free",
+                  "credits",
+                  "account",
+                  "rental",
+                  "quoted"
+                ]
+              },
+              "credits": {
+                "type": "number",
+                "minimum": 0
+              },
+              "usd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "label": {
+                "type": "string"
+              }
+            }
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "referenceImages": {
+                "type": "boolean"
+              },
+              "maxReferenceImages": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "family": {
+                "type": "string"
+              },
+              "accepts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "beta": {
+                "type": "boolean"
+              },
+              "default": {
+                "type": "boolean"
+              },
+              "requiresImage": {
+                "type": "boolean"
+              }
+            }
+          },
+          "execute": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "route"
+            ],
+            "properties": {
+              "route": {
+                "type": "string",
+                "enum": [
+                  "connected-app",
+                  "media-studio-mcp",
+                  "hosted-media",
+                  "content-studio",
+                  "none"
+                ]
+              },
+              "appId": {
+                "type": "string"
+              },
+              "workflowId": {
+                "type": "string"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "openUrl": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

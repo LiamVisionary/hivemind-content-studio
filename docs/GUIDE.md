@@ -335,12 +335,22 @@ being thin, not a fault here.
 
 Four tabs:
 
-* **Models** — the local workflows the studios can generate with.
+* **Models** — the local workflows the studios can generate with. Each card is a
+  picture of what the model makes and a sentence about it; pressing one opens the
+  model — where it came from, links to its page on Civitai or Hugging Face, what
+  it can do in plain words, and the ids and defaults behind a "Technical details"
+  disclosure. Hovering a card offers **Open**, straight into the studio that runs it.
 * **Engine** — the store: the inference engine and the models you can install.
 * **Installed** — every weight file on disk, searchable.
 * **Discover** — search Civitai and install from it.
 
 This page is the only place models are installed or removed.
+
+The artwork and the descriptions are not shipped with the studio: the first time
+this page is opened, the machine looks each model up on Civitai and Hugging Face,
+keeps what it finds for a week, and stores a card-sized copy of the picture. Your
+browser never talks to either service — the local bridge does — and a model
+nothing matched keeps a coloured tile rather than borrowing somebody else's art.
 
 ---
 

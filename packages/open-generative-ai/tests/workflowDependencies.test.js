@@ -152,10 +152,12 @@ test('the preflight is cached per workflow and pin, refreshed on force, and adop
     assert.deepEqual(none, { ok: true, known: false, missing: [] });
 });
 
-// The prompt is a portalled modal, which react-dom/server cannot render, so
-// its wiring is asserted on the source: every string it asks i18n for
-// exists, and the Video studio mounts it behind its open flag with the
-// report, the workflow and the pin.
+// Deliberately textual: the prompt renders through Modal, which is a
+// createPortal call, and react-dom/server refuses portals — there is no markup
+// to assert on. So its wiring is read instead: every string it asks i18n for
+// exists, the Video studio mounts it behind its open flag with the report, the
+// workflow and the pin, and the remedy the server names resolves to an action
+// the studio handles. The store above it is exercised, not read.
 test('the prompt asks only for strings i18n has, and the Video studio mounts it', () => {
     const fs = require('node:fs');
     const path = require('node:path');

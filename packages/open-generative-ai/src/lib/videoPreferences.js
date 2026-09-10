@@ -13,6 +13,8 @@
 // videoLogic.js re-exports all of this, so studio code keeps one import site.
 
 import { normalizeCameraMotions } from './cameraMotion.js';
+import { emotionDirectionById } from './emotionDirection.js';
+import { UGC_DEFAULT_FORMAT, ugcFormat } from './ugcMode.js';
 import { restylePresetById } from './h3RestylePresets.js';
 
 const VIDEO_ADVANCED_EXCLUDED_INPUTS = new Set([
@@ -208,6 +210,11 @@ export function normalizeVideoPreferences(value) {
         // stacking a second sentence after a reload.
         cameraMotionIds: normalizeCameraMotions(value.cameraMotionIds),
         restylePresetId: restylePresetById(stringValue(value.restylePresetId)) ? stringValue(value.restylePresetId) : null,
+        emotionDirectionId: emotionDirectionById(stringValue(value.emotionDirectionId)) ? stringValue(value.emotionDirectionId) : null,
+        // The UGC ad format, as an id. Like the chips above, the BRIEF itself
+        // rides in the encrypted composer with the prompt; only the choice is
+        // plaintext.
+        ugcFormat: ugcFormat(stringValue(value.ugcFormat)).id,
         advancedValues,
         loraSelections,
         ingredientSelections,
