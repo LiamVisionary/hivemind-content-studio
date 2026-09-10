@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -38,6 +39,10 @@ TAURI_CONFIG = ROOT / "desktop" / "src-tauri" / "tauri.conf.json"
 CARGO_TOML = ROOT / "desktop" / "src-tauri" / "Cargo.toml"
 SHELL_LIB = ROOT / "desktop" / "src-tauri" / "src" / "lib.rs"
 CAPABILITIES = ROOT / "desktop" / "src-tauri" / "capabilities"
+# The studio page reads the SAME manifest the shipped app does, so that a
+# release the shell would install is exactly a release the page reports. It
+# derives the URL from GET /api/version's source_url plus this path.
+FRONTEND_UPDATE = ROOT / "packages" / "open-generative-ai" / "src" / "lib" / "appUpdate.js"
 
 # The three things that have to be true for a promoted latest.json to reach an
 # installed app, none of which the two JSON files can tell you.
@@ -140,7 +145,9 @@ def check(*, require_key: bool) -> list[str]:
     if require_key and not pubkey:
         problems.append(
             f"{UPDATER_CONFIG.name} has no pubkey, so an update could not be verified by the app that "
-            "receives it. Generate a key pair with `cargo tauri signer generate`, put the PUBLIC half "
+            "receives it. Generate a key pair with `npx --yes @tauri-apps/cli@^2 signer generate` "
+            "(the Tauri CLI is not installed by checking this repo out, so a bare `cargo tauri` "
+            "fails), put the PUBLIC half "
             f"here, and store the private half as the {secret_name or 'TAURI_SIGNING_PRIVATE_KEY'} "
             "repository secret. Never commit the private half."
         )
@@ -167,6 +174,27 @@ def check(*, require_key: bool) -> list[str]:
                     f"{UPDATER_CONFIG.name}. Whichever is wrong, an install made with it can never be "
                     "updated; fix both to the same value before building."
                 )
+
+    # The page is the updater's second consumer. It must agree about WHICH
+    # manifest is authoritative, or the sidebar would offer an update the shell
+    # cannot install (or stay silent about one it can).
+    if FRONTEND_UPDATE.is_file():
+        frontend = FRONTEND_UPDATE.read_text(encoding="utf-8")
+        match = re.search(r"UPDATE_MANIFEST_PATH\s*=\s*'([^']+)'", frontend)
+        if not match:
+            problems.append(
+                f"{FRONTEND_UPDATE.name} no longer declares UPDATE_MANIFEST_PATH, so nothing holds the "
+                "page's update check to the endpoint the shipped app asks."
+            )
+        elif endpoints:
+            path = match.group(1)
+            if not any(str(endpoint).endswith(path) for endpoint in endpoints):
+                problems.append(
+                    f"{FRONTEND_UPDATE.name}'s UPDATE_MANIFEST_PATH ({path}) is not the tail of any "
+                    f"endpoint in {UPDATER_CONFIG.name}. The page would report updates from a different "
+                    "manifest than the one the app installs from."
+                )
+
     return problems
 
 

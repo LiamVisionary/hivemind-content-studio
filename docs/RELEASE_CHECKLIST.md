@@ -199,8 +199,23 @@ The updater's **public** key is a config value in
 [`desktop/src-tauri/updater.json`](../desktop/src-tauri/updater.json) and ships inside the
 app; `tauri.conf.json` must agree with it, which
 `scripts/check_updater_config.py` enforces. Get the pair from
-`cargo tauri signer generate`, commit only the public half, and store the
-private half as the repository secret above.
+`signer generate`, commit only the public half, and store the private half as
+the repository secret above.
+
+**`signer` is part of the Tauri CLI, which is not installed by checking this
+repository out.** `cargo tauri signer generate` fails with `no such command:
+tauri` until you have it — this repo has no npm project, so there is no
+`npm run tauri` either (which is also why `release-desktop.yml` installs the
+Rust CLI and passes `tauriScript: cargo tauri`). Either form works:
+
+```bash
+# One-off, nothing installed, no Rust compile:
+npx --yes @tauri-apps/cli@^2 signer generate
+
+# Or the CLI the release workflow uses, if you want it on PATH (a few minutes):
+cargo install tauri-cli --version "^2.11" --locked
+cargo tauri signer generate
+```
 
 `signer generate` **prints** both halves and writes nothing unless you pass
 `-w <path>`, so the plain form is the one to use for CI: copy the printed
@@ -223,6 +238,7 @@ the DMG a person installs is the only place the Download control and the
 updater can really be exercised — wants the path form:
 
 ```bash
+# `npx --yes @tauri-apps/cli@^2 signer …` works here too — see the note above.
 cargo tauri signer generate -w ~/.tauri/hivemind-content-studio.key
 export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.tauri/hivemind-content-studio.key"
 # and, only if you gave the key a password:

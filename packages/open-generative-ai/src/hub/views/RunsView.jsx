@@ -330,7 +330,10 @@ export function RunsView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker={t('runs.kicker')} title={t('nav.productions')}>
+      {/* refresh: loadRuns() runs on every poll tick and the Activity tab's
+          telemetry is fetched while this page shows — both are server state a
+          run finishing elsewhere moves, so jumping the 10 s cadence is real. */}
+      <HubToolbar kicker={t('runs.kicker')} title={t('nav.productions')} refresh>
         <Segmented options={tabs} value={tab} onChange={setTab} />
         {tab === 'productions' ? <Segmented options={FILTERS} value={s.statusFilter} onChange={setStatusFilter} /> : null}
       </HubToolbar>

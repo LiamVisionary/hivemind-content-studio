@@ -44,3 +44,37 @@ export async function restartStudio() {
     return { ok: false, reason: 'failed', detail: String(error?.message || error || '') };
   }
 }
+
+/**
+ * Ask the shell to install a promoted update and relaunch.
+ *
+ * Only the packaged app can do this: it replaces its own bundle after verifying
+ * the signature, which is what every platform's updater does. A browser tab gets
+ * `{ ok: false, reason: 'no-shell' }` and is shown the release instead — a page
+ * must not mutate the server that serves it.
+ *
+ * A SUCCESSFUL install never resolves: `app.restart()` replaces the process, so
+ * the call is cut off mid-flight. Callers should treat the promise not settling
+ * as the app going down for the relaunch, and only act on a rejection.
+ *
+ * Reasons, which the caller turns into a sentence from the key table (never the
+ * shell's own error text):
+ *   'no-shell'         — not the packaged app.
+ *   'unsigned-channel' — this build carries no updater public key, so nothing can
+ *                        be verified and therefore nothing may be installed.
+ *   'no-update'        — the manifest offers nothing newer.
+ *   'failed'           — the download or the signature check did not succeed.
+ */
+export async function installUpdate() {
+  const shell = desktopShell();
+  if (!shell) return { ok: false, reason: 'no-shell' };
+  try {
+    await shell.invoke('install_update');
+    // Reached only if the shell declined to restart; the update is on disk.
+    return { ok: true };
+  } catch (error) {
+    const reason = String(error?.message || error || '').trim();
+    const known = ['unsigned-channel', 'no-update', 'failed'];
+    return { ok: false, reason: known.includes(reason) ? reason : 'failed' };
+  }
+}

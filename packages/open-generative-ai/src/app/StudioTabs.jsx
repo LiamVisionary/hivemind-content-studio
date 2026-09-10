@@ -378,12 +378,20 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
 
   const openTabIds = state.tabs.map((tab) => tab.id);
 
-  return (
-    <>
+  // The strip is no longer a bar across the top of the page. It floats over the
+  // stage on the composer's own column (StudioFrame's `tabs` slot), so the first
+  // chip sits directly above the prompt's first character and moves with it when
+  // Advanced pushes the stage aside. Same chrome as the composer and the drawer:
+  // translucent, blurred, one hairline ring, one deep shadow.
+  //
+  // Built once and handed to the FRONT tab only — every mounted tab renders its
+  // own frame, and passing this to all of them would put a second (hidden)
+  // tablist in the DOM behind each background studio.
+  const strip = (
       <div
         role="tablist"
         aria-label="Studio tabs"
-        className="no-scrollbar flex h-10 w-full shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line1 bg-bg1 px-3"
+        className="no-scrollbar pointer-events-auto flex max-w-full items-center gap-1.5 overflow-x-auto rounded-[14px] bg-bg0/85 px-2 py-1.5 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.07)] backdrop-blur-xl"
       >
         {state.tabs.map((tab, index) => (
           <TabChip
@@ -412,7 +420,10 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
           <Icon name="plus" size={14} />
         </button>
       </div>
+  );
 
+  return (
+    <>
       {state.tabs.filter((tab) => mounted.has(tab.id)).map((tab) => {
         const front = tab.id === state.activeId;
         return (
@@ -425,6 +436,7 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
               primary={tab.id === state.tabs[0].id && !tab.seed}
               openTabIds={openTabIds}
               apiRef={apiFor(tab.id)}
+              tabStrip={front ? strip : null}
               studioLane={studioLaneId(studioType, instanceIdRef.current, tab.id)}
             />
           </div>

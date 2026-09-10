@@ -132,10 +132,14 @@ export function TelemetryView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+      {/* refresh: the ledger is only fetched while this page (or Productions)
+          is showing, so it is server state with no other way to re-read it —
+          and the offline pill below is exactly the case that needs a retry. */}
       <HubToolbar
         kicker={t('activity.kicker')}
         title={t('nav.activity')}
         subtitle={t('activity.subtitle')}
+        refresh
       >
         {s.telemetry && s.apiOnline === false ? <Pill tone="warn" dot>{t('activity.offlinePill')}</Pill> : null}
       </HubToolbar>

@@ -413,7 +413,10 @@ export function HistoryView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker={t('history.kicker')} title={t('nav.library')}>
+      {/* refresh: this page IS the hub poll's output — refreshAll re-reads the
+          canvas history and re-fetches the prompts while Library is showing —
+          and nothing else here re-reads it on demand. */}
+      <HubToolbar kicker={t('history.kicker')} title={t('nav.library')} refresh>
         {refreshing ? <Spinner size={14} className="text-honey" /> : null}
         {s.apiOnline === false ? (
           <Pill tone="warn" dot title={t('history.staleReadingTitle')}>

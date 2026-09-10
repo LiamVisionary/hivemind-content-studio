@@ -13,6 +13,7 @@ fn main() {
                 "skip_service",
                 "reveal_logs",
                 "restart_studio",
+                "install_update",
             ]),
         ),
     )

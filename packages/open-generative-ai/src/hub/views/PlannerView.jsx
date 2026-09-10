@@ -523,11 +523,13 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 p-4 md:p-5">
           {s.thread.length === 0 && s.apiOnline === false && !s.simpleCatalog ? (
             // Boot never reached the API: say so instead of inviting a prompt
-            // the brain chip cannot serve.
+            // the brain chip cannot serve. The hint used to send people to the
+            // topbar's Refresh, which no longer exists — the retry it means is
+            // this page's own toolbar button.
             <EmptyState
               icon="plug"
               title="The studio is not running"
-              hint="The Planner needs the studio on this machine. It retries on its own once the studio is running — or use the refresh button in the top bar."
+              hint="The Planner needs the studio on this machine. It retries on its own once the studio is running — or press Refresh above."
               className="flex-1"
             />
           ) : s.thread.length === 0 ? (
@@ -1033,10 +1035,14 @@ export function PlannerView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+      {/* refresh: the thread's run cards are hubState.runs, reloaded by the
+          poll, and the brain chip's catalog is the boot fetch — a studio that
+          came up after this page did needs a way to be asked again. */}
       <HubToolbar
         kicker="Agent-directed production"
         title="Planner"
         right={<Segmented options={MODE_OPTIONS} value={s.studioMode} onChange={setStudioMode} />}
+        refresh
       />
       {advanced
         ? <AdvancedForm titleRef={titleRef} />

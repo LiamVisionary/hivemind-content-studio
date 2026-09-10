@@ -211,7 +211,7 @@ function ExploreDockInner() {
     <div
       id="hivemind-explore-dock"
       ref={rootRef}
-      className="hive-scale-in fixed right-3 top-[calc(var(--topbar-h)+8px)] z-[70] flex max-h-[min(560px,78vh)] w-[min(21rem,calc(100vw-1.5rem))] flex-col gap-3 overflow-y-auto rounded-lg border border-line1 bg-bg1 p-3 shadow-pop"
+      className="hive-scale-in fixed right-3 top-3 z-[70] flex max-h-[min(560px,78vh)] w-[min(21rem,calc(100vw-1.5rem))] flex-col gap-3 overflow-y-auto rounded-lg border border-line1 bg-bg1 p-3 shadow-pop"
     >
           <div className="flex items-center justify-between gap-3 border-b border-line1 pb-2.5">
             <div>

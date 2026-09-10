@@ -94,13 +94,26 @@ test('the notices payload flattens python, npm, the Rust crates and the bundled 
     assert.deepEqual(allNoticePackages({}), []);
 });
 
-test('About is reachable from the nav and from the topbar chip', async () => {
+test('About is reachable from the nav and from the build line in the sidebar', async () => {
     const { HUB_PAGES, isKnownPage } = await importSrc('src/app/navConfig.jsx');
     assert.equal(isKnownPage('about'), true);
     assert.equal(HUB_PAGES.about, 'about');
     const shell = read('src/app/Shell.jsx');
-    assert.ok(shell.includes('<VersionChip onNavigate={onNavigate} />'), 'the topbar needs the version chip');
-    assert.ok(/onNavigate\('about'\)/.test(shell), 'the chip must open the About page');
+    // AGPL §5(d) needs a door to the page that names the licence and the source
+    // offer. It used to be a chip in the topbar; the topbar is gone, so the door
+    // is the build line at the foot of the sidebar — and, below lg where there is
+    // no sidebar, an item in the mobile More menu. BOTH must exist: dropping
+    // either leaves a whole class of window with no way to reach About.
+    assert.ok(
+        shell.includes('<SidebarVersion onNavigate={onNavigate} railed={railed} />'),
+        'the sidebar footer needs the build line',
+    );
+    assert.match(shell, /function SidebarVersion\(/, 'the build line is its own component');
+    assert.equal(
+        (shell.match(/onNavigate\('about'\)/g) || []).length,
+        2,
+        "About must be reachable from the sidebar's build line AND the mobile More menu",
+    );
 });
 
 test('the About page states the licence, the source offer and the warranty', async () => {

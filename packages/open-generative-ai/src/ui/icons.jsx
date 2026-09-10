@@ -140,6 +140,16 @@ const PATHS = {
       <path d="M12 16V3" />
     </>
   ),
+  // The system share glyph, drawn the way every OS draws it: a box the arrow
+  // leaves through the top. Deliberately not `upload` (a tray taking something
+  // IN) — these two sit two rows apart in the download menu.
+  share: (
+    <>
+      <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
+      <path d="m8 7 4-4 4 4" />
+      <path d="M12 3v13" />
+    </>
+  ),
   plus: (
     <>
       <path d="M12 5v14" />
@@ -211,6 +221,15 @@ const PATHS = {
       <circle cx="12" cy="12" r="9" />
       <path d="M12 16v-5" />
       <path d="M12 8h.01" />
+    </>
+  ),
+  // The sidebar's own toggle. A chevron says "there is more this way"; a shelf
+  // with its rail drawn in says "this is the shelf, and it folds" — which is the
+  // question the control actually answers.
+  panelLeft: (
+    <>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" />
     </>
   ),
   sliders: (

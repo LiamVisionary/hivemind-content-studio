@@ -111,13 +111,46 @@ test('the restart remedy is a button in the desktop shell and an instruction in 
     }
 });
 
+// Every .jsx under src/ whose source matches `pattern`. Used to derive the set
+// of surfaces a rule applies to, instead of hard-coding a list that goes stale
+// the moment a control moves.
+function jsxFilesMatching(pattern) {
+    const root = path.join(__dirname, '..', 'src');
+    const out = [];
+    const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) { walk(full); continue; }
+            if (!entry.name.endsWith('.jsx')) continue;
+            if (pattern.test(fs.readFileSync(full, 'utf8'))) {
+                out.push(path.relative(path.join(__dirname, '..'), full).split(path.sep).join('/'));
+            }
+        }
+    };
+    walk(root);
+    return out;
+}
+
 test('every surface that explains the offline state carries that one remedy', () => {
-    // Asserted on the source because all three are reached through an effect —
-    // a heartbeat verdict, a save that needs a restart — and a server render
-    // runs no effects. What matters is that none of them grew a second answer.
-    for (const file of ['src/ui/kit.jsx', 'src/app/Shell.jsx', 'src/hub/views/SettingsView.jsx']) {
-        assert.match(read(file), /<StudioRestartAction/, `${file} explains the restart without offering it`);
+    // Asserted on the source because these are reached through an effect — a
+    // heartbeat verdict, a save that needs a restart — and a server render runs
+    // no effects. What matters is that none of them grew a second answer.
+    //
+    // The list is DERIVED now, not written down. It used to name Shell.jsx,
+    // which explained the offline state in its topbar status menu; the topbar is
+    // gone and so is that explanation, and a hand-written list cannot tell the
+    // difference between "this surface lost the remedy" and "this surface no
+    // longer explains the problem". So: any component that prints the offline
+    // sentence must also offer the restart, whichever component that turns out
+    // to be. A new surface that explains without offering fails here.
+    const explainers = jsxFilesMatching(/apiOfflineSentence\s*\(/);
+    assert.ok(explainers.length > 0, 'nothing explains the offline state — this guard is measuring nothing');
+    for (const file of explainers) {
+        assert.match(read(file), /<StudioRestartAction/, `${file} explains the offline state without offering the restart`);
     }
+    // Settings explains a DIFFERENT trigger for the same remedy (a saved change
+    // that needs a restart), so it is named rather than derived.
+    assert.match(read('src/hub/views/SettingsView.jsx'), /<StudioRestartAction/, 'Settings must offer the restart it asks for');
     // And the sentence beside it states the problem only — the fix is the
     // component above, not a trailing "by running:" with nothing after it.
     const table = read('src/lib/i18n.js');

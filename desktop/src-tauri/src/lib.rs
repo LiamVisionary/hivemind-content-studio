@@ -14,6 +14,7 @@ pub mod ports;
 pub mod secret;
 pub mod services;
 pub mod supervisor;
+pub mod update;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,6 +69,7 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
             boot::skip_service,
             boot::reveal_logs,
             boot::restart_studio,
+            update::install_update,
         ])
         .build(context)
         .expect("failed to start the Hivemind Content Studio shell")
