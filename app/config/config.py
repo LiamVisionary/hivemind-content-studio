@@ -5,9 +5,10 @@ import shutil
 import socket
 import tempfile
 import threading
+import tomllib
 from contextlib import contextmanager
 
-import toml
+import tomli_w
 from loguru import logger
 
 from app import __version__
@@ -641,13 +642,34 @@ def load_config():
     logger.info(f"load config from file: {config_file}")
 
     try:
-        _config_ = toml.load(config_file)
+        with open(config_file, mode="rb") as fp:
+            _config_ = tomllib.load(fp)
     except Exception as e:
+        # A BOM is not TOML, and a file saved by an editor that writes one used
+        # to fail here too. Read it as text with the signature stripped.
         logger.warning(f"load config failed: {str(e)}, try to load as utf-8-sig")
         with open(config_file, mode="r", encoding="utf-8-sig") as fp:
             _cfg_content = fp.read()
-            _config_ = toml.loads(_cfg_content)
+            _config_ = tomllib.loads(_cfg_content)
     return _apply_hive_env(_config_)
+
+
+def _without_none(value):
+    """Drop None at any depth before serialising.
+
+    TOML has no null. The writer this replaced (`toml`) skipped a None key
+    silently, so a runtime value cleared with None never reached the file;
+    tomli_w raises on one instead. Keep the file the shape it always had.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _without_none(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [_without_none(item) for item in value if item is not None]
+    return value
 
 
 def save_config():
@@ -691,7 +713,7 @@ def save_config():
             persisted_config[section] = _without_runtime_secrets(
                 persisted_config.get(section, {}), defaults
             )
-        serialized_config = toml.dumps(persisted_config)
+        serialized_config = tomli_w.dumps(_without_none(persisted_config))
 
         # WebUI 完整 rerun 结束时会调用保存。内容没有变化时直接返回，避免每次
         # 点击普通控件都产生一次磁盘写入和 fsync。

@@ -1,7 +1,6 @@
 import json
 from typing import Dict
 
-import redis
 from loguru import logger
 from pydantic import ValidationError
 
@@ -24,6 +23,14 @@ class RedisTaskManager(TaskManager):
         redis_url: str,
         max_queued_tasks: int = 100,
     ):
+        # Imported here, not at module scope: `redis` is a faceless-webui extra
+        # and the desktop bundle does not carry it. video.py already reaches
+        # this class only inside its `enable_redis` branch; this makes the
+        # module itself importable without the package, which is what
+        # test_task_manager collects on the bundle-shaped install and what
+        # test_packaging_extras walks with the extra blocked.
+        import redis
+
         self.redis_client = redis.Redis.from_url(redis_url)
         super().__init__(max_concurrent_tasks, max_queued_tasks=max_queued_tasks)
 

@@ -445,8 +445,16 @@ import, and roughly a third of the venv on disk. All five were already imported
 lazily except one: `app/router.py` reached `redis` eagerly through
 `app/controllers/v1/video.py`, which made the whole engine unimportable without
 it. That import now happens inside the `enable_redis` branch, and
-`test/studio/test_packaging_extras.py` proves the engine imports with all five
-blocked.
+`RedisTaskManager` itself imports `redis` on construction rather than at module
+scope. The extra also carries what those five pull in — `toml` among it, through
+streamlit — and `app/config/config.py` had been reading and writing
+`config.toml` with `toml` without it ever being a declared dependency, so the
+split left the engine's config module unimportable on any fresh base sync (CI
+found it on 2026-09-04; the bundle would have). Reads are the stdlib's
+`tomllib` now and writes go through `tomli-w`, a base dependency.
+`test/studio/test_packaging_extras.py` proves every engine module imports with
+the whole extra — the five and everything only they pull in, read from
+`uv.lock` — blocked.
 
 **Detected** (never installed silently, always surfaced in-app with the action
 next to the problem, never in a Settings hunt): ComfyUI and its lanes, the Swift
