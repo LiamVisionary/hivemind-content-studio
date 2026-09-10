@@ -4,6 +4,13 @@
 //
 // Deliberately textual: registry filtering and the SFW/NSFW confirm are store
 // wiring around the pure helpers exercised above.
+//
+// LoraSection.jsx itself is unmoved. What moved is where the Video studio
+// MOUNTS it: the section now lives in the Advanced drawer
+// (src/studios/video/VideoAdvanced.jsx), so VideoStudio.jsx states
+// `onRentedMachine` in a `loraProps` object literal rather than as a JSX
+// attribute. Both halves are pinned — the studio computes the flag, the drawer
+// spreads the bag — so the rented filter cannot be quietly disconnected.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -114,8 +121,14 @@ test('the LoRA panel renders the registry-filtered catalog on a rented machine',
     // Both studios answer the same question — does THIS tab's work land on a
     // rented machine — off the per-tab pin. There is no rented MODE to read:
     // a rental is a property of This Mac, and the pin is the only override.
+    // Both write the answer into the LoraSection prop bag they assemble; the
+    // Video studio's section now renders a drawer away, in VideoAdvanced.jsx.
     assert.match(read('src/studios/ImageStudio.jsx'), /onRentedMachine: Boolean\(s\.useLocalModel && pinnedMachine\(\)\),/);
-    assert.match(read('src/studios/VideoStudio.jsx'), /onRentedMachine=\{Boolean\(s\.setup\.localMode && s\.setup\.rentedMachineId\)\}/);
+    assert.match(read('src/studios/VideoStudio.jsx'), /onRentedMachine: Boolean\(s\.setup\.localMode && s\.setup\.rentedMachineId\),/);
+    // …and the drawer spreads that bag onto the section, so the answer actually
+    // reaches the filter. Computing it and dropping it would show a rented tab
+    // the whole local catalog, most of which is not on the box.
+    assert.match(read('src/studios/video/VideoAdvanced.jsx'), /<LoraSection \{\.\.\.loraProps\} \/>/);
     assert.doesNotMatch(section, /rentedOnly/, 'the retired mode is gone from the panel too');
 });
 

@@ -6,6 +6,12 @@
 // Deliberately textual: a persona is a NAME for three reference lists, so what
 // is pinned here is where it is stored and which setters write it back. That
 // is module wiring, not something a page can be made to show.
+//
+// After the Video studio's UI was rebuilt, that wiring spans two files:
+// VideoStudio.jsx still owns every value and handler, while the controls that
+// read them (the References panel and Prompt Check) render from
+// src/studios/video/VideoComposerBar.jsx. Assertions below name whichever file
+// carries the half they check; the contract is that the two halves meet.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -56,8 +62,17 @@ test('the studio carries which persona the references are, and drops it with the
     assert.match(studio, /persona: s\.setup\.persona \? \{ \.\.\.s\.setup\.persona \} : null,/, 'capture carries it');
     assert.match(studio, /persona: personaIdentity\(next\)/, 'the bar\'s change handler shapes it the same way');
     assert.match(studio, /persona: personaIdentity\(woven\.persona\)/, 'and so does the weave, whenever it writes the rows');
-    assert.match(studio, /persona=\{s\.setup\.persona \|\| null\}/);
-    assert.match(studio, /onPersonaChange=\{onPersonaChange\}/);
+    // The References panel is mounted TWICE since the redesign — the studio
+    // renders the drawer's copy itself, and hands the composer everything its
+    // copy needs. Both are wired to the one persona on the setup and the one
+    // change handler, so whichever door the owner opens reports the same
+    // character; a copy that lost the wiring would silently forget it.
+    assert.match(studio, /persona=\{s\.setup\.persona \|\| null\}/, 'the drawer\'s copy reads it');
+    assert.match(studio, /onPersonaChange=\{onPersonaChange\}/, 'and writes back through the studio');
+    const composer = read('src/studios/video/VideoComposerBar.jsx');
+    assert.match(composer, /<ReferencesMenu[\s\S]*?persona=\{s\.setup\.persona \|\| null\}/, 'the composer\'s copy reads the same persona');
+    assert.match(composer, /<ReferencesMenu[\s\S]*?onPersonaChange=\{onPersonaChange\}/, 'and writes back through the same handler');
+    assert.match(studio, /<VideoComposerBar[\s\S]*?onPersonaChange=\{onPersonaChange\}/, 'which the studio hands it');
 });
 
 test('the persona name never reaches localStorage', () => {
@@ -84,6 +99,11 @@ test('a dialog raised from a popover does not dismiss the popover under it', () 
 test('a persona has a gender, set beside its name and read by every generator', () => {
     // Set in two places — the save dialog, and the bar for a loaded character —
     // through one chip row, and written into the persona payload itself.
+    //
+    // The Video studio's presentation now lives in src/studios/video/*, so the
+    // reader half of this (which control asks for the gender, which door fires
+    // the weave that carries it) is pinned in the composer bar, and the writer
+    // half — the values and the handlers — stays pinned in VideoStudio.jsx.
     const bar = read('src/studios/video/PersonaBar.jsx');
     assert.match(bar, /function GenderChips\(/);
     assert.match(bar, /<GenderChips value=\{saveGender\} onChange=\{setSaveGender\}/, 'the save dialog asks for it');
@@ -102,7 +122,10 @@ test('a persona has a gender, set beside its name and read by every generator', 
     // starters.
     assert.match(read('src/lib/castPrompt.js'), /gender: normalizePersonaGender\(persona\?\.gender\)/);
     const studio = read('src/studios/VideoStudio.jsx');
-    assert.match(studio, /ugcVariantAt\(index, \{ gender: s\.setup\.persona\?\.gender \}\)/);
+    // The deal reads the persona's gender. Open-ended after it, because the
+    // deal also takes the ad format now (which bank the setting comes from) and
+    // pinning the whole argument object made this fail for an unrelated reason.
+    assert.match(studio, /ugcVariantAt\(index, \{ gender: s\.setup\.persona\?\.gender[,\s}]/);
     // With pictures attached the UGC brief is about the person in them, so the
     // reference rows (and the persona's name/gender) go to the brief builder,
     // and the menu says who the clip will be about.
@@ -110,9 +133,9 @@ test('a persona has a gender, set beside its name and read by every generator', 
     assert.match(studio, /subject=\{ugcSubjectLabel\(ugcPersona\(\)\)\}/);
     assert.match(studio, /videoRequestPlan\(s\.setup\)\.sendReferenceImages\) return null;/, 'only pictures that will be SENT count');
     assert.match(studio, /personaGender=\{s\.setup\.persona\?\.gender \|\| ''\}/);
-    // The helper's draft and the References panel's Weave both go through the
-    // studio's one weave (acceptPrompt), whose cast carries the gender — and
-    // the helper is told the whole cast by slot, never a persona's name.
+    // The helper's draft and Prompt Check's Weave both go through the studio's
+    // one weave (acceptPrompt), whose cast carries the gender — and the helper
+    // is told the whole cast by slot, never a persona's name.
     assert.match(studio, /cast=\{castSubjects\(s\.cast\)\}/);
     assert.match(studio, /onUse=\{\(prompt\) => \{[\s\S]*?acceptPrompt\(prompt\);/);
     // The References panel no longer renders a Weave of its own — the weave has
@@ -121,7 +144,16 @@ test('a persona has a gender, set beside its name and read by every generator', 
     const menu = read('src/studios/video/ReferencesMenu.jsx');
     assert.doesNotMatch(menu, /onWriteTags/);
     assert.match(menu, /void onWeave;/);
-    assert.match(studio, /<PromptCheckMenu[\s\S]*?onWeave=\{\(\) => \{[\s\S]*?acceptPrompt\(s\.setup\.prompt, \{ scaffold: true \}\);/);
+    // Prompt Check moved into the composer bar with the rest of the composer,
+    // so the weave it fires is now checked in two halves: the door is wired to
+    // a prop there, and the studio hands that prop the ONE weave — the closure
+    // that scaffolds the cast into the prompt. The bar implements no weave of
+    // its own, which is what keeps the two doors from drifting apart.
+    const composerBar = read('src/studios/video/VideoComposerBar.jsx');
+    assert.match(composerBar, /<PromptCheckMenu[\s\S]*?onWeave=\{onWeave\}/, 'Prompt Check\'s Weave is the studio\'s, passed in');
+    assert.doesNotMatch(composerBar, /acceptPrompt/, 'the bar never weaves on its own');
+    assert.match(studio, /const weavePromptNow = \(\) => \{[\s\S]*?acceptPrompt\(s\.setup\.prompt, \{ scaffold: true \}\);/, 'the one weave scaffolds the cast in');
+    assert.match(studio, /<VideoComposerBar[\s\S]*?onWeave=\{weavePromptNow\}/, 'and it is what Prompt Check\'s door runs');
     assert.match(read('src/lib/promptWeave.js'), /gender: normalizePersonaGender\(persona\?\.gender \|\| gender\)/, 'the references member carries it');
     assert.match(read('src/lib/defaultPrompts.js'), /const gender = override !== undefined \? override : \(source\?\.persona\?\.gender \|\| ''\);/);
     // Only the gender reaches the helper request — never the persona's name,

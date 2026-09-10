@@ -8,7 +8,10 @@
 // This Mac rather than a mode, and an Automatic default that says why.
 //
 // Deliberately textual: "no studio still offers" and "one implementation, not
-// three" are absence claims over the tree.
+// three" are absence claims over the tree. The set of surfaces that ask the
+// question is read off the tree rather than listed by hand, so a route that
+// moves its picker (as Image and Video did when their JSX left the studio
+// files) fails loudly instead of quietly leaving a surface unchecked.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
@@ -227,13 +230,33 @@ test('a clip is only offered where a clip can actually run, and the rest is said
 
 /* ---------------- the four controls are actually gone ---------------- */
 
+// The Image and Video routes' presentation moved out of the two studio files:
+// each route now asks the question in its Advanced drawer body AND in its
+// floating composer, while the studio file keeps the state behind both. So the
+// "shows the one readout" half is checked where the readout renders, and the
+// "does not speak the old words" half stays on the studio file too — that is
+// where the retired Local / API / Rented segmented control used to live.
 test('no studio still offers Local / API / Rented as a mode', async () => {
-  const image = read('src/studios/image/ImageSettingsPanel.jsx');
-  const video = read('src/studios/VideoStudio.jsx');
-  for (const [name, source] of [['image', image], ['video', video]]) {
-    assert.match(source, /<RunOnPicker/, `${name} shows the one readout`);
-    assert.doesNotMatch(source, /value: 'rented'/, `${name} still offers a rented mode`);
-    assert.doesNotMatch(source, /t\('image\.local'\)|t\('image\.api'\)/, `${name} still speaks the old vocabulary`);
+  const readouts = {
+    image: ['src/studios/image/ImageSettingsPanel.jsx', 'src/studios/image/ImageComposer.jsx'],
+    video: ['src/studios/video/VideoAdvanced.jsx', 'src/studios/video/VideoComposerBar.jsx'],
+  };
+  const routes = {
+    image: [...readouts.image, 'src/studios/ImageStudio.jsx'],
+    video: [...readouts.video, 'src/studios/VideoStudio.jsx'],
+  };
+  for (const [name, files] of Object.entries(readouts)) {
+    for (const file of files) {
+      assert.match(read(file), /<RunOnPicker/, `${name} shows the one readout in ${file}`);
+    }
+  }
+  for (const [name, files] of Object.entries(routes)) {
+    for (const file of files) {
+      const source = read(file);
+      assert.doesNotMatch(source, /value: 'rented'/, `${name} still offers a rented mode in ${file}`);
+      assert.doesNotMatch(source, /t\('image\.local'\)|t\('image\.api'\)/,
+        `${name} still speaks the old vocabulary in ${file}`);
+    }
   }
   // The i18n dictionary no longer holds the words either.
   const i18n = read('src/lib/i18n.js');
@@ -321,19 +344,41 @@ test('an image runs on the account the picker chose, not always on MUAPI', async
  * borrowed the new words. This is the guard against the fifth one: a studio may
  * bring its own INVENTORY (a feature's rated rows, the gateway's lanes, another
  * tab's sources) but never its own vocabulary for where the bill lands.
+ *
+ * The Video route used to ask from `VideoStudio.jsx` itself; its presentation
+ * has since moved into the drawer body and the composer, so its two entries
+ * below are the same one question asked in two places. That move is also why
+ * the list is now DERIVED and compared rather than merely walked: a hand-kept
+ * list of surfaces goes stale the moment a surface moves, and a stale list is a
+ * surface nobody is checking.
  */
 const RUN_ON_SURFACES = [
-  'src/studios/image/ImageSettingsPanel.jsx',
+  'src/components/SendToMenu.jsx',
+  'src/studios/SpriteStudio.jsx',
   'src/studios/image/ImageComposer.jsx',
-  'src/studios/VideoStudio.jsx',
+  'src/studios/image/ImageSettingsPanel.jsx',
+  'src/studios/restore/RestoreSettings.jsx',
   'src/studios/story/CastStage.jsx',
   'src/studios/story/MotionStage.jsx',
-  'src/studios/SpriteStudio.jsx',
-  'src/studios/restore/RestoreSettings.jsx',
-  'src/components/SendToMenu.jsx',
+  'src/studios/video/VideoAdvanced.jsx',
+  'src/studios/video/VideoComposerBar.jsx',
 ];
 
+/** Every file under src/ that renders the picker, except the picker itself. */
+function runOnSurfacesOnDisk() {
+  const root = new URL('../src/', import.meta.url);
+  return fs.readdirSync(root, { recursive: true })
+    .map((entry) => `src/${entry.split(path.sep).join('/')}`)
+    .filter((rel) => /\.jsx?$/.test(rel) && rel !== 'src/components/RunOnPicker.jsx')
+    .filter((rel) => /<RunOn(Picker|List)/.test(read(rel)))
+    .sort();
+}
+
 test('every studio asks where work runs with the SAME component', async () => {
+  // Exhaustive, not illustrative: a new surface that asks where work runs is
+  // named here or this fails, so nobody can add a fifth vocabulary by adding a
+  // file the loop below never opens.
+  assert.deepEqual(runOnSurfacesOnDisk(), RUN_ON_SURFACES);
   for (const file of RUN_ON_SURFACES) {
     const source = read(file);
     assert.match(source, /<RunOn(Picker|List)/, `${file} must render the one picker`);

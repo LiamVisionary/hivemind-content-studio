@@ -58,7 +58,7 @@ import {
 } from '../lib/hivemindStudio.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
-import { civitaiResourcesFromLoras } from '../lib/civitaiPost.js';
+import { civitaiResourcesFromLoras, postMetaFromEntry } from '../lib/civitaiPost.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
 import { OWNERSHIP_HEADING, applyReferenceRoles, normalizeReferenceRoles, referenceLabelStyleFor } from '../lib/imageReferenceRoles.js';
@@ -88,13 +88,15 @@ import {
 import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { useMediaSrc } from '../hooks/hooks.js';
 import {
-  Button, EmptyState, FailureCallout, SectionLabel, Spinner,
+  Button, FailureCallout, Spinner,
 } from '../ui/kit.jsx';
 import { Menu } from '../ui/Menu.jsx';
-import { StudioLayout } from '../ui/kit.jsx';
+import { StudioFrame } from './frame/StudioFrame.jsx';
 
 import { ImageSettingsPanel } from './image/ImageSettingsPanel.jsx';
 import { ImageComposer } from './image/ImageComposer.jsx';
+import { ImageStage } from './image/ImageStage.jsx';
+import { ImageRail } from './image/ImageRail.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 
@@ -102,7 +104,7 @@ import { computeSmoothProgress, estimateGenerationSeconds, recordGenerationSecon
 import {
   IMAGE_PREFERENCES_KEY, STYLE_PRESETS,
   applyStylePreset, imageTimingProfile, normalizeImagePreferences, persistedImageSettings,
-  referenceRolesNeedRewrite, restoredReferenceLimit, startFreshPatch,
+  referenceRolesNeedRewrite, restoredReferenceLimit, startFreshPatch, startFreshSummary,
 } from './image/imagePrefs.js';
 import { applyUgcFirstFrame, hasUgcFirstFrame, ugcVariantAt } from '../lib/ugcMode.js';
 import { CameraMenu } from './image/CameraMenu.jsx';
@@ -413,6 +415,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // this Mac, so it waits on an explicit confirm. Approvals and the resulting CDN
     // URLs are session-only (never persisted): a fresh studio asks again.
     cloudRefConfirm: null,
+    // Start fresh asks first, because it takes more than the prompt: true while
+    // that dialog is up. Never set when there is nothing to lose.
+    startFreshConfirm: false,
     cloudRefApproved: new Set(),
     cloudRefUploads: new Map(),
     civitaiOpen: false,
@@ -420,6 +425,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     resumeRemaining: 0,
     promptHelper: { open: false, busy: false, title: '', result: '', status: '', negative: '', ready: false },
     enhancerOpen: false,
+    // Advanced (the frame's left drawer). View state, deliberately not persisted
+    // — see toggleAdvanced in the render.
+    advancedOpen: false,
     enhanceBase: '',
     enhanceTags: new Set(),
     persistTimer: null,
@@ -435,6 +443,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
 export function ImageStudio({
   active = true, tabActive = true, seed = null, apiRef = null, studioLane = '',
   tabId = 0, primary = null, openTabIds = null,
+  // The floating tab strip, built by StudioTabs and handed to the FRONT tab only.
+  // Null when this studio is mounted without tabs.
+  tabStrip = null,
 } = {}) {
   const engineRef = useRef(null);
   // The seed is read once, at mount — StudioTabs clears it afterwards, so every
@@ -752,6 +763,13 @@ export function ImageStudio({
       // own store and leaves the panel, composer and gallery alone.
       s.progressStore.set({ pct: s.progressDisplay });
     }, 300);
+  };
+  // How long a finished picture took, for its gallery chip and viewer row.
+  // Measured from the moment the request left, so a queued cloud job counts
+  // its wait — that is the time the person spent looking at the bar.
+  const tookSince = (startedAt) => {
+    const ms = Date.now() - Number(startedAt);
+    return Number(startedAt) > 0 && ms >= 0 ? { generationMs: ms } : {};
   };
   const finishImageProgress = (success) => {
     if (s.generationTimer) { clearInterval(s.generationTimer); s.generationTimer = null; }
@@ -1493,6 +1511,126 @@ export function ImageStudio({
     return true;
   };
 
+  /* ---------------- shipped image starters ---------------- */
+
+  // Which shelf the Starters menu draws: the selected LOCAL workflow, or null on
+  // a cloud model. A starter is a finished prompt at a finished set of numbers
+  // for one workflow, so a cloud model showing none is the rule working, not a
+  // gap — the same rule the video shelf follows (defaultPrompts.js).
+  const starterModelSource = () => (s.useLocalModel ? localModelById(s.selectedLocalModel) : null);
+
+  // A shipped image starter's recipe, applied to the workflow it was written for.
+  //
+  // Deliberately narrow. It sets only what the starter names, only where the
+  // selected workflow actually offers it — a sampler the graph does not expose
+  // would otherwise be sent and silently swapped for the graph's own — and it
+  // touches nothing that belongs to the person at the keyboard: references, seed
+  // and negative prompt are left exactly as they were. It never changes the
+  // model either: the starter is on screen because that model is selected.
+  const applyImageStarterSetup = (setup) => {
+    if (!setup || !s.useLocalModel) return;
+    const model = localModelById(s.selectedLocalModel);
+    if (!model) return;
+
+    // What the workflow could not be set to. The happy path says nothing: the
+    // starter's own note already states the recipe, and the Format and Advanced
+    // panels visibly move — a third toast on top of the note and the LoRA line
+    // is three notifications for one click. A setting that did NOT take is the
+    // only thing here nobody can see.
+    const refused = [];
+    if (Number(setup.steps) > 0) s.steps = Number(setup.steps);
+    if (setup.guidanceScale != null && Number.isFinite(Number(setup.guidanceScale))) {
+      s.guidanceScale = Number(setup.guidanceScale);
+    }
+    if (setup.sampler) {
+      if ((model.samplers || []).includes(setup.sampler)) s.sampler = setup.sampler;
+      else refused.push(`the ${setup.sampler} sampler`);
+    }
+    if (setup.scheduler) {
+      if ((model.schedulers || []).includes(setup.scheduler)) s.scheduler = setup.scheduler;
+      else refused.push(`the ${setup.scheduler} scheduler`);
+    }
+    if (setup.aspectRatio) {
+      if ((model.aspectRatios || []).includes(setup.aspectRatio)) s.selectedAr = setup.aspectRatio;
+      else refused.push(`a ${setup.aspectRatio} canvas`);
+    }
+    if (Number(setup.baseSize) > 0) {
+      s.baseSize = Number(setup.baseSize);
+      // A custom width/height left over from an earlier run WINS over the aspect
+      // ratio (resolveLocalDimensions), so a starter that asked for 3:4 would
+      // have rendered at whatever was in those two boxes.
+      s.customWidth = 0;
+      s.customHeight = 0;
+      s.customArOpen = false;
+    }
+
+    persistImagePreferences();
+    bump();
+    if (refused.length) {
+      const missing = refused.length > 1
+        ? `${refused.slice(0, -1).join(', ')} or ${refused[refused.length - 1]}`
+        : refused[0];
+      toast(`${model.name} does not offer ${missing} — that part of the recipe runs at the workflow's own setting. Everything else was applied.`,
+        { duration: 10000 });
+    }
+    void applyStarterLoras(model, setup.loras);
+  };
+
+  // The LoRAs a starter was written around, matched against what is installed.
+  //
+  // Matched by NAME, not by id: a LoRA's id on this machine is its filename, and
+  // a shipped starter cannot know what the file was called when it was
+  // downloaded. A miss is reported with the name to search Civitai for rather
+  // than swallowed — the trigger word is already sitting at the head of the
+  // prompt, and without the adapter behind it the picture comes back in the
+  // model's base style with no sign of why.
+  const applyStarterLoras = async (model, wanted) => {
+    const wants = (Array.isArray(wanted) ? wanted : []).filter((item) => item?.match);
+    if (!wants.length || !model.supportsLoras) return;
+    // The catalog is only fetched when the LoRA panel is opened, so a starter
+    // loaded before that has nothing to match against yet.
+    if (!s.availableLoras.length || currentLoraModel()?.id !== model.id) {
+      await loadLorasForCurrentModel();
+    }
+    if (currentLoraModel()?.id !== model.id) return;
+
+    const matched = [];
+    const missing = [];
+    for (const want of wants) {
+      const needle = String(want.match).toLowerCase();
+      const found = s.availableLoras.find((lora) => (
+        [lora.id, lora.name, lora.displayName].some((field) => String(field || '').toLowerCase().includes(needle))
+      ));
+      if (!found) { missing.push(want.match); continue; }
+      let selection = currentLoraSelection();
+      if (!selection.some((item) => item.id === found.id)) {
+        selection = toggleLoraSelection(selection, found);
+      }
+      // Unmuted as well as selected: a LoRA left muted from an earlier A/B keeps
+      // its slot and its weight, so "already in the stack" is not the same as
+      // "reaching the sampler".
+      setCurrentLoraSelection(updateLoraStrength(
+        selection.map((item) => (item.id === found.id ? { ...item, enabled: true } : item)),
+        found.id,
+        want.strength ?? 1,
+      ));
+      matched.push(found.displayName || found.name);
+    }
+    if (matched.length) persistImagePreferences();
+    bump();
+    if (matched.length) toast.success(`Loaded ${matched.join(', ')}.`);
+    for (const name of missing) {
+      // Opened, because the fix is a button in there: Download LoRA takes the
+      // Civitai link and the card lands in this same catalog.
+      s.loraOpen = true;
+      bump();
+      toast.error(
+        `“${name}” is not installed — this starter is written around it. Search Civitai for “${name}” and use Download LoRA in the LoRA panel.`,
+        { duration: 12000 },
+      );
+    }
+  };
+
   /* ---------------- hand off to the video studio ---------------- */
 
   // Re-uploads the viewed image through the normal reference path (so it is
@@ -1553,6 +1691,7 @@ export function ImageStudio({
         reader.onerror = () => reject(new Error('Could not read the image'));
         reader.readAsDataURL(blob);
       });
+      const tookFrom = Date.now();
       const result = await localAI.upscale({ image_base64: dataUrl, mode, scale: 1.5, prompt: entry.prompt || '', ...runOn() });
       if (!result?.url) throw new Error('Upscale finished without an image');
       addToHistory({
@@ -1562,6 +1701,7 @@ export function ImageStudio({
         model: `${entry.model || 'Anima'} · upscaled${mode === 'max' ? ' (max)' : ''}`,
         aspect_ratio: entry.aspect_ratio,
         timestamp: new Date().toISOString(),
+        ...tookSince(tookFrom),
         // Pairs this result with what it upscaled so the viewer can offer the
         // synchronized before/after compare.
         sourceUrl: entry.url,
@@ -1591,6 +1731,7 @@ export function ImageStudio({
         reader.onerror = () => reject(new Error('Could not read the image'));
         reader.readAsDataURL(blob);
       });
+      const tookFrom = Date.now();
       const result = await runImage({
         row: localRow(model.id, model.provider),
         shared: { prompt: prompt || entry.prompt || '', seed: -1 },
@@ -1617,6 +1758,7 @@ export function ImageStudio({
         model: `${entry.model || model.name} · expanded`,
         aspect_ratio: `${width}:${height}`,
         timestamp: new Date().toISOString(),
+        ...tookSince(tookFrom),
         // Pairs with the source so Compare works on expansions too.
         sourceUrl: entry.url,
       });
@@ -1666,6 +1808,7 @@ export function ImageStudio({
         reader.onerror = () => reject(new Error('Could not read the image'));
         reader.readAsDataURL(blob);
       });
+      const tookFrom = Date.now();
       const result = await runImage({
         row: localRow(model.id, model.provider),
         shared: { prompt: prompt || '', seed: -1 },
@@ -1684,6 +1827,7 @@ export function ImageStudio({
         model: `${entry.model || model.name} · edited area`,
         aspect_ratio: entry.aspect_ratio,
         timestamp: new Date().toISOString(),
+        ...tookSince(tookFrom),
         // Pairs with the source so Compare shows exactly what changed.
         sourceUrl: entry.url,
       });
@@ -1731,6 +1875,7 @@ export function ImageStudio({
         const angle = angles[i];
         s.angleProgress = `Shot ${i + 1} of ${angles.length} — ${angleLabel(angle)}`;
         bump();
+        const tookFrom = Date.now();
         const result = await runImage({
           row: localRow(model.id, model.provider),
           shared: { prompt: editAnglePrompt(dialect, angle, extraPrompt), seed: -1 },
@@ -1744,6 +1889,7 @@ export function ImageStudio({
           model: `${model.name} · angle: ${angleLabel(angle)}`,
           aspect_ratio: entry.aspect_ratio,
           timestamp: new Date().toISOString(),
+          ...tookSince(tookFrom),
           sourceUrl: entry.url,
         });
         completed += 1;
@@ -1780,6 +1926,7 @@ export function ImageStudio({
         if (s.sequenceStop) break;
         s.sequenceProgress = `Step ${i + 1} of ${prompts.length}`;
         bump();
+        const tookFrom = Date.now();
         const result = await runImage({
           row: localRow(model.id, model.provider),
           shared: { prompt: prompts[i], seed: baseSeed + i },
@@ -1793,6 +1940,7 @@ export function ImageStudio({
           model: `${model.name} · step ${i + 1}/${prompts.length}`,
           aspect_ratio: entry.aspect_ratio,
           timestamp: new Date().toISOString(),
+          ...tookSince(tookFrom),
           seed: result.seed,
           // Each step pairs with ITS input, so Compare shows that step's change.
           sourceUrl,
@@ -1825,7 +1973,32 @@ export function ImageStudio({
 
   const downloadImage = downloadMedia;
 
+  // The prompt alone, in one press, from the badge in the box's corner. This is
+  // what most "start over" presses actually wanted: the attached pictures, the
+  // model and every setting stay, so it needs no dialog — an Undo toast is the
+  // whole safety net a one-field change deserves.
+  const clearPromptOnly = () => {
+    const before = s.prompt;
+    if (!before.trim()) return;
+    setPromptValue('');
+    bump();
+    promptRef.current?.focus();
+    toast((instance) => (
+      <span className="flex items-center gap-3">
+        <span>Cleared the prompt.</span>
+        <button
+          type="button"
+          className="font-semibold text-honey hover:underline"
+          onClick={() => { setPromptValue(before); toast.dismiss(instance.id); promptRef.current?.focus(); }}
+        >
+          Undo
+        </button>
+      </span>
+    ), { duration: 7000 });
+  };
+
   const newPrompt = () => {
+    s.startFreshConfirm = false;
     // Start fresh — a blank canvas: prompt, references (and their roles), region
     // boxes, couple text, the enhancer and the viewed setup all go. The source,
     // the model, the aspect and the saved tuning stay: starting over is not a
@@ -1850,6 +2023,17 @@ export function ImageStudio({
     schedulePersist();
     bump();
     promptRef.current?.focus();
+  };
+
+  // Start fresh, asked before it is done. The dialog names what is actually on
+  // screen (startFreshSummary reads the same engine the patch clears) rather
+  // than the word "reset", because the press was being read as "clear the
+  // prompt" and it is not. Nothing to lose means nothing to ask: an empty
+  // composer starts fresh on the press.
+  const requestNewPrompt = () => {
+    if (!startFreshSummary(s).length) { newPrompt(); return; }
+    s.startFreshConfirm = true;
+    bump();
   };
 
   /* ---------------- prompt helper (race-guarded, verbatim payload) ---------------- */
@@ -2142,6 +2326,7 @@ export function ImageStudio({
             s.localProgress = { active: true, pct: 0, label: `Shot ${shot + 1} of ${batchTotal}` };
             s.progressStore.set({ label: s.localProgress.label });
           }
+          const shotStartedAt = Date.now();
           const res = await runImage({
             row: localRow(s.selectedLocalModel),
             shared: {
@@ -2199,6 +2384,7 @@ export function ImageStudio({
             aspect_ratio: s.selectedAr,
             seed: res.seed,
             timestamp: new Date().toISOString(),
+            ...tookSince(shotStartedAt),
           }, s.lastSubmittedContext);
           lastUrl = res.url;
         }
@@ -2354,6 +2540,7 @@ export function ImageStudio({
           aspect_ratio: s.selectedAr,
           timestamp: new Date().toISOString(),
           saved: Boolean(res.savedUrl),
+          ...tookSince(s.generationStartedAt),
         }, s.lastSubmittedContext);
         finishImageProgress(true);
         viewImage(kept);
@@ -2459,7 +2646,7 @@ export function ImageStudio({
             const { url, saved } = await pollJob(live);
             if (run.cancelled) return;
             if (url) {
-              addToHistory({ id: live.requestId, url, ...live.historyMeta, saved, timestamp: new Date().toISOString() });
+              addToHistory({ id: live.requestId, url, ...live.historyMeta, saved, timestamp: new Date().toISOString(), ...tookSince(live.submittedAt) });
               finishImageProgress(true);
               viewImage(url);
             } else {
@@ -2488,7 +2675,7 @@ export function ImageStudio({
         try {
           const { url, saved } = await pollJob(job);
           if (url) {
-            addToHistory({ id: job.requestId, url, ...job.historyMeta, saved, timestamp: new Date().toISOString() });
+            addToHistory({ id: job.requestId, url, ...job.historyMeta, saved, timestamp: new Date().toISOString(), ...tookSince(job.submittedAt) });
             void playCompletionPing();
           }
         } catch (e) {
@@ -2776,8 +2963,104 @@ export function ImageStudio({
   const editOutput = editOutputDimensions(editBudget, referenceDims?.width, referenceDims?.height);
   const coupleOn = coupleActive();
   const sheetOn = characterSheetActive();
+
+  /* ---- the three settings the recipe line shares with the drawer ----
+     Both surfaces now offer aspect, style and batch, so the write lives here
+     rather than inline in either: a shortcut that set them a second way would
+     drift from the drawer the first time one of them grew a rule. */
+  const selectAspect = (value) => {
+    if (value === 'custom') {
+      s.customArOpen = true;
+      if (!(s.customWidth && s.customHeight)) {
+        s.customWidth = resolvedDims?.width || activeLocalModel?.defaultWidth || 1024;
+        s.customHeight = resolvedDims?.height || activeLocalModel?.defaultWidth || 1024;
+      }
+    } else {
+      s.selectedAr = value;
+      s.customArOpen = false;
+      s.customWidth = 0;
+      s.customHeight = 0;
+    }
+    persistImagePreferences();
+    bump();
+  };
+  const selectStyle = (preset) => { s.selectedStyle = preset; persistImagePreferences(); bump(); };
+  const selectBatch = (count) => { s.batchCount = Number(count) || 1; persistImagePreferences(); bump(); };
+
+  // Advanced is view state, not a preference: it opens on the press that asked
+  // for it and shuts on Escape. Persisting it would mean arriving at a studio
+  // whose stage is already half covered by a drawer nobody just opened.
+  const toggleAdvanced = () => { s.advancedOpen = !s.advancedOpen; bump(); };
+  const closeAdvanced = () => { s.advancedOpen = false; bump(); };
+
+  // What the drawer's References row needs — the same four values the composer's
+  // attach door already reads, named once so the two cannot disagree.
+  const referenceProps = {
+    refsSupported,
+    referenceLabelStyle: referenceLabelStyleFor(s.useLocalModel ? s.selectedLocalModel : s.selectedModel),
+    onApplyRoles: applyRoles,
+    onClearReferences: clearReferences,
+  };
   const viewerIndex = s.viewerUrl ? s.history.findIndex((e) => e.url === s.viewerUrl) : -1;
   const viewerEntry = viewerIndex >= 0 ? s.history[viewerIndex] : null;
+
+  /* ---- the stage's subject, and the three actions that need its recipe ----
+     The viewer is no longer the only way to look at a result: the stage always
+     shows one. `getViewed()` is written by viewImage() alone, so the two actions
+     that reopen a result's SETTINGS recall by url instead — otherwise pressing
+     them on the stage would restore whatever was last opened in the viewer. */
+  const stageEntry = viewerEntry || s.history[0] || null;
+  const stageBackToSetup = (entry) => {
+    const made = entry?.url ? s.contextStore.recall(entry.url) : null;
+    if (made) restoreImageContext(made);
+    s.viewerUrl = null;
+    schedulePersist();
+    bump();
+    promptRef.current?.focus();
+  };
+  const stageRegenerate = (entry) => {
+    const made = entry?.url ? s.contextStore.recall(entry.url) : null;
+    if (made) restoreImageContext(made);
+    s.viewerUrl = null;
+    bump();
+    void generate();
+  };
+  // The settings that travel INSIDE a file the owner asked to save unencrypted.
+  //
+  // Built from the context captured for THIS output, not the composer's current
+  // state — by the time anybody opens the download menu the panel has usually
+  // moved on, and a file that claims the wrong seed is worse than one that
+  // claims nothing. postMetaFromEntry is the single mapper (the Civitai post
+  // uses it too), so the two doors cannot describe the same picture differently.
+  const downloadSettingsFor = (entry) => {
+    if (!entry?.url) return {};
+    const made = s.contextStore.recall(entry.url);
+    return postMetaFromEntry({
+      ...entry,
+      prompt: entry.prompt || made?.prompt || '',
+      negativePrompt: made?.negativePrompt || '',
+      model: entry.model || made?.selectedModelName || made?.selectedModel || '',
+      seed: entry.seed ?? made?.seed,
+      steps: made?.steps,
+      cfg: made?.guidanceScale,
+      sampler: made?.sampler,
+      scheduler: made?.scheduler,
+      civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableLoras),
+    });
+  };
+
+  const stagePostToCivitai = (entry) => {
+    if (!entry?.url) return;
+    // Resources come from the context captured for THIS output, not the drawer's
+    // current selection — a public post must not credit a LoRA that had nothing
+    // to do with the picture.
+    const made = s.contextStore.recall(entry.url);
+    s.civitaiPost = {
+      url: entry.url,
+      entry: { ...entry, civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableLoras) },
+    };
+    bump();
+  };
 
   // "~40 s" — what this exact setup has taken before, from the same store the
   // progress bar uses. It reads out beside Generate and stands in for the
@@ -2938,6 +3221,7 @@ export function ImageStudio({
       tabActive={tabActive}
       loraProps={loraProps}
       runOn={runOnProps}
+      referenceProps={referenceProps}
       onSetSource={setSource}
       onDiscoverLocalCatalog={discoverLocalCatalog}
     />
@@ -3075,8 +3359,10 @@ export function ImageStudio({
       onClosePromptHelper={closePromptHelper}
       onUsePromptHelperResult={usePromptHelperResult}
       runOn={runOnProps}
+      starterModel={starterModelSource()}
       captureContext={() => captureImageContext(s.prompt)}
       onRestoreContext={(context) => restoreImageContext(context)}
+      onApplyStarterSetup={applyImageStarterSetup}
       onApplyUgc={applyUgc}
       cameraRig={s.cameraRig}
       cameraArmed={hasCameraRig(s.prompt)}
@@ -3086,6 +3372,18 @@ export function ImageStudio({
       onArmCamera={applyCamera}
       ugcArmed={hasUgcFirstFrame(s.prompt)}
       ugcVerticalAvailable={ugcVerticalAvailable()}
+      // The recipe line's five settings. Same values the drawer renders, and the
+      // same three writers — a shortcut that wrote them its own way would drift.
+      aspectRatios={aspectRatios}
+      customDimsActive={customDimsActive}
+      resolvedDims={resolvedDims}
+      referenceDrivesAspect={referenceDrivesAspect}
+      stylePresets={STYLE_PRESETS}
+      onSelectAspect={selectAspect}
+      onSelectStyle={selectStyle}
+      onSelectBatch={selectBatch}
+      advancedOpen={s.advancedOpen}
+      onToggleAdvanced={toggleAdvanced}
       coupleOn={coupleOn}
       promptPlaceholder={promptPlaceholder}
       generateLabel={generateLabel}
@@ -3098,98 +3396,110 @@ export function ImageStudio({
       etaLabel={etaLabel}
       onGenerate={generate}
       onCancel={cancelGeneration}
-      onNewPrompt={newPrompt}
+      onNewPrompt={requestNewPrompt}
+      onClearPrompt={clearPromptOnly}
     />
   );
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
-      <StudioLayout panel={panel} panelTitle="Image settings" composer={composer} composerDrop={composerDrop}>
-        <div className="flex flex-col gap-4 p-4 md:p-5">
-          {/* The last failure stays on the canvas until dismissed or the next
-              run — one sentence, the button that repairs it, and the raw text
-              behind Details. Nothing toasts beside it (DESIGN.md §4). */}
-          {/* An empty catalog is not a state anyone should reach — the loader
-              falls back to the offline list — but when it happens the studio
-              renders and says so rather than crashing on a missing default
-              model. The repair is a reload: the catalog is fetched once, at
-              boot, and this studio's defaults are read from it there. */}
-          {!t2iModels.length && !i2iModels.length ? (
-            <FailureCallout
-              title="The model catalog could not be loaded, so this studio has no cloud models to offer."
-              onRetry={() => { try { window.location.reload(); } catch { /* no window */ } }}
-              retryLabel="Reload"
-            />
-          ) : null}
+      <StudioFrame
+        railWidth={96}
+        tabs={tabStrip}
+        drop={composerDrop}
+        composer={composer}
+        drawerTitle={t('common.advanced')}
+        drawerOpen={s.advancedOpen}
+        onDrawerClose={closeAdvanced}
+        drawer={panel}
+        notices={(
+          <>
+            {/* The last failure stays on the stage until dismissed or the next
+                run — one sentence, the button that repairs it, and the raw text
+                behind Details. Nothing toasts beside it (DESIGN.md §4). These
+                used to head a scrolling column; the stage does not scroll, so
+                they float over its top edge where they cannot be scrolled past. */}
+            {/* An empty catalog is not a state anyone should reach — the loader
+                falls back to the offline list — but when it happens the studio
+                renders and says so rather than crashing on a missing default
+                model. The repair is a reload: the catalog is fetched once, at
+                boot, and this studio's defaults are read from it there. */}
+            {!t2iModels.length && !i2iModels.length ? (
+              <FailureCallout
+                title="The model catalog could not be loaded, so this studio has no cloud models to offer."
+                onRetry={() => { try { window.location.reload(); } catch { /* no window */ } }}
+                retryLabel="Reload"
+              />
+            ) : null}
 
-          {s.generateError ? (
-            <FailureCallout
-              title={s.generateError}
-              detail={s.generateFailure?.detail || ''}
-              remedy={s.generateFailure?.remedy || null}
-              onRemedy={(remedy) => void runFailureRemedy(remedy, {
-                onMuapiKey: () => { authRetryRef.current = () => generate(); s.authOpen = true; bump(); },
-                onLowerResolution: lowerResolution,
-                onRetry: () => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); },
-              })}
-              onRetry={generate}
-              retryDisabled={s.generating || generateBlocked}
-              retryLabel="Try again"
-              detailsLabel="Details"
-              onDismiss={() => { s.generateError = ''; s.generateFailure = null; bump(); }}
-              dismissLabel="Dismiss"
-            />
-          ) : null}
-
-          {s.generating ? (
-            <GenerationProgressCard
-              store={s.progressStore}
-              heading={s.useLocalModel ? t('image.generatingLocally') : t('common.generating')}
-              fallbackLabel={s.useLocalModel ? `local:${s.selectedLocalModel}` : (s.selectedModelName || s.selectedModel)}
-            />
-          ) : null}
-
-          {s.history.length === 0 && !s.generating ? (
-            <EmptyState
-              icon="image"
-              title="Nothing here yet"
-              hint="Describe the image below and press Generate. Everything you have made before is in the Library."
-              action={(
-                <Button
-                  size="sm"
-                  variant="neutral"
-                  icon="history"
-                  onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'history' } }))}
-                >
-                  Open Library
-                </Button>
-              )}
-              className="flex-1"
-            />
-          ) : (
-            <>
-              <div className="flex items-center justify-between gap-2">
-                <SectionLabel>{t('common.history')}</SectionLabel>
-                <span className="font-mono text-[11px] text-ink3">{s.history.length}</span>
-              </div>
-              <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]">
-                {s.history.map((entry, idx) => (
-                  <GalleryCard
-                    key={entry.id || `${entry.url}-${idx}`}
-                    entry={entry}
-                    active={s.viewerUrl ? s.viewerUrl === entry.url : idx === 0}
-                    canReuse={refsSupported}
-                    onOpen={openGalleryEntry}
-                    onDownload={downloadGalleryEntry}
-                    onReuse={reuseGalleryEntry}
-                    onUpscale={isLocalAIAvailable() ? upscaleGalleryEntry : undefined}
-                  />
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </StudioLayout>
+            {s.generateError ? (
+              <FailureCallout
+                title={s.generateError}
+                detail={s.generateFailure?.detail || ''}
+                remedy={s.generateFailure?.remedy || null}
+                onRemedy={(remedy) => void runFailureRemedy(remedy, {
+                  onMuapiKey: () => { authRetryRef.current = () => generate(); s.authOpen = true; bump(); },
+                  onLowerResolution: lowerResolution,
+                  onRetry: () => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); },
+                })}
+                onRetry={generate}
+                retryDisabled={s.generating || generateBlocked}
+                retryLabel="Try again"
+                detailsLabel="Details"
+                onDismiss={() => { s.generateError = ''; s.generateFailure = null; bump(); }}
+                dismissLabel="Dismiss"
+              />
+            ) : null}
+          </>
+        )}
+        rail={(
+          <ImageRail
+            entries={s.history}
+            selectedUrl={s.viewerUrl || s.history[0]?.url || ''}
+            generating={s.generating}
+            canReuse={refsSupported}
+            onOpen={openGalleryEntry}
+            onDownload={downloadGalleryEntry}
+            onReuse={reuseGalleryEntry}
+            onUpscale={isLocalAIAvailable() ? upscaleGalleryEntry : undefined}
+          />
+        )}
+        stage={(
+          <ImageStage
+            entry={stageEntry}
+            historyCount={s.history.length}
+            generating={s.generating}
+            progressStore={s.progressStore}
+            progressHeading={s.useLocalModel ? t('image.generatingLocally') : t('common.generating')}
+            progressFallbackLabel={s.useLocalModel ? `local:${s.selectedLocalModel}` : (s.selectedModelName || s.selectedModel)}
+            onCancel={cancelGeneration}
+            onOpen={openGalleryEntry}
+            onDownload={downloadGalleryEntry}
+            downloadSettings={downloadSettingsFor}
+            downloadFilename={imageDownloadName(stageEntry?.model, stageEntry?.id)}
+            onReuse={refsSupported ? reuseGalleryEntry : undefined}
+            onBackToSetup={stageBackToSetup}
+            onRegenerate={stageRegenerate}
+            onCompare={stageEntry?.sourceUrl ? (entry) => { s.compareEntry = entry; bump(); } : undefined}
+            onExpandCanvas={isLocalAIAvailable() && krea2LocalModel()
+              ? (entry) => { s.expandEntry = entry; bump(); }
+              : undefined}
+            onInpaint={isLocalAIAvailable() && krea2LocalModel()
+              ? (entry) => { s.inpaintEntry = entry; bump(); }
+              : undefined}
+            onAngles={isLocalAIAvailable() && angleEditModel()
+              ? (entry) => { s.angleEntry = entry; bump(); }
+              : undefined}
+            onSequence={isLocalAIAvailable() && angleEditModel()
+              ? (entry) => { s.sequenceEntry = entry; bump(); }
+              : undefined}
+            onUpscale={isLocalAIAvailable() ? (entry, mode) => upscaleEntry(entry, mode) : undefined}
+            onUseAsVideoFrame={(entry) => void sendToVideoStartFrame(entry.url)}
+            videoFrameBusy={s.sendingToVideo}
+            onPostToCivitai={stagePostToCivitai}
+          />
+        )}
+      />
 
       {s.viewerUrl ? (
         <ViewerModal
@@ -3247,6 +3557,10 @@ export function ImageStudio({
             : undefined}
           onUseAsVideoFrame={() => void sendToVideoStartFrame(s.viewerUrl)}
           videoFrameBusy={s.sendingToVideo}
+          // The rail carries this per card, but the rail is behind this dialog
+          // while it is open and is not drawn at all below sm — so the picture
+          // you are looking at can always become the next one's reference.
+          onReuse={refsSupported && viewerEntry ? () => reuseGalleryEntry(viewerEntry) : undefined}
         />
       ) : null}
 
@@ -3319,6 +3633,34 @@ export function ImageStudio({
             bump();
           }}
           onRun={(config) => void runEditSequence(s.sequenceEntry, config)}
+        />
+      ) : null}
+
+      {/* Start fresh takes more than the prompt, so it says what it is about to
+          take — in the words on screen, listed from the same engine the patch
+          clears. `tone="primary"` rather than danger: nothing here is deleted.
+          Every picture it drops is still in your gallery and your library. */}
+      {s.startFreshConfirm ? (
+        <ConfirmModal
+          open
+          tone="primary"
+          title={t('common.startFreshTitle')}
+          confirmLabel={t('common.startFresh')}
+          cancelLabel={t('common.keepWhatIHave')}
+          body={(
+            <div className="flex flex-col gap-2 text-[13px] leading-relaxed text-ink2">
+              <p>This empties the composer. It clears:</p>
+              <ul className="flex list-disc flex-col gap-1 pl-5">
+                {startFreshSummary(s).map((item) => <li key={item}>{item}</li>)}
+              </ul>
+              <p>
+                Your model, size, style and everything in Advanced stay exactly as they are,
+                and the pictures you have already made stay in your gallery.
+              </p>
+            </div>
+          )}
+          onClose={() => { s.startFreshConfirm = false; bump(); }}
+          onConfirm={newPrompt}
         />
       ) : null}
 

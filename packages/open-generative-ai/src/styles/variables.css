@@ -33,6 +33,10 @@
   --ink-1: #f2f2f3;
   --ink-2: #a3a3ac;
   --ink-3: #6b6b74;
+  /* The studio frame's mid-grey: quieter than ink-2, brighter than ink-3. The
+     redesigned Image/Video stages lean on it for every label that must recede
+     without vanishing over a full-bleed picture. */
+  --ink-soft: #8a8a93;
 
   /* Channel triplets — the Tailwind colour map reads these so opacity
      modifiers (border-honey/50, bg-bg0/80, bg-warn/10 …) actually emit CSS.
@@ -52,6 +56,7 @@
   --ink-1-rgb: 242 242 243;
   --ink-2-rgb: 163 163 172;
   --ink-3-rgb: 107 107 116;
+  --ink-soft-rgb: 138 138 147;
   --honey-tint-a: 0.12;
   --ok-tint-a: 0.12;
   --danger-tint-a: 0.12;
@@ -91,5 +96,4 @@
   /* Shell metrics */
   --sidebar-w: 216px;
   --sidebar-w-rail: 64px;
-  --topbar-h: 52px;
 }

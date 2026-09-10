@@ -95,15 +95,25 @@ export function Menu({
   const ref = useDismissable(open, () => setOpen(false));
   const panelRef = useRef(null);
   const [side, setSide] = useState(align);
+  // `up` is a PREFERENCE, not a position. A menu anchored low on the window —
+  // every control in the studios' floating composer is — opened downward and ran
+  // off the bottom, which is the vertical twin of the horizontal overflow the
+  // side-flip below already fixed. So the same rule now runs on both axes: keep
+  // the asked-for side while it fits, otherwise take whichever has more room.
+  const [drop, setDrop] = useState(up ? 'up' : 'down');
+  // When neither side can hold the panel, it is clamped to the room it has and
+  // scrolls inside — better than a list whose last item is under the screen edge.
+  const [roomCap, setRoomCap] = useState(null);
   // A popover anchored at the left of a chip near the right edge (or wider than a
   // phone) used to run off-screen; flip to the other edge when it would.
   useEffect(() => {
-    if (!open) { setSide(align); return; }
+    if (!open) { setSide(align); setDrop(up ? 'up' : 'down'); setRoomCap(null); return; }
     const panel = panelRef.current;
     const anchor = ref.current;
     if (!panel || !anchor) return;
-    // Measure with the UNSCALED width (offsetWidth) against the anchor's box: the
-    // panel is mid scale-in when this runs, so its own bounding rect under-reports.
+    // Measure with the UNSCALED box (offsetWidth/offsetHeight) against the
+    // anchor's rect: the panel is mid scale-in when this runs, so its own
+    // bounding rect under-reports.
     const anchorRect = anchor.getBoundingClientRect();
     const width = panel.offsetWidth;
     const margin = 8;
@@ -111,7 +121,23 @@ export function Menu({
     if (align !== 'end' && fits && anchorRect.left + width > window.innerWidth - margin) setSide('end');
     else if (align === 'end' && fits && anchorRect.right - width < margin) setSide('start');
     else setSide(align);
-  }, [open, align, ref]);
+
+    // 6px is the gap the panel's own bottom-/top-[calc(100%+6px)] leaves.
+    const gap = 6;
+    const height = panel.offsetHeight;
+    const roomBelow = window.innerHeight - anchorRect.bottom - gap - margin;
+    const roomAbove = anchorRect.top - gap - margin;
+    const wanted = up ? 'up' : 'down';
+    const roomFor = (where) => (where === 'up' ? roomAbove : roomBelow);
+    const chosen = height <= roomFor(wanted) || roomFor(wanted) >= roomFor(wanted === 'up' ? 'down' : 'up')
+      ? wanted
+      : (wanted === 'up' ? 'down' : 'up');
+    setDrop(chosen);
+    // Only ever NARROWS: `height` is already clamped by the panel's own max-h, so
+    // a cap is set exactly when even that does not fit, and the class governs
+    // otherwise.
+    setRoomCap(height > roomFor(chosen) ? Math.max(140, Math.round(roomFor(chosen))) : null);
+  }, [open, align, up, ref]);
   return (
     <div ref={ref} className="relative inline-block">
       {trigger(open, () => setOpen((v) => !v))}
@@ -121,10 +147,11 @@ export function Menu({
           className={cx(
             'hive-scale-in absolute z-50 max-h-[min(420px,60vh)] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop',
             width,
-            up ? 'bottom-[calc(100%+6px)]' : 'top-[calc(100%+6px)]',
+            drop === 'up' ? 'bottom-[calc(100%+6px)]' : 'top-[calc(100%+6px)]',
             side === 'end' ? 'right-0' : 'left-0',
             panelClassName,
           )}
+          style={roomCap ? { maxHeight: `${roomCap}px` } : undefined}
           role="menu"
         >
           {typeof children === 'function' ? children(() => setOpen(false)) : children}

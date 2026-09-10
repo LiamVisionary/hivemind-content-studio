@@ -8,6 +8,13 @@
 // down, what a captured context carries, which handler a re-render commits —
 // none of which a single static render can observe. What the Image studio
 // SHOWS is rendered in imageTiering.test.js and pagesSmoke.test.js.
+//
+// 2026-09-10 — the route's presentation was replaced whole (StudioLayout's
+// settings column became StudioFrame's Advanced drawer; the chip toolbar became
+// a recipe sentence plus round doors). The wiring below did not move, so only
+// the two assertions that named the old markup were re-pointed: Cancel is the
+// composer's ComposerSecondary, and the "one primary, pinned right" shape is
+// now drawn by frame/ComposerPanel.jsx and asserted there.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -104,6 +111,74 @@ test('Start fresh clears the encrypted composer draft and keeps the cloud model'
     assert.doesNotMatch(fresh, /s\.selectedAr = /);
 });
 
+test('startFreshSummary names what is on screen, and nothing that is not', async () => {
+    const { startFreshSummary, startFreshPatch } = await prefs();
+    // A blank composer has nothing to lose — which is what lets the studio skip
+    // the dialog entirely rather than asking about an empty list.
+    assert.deepEqual(startFreshSummary({}), []);
+    assert.deepEqual(startFreshSummary({ prompt: '   ', uploadedImageUrls: [], regions: [] }), []);
+    assert.deepEqual(startFreshSummary(startFreshPatch()), [], 'and the patch itself lands on an empty summary');
+    assert.deepEqual(startFreshSummary({ prompt: 'a cat' }), ['what you typed']);
+    assert.deepEqual(startFreshSummary({ uploadedImageUrls: ['/a.png'] }), ['1 attached picture']);
+    assert.deepEqual(startFreshSummary({ uploadedImageUrls: ['/a.png', '/b.png'] }), ['2 attached pictures']);
+    assert.deepEqual(startFreshSummary({ regions: [{}] }), ['1 region box']);
+    assert.deepEqual(startFreshSummary({ regions: [{}, {}] }), ['2 region boxes']);
+    assert.deepEqual(startFreshSummary({ coupleA: 'her' }), ['the couple character text']);
+    assert.deepEqual(
+        startFreshSummary({ prompt: 'a cat', uploadedImageUrls: ['/a.png'], regions: [{}, {}], coupleShared: 'x' }),
+        ['what you typed', '1 attached picture', '2 region boxes', 'the couple character text'],
+    );
+});
+
+// The dialog and the patch have to name the same things, and they are written in
+// two places (imagePrefs.js and the modal's body). What holds them together is
+// that the body is BUILT from the summary — so this pins that, not the wording.
+test('Start fresh asks before it clears, off the same engine the patch empties', () => {
+    const studio = read('src/studios/ImageStudio.jsx');
+    const request = studio.match(/const requestNewPrompt = \(\) => \{[\s\S]*?\n  \};/)[0];
+    assert.match(request, /if \(!startFreshSummary\(s\)\.length\) \{ newPrompt\(\); return; \}/,
+        'nothing to lose means nothing to ask');
+    assert.match(request, /s\.startFreshConfirm = true;/);
+    // The composer's door opens the question, not the act.
+    assert.match(studio, /onNewPrompt=\{requestNewPrompt\}/);
+    assert.doesNotMatch(studio, /onNewPrompt=\{newPrompt\}/, 'the raw handler is never wired to a press');
+    // The dialog lists the summary rather than a hand-typed copy of it.
+    const dialog = studio.slice(studio.indexOf('{s.startFreshConfirm ? ('), studio.indexOf('{s.cloudRefConfirm ? ('));
+    assert.match(dialog, /startFreshSummary\(s\)\.map\(/);
+    assert.match(dialog, /title=\{t\('common\.startFreshTitle'\)\}/);
+    assert.match(dialog, /confirmLabel=\{t\('common\.startFresh'\)\}/);
+    assert.match(dialog, /cancelLabel=\{t\('common\.keepWhatIHave'\)\}/);
+    assert.match(dialog, /tone="primary"/, 'nothing is deleted — the gallery keeps every picture');
+    assert.match(dialog, /onConfirm=\{newPrompt\}/);
+    // And the act closes its own dialog, so a second press cannot re-run it.
+    assert.match(studio.match(/const newPrompt = \(\) => \{[\s\S]*?\n  \};/)[0], /s\.startFreshConfirm = false;/);
+});
+
+/* ---------------- clear the prompt, and only the prompt ---------------- */
+
+// The badge in the box's corner. It exists because Start fresh was being pressed
+// by people who wanted an empty prompt and got an empty composer.
+test('the prompt badge clears the prompt alone, with an Undo and no dialog', () => {
+    const studio = read('src/studios/ImageStudio.jsx');
+    const clear = studio.match(/const clearPromptOnly = \(\) => \{[\s\S]*?\n  \};/)[0];
+    // Through the draft writer, so the encrypted composer forgets it too.
+    assert.match(clear, /setPromptValue\(''\)/);
+    // One field: nothing about the references, the model or the settings.
+    assert.doesNotMatch(clear, /startFreshPatch|uploadedImageUrls|selectedModel|contextStore/);
+    assert.doesNotMatch(clear, /startFreshConfirm/, 'a one-field change asks nothing');
+    assert.match(clear, /setPromptValue\(before\)/, 'and it is offered back');
+    assert.match(studio, /onClearPrompt=\{clearPromptOnly\}/);
+
+    // The composer hands it to the box, which draws the badge.
+    const composer = read('src/studios/image/ImageComposer.jsx');
+    assert.match(composer, /<ComposerPrompt[\s\S]*?onClear=\{onClearPrompt\}/);
+    const panel = read('src/studios/frame/ComposerPanel.jsx');
+    assert.match(panel, /const clearable = Boolean\(onClear\) && !disabled && Boolean\(String\(value \|\| ''\)\.trim\(\)\)/,
+        'no badge on an empty box, and none on a box that cannot be typed in');
+    assert.match(panel, /clearable && 'pr-8'/, 'the text makes room for it');
+    assert.match(panel, /aria-label=\{t\('composer\.clearPrompt'\)\}/);
+});
+
 /* ---------------- reference roles follow the count ---------------- */
 
 test('a prompt with no roles and no block is left alone; held roles or a block trigger a rewrite', async () => {
@@ -157,12 +232,23 @@ test('cancel flags the run, tears down the timer and listener, and the late resu
     assert.match(studio, /if \(run\.cancelled\) return;\n\s+unsub\(\);\n\s+s\.localProgress = \{ active: false, pct: 0, label: '' \};\n\s+finishImageProgress\(true\);/);
     // …and a cancelled rejection is not an error.
     assert.match(studio, /if \(run\.cancelled \|\| e\?\.cancelled\) return;/);
-    // No ghost Cancel inside the progress card; a danger Cancel beside Generate
-    // (the composer is its own module now).
+    // No ghost Cancel anywhere: interrupting a paid render is not a quiet
+    // action. There are two doors onto it since the frame replaced the settings
+    // column — the composer's, beside Generate, and the stage's, on the
+    // progress readout that replaced GenerationProgressCard — and BOTH go
+    // through this one handler, so a cancel is a cancel either way.
     assert.doesNotMatch(studio, /variant="ghost" onClick=\{cancel/);
-    assert.match(studio, /onCancel=\{cancelGeneration\}/);
+    assert.equal(
+        (studio.match(/onCancel=\{cancelGeneration\}/g) || []).length,
+        2,
+        'the composer and the stage both cancel through the one handler',
+    );
+    // In the composer, Cancel is the SECONDARY — it can never take the one
+    // primary press's place — and it only exists while a run is out.
     const composer = read('src/studios/image/ImageComposer.jsx');
-    assert.match(composer, /<Button\s+variant="danger"\s+size="lg"\s+onClick=\{onCancel\}/);
+    assert.match(composer, /secondary=\{s\.generating \? \(\s*<ComposerSecondary onClick=\{onCancel\}/);
+    assert.equal((composer.match(/<ComposerSecondary\b/g) || []).length, 1, 'one Cancel, not one per state');
+    assert.doesNotMatch(composer, /<ComposerPrimary[^>]*onClick=\{onCancel\}/, 'Cancel is never the primary');
 });
 
 test('local generations save a pending job by the hosted bridge\'s job id and resume through it', () => {
@@ -325,7 +411,7 @@ test('with no saved preference the studio boots on the Local source when local m
     assert.match(studio, /const useLocalModel = persistedImagePreferences\s*\? Boolean\(persistedImagePreferences\.useLocalModel && isLocalAIAvailable\(\)\)\s*: Boolean\(isHivemindStudioEnabled\(\) && isLocalAIAvailable\(\)\);/);
 });
 
-/* ---------------- failure surface, composer row, misc ---------------- */
+/* ---------------- failure surface, composer action row, misc ---------------- */
 
 test('a failed generation leaves ONE callout — described, with its remedy — and no toast beside it', () => {
     const studio = read('src/studios/ImageStudio.jsx');
@@ -345,11 +431,32 @@ test('a failed generation leaves ONE callout — described, with its remedy — 
     assert.match(studio, /retryLabel="Try again"/);
 });
 
-test('the composer keeps the chips wrapping and Generate pinned in its own group', () => {
+test('the composer keeps its doors on the left and Generate pinned in its own group', () => {
     const studio = read('src/studios/ImageStudio.jsx');
     const composer = read('src/studios/image/ImageComposer.jsx');
-    assert.match(composer, /<div className="flex items-end gap-2">\s*<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">/);
-    assert.match(composer, /<div className="ml-auto flex shrink-0 items-center gap-2">/);
+    // ONE primary, pinned right, never wrapped under the doors. The action row
+    // belongs to the frame now, so the shape is pinned where it is drawn: the
+    // doors flow first, then a single `ml-auto` group holding the eta, Cancel
+    // and Generate in that order. Generate cannot wrap under the doors because
+    // it is not in the same flex group as them.
+    const panel = read('src/studios/frame/ComposerPanel.jsx');
+    assert.match(
+        panel,
+        /<div className="flex items-center gap-2">\s*\{tools\}\s*<div className="ml-auto flex min-w-0 items-center gap-\[15px\]">\s*\{meta\}\s*\{secondary\}\s*\{primary\}\s*<\/div>/,
+        'the action row is tools, then one right-hand group',
+    );
+    // …and the Image composer puts exactly one press in that group, and none
+    // among the doors. (imageTiering renders this and checks it holds.)
+    assert.equal((composer.match(/<ComposerPrimary\b/g) || []).length, 1, 'one primary press');
+    assert.match(composer, /primary=\{\(\s*<ComposerPrimary/);
+    const tools = composer.slice(composer.indexOf('const tools = ('), composer.indexOf('\n  return ('));
+    assert.ok(tools.length > 0, 'the doors are still declared');
+    assert.doesNotMatch(tools, /<ComposerPrimary|<ComposerSecondary/, 'the press is not one of the doors');
+    // Every icon-only door carries its name: ComposerTool draws no label, so
+    // the aria-label is the only name a screen reader gets.
+    for (const door of composer.match(/<ComposerTool[\s\S]{0,240}?\/>/g) || []) {
+        assert.match(door, /\n\s+label=/, 'an icon-only door with no name');
+    }
     // The app helper lives inside the one "Improve" menu now.
     assert.match(composer, /label=\{t\('composer\.improve'\)\}/);
     assert.doesNotMatch(composer, /className="border-honey\/40 text-honey"/);
@@ -410,5 +517,38 @@ test('duplicating a tab carries the reference roles, UGC counters and the open C
     const { IMAGE_TAB_FIELDS } = await import('../src/lib/studioTabs.js');
     for (const field of ['referenceRoles', 'ugcVariantIndex', 'ugcRoomIndex', 'customArOpen']) {
         assert.ok(IMAGE_TAB_FIELDS.includes(field), `${field} is a tab field`);
+    }
+});
+
+test('every finished picture carries how long it took, and the tile and viewer show it', async () => {
+    // 2026-09-07: the number a person compares across tiles while choosing
+    // settings. Stamped where each render's await sits (a batch shot on its
+    // own clock, a resumed job from its true submit time), never on entries
+    // from before this existed — those simply show no chip.
+    const gallery = read('src/studios/image/GalleryAndViewer.jsx');
+    assert.match(gallery, /formatTook\(entry\.generationMs\) \? \(/, 'the tile has the chip');
+    assert.match(gallery, /title=\{t\('image\.generationTime'\)\}/);
+    assert.match(gallery, /<MetaRow label="Took" value=\{formatTook\(entry\?\.generationMs\)\} \/>/);
+    assert.match(read('src/lib/i18n.js'), /'image\.generationTime':/);
+    const { formatTook } = await import('../src/studios/image/GalleryAndViewer.jsx').catch(() => ({}));
+    if (formatTook) {
+        assert.equal(formatTook(undefined), '', 'an older entry has nothing to show');
+        assert.equal(formatTook(0), '');
+        assert.equal(formatTook(4180), '4.2s');
+        assert.equal(formatTook(37400), '37s');
+        assert.equal(formatTook(125000), '2m 05s');
+    }
+    const studio = read('src/studios/ImageStudio.jsx');
+    assert.match(studio, /const shotStartedAt = Date\.now\(\);\n\s+const res = await runImage\(/, 'each batch shot is timed alone');
+    assert.match(studio, /\.\.\.tookSince\(shotStartedAt\),/);
+    assert.match(studio, /\.\.\.tookSince\(s\.generationStartedAt\),/, 'a cloud render is timed from its submit');
+    assert.match(studio, /\.\.\.tookSince\(live\.submittedAt\)/, 'a resumed job keeps its true start');
+    assert.match(studio, /\.\.\.tookSince\(job\.submittedAt\)/);
+    // The derived renders too: every one of them is a wait a person sat through.
+    for (const prefix of ['upscale-', 'expand-', 'inpaint-', 'angle-', 'seq-']) {
+        const at = studio.indexOf(`id: \`${prefix}`);
+        assert.ok(at > 0, prefix);
+        const block = studio.slice(at, studio.indexOf('});', at));
+        assert.match(block, /\.\.\.tookSince\(tookFrom\),/, `${prefix} carries its time`);
     }
 });

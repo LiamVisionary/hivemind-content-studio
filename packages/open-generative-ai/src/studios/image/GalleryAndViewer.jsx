@@ -15,6 +15,18 @@ export function formatCreated(timestamp) {
   return Number.isNaN(date.getTime()) ? String(timestamp) : date.toLocaleString();
 }
 
+// How long a render took, in the shortest form that still reads: "4.2s",
+// "37s", "2m 05s". Nothing for an entry from before this was recorded.
+export function formatTook(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const seconds = value / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${String(Math.round(seconds % 60)).padStart(2, '0')}s`;
+}
+
 // Gallery cards: the one this key activates. Space joins Enter (a div with
 // role="button" gets neither for free).
 export const activatesCard = (key) => key === 'Enter' || key === ' ';
@@ -61,6 +73,17 @@ export const GalleryCard = memo(function GalleryCard({ entry, active, canReuse, 
         <div className="truncate text-[11px] text-ink1">{entry.prompt || '—'}</div>
         <div className="truncate font-mono text-[10px] text-ink3">{entry.model || ''}</div>
       </div>
+      {/* Always on, not hover-only: how long this one took is the number a
+          person compares across tiles while choosing settings. */}
+      {formatTook(entry.generationMs) ? (
+        <span
+          className="pointer-events-none absolute bottom-1.5 left-1.5 inline-flex items-center gap-1 rounded-sm bg-bg0/75 px-1 py-px font-mono text-[10px] font-semibold text-ink2"
+          title={t('image.generationTime')}
+        >
+          <Icon name="clock" size={9} />
+          {formatTook(entry.generationMs)}
+        </span>
+      ) : null}
       {/* focus-within: a keyboard user tabbing onto these buttons sees them. */}
       <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
         <button
@@ -112,6 +135,12 @@ function MetaRow({ label, value }) {
 export function ViewerModal({
   url, entry, onClose, onBackToSetup, onRegenerate, onDownload, onUpscale, onCompare, onExpand, onInpaint, onAngles, onSequence,
   onUseAsVideoFrame, videoFrameBusy, onPostToCivitai,
+  // "Use this one as a reference for the next image". It used to live only on
+  // the gallery tile, and the gallery is a 96px rail now — which is hidden
+  // altogether below sm, and covered by this very dialog while it is open. The
+  // viewer is the one surface that can always reach the picture being looked at,
+  // so the door belongs here too.
+  onReuse,
   // Walking the gallery from inside the viewer: position = { index, total } (0-based).
   onPrev, onNext, position = null,
 }) {
@@ -174,6 +203,9 @@ export function ViewerModal({
           ) : null}
           {onSequence ? (
             <ActionButton variant="neutral" icon="stack" label="Steps" onClick={onSequence} />
+          ) : null}
+          {onReuse ? (
+            <ActionButton variant="neutral" icon="plus" label="Reuse as reference image" onClick={onReuse} />
           ) : null}
           {onUseAsVideoFrame ? (
             <ActionButton
@@ -238,6 +270,7 @@ export function ViewerModal({
           <MetaRow label="Model" value={entry?.model} />
           <MetaRow label="Aspect" value={entry?.aspect_ratio} />
           <MetaRow label="Seed" value={entry?.seed} />
+          <MetaRow label="Took" value={formatTook(entry?.generationMs)} />
           {/* Created as a readable local time; the raw id rides in the title
               attribute rather than as a row of its own. */}
           <div title={entry?.id ? `Id ${entry.id}` : undefined}>

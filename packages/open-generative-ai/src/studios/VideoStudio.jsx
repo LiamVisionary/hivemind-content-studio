@@ -1,7 +1,17 @@
 // Video Studio — React port of the retired vanilla studio (git history: src/components/VideoStudio.js).
 // T2V / I2V / V2V / local Hivemind LTX workflows / Wan2GP, model+parameter
 // selection, LTX Ingredients reference sheets, LoRA management, job-based
-// generation with resume, results canvas, and history.
+// generation with resume, and history.
+//
+// This file is the STATE and the WIRING; it no longer draws the route. Its
+// render mounts StudioFrame with four surfaces — video/VideoStage.jsx (the
+// player, the mid-render readout, the empty state), video/VideoRail.jsx (the
+// sequence and the earlier clips), video/VideoComposerBar.jsx (the prompt, the
+// recipe sentence and the tool doors) and video/VideoAdvanced.jsx (the drawer
+// that replaced the permanent settings column) — and hands each one values it
+// already had and handlers it already called. The failure callout and the
+// dependency prompt ride StudioFrame's `notices` slot, which is their only
+// home: VideoStage deliberately carries neither.
 //
 // Port rules honored here:
 // - All src/lib modules are consumed unchanged (source of truth).
@@ -13,7 +23,8 @@
 //   semantics (a validation that aborted still aborts).
 // - The two window listeners ('hivemind-workflow-selected',
 //   'hivemind-context-updated') now add/remove in a mount effect, fixing the leak.
-// - Media <video>/<img> srcs resolve through useMediaSrc (E2E decrypt, fail-open).
+// - Media <video>/<img> srcs resolve through useMediaSrc / useMediaPoster (E2E
+//   decrypt, fail-open) inside the surfaces above.
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
@@ -22,6 +33,8 @@ import { muapi } from '../lib/muapi.js';
 import { localRow, muapiKeyMissing, muapiRow, runVideo, studioRow } from '../lib/modelRunner.js';
 import { describeFailure } from '../lib/describeFailure.js';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
+import { WorkflowDependencyPrompt } from '../components/WorkflowDependencyPrompt.jsx';
+import { checkWorkflowDependencies, dependenciesBlockGeneration } from '../lib/workflowDependencies.js';
 import { toastFailure } from '../ui/failureToast.jsx';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { fitShotTimeline } from '../lib/shotTimeline.js';
@@ -34,6 +47,8 @@ import { applyCameraMotionPrompt, cameraMotionIdsInPrompt, cameraMotionPhrase, n
 import { CameraMotionMenu } from './video/CameraMotionMenu.jsx';
 import { applyRestylePrompt } from '../lib/h3RestylePresets.js';
 import { RestyleMenu } from './video/RestyleMenu.jsx';
+import { applyEmotionPrompt, emotionDirectionIdInPrompt } from '../lib/emotionDirection.js';
+import { EmotionMenu } from './video/EmotionMenu.jsx';
 import { CastStrip } from './video/CastStrip.jsx';
 import {
   castPersonaIdentity, castRenderGender, castRows, castSubjects, isWovenForReference,
@@ -48,7 +63,7 @@ import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { peekMediaDuration } from '../lib/mediaDuration.js';
 import { CivitaiPostDialog } from '../components/CivitaiPostDialog.jsx';
-import { civitaiResourcesFromLoras } from '../lib/civitaiPost.js';
+import { civitaiResourcesFromLoras, postMetaFromEntry } from '../lib/civitaiPost.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 // joinClips itself is imported dynamically inside joinChainFrom — it carries
 // mediabunny, which should not weigh down the studio chunk until a join runs.
@@ -62,11 +77,10 @@ import {
   timelineCombineKey, timelineContinuationPlan, timelineCutSegments, timelineDropPlan,
   timelineFromChainShots, toggleTimelineSegmentExcluded,
 } from '../lib/videoTimeline.js';
-import { ShotBuilderChip, ShotBuilderDialog, blankTimeline } from './video/ShotBuilder.jsx';
-import { PromptCheckMenu } from './video/PromptCheckMenu.jsx';
+import { ShotBuilderDialog, blankTimeline } from './video/ShotBuilder.jsx';
 import { armChainPrompt } from '../lib/chainPrompt.js';
 import { personaIdentity } from '../lib/personaId.js';
-import { applyUgcVideoBrief, hasUgcVideoBrief, ugcSubjectLabel, ugcVariantAt } from '../lib/ugcMode.js';
+import { UGC_DEFAULT_FORMAT, applyUgcVideoBrief, hasUgcVideoBrief, ugcFormatInPrompt, ugcSubjectLabel, ugcVariantAt } from '../lib/ugcMode.js';
 import { UgcMenu } from './UgcMenu.jsx';
 import { restoredHistoryEntry } from '../lib/restoredOutput.js';
 import {
@@ -93,7 +107,7 @@ import {
   saveStudioGenerationHistory,
   uploadFileToHivemindStudio,
   workflowIdFromHivemindModelId, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
-import { t, tf, aspectRatioName } from '../lib/i18n.js';
+import { t, tf } from '../lib/i18n.js';
 
 import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
 import { useApiStatus } from '../app/statusStore.js';
@@ -101,20 +115,21 @@ import { useRunTargets } from '../lib/useRunTargets.js';
 import { useProviderReadiness } from '../lib/useProviderReadiness.js';
 import { PLACE_THIS_MAC, pickRunTarget } from '../lib/runTargets.js';
 import { videoRunTargets } from './video/videoRunTargets.js';
-import { RunOnPicker } from '../components/RunOnPicker.jsx';
 import { basenameOf, rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
-import { useMediaPoster, useMediaSrc } from '../hooks/hooks.js';
 import { Icon } from '../ui/icons.jsx';
-import {
-  AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, FailureCallout, Field, IconButton,
-  NativeSelect, Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput,
-  Toggle, cx,
-} from '../ui/kit.jsx';
-import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
-import { CompletionPingToggle } from '../ui/CompletionPingToggle.jsx';
+import { FailureCallout, Spinner, Toggle, cx } from '../ui/kit.jsx';
+import { ChipButton } from '../ui/Menu.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
-import { StudioLayout } from '../ui/kit.jsx';
+// The redesigned route frame and the four surfaces it mounts. The stage owns
+// the window, the sequence rail owns the right edge, one composer floats over
+// the bottom and every remaining control is one press away behind Advanced —
+// StudioLayout's permanent 320px column and scrolling result grid are gone.
+import { StudioFrame } from './frame/StudioFrame.jsx';
+import { VideoAdvanced } from './video/VideoAdvanced.jsx';
+import { VideoComposerBar } from './video/VideoComposerBar.jsx';
+import { VideoRail } from './video/VideoRail.jsx';
+import { VideoStage, VideoStageActions } from './video/VideoStage.jsx';
 
 import { UploadPicker } from './UploadPicker.jsx';
 import { FrameSlotsPicker } from './video/FrameSlotsPicker.jsx';
@@ -139,8 +154,6 @@ import {
   referenceUploader,
 } from '../lib/referenceDrop.js';
 import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
-import { LoraSection } from './image/LoraSection.jsx';
-import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
 import { IngredientsPanel } from './video/IngredientsPanel.jsx';
 
 import {
@@ -157,7 +170,7 @@ import {
   applyRestoredPreferences, applyGenerationContext, restylePresetIdInPrompt,
   startFrameSelectedTransition, startFrameClearedTransition, clearVideoUploadTransition,
   videoUploadedTransition, selectV2VModelTransition, selectRegularModelTransition,
-  selectHivemindWorkflowTransition, newPromptTransition, extendTransition, withServedModel,
+  selectHivemindWorkflowTransition, newPromptTransition, startFreshSummary, extendTransition, withServedModel,
   getAdvancedVideoInputs, getAdvancedVideoPayload,
   normalizeVideoPreferences, normalizeVideoIngredientSelections, normalizeSelectedVideoIngredientSheet,
   videoIngredientDescriptions, withVideoIngredientDescriptions,
@@ -177,64 +190,11 @@ export {
   closestVideoAspectRatio,
 } from './video/videoLogic.js';
 
-/* ---------------- media leaves (E2E-transparent) ---------------- */
-
-// `unmuted` — the clip reached the canvas through a user gesture (a strip
-// click, Regenerate, a timeline pick), so it may play with sound; a clip that
-// lands on its own (a finished generation, a restore) stays muted, which is
-// what autoplay policy allows. H3 renders dialogue and soundscape, and a
-// result that always started silent gave no cue that there was any.
-function ResultVideo({ url, unmuted = false, hasAudio = false }) {
-  const src = useMediaSrc(url);
-  return (
-    <div className="relative">
-      <video
-        src={src}
-        controls controlsList="nodownload"
-        loop
-        autoPlay
-        muted={!unmuted}
-        playsInline
-        className="max-h-[58vh] w-auto max-w-full rounded-lg border border-line1 bg-bg0 object-contain"
-      />
-      {hasAudio ? (
-        <Pill tone="neutral" className="pointer-events-none absolute left-2 top-2 gap-1 bg-bg0/80">
-          <Icon name="sound" size={11} />
-          Sound
-        </Pill>
-      ) : null}
-    </div>
-  );
-}
-
-// Strip tiles draw ONE decoded frame as an <img> (useMediaPoster), not a <video>
-// per entry: thirty live media elements each holding a decoder for a 200px
-// tile, and the frame re-decoded on every remount, was the cost of the old
-// way. The clip itself is decrypted once (cached) and reused when it goes on
-// the canvas.
-function HistoryThumb({ url }) {
-  const { poster, resolved, pending } = useMediaPoster(url, { kind: 'video' });
-  if (poster) return <img src={poster} alt="" className="aspect-video w-full bg-bg0 object-contain" />;
-  if (!resolved || pending) return <div className="aspect-video w-full animate-pulse bg-bg2" aria-label="Decrypting" />;
-  return (
-    <div className="grid aspect-video w-full place-items-center bg-bg0 text-ink3">
-      <Icon name="film" size={18} />
-    </div>
-  );
-}
-
-// The strip scrolls itself to the clip that just landed. Stable identity on
-// purpose: as a ref callback it then runs when the tile mounts (a new render is
-// prepended) or when the active tile changes, not on every re-render.
-function scrollTileIntoView(node) {
-  if (!node || typeof node.scrollIntoView !== 'function') return;
-  try { node.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* older engines */ }
-}
-
-function ProgressPreview({ url }) {
-  const src = useMediaSrc(url);
-  return <img src={src} alt="" className="absolute inset-0 h-full w-full object-cover opacity-60" />;
-}
+// The four media leaves that used to live here — ResultVideo, HistoryThumb,
+// scrollTileIntoView and ProgressPreview — moved with the surfaces that drew
+// them: the player is VideoStage's StageClip, the strip tiles are VideoRail's,
+// and the mid-render preview is the stage overlay. Each still resolves its src
+// through useMediaSrc / useMediaPoster (E2E decrypt, fail-open) in its new home.
 
 /* ---------------- one mutable engine per mount ---------------- */
 
@@ -296,7 +256,16 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     videoLoraCatalogMessage: '',
     videoLoraCatalogRequest: 0,
     videoLoraCatalogModelId: '',
+    // Workflow preflight: the lane's report for the selected local workflow,
+    // and whether the install prompt is open. The report is re-asked when the
+    // workflow or the "Run on" pin changes (workflowDependencies.js caches).
+    dependencyReport: null,
+    dependencyPromptOpen: false,
+    dependencyCheckRequest: 0,
     loraOpen: false,
+    // Advanced (the frame's left drawer). View state, deliberately not
+    // persisted — see toggleAdvanced in the render.
+    advancedOpen: false,
     // Ingredients
     sharedIngredientSelections,
     sharedIngredientSheets,
@@ -361,6 +330,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // A pending "attach this clip?" question: { lines, resolve } while the
     // ConfirmModal is up (confirmSourceVideoSwitch), else null.
     sourceSwitchConfirm: null,
+    // Start fresh asks first, because it takes more than the prompt: true while
+    // that dialog is up. Never set when there is nothing to lose.
+    startFreshConfirm: false,
     persistTimer: null,
     // A History "Load in Studio" that arrived before the workflow catalog did,
     // held until the catalog can resolve its model.
@@ -431,6 +403,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
 export function VideoStudio({
   active = true, tabActive = true, seed = null, apiRef = null, studioLane = '',
   tabId = 0, primary = null, openTabIds = null,
+  // The floating tab strip, built by StudioTabs and handed to the FRONT tab only.
+  // Null when this studio is mounted without tabs.
+  tabStrip = null,
 } = {}) {
   const engineRef = useRef(null);
   // The seed is read once, at mount — StudioTabs clears it afterwards, so every
@@ -581,6 +556,9 @@ export function VideoStudio({
 
   const rootRef = useRef(null);
   const promptRef = useRef(null);
+  // The stage's <video>. VideoStage assigns it and VideoStageActions' Expand
+  // reads it, so the two halves of one clip share one element.
+  const stageVideoRef = useRef(null);
   const videoFileInputRef = useRef(null);
   const mountedOnceRef = useRef(false);
   const registryRetryRef = useRef(null);
@@ -1179,6 +1157,20 @@ export function VideoStudio({
     bump();
   };
 
+  // Performance direction — same idempotent phrase contract again, with one
+  // difference: which TEXT is written depends on the model. H3 renders the
+  // audio too, so it gets the rewrite that names the sound the body makes, and
+  // the phrase is inserted into the description rather than appended past the
+  // end (an H3 prompt finishes with non_diegetic_music, and appending writes
+  // acting direction into the music field). Both dialects are stripped on the
+  // way out, because the model can change under an armed phrase.
+  const applyEmotion = (id) => {
+    const next = applyEmotionPrompt(s.setup.prompt, s.setup.emotionDirectionId, id, { h3: isH3() });
+    s.setup = { ...s.setup, prompt: next.prompt, emotionDirectionId: next.id };
+    updateComposerDraft({ prompt: next.prompt });
+    bump();
+  };
+
   // UGC mode — same idempotent-block contract as the phrases above, with one
   // difference that matters: re-dealing the cast KEEPS the script already
   // written into the block, because varying the person/room/light/beats while
@@ -1204,13 +1196,19 @@ export function VideoStudio({
       audios: s.setup.referenceAudios || [],
     };
   };
-  const applyUgc = (index) => {
+  const applyUgc = (index, formatId = undefined) => {
+    // Which ad format the brief is written as. Read from the PROMPT first, so
+    // re-arming replaces the brief that is actually in the box rather than the
+    // one the chip last remembered; the explicit argument is a format button.
+    const format = formatId || ugcFormatInPrompt(s.setup.prompt) || s.setup.ugcFormat || UGC_DEFAULT_FORMAT;
     // A loaded persona's gender picks the cast pool: the dealt person must be
-    // the kind of person the attached pictures show.
-    const variant = Number.isInteger(index) ? ugcVariantAt(index, { gender: s.setup.persona?.gender }) : null;
+    // the kind of person the attached pictures show. The SETTING comes from the
+    // format's own bank — a street interview has no bathroom in it.
+    const variant = Number.isInteger(index) ? ugcVariantAt(index, { gender: s.setup.persona?.gender, format }) : null;
     const prompt = applyUgcVideoBrief(s.setup.prompt, variant, {
       durationSeconds: Number(s.setup.duration) || null,
       persona: ugcPersona(),
+      format,
     });
     // A UGC clip is a phone held in portrait. Switching here rather than
     // leaving it to the user, and said out loud in the menu.
@@ -1221,6 +1219,9 @@ export function VideoStudio({
       // Kept when clearing, so turning UGC back on deals the NEXT cast instead
       // of restarting the cycle at the one you just used.
       ugcVariantIndex: variant ? variant.index : s.setup.ugcVariantIndex ?? null,
+      // Kept when clearing too, so turning UGC back on comes back in the format
+      // you were working in rather than resetting to the selfie.
+      ugcFormat: format,
       ar: variant && vertical ? '9:16' : s.setup.ar,
     };
     updateComposerDraft({ prompt });
@@ -2242,15 +2243,28 @@ export function VideoStudio({
     bump();
     void generate();
   };
-  // "+ New" clears the prompt, the references, the persona and the frames in
-  // one press — offered back through the same Undo toast the weave uses, since
-  // there is no confirm and a press can land a second early.
+  // The prompt alone, in one press, from the badge in the box's corner. This is
+  // what most "start over" presses actually wanted: the frames, the cast, the
+  // clip and every setting stay. One field, so it asks nothing — the weave's
+  // own Undo toast is the whole safety net it needs.
+  const clearPromptOnly = () => {
+    if (!s.setup.prompt.trim()) return;
+    const before = { ...weaveSnapshot(), setup: s.setup };
+    setPrompt('');
+    focusPrompt();
+    announceWeave('Cleared the prompt', before);
+  };
+
+  // "Start fresh" clears the prompt, the references, the persona and the frames
+  // in one press. It ASKS first (the dialog lists what is on screen), and the
+  // weave's Undo toast still catches the press that landed a second early.
   const newPrompt = () => {
+    s.startFreshConfirm = false;
     const before = { ...weaveSnapshot(), setup: s.setup };
     const hadSomething = Boolean(before.prompt.trim())
       || before.rows.images.length || before.rows.videos.length || before.rows.audios.length
       || Boolean(s.setup.imageUrl) || Boolean(s.setup.videoUrl);
-    s.setup = newPromptTransition(s.setup, s.catalogs);
+    s.setup = newPromptTransition(s.setup);
     s.lastSubmittedContext = null;
     s.contextStore.clearViewed();
     s.resultUrl = null;
@@ -2267,6 +2281,17 @@ export function VideoStudio({
     focusPrompt();
     if (hadSomething) announceWeave('Cleared the prompt and its inputs', before);
   };
+
+  // Asked before it is done: the press was being read as "clear the prompt",
+  // and it is not. startFreshSummary names what is actually attached, off the
+  // same setup newPromptTransition clears. Nothing to lose means nothing to
+  // ask — an empty composer starts fresh on the press.
+  const requestNewPrompt = () => {
+    if (!startFreshSummary(s.setup).length) { newPrompt(); return; }
+    s.startFreshConfirm = true;
+    bump();
+  };
+
   const extend = () => {
     if (!s.lastGenerationId) return;
     s.setup = extendTransition(s.setup, s.catalogs);
@@ -3641,6 +3666,11 @@ export function VideoStudio({
         next.restylePresetId = restyleId;
         changed = true;
       }
+      const emotionId = emotionDirectionIdInPrompt(restoredPrompt);
+      if ((emotionId || null) !== (s.setup.emotionDirectionId || null)) {
+        next.emotionDirectionId = emotionId;
+        changed = true;
+      }
       if (typeof savedNegative === 'string' && savedNegative && !String(s.setup.negativePrompt || '').trim()) {
         next.negativePrompt = savedNegative;
         changed = true;
@@ -4010,6 +4040,32 @@ export function VideoStudio({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unmeasuredReferenceVideos]);
 
+  // Ask the lane what it lacks for the selected local workflow, before
+  // Generate: a missing node pack or model file opens the install prompt
+  // now, with progress bars, instead of a refusal after the upload.
+  const dependencyModel = currentModel(s.setup, s.catalogs);
+  const dependencyWorkflowId = dependencyModel?.provider === 'hivemind-media-studio' ? String(dependencyModel.workflowId || '') : '';
+  const dependencyRunOn = s.setup.rentedMachineId || '';
+  const openDependencyPrompt = async ({ force = false } = {}) => {
+    if (!dependencyWorkflowId) return;
+    const request = ++s.dependencyCheckRequest;
+    try {
+      const report = await checkWorkflowDependencies(localAI, { workflowId: dependencyWorkflowId, runOn: dependencyRunOn, force });
+      if (request !== s.dependencyCheckRequest) return;
+      s.dependencyReport = report;
+      s.dependencyPromptOpen = force || dependenciesBlockGeneration(report);
+      bump();
+    } catch {
+      // A lane that cannot be asked is not a lane that is missing things;
+      // Generate says what it says, and the callout's remedy reopens this.
+    }
+  };
+  useEffect(() => {
+    if (!dependencyWorkflowId) { s.dependencyReport = null; s.dependencyPromptOpen = false; return; }
+    void openDependencyPrompt();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dependencyWorkflowId, dependencyRunOn]);
+
   // Load LoRAs when the active LoRA workflow changes and the section is open.
   const loraWorkflowId = currentVideoLoraModel()?.workflowId || '';
   useEffect(() => {
@@ -4280,7 +4336,6 @@ export function VideoStudio({
 
   const progressStageLabel = t(`video.progress.${s.progress.stage}`);
   const progressPct = Math.max(0, Math.min(1, Number(s.progressDisplay) || 0));
-  const progressValueLabel = `${Math.round(progressPct * 100)}%`;
   const progressElapsedMs = Date.now() - s.generationStartedAt;
   const progressElapsed = formatVideoGenerationElapsed(progressElapsedMs);
   // What is LEFT, not the whole estimate again: past the estimate the honest
@@ -4294,8 +4349,10 @@ export function VideoStudio({
   const progressSteps = s.progressSteps?.total
     ? tf('video.progress.step', s.progressSteps.step, s.progressSteps.total)
     : null;
+  // The stage prints the step counter beside the PHASE, so this line carries
+  // only the shape of the render. With progressSteps still in it, the same
+  // "step 12 of 32" would be printed twice on one readout.
   const progressDetail = [
-    progressSteps,
     s.progressContext?.aspectRatio,
     s.progressContext?.duration ? `${s.progressContext.duration}s` : null,
   ].filter(Boolean).join(' · ');
@@ -4305,472 +4362,313 @@ export function VideoStudio({
   const rentedBlocked = Boolean(s.setup.rentedMachineId && !s.rentedMachines?.length);
   const offlineBlocked = apiStatus.tone === 'offline';
 
-  /* ---------------- panel ---------------- */
+  /* ---------------- Advanced ---------------- */
 
+  // The drawer that replaced the permanent settings column. View state,
+  // deliberately not persisted — a drawer that reopens itself on every reload
+  // is a settings column again. Same pair the Image route uses.
+  const toggleAdvanced = () => { s.advancedOpen = !s.advancedOpen; bump(); };
+  const closeAdvanced = () => { s.advancedOpen = false; bump(); };
+
+  /* ---------------- the controls the drawer borrows from the composer ---------------- */
+
+  // Weaving the cast into the prompt is ONE action reached from three doors —
+  // the cast strip's readout, Prompt Check, and the drawer's own copy of the
+  // strip — so the closure is written once instead of three times. Byte for
+  // byte what each of those three doors already ran.
+  const weavePromptNow = () => {
+    const before = weaveSnapshot();
+    const woven = acceptPrompt(s.setup.prompt, { scaffold: true });
+    if (woven.prompt !== before.prompt) announceWeave('Wove your references into the prompt', before);
+    focusPrompt();
+  };
+  const openPromptHelper = () => { s.promptHelperOpen = true; bump(); };
+  const openReferences = () => { s.referencesOpenRequest = (s.referencesOpenRequest || 0) + 1; bump(); };
+
+  // What the strip already knows about the person in the rows — so "Save as
+  // persona" starts from it.
+  const personaSeed = (() => {
+    const holder = s.cast.find((member) => member.kind === 'persona');
+    return holder ? { gender: holder.data?.gender || '', look: holder.data?.look || '' } : null;
+  })();
+
+  // The Advanced drawer takes RENDERED controls for the cast, the frames, the
+  // references, the clip and the four prompt-writing menus — VideoAdvanced says
+  // why in its own header: those call sites are forty props wide and belong to
+  // the studio rather than to a settings file. The composer builds its own from
+  // primitives, so these are the drawer's copies: same engine object, same
+  // handlers, same render conditions, and they only mount while it is open.
+  const drawerCast = promptUi.disabled ? null : (
+    <CastStrip
+      members={s.cast}
+      onMembersChange={applyCast}
+      target={weaveTargetNow()}
+      referenceLane={referenceLaneAvailable()}
+      h3={isH3()}
+      woven={isWovenForReference(s.setup.prompt)}
+      promptEmpty={!s.setup.prompt.trim()}
+      warnings={s.castWarnings}
+      onAttach={openReferences}
+      onWeave={weavePromptNow}
+      onDraftLook={draftLookFor}
+      onAddMedia={referenceLaneAvailable() ? addMediaForMember : null}
+    />
+  );
+
+  // The four keyframe controls are mutually exclusive and in THIS order — the
+  // three-slot picker, the chain chip, the two-slot picker, the plain start
+  // frame. Only one ever renders, and the studio's own effects null the stale
+  // halves when the branch changes.
+  const drawerFrames = ltxFramesVisible ? (
+    // LTX 2.3: one control with Start / Middle / End rows (all optional).
+    <FrameSlotsPicker
+      label="Frames"
+      slots={[
+        { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
+        { key: 'middle', label: 'Middle', url: s.setup.ltxMiddleUrl },
+        { key: 'end', label: 'End', url: s.setup.ltxEndUrl },
+      ]}
+      onSlotChange={(key, url) => {
+        const value = url ? [url] : [];
+        if (key === 'start') onStartFrameChange(value);
+        else if (key === 'middle') onLtxMiddleFrameChange(value);
+        else onLtxEndFrameChange(value);
+      }}
+      uploadFn={uploadFnForFrame}
+      requireApiKey={frameRequiresApiKey}
+      // No autoOpen here: s.framesPanelAutoOpen is a one-render pulse cleared by
+      // an effect, and the composer's copy is the one that should answer it. Two
+      // pickers reading it would both fly open on a single start-frame pick.
+    />
+  ) : chainArmed ? (
+    // Scene chaining replaces the start frame: the armed clip's tail IS the
+    // opening of this shot, so the picker gives way to the chain chip.
+    <div
+      className="flex items-center gap-1.5 rounded-md border border-honey/40 bg-honey-tint px-2 py-1"
+      title="The pinned frames carry motion and room tone — the SCENE carries through the prompt. Keep the shot's style and subject words, hold the previous closing framing for a beat, then describe what happens next."
+    >
+      <Icon name="film" size={13} className="text-honey" />
+      <span className="text-xs font-medium text-honey">{`Continuing shot ${chainShot}`}</span>
+      <button
+        type="button"
+        title="Stop continuing the scene"
+        aria-label="Stop continuing the scene"
+        className="grid h-4 w-4 place-items-center rounded text-honey transition-colors hover:bg-honey/20"
+        onClick={clearMotionContext}
+      >
+        <Icon name="x" size={11} />
+      </button>
+    </div>
+  ) : endFrameVisible ? (
+    // First/last-frame models (H3 FL2VA, remote FLF): ONE control with Start /
+    // End rows, same pattern as the LTX three-slot picker. Armed character
+    // references replace these frames for the run, but the picker stays mounted
+    // (dimmed, with a note) — hiding it stranded an already-set start frame with
+    // no way to change it or add the end frame.
+    <FrameSlotsPicker
+      label="Frames"
+      slots={[
+        { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
+        { key: 'end', label: 'End (optional)', url: s.setup.endImageUrl },
+      ]}
+      onSlotChange={(key, url) => {
+        const value = url ? [url] : [];
+        if (key === 'start') onStartFrameChange(value);
+        else onEndFrameChange(value);
+      }}
+      uploadFn={uploadFnForFrame}
+      requireApiKey={frameRequiresApiKey}
+      inactiveNote={refsArmed ? 'Character references replace these frames while attached' : ''}
+    />
+  ) : (
+    <UploadPicker
+      values={s.setup.imageUrl ? [s.setup.imageUrl] : []}
+      onChange={onStartFrameChange}
+      uploadFn={uploadFnForFrame}
+      requireApiKey={frameRequiresApiKey}
+      maxImages={1}
+      accept="image/*"
+      label="Start frame"
+      ignored={refsArmed}
+    />
+  );
+
+  // One control for every reference kind this model has. The slot counts come
+  // from the workflow entry rather than being restated here, so the drawer can
+  // never offer a slot the graph has not wired — and a model whose only
+  // reference kind is stitched views shows just those.
+  const drawerReferences = referenceEntry || ingredientModel ? (
+    <ReferencesMenu
+      images={Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : []}
+      audios={Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : []}
+      videos={Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : []}
+      prompt={s.setup.prompt}
+      durationSeconds={Number(s.setup.duration) || 0}
+      limits={{
+        images: referenceEntry?.referenceSlots?.images || 9,
+        audios: referenceEntry?.referenceSlots?.audios || 3,
+        videos: referenceEntry?.referenceSlots?.videos || 3,
+      }}
+      views={ingredientViews}
+      viewsOnly={!referenceEntry}
+      scene={sceneUrls()}
+      sceneRoles={sceneRoleMap()}
+      onSceneRole={onSceneRole}
+      onChange={{
+        images: onCharacterRefsChange,
+        scene: onSceneRefsChange,
+        audios: onReferenceAudiosChange,
+        videos: onReferenceVideosChange,
+      }}
+      persona={s.setup.persona || null}
+      onPersonaChange={onPersonaChange}
+      personaSeed={personaSeed}
+      uploadFn={uploadFnForFrame}
+      requireApiKey={frameRequiresApiKey}
+      // Deliberately not wired to s.referencesOpenRequest: the composer's copy
+      // owns that pulse, and two menus answering one request would both fly open.
+      openRequest={0}
+      // Head replacement's one door. Offered only on a family whose registry
+      // actually carries an inpaint graph, so the thumbnail never opens a dialog
+      // whose Apply the run would ignore.
+      onOpenClip={inpaintEntry ? (index) => { s.inpaintOpenIndex = index; bump(); } : null}
+    />
+  ) : null;
+
+  // One chip, two meanings, and the chip SAYS which. The request plan decides:
+  // where a clip seeds the next shot's opening frames (motion context) it is
+  // "Continue from clip"; everywhere else a clip is an INPUT to the run, so it
+  // is the source video. One icon and the word "Clip" for both was unguessable.
+  const drawerClip = (() => {
+    const label = clipChipContinues ? 'Continue from clip' : 'Source video';
+    const idle = clipChipContinues
+      ? 'Continue from a clip — the next shot picks up where it ends, motion and room tone carrying across'
+      : `${'Upload'}: ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`;
+    const attachedText = `${s.setup.videoName || label} — ${'click to clear'}`;
+    return (
+      <ChipButton
+        icon={clipChipContinues ? 'film' : 'upload'}
+        label={label}
+        value={attachedClipUrl() ? (s.setup.videoName || 'attached') : ''}
+        active={Boolean(attachedClipUrl())}
+        chevron={false}
+        disabled={s.videoUploading}
+        aria-label={attachedClipUrl() ? attachedText : `${label} — ${idle}`}
+        title={attachedClipUrl() ? attachedText : idle}
+        onClick={onVideoRefClick}
+      />
+    );
+  })();
+
+  /* ---------------- the Advanced drawer ---------------- */
+
+  // Was ~460 lines of inline JSX in a permanent 320px column. VideoAdvanced.jsx
+  // holds the same controls, re-tiered by what each one decides; every value it
+  // reads and every writer it calls is still this file's.
   const panel = (
-    <>
-      {rentedBlocked ? null : (
-        <>
-      {/* One readout for the question four controls used to ask four ways: the
-          place, the model and the bill in one line, over ONE list grouped by
-          who pays. The segmented Local / API / Rented triad and the separate
-          model menu beside it were asking the same question twice. */}
-      <div className="flex flex-col gap-2">
-        <RunOnPicker
-          targets={runOn.targets}
-          value={runOn.value}
-          onChange={runOn.onChange}
-          automatic={runOn.automatic}
-          onAutomatic={runOn.onAutomatic}
-          isAutomatic={runOn.isAutomatic}
-          engine={s}
-          page="video"
-          pinned={runOn.pinned}
-          onPin={runOn.onPin}
-          readinessFor={runOn.readinessFor}
-          onFixReadiness={runOn.onFixReadiness}
-          busyAction={runOn.busyAction}
-        />
-        {/* The places that can make a STILL here but have no clip route yet.
-            Said once, quietly, rather than offered as rows whose Generate can
-            only fail. */}
-        {runOn.unreachable.length ? (
-          <small className="text-[11px] text-ink3">
-            {`${runOn.unreachable.join(' and ')} can make stills here, not clips yet.`}
-          </small>
-        ) : null}
-        <Pill tone="honey" className="w-fit">{modeLabel}</Pill>
-      </div>
-
-      {availableTasks.length > 1 ? (
-        <div className="flex flex-col gap-3">
-          <SectionLabel>Task</SectionLabel>
-          {/* Explicit, and first: every input slot below reads its meaning from
-              this. Inferring it from whichever files were attached is what made
-              an uploaded clip always mean "extend". */}
-          <Segmented
-            value={videoTask}
-            onChange={(next) => commit({ ...s.setup, videoTask: next })}
-            options={[
-              { value: 'generate', label: 'Generate' },
-              { value: 'extend', label: 'Extend' },
-              { value: 'head-swap', label: 'Head swap' },
-            ]}
-          />
-          <p className="text-[11px] leading-relaxed text-ink3">
-            {videoTask === 'head-swap'
-              ? 'Replaces the face in the source video with the new face. The BFS head-swap LoRA is switched on by this mode — you do not need to select it. Prompt shaped "head_swap: FACE: … ACTION: …".'
-              : videoTask === 'extend'
-                ? 'Appends new footage to the end of the uploaded video.'
-                : 'Generates from the prompt, optionally starting from a frame you attach.'}
-          </p>
-          {videoTask === 'head-swap' ? (
-            <>
-              <Field
-                label="Swap engine"
-                hint={s.setup.headSwapBackend === 'facefusion'
-                  ? 'Swaps only the face region — body, clothing, background and motion stay identical to your source, and it runs about 10× quicker. Hair and head shape stay the original actor\'s.'
-                  : 'Regenerates every frame, so it can change hair and head shape — but the whole picture is reinvented rather than preserved.'}
-              >
-                <Segmented
-                  value={s.setup.headSwapBackend === 'facefusion' ? 'facefusion' : 'bfs'}
-                  onChange={(next) => commit({ ...s.setup, headSwapBackend: next })}
-                  options={[
-                    { value: 'bfs', label: 'Regenerate whole frame' },
-                    { value: 'facefusion', label: 'Swap face only' },
-                  ]}
-                />
-              </Field>
-              {s.setup.headSwapBackend === 'facefusion' ? (
-                <Toggle
-                  checked={Boolean(s.setup.headSwapFaceEnhancer)}
-                  onChange={(next) => commit({ ...s.setup, headSwapFaceEnhancer: next })}
-                  label="Face enhancer (about 2× slower)"
-                />
-              ) : (
-                <Field
-                  label="Head-swap strength"
-                  hint="1.0 gives the best motion fidelity. Above 1.0 captures identity and hair more strongly, but can distort."
-                >
-                  <Slider
-                    min={0.5}
-                    max={1.5}
-                    step={0.05}
-                    value={Number(s.setup.headSwapLoraStrength ?? 1)}
-                    onChange={(next) => commit({ ...s.setup, headSwapLoraStrength: next })}
-                    format={(v) => Number(v).toFixed(2)}
-                  />
-                </Field>
-              )}
-            </>
-          ) : null}
-          {swapState.active && !swapState.ready ? (
-            <p className="text-[11px] font-medium text-danger">
-              {'Still needed: '}{swapState.missing.join(' and ')}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {(visibility.ar || visibility.duration || visibility.resolution || visibility.quality || visibility.mode || visibility.effect) ? (
-        <div className="flex flex-col gap-3">
-          <SectionLabel>Format</SectionLabel>
-          {visibility.ar ? (
-            <Field
-              label="Aspect ratio"
-              hint={arMatchedToFrame ? 'Matched to the starting frame — no cropping' : undefined}
-            >
-              <AspectRatioPicker
-                options={arOptions}
-                value={s.setup.ar}
-                onChange={setAr}
-                disabled={arMatchedToFrame}
-                nameFor={aspectRatioName}
-              />
-            </Field>
-          ) : null}
-          {startFrameArMatchAvailable ? (
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-xs font-medium text-ink2">
-                Use starting frame aspect ratio
-              </span>
-              <Toggle
-                label="Use starting frame aspect ratio"
-                checked={s.setup.matchStartFrameAr}
-                onChange={setMatchStartFrameAr}
-              />
-            </div>
-          ) : null}
-          {visibility.duration ? (
-            minimaxSelected ? (
-              <Field
-                label="Duration"
-                hint={durationCapped
-                  ? motionCapHint
-                  : 'Up to 15s — the model keeps people and scenes consistent for about 15 seconds, so longer takes are not offered.'}
-              >
-                <Slider
-                  min={Number(durationOptions[0]) || 1}
-                  max={Number(durationOptions[durationOptions.length - 1]) || 15}
-                  step={1}
-                  value={Number(s.setup.duration) || 5}
-                  onChange={setDuration}
-                  format={(v) => `${v}s`}
-                />
-              </Field>
-            ) : (
-              <Field label="Duration">
-                <NativeSelect value={String(s.setup.duration)} onChange={(e) => setDuration(e.target.value)}>
-                  {durationOptions.map((d) => <option key={d} value={String(d)}>{`${d}s`}</option>)}
-                </NativeSelect>
-              </Field>
-            )
-          ) : null}
-          {visibility.resolution ? (
-            minimaxSelected ? (
-              <Field
-                label="Resolution"
-                hint={{
-                  Standard: 'Fastest — try an idea cheaply before a real render (0.3MP).',
-                  High: 'The balanced default for speed and detail (0.9MP).',
-                  Max: "Best quality — the model's own canvas: sharpest detail, audio and on-screen text, and the slowest to render (1.0MP, its ceiling).",
-                }[s.setup.resolution] || undefined}
-              >
-                <Segmented
-                  value={s.setup.resolution}
-                  onChange={setResolution}
-                  options={[
-                    { value: 'Standard', label: 'Draft' },
-                    { value: 'High', label: 'High' },
-                    { value: 'Max', label: 'Best quality' },
-                  ]}
-                />
-              </Field>
-            ) : (
-              <Field label="Resolution">
-                <NativeSelect value={s.setup.resolution} onChange={(e) => setResolution(e.target.value)}>
-                  {resolutionOptions.map((r) => <option key={r} value={r}>{r}</option>)}
-                </NativeSelect>
-              </Field>
-            )
-          ) : null}
-          {visibility.quality ? (
-            <Field label="Quality">
-              <NativeSelect value={s.setup.quality} onChange={(e) => setQuality(e.target.value)}>
-                {qualityOptions.map((q) => <option key={q} value={q}>{q}</option>)}
-              </NativeSelect>
-            </Field>
-          ) : null}
-          {visibility.mode ? (
-            <Field label="Mode">
-              <NativeSelect value={s.setup.mode} onChange={(e) => setMode(e.target.value)}>
-                {modeOptions.map((m) => <option key={m} value={m}>{m}</option>)}
-              </NativeSelect>
-            </Field>
-          ) : null}
-          {visibility.effect ? (
-            <Field label="Effect type">
-              <NativeSelect value={s.setup.effectName} onChange={(e) => setEffect(e.target.value)}>
-                {effectOptions.map((eff) => <option key={eff} value={eff}>{eff}</option>)}
-              </NativeSelect>
-            </Field>
-          ) : null}
-        </div>
-      ) : null}
-
-      <CollapsibleSection title="Advanced" hint={advancedHint} storageKey="video.advanced">
-        {/* The tuning bench, behind the ONE disclosure convention. Quality tier,
-            refinement and the seed steer every render, so the closed header
-            names whichever of them is armed (advancedHint) — hidden is fine,
-            invisible is not. */}
-        {(() => {
-          // Lite/Standard for models that ship both a distilled and a full-step
-          // build. Only rendered when both are installed, and switching swaps the
-          // selected model so exactly one is ever active.
-          const pair = tierPairFor(s.catalogs.hivemindI2V, s.setup.modelId);
-          if (!pair) return null;
-          const active = pair.lite.id === s.setup.modelId ? 'lite' : 'standard';
-          return (
-            <Field
-              label="Quality"
-              hint={active === 'lite'
-                ? 'Fastest, with softer detail (distilled, ~8 steps)'
-                : 'Best quality — about 3x slower (full-step CFG)'}
-            >
-              <Segmented
-                value={active}
-                onChange={(tier) => { if (pair[tier]) selectHiveModel(pair[tier]); }}
-                options={[
-                  { value: 'lite', label: 'Faster' },
-                  { value: 'standard', label: 'Best quality' },
-                ]}
-              />
-            </Field>
-          );
-        })()}
-        {minimaxStepsAvailable ? (
-          <Field
-            label="Refinement"
-            hint={minimaxRefinement === 'high'
-              ? 'Smoother motion, sharper hands and faces, cleaner audio — roughly twice the render time (32 sampling passes).'
-              : `Quickest, at the model's own default (${Math.round(model?.defaultSteps || 15)} sampling passes).`}
-          >
-            <Segmented
-              value={minimaxRefinement}
-              onChange={(next) => commit({ ...s.setup, steps: next === 'high' ? 32 : null })}
-              options={[
-                { value: 'standard', label: 'Standard' },
-                { value: 'high', label: 'High detail' },
-              ]}
-            />
-          </Field>
-        ) : null}
-        {isHivemindVideoModelId(s.setup.modelId) ? (
-          <Field
-            label="Seed"
-            hint="Lock one and the same settings give you the same take again."
-          >
-            <div className="flex items-center gap-1.5">
-              <TextInput
-                type="number"
-                min={0}
-                step={1}
-                value={s.setup.seed >= 0 ? String(s.setup.seed) : ''}
-                placeholder="Random"
-                onChange={(e) => setSeed(e.target.value === '' ? -1 : e.target.value)}
-                className="flex-1"
-              />
-              <IconButton
-                icon="refresh"
-                label="Randomize seed"
-                title="Use a fresh random seed each generation"
-                active={s.setup.seed < 0}
-                onClick={randomizeSeed}
-              />
-            </div>
-            {s.setup.seed < 0 && typeof s.lastSeed === 'number' ? (
-              <button
-                type="button"
-                onClick={lockLastSeed}
-                className="mt-1 text-left text-xs text-ink3 hover:text-honey"
-              >
-                {'Last seed: ' + s.lastSeed + ' · click to lock'}
-              </button>
-            ) : null}
-          </Field>
-        ) : null}
-        {supportsSpectrum(model) ? (
-          <Field
-            label="Faster, softer detail"
-            hint={chainArmed
-              ? 'Forced off while chaining scenes: step forecasting mispredicts the pinned join frames.'
-              : 'About half the sampling time: roughly half the steps are predicted rather than computed, so fine detail softens and highlights can bloom. Turn it off for maximum fidelity (Spectrum).'}
-          >
-            <Toggle
-              checked={!chainArmed && s.setup.spectrum !== false}
-              disabled={chainArmed}
-              onChange={(next) => commit({ ...s.setup, spectrum: next })}
-              label="Faster, softer detail"
-            />
-          </Field>
-        ) : null}
-        {supportsFastHighRes(model) ? (
-          <Field
-            label="Fast high-res"
-            hint="About half the render time, at the same size, length and sound — most of the steps run on a much smaller canvas before the picture is lifted to full size. The same seed gives a different take, not the same one faster."
-          >
-            <Toggle
-              checked={s.setup.fastHighRes === true}
-              onChange={(next) => commit({ ...s.setup, fastHighRes: next })}
-              label="Fast high-res"
-            />
-          </Field>
-        ) : null}
-        {denoiseAvailable ? (
-          <>
-            <Field
-              label="Avoid these things"
-              hint="What to keep out of the shot. Works at best quality; the faster lanes ignore it."
-            >
-              <TextArea
-                rows={2}
-                value={s.setup.negativePrompt || ''}
-                onChange={(e) => setNegativePrompt(e.target.value)}
-                placeholder="blurry, bad anatomy, extra fingers, deformed hands, watermark"
-                className="resize-y text-xs"
-              />
-            </Field>
-            {String(s.setup.negativePrompt || '').trim() ? (
-              <Field
-                label="How hard to avoid them"
-                hint="How hard to push the shot away from that list — adds about 8% to the render. Raise it if it is still not listening (NAG)."
-              >
-                <NativeSelect
-                  value={String(s.setup.nagScale ?? '')}
-                  onChange={(e) => commit({
-                    ...s.setup,
-                    nagScale: e.target.value === '' ? null : Number(e.target.value),
-                  })}
-                >
-                  <option value="">Default (11)</option>
-                  <option value="5">Subtle (5)</option>
-                  <option value="15">Strong (15)</option>
-                  <option value="1">Off</option>
-                </NativeSelect>
-              </Field>
-            ) : null}
-          </>
-        ) : null}
-        {denoiseAvailable ? (
-          <Field
-            label="Detailer"
-            hint={s.setup.detailerStrength
-              ? "Lightricks' IC-LoRA Detailer runs a second sampling pass over the clip to add fine texture. Roughly doubles generation time."
-              : 'Off — one pass, exactly as fast as before.'}
-          >
-            <NativeSelect
-              value={String(s.setup.detailerStrength || 0)}
-              onChange={(e) => commit({ ...s.setup, detailerStrength: Number(e.target.value) })}
-            >
-              <option value="0">Off</option>
-              <option value="0.4">Subtle (0.4)</option>
-              <option value="0.6">Recommended (0.6)</option>
-              <option value="0.9">Strong (0.9)</option>
-            </NativeSelect>
-          </Field>
-        ) : null}
-        {denoiseAvailable ? (
-          <Field
-            label="Grain cleanup"
-            hint={s.setup.denoise
-              ? (s.setup.denoise === 'strong'
-                ? 'Motion-adaptive temporal pass + a spatial pass. Re-encodes after generation.'
-                : 'Motion-adaptive temporal pass: averages static grain, leaves moving detail alone.')
-              : 'Off — the clip is saved exactly as the model rendered it.'}
-          >
-            <NativeSelect
-              value={s.setup.denoise || ''}
-              onChange={(e) => commit({ ...s.setup, denoise: e.target.value })}
-            >
-              <option value="">Off</option>
-              <option value="light">Light</option>
-              <option value="strong">Strong</option>
-            </NativeSelect>
-          </Field>
-        ) : null}
-        {advancedInputs.map((input) => {
-          const value = s.setup.advancedValues[input.name];
-          if (input.type === 'boolean') {
-            return (
-              <div key={input.name} className="flex items-center justify-between gap-3" title={input.description || ''}>
-                <span className="min-w-0 text-xs font-medium text-ink2">{input.title || input.name}</span>
-                <Toggle label={input.title || input.name} checked={Boolean(value)} onChange={(v) => setAdvanced(input.name, v)} />
-              </div>
-            );
-          }
-          if (Array.isArray(input.enum) && input.enum.length > 0) {
-            return (
-              <Field key={input.name} label={input.title || input.name}>
-                <NativeSelect
-                  value={String(value)}
-                  onChange={(e) => {
-                    const match = input.enum.find((v) => String(v) === e.target.value);
-                    setAdvanced(input.name, match ?? e.target.value);
-                  }}
-                >
-                  {input.enum.map((v) => <option key={String(v)} value={String(v)}>{String(v).replaceAll('_', ' ')}</option>)}
-                </NativeSelect>
-              </Field>
-            );
-          }
-          const numeric = ['int', 'float', 'number'].includes(input.type);
-          return (
-            <Field key={input.name} label={input.title || input.name}>
-              <TextInput
-                type={numeric ? 'number' : 'text'}
-                value={value ?? ''}
-                min={numeric && input.minValue != null ? input.minValue : undefined}
-                max={numeric && input.maxValue != null ? input.maxValue : undefined}
-                step={numeric ? (input.step ?? (input.type === 'int' ? 1 : 'any')) : undefined}
-                className={numeric ? 'font-mono' : ''}
-                onChange={(e) => setAdvanced(input.name, numeric && e.target.value !== '' ? Number(e.target.value) : e.target.value)}
-              />
-            </Field>
-          );
-        })}
-      {loraModel ? (
-        <div className="border-t border-line1 pt-4">
-          <LoraSection
-            open={s.loraOpen}
-            onToggleOpen={() => {
-              s.loraOpen = !s.loraOpen;
-              bump();
-              if (s.loraOpen) void loadLorasForCurrentVideoModel();
-            }}
-            baseLabel={loraModel.compatibleBaseModels?.join(', ') || loraModel.name}
-            baseModelId={loraModel.id || ''}
-            baseModels={loraModel.compatibleBaseModels || []}
-            status={s.videoLoraCatalogStatus}
-            message={s.videoLoraCatalogMessage}
-            loras={s.availableVideoLoras}
-            onRentedMachine={Boolean(s.setup.localMode && s.setup.rentedMachineId)}
-            selection={currentVideoLoraSelection()}
-            getSelection={currentVideoLoraSelection}
-            onToggleLora={(lora) => setCurrentVideoLoraSelection(toggleLoraSelection(currentVideoLoraSelection(), lora))}
-            onToggleEnabled={(lora) => setCurrentVideoLoraSelection(toggleLoraEnabled(currentVideoLoraSelection(), lora.id))}
-            onSetStrength={(id, value) => setCurrentVideoLoraSelection(updateLoraStrength(currentVideoLoraSelection(), id, value), { render: false })}
-            onCommitStrength={(id, value) => setCurrentVideoLoraSelection(updateLoraStrength(currentVideoLoraSelection(), id, value))}
-            onClearAll={() => setCurrentVideoLoraSelection([])}
-            onDownload={() => { s.civitaiOpen = true; bump(); }}
-            onUpdateLora={startVideoLoraUpdate}
-            onLoadGroup={(selection) => setCurrentVideoLoraSelection(selection)}
-          />
-        </div>
-      ) : null}
-      </CollapsibleSection>
-        </>
+    <VideoAdvanced
+      engine={s}
+      commit={commit}
+      rentedBlocked={rentedBlocked}
+      modeLabel={modeLabel}
+      runOn={runOn}
+      tabActive={tabActive}
+      videoTask={videoTask}
+      availableTasks={availableTasks}
+      swapState={swapState}
+      visibility={visibility}
+      arOptions={arOptions}
+      setAr={setAr}
+      arMatchedToFrame={arMatchedToFrame}
+      startFrameArMatchAvailable={startFrameArMatchAvailable}
+      setMatchStartFrameAr={setMatchStartFrameAr}
+      minimaxSelected={minimaxSelected}
+      durationOptions={durationOptions}
+      durationCapped={durationCapped}
+      motionCapHint={motionCapHint}
+      setDuration={setDuration}
+      resolutionOptions={resolutionOptions}
+      setResolution={setResolution}
+      qualityOptions={qualityOptions}
+      setQuality={setQuality}
+      modeOptions={modeOptions}
+      setMode={setMode}
+      effectOptions={effectOptions}
+      setEffect={setEffect}
+      advancedHint={advancedHint}
+      tierPair={tierPairFor(s.catalogs.hivemindI2V, s.setup.modelId)}
+      selectHiveModel={selectHiveModel}
+      minimaxStepsAvailable={minimaxStepsAvailable}
+      minimaxRefinement={minimaxRefinement}
+      modelDefaultSteps={model?.defaultSteps}
+      seedAvailable={isHivemindVideoModelId(s.setup.modelId)}
+      setSeed={setSeed}
+      randomizeSeed={randomizeSeed}
+      lockLastSeed={lockLastSeed}
+      spectrumAvailable={supportsSpectrum(model)}
+      chainArmed={chainArmed}
+      fastHighResAvailable={supportsFastHighRes(model)}
+      denoiseAvailable={denoiseAvailable}
+      setNegativePrompt={setNegativePrompt}
+      advancedInputs={advancedInputs}
+      setAdvanced={setAdvanced}
+      loraProps={loraModel ? {
+        open: s.loraOpen,
+        onToggleOpen: () => {
+          s.loraOpen = !s.loraOpen;
+          bump();
+          if (s.loraOpen) void loadLorasForCurrentVideoModel();
+        },
+        baseLabel: loraModel.compatibleBaseModels?.join(', ') || loraModel.name,
+        baseModelId: loraModel.id || '',
+        baseModels: loraModel.compatibleBaseModels || [],
+        status: s.videoLoraCatalogStatus,
+        message: s.videoLoraCatalogMessage,
+        loras: s.availableVideoLoras,
+        onRentedMachine: Boolean(s.setup.localMode && s.setup.rentedMachineId),
+        selection: currentVideoLoraSelection(),
+        getSelection: currentVideoLoraSelection,
+        onToggleLora: (lora) => setCurrentVideoLoraSelection(toggleLoraSelection(currentVideoLoraSelection(), lora)),
+        onToggleEnabled: (lora) => setCurrentVideoLoraSelection(toggleLoraEnabled(currentVideoLoraSelection(), lora.id)),
+        onSetStrength: (id, value) => setCurrentVideoLoraSelection(updateLoraStrength(currentVideoLoraSelection(), id, value), { render: false }),
+        onCommitStrength: (id, value) => setCurrentVideoLoraSelection(updateLoraStrength(currentVideoLoraSelection(), id, value)),
+        onClearAll: () => setCurrentVideoLoraSelection([]),
+        onDownload: () => { s.civitaiOpen = true; bump(); },
+        onUpdateLora: startVideoLoraUpdate,
+        onLoadGroup: (selection) => setCurrentVideoLoraSelection(selection),
+      } : null}
+      // This studio does not track a local-catalog status today (only Image,
+      // Story and Sprite do). The home exists either way, so the notice never
+      // has to be re-invented the day it grows one.
+      localCatalog={null}
+      onSwitchToCloud={() => setLocalMode(false)}
+      cast={drawerCast}
+      frames={drawerFrames}
+      references={drawerReferences}
+      clip={drawerClip}
+      cameraMotion={promptUi.disabled ? null : (
+        <CameraMotionMenu selectedIds={s.setup.cameraMotionIds || []} onApply={applyCameraMotions} />
       )}
-    </>
+      restyle={!promptUi.disabled && isH3() ? (
+        <RestyleMenu activeId={s.setup.restylePresetId || null} onApply={applyRestyle} />
+      ) : null}
+      emotion={promptUi.disabled ? null : (
+        <EmotionMenu activeId={s.setup.emotionDirectionId || null} onApply={applyEmotion} />
+      )}
+      ugcBrief={!promptUi.disabled && isH3() ? (
+        <UgcMenu
+          mode="video"
+          active={hasUgcVideoBrief(s.setup.prompt)}
+          variantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
+          formatId={ugcFormatInPrompt(s.setup.prompt) || s.setup.ugcFormat || UGC_DEFAULT_FORMAT}
+          gender={s.setup.persona?.gender || ''}
+          subject={ugcSubjectLabel(ugcPersona())}
+          durationSeconds={Number(s.setup.duration) || null}
+          verticalAvailable={aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16')}
+          onArm={applyUgc}
+        />
+      ) : null}
+    />
   );
 
   /* ---------------- composer drops ---------------- */
@@ -4944,722 +4842,388 @@ export function VideoStudio({
     },
   };
 
-  /* ---------------- composer ---------------- */
+  /* ---------------- the sequence, and the composer ---------------- */
 
+  const selectedSeg = s.timelineSegments.find((seg) => seg.id === s.timelineSelectedId);
+  // The manual sequence surface, handed to the composer's `more` menu as a node.
+  // The rail draws the shots, but it cannot express reorder-by-drag, exclude,
+  // cut, combine or delete-with-file — so the full strip stays one press away
+  // rather than being replaced by the rail.
+  const timelineStrip = s.timelineOn ? (() => {
+    const modelEntry = currentModel(s.setup, s.catalogs);
+    const extendMode = timelineExtendModeFor(modelEntry);
+    return (
+      <TimelineStrip
+        segments={s.timelineSegments}
+        selectedId={s.timelineSelectedId}
+        pendingSegmentId={s.generating && selectedSeg && !selectedSeg.url ? selectedSeg.id : ''}
+        extendAvailable={Boolean(extendMode)}
+        extendMode={extendMode}
+        extendOn={s.timelineExtend}
+        onToggleExtend={timelineToggleExtend}
+        canCombine={timelineCanCombine(s.timelineSegments)}
+        showCombined={s.timelineShowCombined}
+        combined={s.timelineCombined}
+        building={s.timelineBuilding}
+        buildError={s.timelineBuildError}
+        onToggleCombined={timelineToggleCombined}
+        onExportCombined={() => void exportTimelineCut()}
+        onSelect={timelineSelect}
+        onAdd={timelineAdd}
+        onRemove={timelineRemoveRequest}
+        onClose={closeTimelineView}
+        onDrop={timelineHandleDrop}
+        promptFor={timelinePromptFor}
+        onExportSegment={(seg) => void timelineExportSegment(seg)}
+        onToggleExcluded={timelineToggleExcluded}
+      />
+    );
+  })() : null;
+
+  // Thirteen labelled chips over two lines became a sentence plus five doors.
+  // VideoComposerBar draws it; every value below is the one the drawer renders
+  // and every handler is the one the chip row called, so a shortcut can never
+  // diverge from the control it shortcuts.
   const composer = (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-2">
-      {extendBanner ? (
-        <div className="flex items-center gap-2 rounded-md border border-honey/30 bg-honey-tint px-3 py-2 text-xs text-honey">
-          <Icon name="arrowRight" size={14} className="shrink-0" />
-          <span>{extendBanner}</span>
-        </div>
-      ) : null}
-
-      <div className="flex flex-col gap-2 rounded-lg border border-line1 bg-bg1 p-2.5 transition-colors focus-within:border-honey/40">
-        {/* WHO is in the shot — every way of adding someone lands here, and the
-            weave recasts the prompt the moment it changes. Every family shows
-            it: on H3 a person from pictures becomes <Subject N> in reference
-            mode, and on every model a known character is written into the
-            scene by its source form. */}
-        {!promptUi.disabled ? (
-          <CastStrip
-            members={s.cast}
-            onMembersChange={applyCast}
-            target={weaveTargetNow()}
-            referenceLane={referenceLaneAvailable()}
-            h3={isH3()}
-            woven={isWovenForReference(s.setup.prompt)}
-            promptEmpty={!s.setup.prompt.trim()}
-            warnings={s.castWarnings}
-            onAttach={() => { s.referencesOpenRequest = (s.referencesOpenRequest || 0) + 1; bump(); }}
-            onWeave={() => {
-              const before = weaveSnapshot();
-              const woven = acceptPrompt(s.setup.prompt, { scaffold: true });
-              if (woven.prompt !== before.prompt) announceWeave('Wove your references into the prompt', before);
-              focusPrompt();
-            }}
-            onDraftLook={draftLookFor}
-            onAddMedia={referenceLaneAvailable() ? addMediaForMember : null}
-          />
-        ) : null}
-        <textarea
-          ref={promptRef}
-          rows={1}
-          placeholder={promptUi.placeholder}
-          disabled={promptUi.disabled}
-          value={s.setup.prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          // ⌘/Ctrl+Enter generates, the same as every other composer; the same
-          // guards as the button, so it can never start what the button refuses.
-          onKeyDown={(e) => {
-            if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey)) return;
-            e.preventDefault();
-            if (rentedBlocked || s.generating) return;
-            void generate();
-          }}
-          className="max-h-[150px] min-h-[40px] w-full resize-none overflow-y-auto border-none bg-transparent px-1 pt-1 text-[15px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 disabled:opacity-50 md:max-h-[250px]"
-        />
-
-        {/* Two groups: the chips wrap as a group, Generate stays pinned at the
-            right on every width. One flex-wrap row held both, so below ~1280px
-            the primary button dropped to a second row, left-aligned, under the
-            chips — the one control a first-timer looks for, in the wrong place. */}
-        <div className="flex items-end gap-2">
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            {ltxFramesVisible ? (
-              // LTX 2.3: one control with Start / Middle / End rows (all optional).
-              <FrameSlotsPicker
-                label="Frames"
-                slots={[
-                  { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
-                  { key: 'middle', label: 'Middle', url: s.setup.ltxMiddleUrl },
-                  { key: 'end', label: 'End', url: s.setup.ltxEndUrl },
-                ]}
-                onSlotChange={(key, url) => {
-                  const value = url ? [url] : [];
-                  if (key === 'start') onStartFrameChange(value);
-                  else if (key === 'middle') onLtxMiddleFrameChange(value);
-                  else onLtxEndFrameChange(value);
-                }}
-                uploadFn={uploadFnForFrame}
-                requireApiKey={frameRequiresApiKey}
-                autoOpen={s.framesPanelAutoOpen}
-              />
-            ) : chainArmed ? (
-              // Scene chaining replaces the start frame: the armed clip's tail IS
-              // the opening of this shot, so the picker gives way to the chain chip.
-              <div
-                className="flex items-center gap-1.5 rounded-md border border-honey/40 bg-honey-tint px-2 py-1"
-                title="The pinned frames carry motion and room tone — the SCENE carries through the prompt. Keep the shot's style and subject words, hold the previous closing framing for a beat, then describe what happens next."
-              >
-                <Icon name="film" size={13} className="text-honey" />
-                <span className="text-xs font-medium text-honey">
-                  {`Continuing shot ${chainShot}`}
-                </span>
-                <button
-                  type="button"
-                  title="Stop continuing the scene"
-                  aria-label="Stop continuing the scene"
-                  className="grid h-4 w-4 place-items-center rounded text-honey transition-colors hover:bg-honey/20"
-                  onClick={clearMotionContext}
-                >
-                  <Icon name="x" size={11} />
-                </button>
-              </div>
-            ) : endFrameVisible ? (
-              // First/last-frame models (H3 FL2VA, remote FLF): ONE control with
-              // Start / End rows, same pattern as the LTX three-slot picker —
-              // never two lookalike icon buttons side by side. Armed character
-              // references replace these frames for the run, but the picker stays
-              // mounted (dimmed, with a note) — hiding it stranded an already-set
-              // start frame with no way to change it or add the end frame.
-              <FrameSlotsPicker
-                label="Frames"
-                slots={[
-                  { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
-                  { key: 'end', label: 'End (optional)', url: s.setup.endImageUrl },
-                ]}
-                onSlotChange={(key, url) => {
-                  const value = url ? [url] : [];
-                  if (key === 'start') onStartFrameChange(value);
-                  else onEndFrameChange(value);
-                }}
-                uploadFn={uploadFnForFrame}
-                requireApiKey={frameRequiresApiKey}
-                inactiveNote={refsArmed
-                  ? 'Character references replace these frames while attached'
-                  : ''}
-              />
-            ) : (
-              // Labelled, not the compact square: it sits beside labelled chips,
-              // and an unlabelled icon next to "Clip" read as a second clip button.
-              <UploadPicker
-                values={s.setup.imageUrl ? [s.setup.imageUrl] : []}
-                onChange={onStartFrameChange}
-                uploadFn={uploadFnForFrame}
-                requireApiKey={frameRequiresApiKey}
-                maxImages={1}
-                accept="image/*"
-                label="Start frame"
-                ignored={refsArmed}
-              />
-            )}
-
-            {referenceEntry || ingredientModel ? (
-              // One control for every reference kind this model has. The slot
-              // counts come from the workflow entry rather than being restated
-              // here, so the panel can never offer a slot the graph has not
-              // wired — and a model whose only reference kind is stitched views
-              // shows just those.
-              <ReferencesMenu
-                images={Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : []}
-                audios={Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : []}
-                videos={Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : []}
-                prompt={s.setup.prompt}
-                // The explicit Weave lives in ONE place now — Prompt Check, and
-                // the cast strip's own readout — so the panel no longer shows a
-                // third copy of the button. (It still accepts onWeave; nothing
-                // is passed.)
-                durationSeconds={Number(s.setup.duration) || 0}
-                limits={{
-                  images: referenceEntry?.referenceSlots?.images || 9,
-                  audios: referenceEntry?.referenceSlots?.audios || 3,
-                  videos: referenceEntry?.referenceSlots?.videos || 3,
-                }}
-                views={ingredientViews}
-                viewsOnly={!referenceEntry}
-                scene={sceneUrls()}
-                sceneRoles={sceneRoleMap()}
-                onSceneRole={onSceneRole}
-                onChange={{
-                  images: onCharacterRefsChange,
-                  scene: onSceneRefsChange,
-                  audios: onReferenceAudiosChange,
-                  videos: onReferenceVideosChange,
-                }}
-                persona={s.setup.persona || null}
-                onPersonaChange={onPersonaChange}
-                // What the strip already knows about the person in the rows —
-                // so "Save as persona" starts from it.
-                personaSeed={(() => {
-                  const holder = s.cast.find((member) => member.kind === 'persona');
-                  return holder ? { gender: holder.data?.gender || '', look: holder.data?.look || '' } : null;
-                })()}
-                uploadFn={uploadFnForFrame}
-                requireApiKey={frameRequiresApiKey}
-                openRequest={s.referencesOpenRequest || 0}
-                // Head replacement's one door. Offered only on a family whose
-                // registry actually carries an inpaint graph, so the thumbnail
-                // never opens a dialog whose Apply the run would ignore.
-                onOpenClip={inpaintEntry ? (index) => { s.inpaintOpenIndex = index; bump(); } : null}
-              />
-            ) : null}
-
-            <input
-              ref={videoFileInputRef}
-              type="file"
-              accept="video/*"
-              className="hidden"
-              onChange={(e) => { void handleVideoFile(e.target.files?.[0]); e.target.value = ''; }}
-            />
-            {/* The cast strip's per-member attach — files land claimed for the
-                member whose chip opened this picker. */}
-            <input
-              ref={memberFileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                const files = Array.from(e.target.files || []);
-                const key = e.target.dataset.memberKey || '';
-                e.target.value = '';
-                if (key && files.length) void attachFilesForMember(key, files);
-              }}
-            />
-            {/* One chip, two meanings, and the chip now SAYS which. The request
-                plan decides: where a clip seeds the next shot's opening frames
-                (motion context) it is "Continue from clip"; everywhere else a
-                clip is an INPUT to the run, so it is the source video. One icon
-                and the word "Clip" for both is what made it unpredictable. */}
-            {(() => {
-              const continues = clipChipContinues;
-              const label = continues
-                ? 'Continue from clip'
-                : 'Source video';
-              const idle = continues
-                ? 'Continue from a clip — the next shot picks up where it ends, motion and room tone carrying across'
-                : `${'Upload'}: ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`;
-              const attachedText = `${s.setup.videoName || label} — ${'click to clear'}`;
-              return (
-                <ChipButton
-                  icon={continues ? 'film' : 'upload'}
-                  label={label}
-                  value={attachedClipUrl() ? (s.setup.videoName || 'attached') : ''}
-                  active={Boolean(attachedClipUrl())}
-                  chevron={false}
-                  disabled={s.videoUploading}
-                  aria-label={attachedClipUrl() ? attachedText : `${label} — ${idle}`}
-                  title={attachedClipUrl() ? attachedText : idle}
-                  onClick={onVideoRefClick}
-                />
-              );
-            })()}
-            {s.videoUploading ? <Spinner size={14} className="text-honey" /> : null}
-
-            {/* The prompt-writing chips mean nothing on a tool whose prompt is
-                disabled (a watermark remover), so they go with the textarea. */}
-            {promptUi.disabled ? null : (
-            <>
-              <SavedPromptsMenu
-                section="video"
-                prompt={s.setup.prompt}
-                modelSource={s.setup}
-                // Starters render for whoever holds <Subject 1> — the loaded
-                // persona, or the first cast member — so the pronouns already fit
-                // before the stand-in is bound.
-                renderGender={castRenderGender(s.cast) || s.setup.persona?.gender || ''}
-                standIns={liveStandIns(s.setup.prompt, s.standIns)}
-                capture={() => captureGenerationContext(s.setup.prompt)}
-                onLoadPrompt={({ prompt, standIns, timeline, durationSeconds }) => {
-                  loadPromptText(prompt, { standIns: standIns || [] });
-                  applyStarterSetup({ timeline, durationSeconds });
-                  focusPrompt();
-                }}
-                onLoadContext={(context) => restoreGenerationContext(context)}
-              />
-
-              <CameraMotionMenu
-                selectedIds={s.setup.cameraMotionIds || []}
-                onApply={applyCameraMotions}
-              />
-
-              {/* Restyle presets, the UGC brief ([Shot 1] HOOK … / (S1) says …),
-                  the Shot Builder and Prompt Check all write H3's own grammar, so
-                  every one of them is H3-only — the UGC brief used to land in LTX
-                  and cloud prompts too. */}
-              {isH3() ? (
-                <>
-                  <UgcMenu
-                    mode="video"
-                    active={hasUgcVideoBrief(s.setup.prompt)}
-                    variantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
-                    gender={s.setup.persona?.gender || ''}
-                    subject={ugcSubjectLabel(ugcPersona())}
-                    durationSeconds={Number(s.setup.duration) || null}
-                    verticalAvailable={aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16')}
-                    onArm={applyUgc}
-                  />
-                  <RestyleMenu activeId={s.setup.restylePresetId || null} onApply={applyRestyle} />
-                  {/* The cast needs reference slots to put its personas in, so it
-                      only appears on a workflow that has them. */}
-                  {/* The timeline inside one generation, and the gate in front of
-                      it. Both read H3's own grammar, so both are H3-only. */}
-                  <ShotBuilderChip
-                    timeline={s.shotTimeline}
-                    prompt={s.setup.prompt}
-                    onOpen={() => { s.shotBuilderOpen = true; bump(); }}
-                  />
-                  <PromptCheckMenu
-                    prompt={s.setup.prompt}
-                    durationSeconds={Number(s.setup.duration) || 0}
-                    {...attachedReferences()}
-                    durations={referenceDurations()}
-                    // The one finding with a mechanical fix, and the last door:
-                    // adoptPrompt catches a prompt arriving from somewhere, and
-                    // withDurationThatFits catches the length changing under one
-                    // already written. This catches the rest — text TYPED or PASTED
-                    // straight into the composer, which nothing else can see.
-                    onRefit={() => commit({ ...s.setup, prompt: adoptPrompt(s.setup.prompt) })}
-                    onWeave={() => {
-                      const before = weaveSnapshot();
-                      const woven = acceptPrompt(s.setup.prompt, { scaffold: true });
-                      if (woven.prompt !== before.prompt) announceWeave('Wove your references into the prompt', before);
-                      focusPrompt();
-                    }}
-                    onRefine={() => { s.promptHelperOpen = true; bump(); }}
-                  />
-                </>
-              ) : null}
-
-              {/* The helper, named for what it does here: it refines what is in
-                  the box — told the cast, the lane, the clip length and the
-                  attached references — rather than replacing it. A labelled chip,
-                  not an icon: this is the one button a first-timer needs to find.
-                  `value`, not `label`: ChipButton paints a label muted, and this is
-                  an action, not a menu. */}
-              <ChipButton
-                icon="sparkles"
-                value={t('composer.refine')}
-                chevron={false}
-                disabled={!s.setup.prompt.trim()}
-                onClick={() => { s.promptHelperOpen = true; bump(); }}
-                title={t('composer.refineTitle')}
-              />
-            </>
-            )}
-          </div>
-
-          {/* Mode and model read out in the left panel — no duplicate badges here. */}
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            {/* One app-wide setting, beside the outcome it announces — it used to
-                be the last row of this studio's Advanced section. */}
-            <CompletionPingToggle />
-            <Button
-              variant="primary"
-              size="lg"
-              loading={s.generating}
-              disabled={offlineBlocked || rentedBlocked || (swapState.active && !swapState.ready)}
-              onClick={generate}
-              title={offlineBlocked
-                ? t('video.generateOffline')
-                : rentedBlocked
-                ? 'Rent a machine (or switch the source to Local) to generate.'
-                : (swapState.active && !swapState.ready)
-                  ? `${'Still needed: '}${swapState.missing.join(' and ')}`
-                  : `${t('video.generateTooltip')} (⌘/Ctrl+Enter)`}
-              className="min-w-[130px]"
-            >
-              {generateLabel}
-            </Button>
-            {s.generating ? (
-              <Button
-                variant="danger"
-                size="lg"
-                onClick={cancelGeneration}
-                title={t('composer.cancelTitle')}
-                className="min-w-[100px]"
-              >
-                {t('common.cancel')}
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      </div>
-    </div>
+    <VideoComposerBar
+      engine={s}
+      promptRef={promptRef}
+      promptUi={promptUi}
+      setPrompt={setPrompt}
+      extendBanner={extendBanner}
+      castTarget={weaveTargetNow()}
+      referenceLane={referenceLaneAvailable()}
+      h3={isH3()}
+      castWoven={isWovenForReference(s.setup.prompt)}
+      onCastChange={applyCast}
+      onCastAttach={openReferences}
+      onCastWeave={weavePromptNow}
+      onDraftLook={draftLookFor}
+      onAddMedia={referenceLaneAvailable() ? addMediaForMember : null}
+      ltxFramesVisible={ltxFramesVisible}
+      endFrameVisible={endFrameVisible}
+      chainArmed={chainArmed}
+      chainShot={chainShot}
+      onClearChain={clearMotionContext}
+      slotLabels={slotLabels}
+      refsArmed={refsArmed}
+      uploadFn={uploadFnForFrame}
+      requireApiKey={frameRequiresApiKey}
+      onStartFrameChange={onStartFrameChange}
+      onMiddleFrameChange={onLtxMiddleFrameChange}
+      onLtxEndFrameChange={onLtxEndFrameChange}
+      onEndFrameChange={onEndFrameChange}
+      referenceEntry={referenceEntry}
+      ingredientModel={ingredientModel}
+      ingredientViews={ingredientViews}
+      referenceLimits={referenceLimits()}
+      sceneRefs={sceneUrls()}
+      sceneRoles={sceneRoleMap()}
+      onSceneRole={onSceneRole}
+      onCharacterRefsChange={onCharacterRefsChange}
+      onSceneRefsChange={onSceneRefsChange}
+      onReferenceAudiosChange={onReferenceAudiosChange}
+      onReferenceVideosChange={onReferenceVideosChange}
+      onPersonaChange={onPersonaChange}
+      personaSeed={personaSeed}
+      onOpenClip={inpaintEntry ? (index) => { s.inpaintOpenIndex = index; bump(); } : null}
+      videoFileInputRef={videoFileInputRef}
+      memberFileInputRef={memberFileInputRef}
+      onVideoFile={handleVideoFile}
+      onMemberFiles={attachFilesForMember}
+      clipChipContinues={clipChipContinues}
+      clipUrl={attachedClipUrl()}
+      onVideoRefClick={onVideoRefClick}
+      starterGender={castRenderGender(s.cast) || s.setup.persona?.gender || ''}
+      standIns={liveStandIns(s.setup.prompt, s.standIns)}
+      captureContext={() => captureGenerationContext(s.setup.prompt)}
+      onLoadPrompt={({ prompt, standIns, timeline, durationSeconds }) => {
+        loadPromptText(prompt, { standIns: standIns || [] });
+        applyStarterSetup({ timeline, durationSeconds });
+        focusPrompt();
+      }}
+      onLoadContext={(context) => restoreGenerationContext(context)}
+      cameraMotionIds={s.setup.cameraMotionIds || []}
+      onApplyCameraMotions={applyCameraMotions}
+      emotionDirectionId={s.setup.emotionDirectionId || null}
+      onApplyEmotion={applyEmotion}
+      ugcActive={hasUgcVideoBrief(s.setup.prompt)}
+      ugcVariantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
+      ugcFormatId={ugcFormatInPrompt(s.setup.prompt) || s.setup.ugcFormat || UGC_DEFAULT_FORMAT}
+      ugcGender={s.setup.persona?.gender || ''}
+      ugcSubject={ugcSubjectLabel(ugcPersona())}
+      ugcDuration={Number(s.setup.duration) || null}
+      ugcVerticalAvailable={aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16')}
+      onApplyUgc={applyUgc}
+      restylePresetId={s.setup.restylePresetId || null}
+      onApplyRestyle={applyRestyle}
+      shotTimeline={s.shotTimeline}
+      onOpenShotBuilder={() => { s.shotBuilderOpen = true; bump(); }}
+      promptCheckRefs={attachedReferences()}
+      promptCheckDurations={referenceDurations()}
+      onRefit={() => commit({ ...s.setup, prompt: adoptPrompt(s.setup.prompt) })}
+      onWeave={weavePromptNow}
+      onRefine={openPromptHelper}
+      onOpenPromptHelper={openPromptHelper}
+      videoTask={videoTask}
+      durationVisible={visibility.duration}
+      durationIsSlider={minimaxSelected}
+      durationOptions={durationOptions}
+      durationHint={durationCapped ? motionCapHint : ''}
+      onDurationChange={setDuration}
+      aspectVisible={visibility.ar}
+      aspectOptions={arOptions}
+      aspectMatchedToFrame={arMatchedToFrame}
+      startFrameArMatchAvailable={startFrameArMatchAvailable}
+      onAspectChange={setAr}
+      onMatchStartFrameAr={setMatchStartFrameAr}
+      runOn={runOn}
+      advancedOpen={s.advancedOpen}
+      onToggleAdvanced={toggleAdvanced}
+      onNewPrompt={requestNewPrompt}
+      onClearPrompt={clearPromptOnly}
+      timeline={timelineStrip}
+      generateLabel={generateLabel}
+      generateBlocked={offlineBlocked || rentedBlocked || (swapState.active && !swapState.ready)}
+      generateTitle={offlineBlocked
+        ? t('video.generateOffline')
+        : rentedBlocked
+          ? 'Rent a machine (or switch the source to Local) to generate.'
+          : (swapState.active && !swapState.ready)
+            ? `${'Still needed: '}${swapState.missing.join(' and ')}`
+            : `${t('video.generateTooltip')} (⌘/Ctrl+Enter)`}
+      rentedBlocked={rentedBlocked}
+      onGenerate={generate}
+      onCancel={cancelGeneration}
+    />
   );
 
-  /* ---------------- canvas ---------------- */
+  /* ---------------- stage, rail, notices ---------------- */
 
   const hasHistory = s.generationHistory.length > 0;
+  const currentEntry = s.generationHistory.find((e) => e.url === s.resultUrl);
+  // The sequence position the stage names. While a render is in flight the
+  // pending slot is the selected segment, not the clip that is still on screen.
+  const stageShotLabel = (() => {
+    const index = s.generating
+      ? s.timelineSegments.findIndex((seg) => seg.id === s.timelineSelectedId)
+      : s.timelineSegments.findIndex((seg) => seg.url === s.resultUrl);
+    return index >= 0 ? `shot ${String(index + 1).padStart(2, '0')}` : '';
+  })();
+  // This machine renders one clip at a time, so a second tab is a queue, not a
+  // stall. Saying which place it is in is what keeps a motionless bar from
+  // reading as a hang. Composed HERE and handed to the stage as finished
+  // sentences — renderCostBudget.test.js pins both templates to this file.
+  const queueNote = s.progressQueuePosition
+    ? `Waiting behind ${s.progressQueuePosition === 1 ? 'one render' : `${s.progressQueuePosition} renders`} — this one starts by itself when the GPU is free.`
+    : '';
+  const overtimeNote = s.progressOvertimeMin
+    ? `Still rendering after ${s.progressOvertimeMin} min — keep waiting, or use Cancel above to stop.`
+    : '';
+  const downloadResult = () => {
+    downloadFile(s.resultUrl, videoDownloadName(currentEntry?.model || s.resultModel, currentEntry?.id));
+  };
+  // The settings that travel INSIDE a clip the owner asked to save unencrypted.
+  // Same rule and the same mapper as the Image studio: the context captured for
+  // THIS clip, never the composer's current state.
+  const downloadSettingsForResult = () => {
+    if (!s.resultUrl) return {};
+    const made = s.contextStore.recall(s.resultUrl);
+    const entry = currentEntry || { model: s.resultModel };
+    // A video lane's dials are not fixed fields: each model declares its own
+    // advanced inputs, so seed/steps/cfg live under whatever name that model
+    // uses. Read the handful of names the ecosystem's metadata actually has a
+    // slot for and leave the rest — a missing setting stays missing rather than
+    // becoming a plausible-looking default.
+    const advanced = made?.advancedValues || {};
+    const dial = (...names) => {
+      for (const name of names) {
+        const value = advanced[name];
+        if (value !== undefined && value !== null && value !== '') return value;
+      }
+      return undefined;
+    };
+    return postMetaFromEntry({
+      ...entry,
+      prompt: entry.prompt || made?.prompt || '',
+      negativePrompt: dial('negative_prompt', 'negativePrompt') || '',
+      model: made?.modelName || entry.model || made?.model || s.resultModel || '',
+      seed: entry.seed ?? dial('seed'),
+      steps: dial('steps', 'num_inference_steps', 'inference_steps'),
+      cfg: dial('cfg', 'cfg_scale', 'guidance_scale', 'guidanceScale'),
+      sampler: dial('sampler', 'sampler_name'),
+      scheduler: dial('scheduler'),
+      civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableVideoLoras),
+    });
+  };
+
+  const postResultToCivitai = () => {
+    // Same rule as the Image studio: the LoRAs recorded against THIS clip's
+    // context, never the composer's current pick.
+    const made = s.contextStore.recall(s.resultUrl);
+    s.civitaiPost = {
+      url: s.resultUrl,
+      entry: {
+        ...(currentEntry || { model: s.resultModel }),
+        civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableVideoLoras),
+      },
+    };
+    bump();
+  };
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
-      <StudioLayout
-        panel={panel}
-        panelTitle="Video settings"
+      <StudioFrame
+        railWidth={108}
+        tabs={tabStrip}
+        drop={composerDrop}
         composer={composer}
-        composerDrop={composerDrop}
-      >
-        <div className="flex flex-col gap-4 p-4 md:p-5">
-          {s.generateError ? (() => {
-            // Name the box when the run was promised to a rented one — "it
-            // failed" on a rental means a different next step.
-            const onRented = (() => {
-              if (!s.setup.rentedMachineId) return '';
-              const machine = servingMachineFor(s.setup, s.setup.modelId, s.rentedMachines);
-              if (!machine) return ' on the rented machine';
-              return ` on ${machine.gpu || 'the rented machine'} (${machine.rental_id || 'rented'})`;
-            })();
-            return (
-              <FailureCallout
-                title={`${s.generateError}${onRented}`}
-                detail={s.generateFailure?.detail || ''}
-                remedy={s.generateFailure?.remedy || null}
-                onRemedy={(remedy) => void runFailureRemedy(remedy, {
-                  onMuapiKey: () => { s.authRetry = () => generate(); s.authOpen = true; bump(); },
-                  onRetry: () => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); },
-                })}
-                onRetry={() => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); }}
-                retryLabel="Try again"
-                detailsLabel="Details"
-                onDismiss={() => { s.generateError = ''; s.generateFailure = null; bump(); }}
-                dismissLabel="Dismiss"
-              />
-            );
-          })() : null}
-
-          {s.generating ? (
-            <Card className="flex flex-col gap-3 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-2.5">
-                  <Spinner size={16} className="text-honey" />
-                  <div className="min-w-0">
-                    <div className="text-[13px] font-semibold text-ink1">{t('video.progressTitle')}</div>
-                    <div className="truncate text-[11px] text-ink3">{s.progressContext?.modelName || s.progressContext?.model || ''}</div>
-                  </div>
-                </div>
-                <span className="shrink-0 font-mono text-xs font-semibold text-honey">{progressValueLabel}</span>
-              </div>
-              {s.progressContext?.imageUrl ? (
-                <div className="relative aspect-video overflow-hidden rounded-md border border-line1 bg-bg0">
-                  <ProgressPreview url={s.progressContext.imageUrl} />
-                </div>
-              ) : null}
-              <ProgressBar value={progressPct} />
-              <div className="flex items-center justify-between font-mono text-[11px] text-ink3">
-                <span>{progressStageLabel}{progressDetail ? ` · ${progressDetail}` : ''}</span>
-                <span>{t('video.progress.elapsed')} {progressElapsed}{progressEta ? ` · ${progressEta}` : ''}</span>
-              </div>
-              {/* This machine renders one clip at a time, so a second tab is a
-                  queue, not a stall. Saying which place it is in is what keeps
-                  a motionless bar from reading as a hang. */}
-              {s.progressQueuePosition ? (
-                <div className="text-[11px] text-ink3">
-                  {`Waiting behind ${s.progressQueuePosition === 1 ? 'one render' : `${s.progressQueuePosition} renders`} — this one starts by itself when the GPU is free.`}
-                </div>
-              ) : null}
-              {s.progressOvertimeMin ? (
-                <div className="text-[11px] text-ink3">
-                  {`Still rendering after ${s.progressOvertimeMin} min — keep waiting, or use Cancel above to stop.`}
-                </div>
-              ) : null}
-            </Card>
-          ) : null}
-
-          {s.resultUrl ? (
-            // Keyed on the clip, so a landing render scales in: the moment the
-            // whole app exists for should look like something arrived.
-            <div key={s.resultUrl} className="hive-scale-in flex flex-col items-center gap-3">
-              <div className="rounded-lg ring-1 ring-honey/40">
-                <ResultVideo
-                  key={s.resultUrl}
-                  url={s.resultUrl}
-                  unmuted={Boolean(s.resultUnmuted)}
-                  // H3 renders audio with every clip; other lanes are silent
-                  // unless a join carried sound through.
-                  hasAudio={/minimax/.test(String(s.resultModel || ''))
-                    || (s.chainCombined?.url === s.resultUrl && Boolean(s.chainCombined?.audioJoined))
-                    || (s.timelineCombined?.url === s.resultUrl && Boolean(s.timelineCombined?.audioJoined))}
-                />
-              </div>
-              {/* ONE next step leads, in the colour of the app: continuing the
-                  scene where the model can, a new clip where it cannot. Download
-                  sits beside it; everything rarer lives under More, so a finished
-                  clip is not answered with nine identical grey buttons. */}
-              {(() => {
-                const canContinue = Boolean(chainCapableEntryFor(s.resultModel));
-                const currentEntry = s.generationHistory.find((e) => e.url === s.resultUrl);
-                const chainLength = currentEntry ? collectChainClips(currentEntry, s.generationHistory).length : 0;
-                const download = () => {
-                  const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
-                  downloadFile(s.resultUrl, videoDownloadName(entry?.model || s.resultModel, entry?.id));
-                };
-                const postToCivitai = () => {
-                  const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
-                  // Same rule as the Image studio: the LoRAs recorded against
-                  // THIS clip's context, never the composer's current pick.
-                  const made = s.contextStore.recall(s.resultUrl);
-                  s.civitaiPost = {
-                    url: s.resultUrl,
-                    entry: {
-                      ...(entry || { model: s.resultModel }),
-                      civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableVideoLoras),
-                    },
-                  };
-                  bump();
-                };
-                return (
-                  <div className="flex flex-wrap items-center justify-center gap-2">
-                    {canContinue ? (
-                      <Button
-                        variant="primary"
-                        icon="arrowRight"
-                        onClick={() => continueSceneFrom(s.resultUrl, s.resultModel)}
-                        title="The next shot picks up exactly where this clip ends — motion and room tone carry across the cut"
-                      >
-                        Continue scene
-                      </Button>
-                    ) : (
-                      <Button variant="primary" icon="plus" onClick={newPrompt}>{t('common.new')}</Button>
-                    )}
-                    <Button variant="neutral" icon="download" onClick={download}>{t('common.download')}</Button>
-                    <Button variant="neutral" icon="refresh" onClick={regenerate}>{t('common.regenerate')}</Button>
-                    <Button variant="ghost" icon="chevronLeft" onClick={backToSetup}>{t('common.backToSetup')}</Button>
-                    <Menu
-                      align="end"
-                      width="w-[260px]"
-                      trigger={(open, toggle) => (
-                        <Button
-                          variant="neutral"
-                          icon="more"
-                          onClick={toggle}
-                          aria-expanded={open}
-                          aria-haspopup="menu"
-                        >
-                          More
-                        </Button>
-                      )}
-                    >
-                      {(close) => (
-                        <>
-                          {canContinue ? (
-                            <MenuItem icon="plus" onClick={() => { close(); newPrompt(); }}>{t('common.new')}</MenuItem>
-                          ) : null}
-                          {isSeedanceResult ? (
-                            <MenuItem
-                              icon="arrowRight"
-                              onClick={() => { close(); extend(); }}
-                              title="Extend this video using Seedance 2.0 Extend"
-                            >
-                              {t('video.extend')}
-                            </MenuItem>
-                          ) : null}
-                          {isLocalAIAvailable() ? (
-                            <MenuItem
-                              icon="film"
-                              disabled={s.smoothingClip}
-                              onClick={() => { close(); void smoothClip(s.resultUrl, s.resultModel, 2); }}
-                              title="Doubles the frame rate so motion reads smoother; the audio passes through untouched (RIFE interpolation, on this device)"
-                            >
-                              Smooth motion 2×
-                            </MenuItem>
-                          ) : null}
-                          {chainLength >= 2 ? (
-                            <MenuItem
-                              icon="layers"
-                              disabled={s.joiningChain}
-                              onClick={() => { close(); void joinChainFrom(currentEntry); }}
-                              title="Join the whole chained episode into one MP4, losslessly, on this device — the clips never leave it"
-                            >
-                              {`Join ${chainLength} shots`}
-                            </MenuItem>
-                          ) : null}
-                          {/* Publishing is the one action here that sends the clip
-                              off this machine in the clear, so the row says so. */}
-                          <MenuItem
-                            icon="upload"
-                            meta="leaves device"
-                            onClick={() => { close(); postToCivitai(); }}
-                            title="Publish this clip to Civitai — it leaves this device unencrypted"
-                          >
-                            Post to Civitai
-                          </MenuItem>
-                        </>
-                      )}
-                    </Menu>
-                  </div>
-                );
-              })()}
-            </div>
-          ) : null}
-
-          {/* The ONE sequence surface: segment cards under the player. One
-              button opens it; everything else — auto-insert, the quiet full-cut
-              build, drops, Auto-continue, and the chain lineage it is seeded
-              from — hangs off lib/videoTimeline.js. */}
-          {(() => {
-            if (!s.timelineOn) {
+        drawerTitle={t('common.advanced')}
+        drawerOpen={s.advancedOpen}
+        onDrawerClose={closeAdvanced}
+        drawer={panel}
+        notices={(
+          <>
+            {/* The last failure, and the dependency report, used to head a
+                scrolling column. The stage does not scroll, so they float over
+                its top edge where they cannot be scrolled past — and VideoStage
+                deliberately carries neither, so this slot is their only home. */}
+            {s.generateError ? (() => {
+              // Name the box when the run was promised to a rented one — "it
+              // failed" on a rental means a different next step.
+              const onRented = (() => {
+                if (!s.setup.rentedMachineId) return '';
+                const machine = servingMachineFor(s.setup, s.setup.modelId, s.rentedMachines);
+                if (!machine) return ' on the rented machine';
+                return ` on ${machine.gpu || 'the rented machine'} (${machine.rental_id || 'rented'})`;
+              })();
               return (
-                <div className="flex justify-end">
-                  <ChipButton
-                    icon="layers"
-                    value="Scene"
-                    chevron={false}
-                    onClick={openTimelineView}
-                    title="Arrange clips into one scene: generate shot by shot, drag clips in, preview the full cut"
-                  />
-                </div>
+                <FailureCallout
+                  title={`${s.generateError}${onRented}`}
+                  detail={s.generateFailure?.detail || ''}
+                  remedy={s.generateFailure?.remedy || null}
+                  onRemedy={(remedy) => void runFailureRemedy(remedy, {
+                    onMuapiKey: () => { s.authRetry = () => generate(); s.authOpen = true; bump(); },
+                    onRetry: () => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); },
+                    // The lane lacks something installable: open the installer
+                    // on a fresh report rather than sending anyone to a terminal.
+                    onInstallDependencies: () => void openDependencyPrompt({ force: true }),
+                  })}
+                  onRetry={() => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); }}
+                  retryLabel="Try again"
+                  detailsLabel="Details"
+                  onDismiss={() => { s.generateError = ''; s.generateFailure = null; bump(); }}
+                  dismissLabel="Dismiss"
+                />
               );
-            }
-            const modelEntry = currentModel(s.setup, s.catalogs);
-            const extendMode = timelineExtendModeFor(modelEntry);
-            const selectedSeg = s.timelineSegments.find((seg) => seg.id === s.timelineSelectedId);
-            return (
-              <TimelineStrip
-                segments={s.timelineSegments}
-                selectedId={s.timelineSelectedId}
-                pendingSegmentId={s.generating && selectedSeg && !selectedSeg.url ? selectedSeg.id : ''}
-                extendAvailable={Boolean(extendMode)}
-                extendMode={extendMode}
-                extendOn={s.timelineExtend}
-                onToggleExtend={timelineToggleExtend}
-                canCombine={timelineCanCombine(s.timelineSegments)}
-                showCombined={s.timelineShowCombined}
-                combined={s.timelineCombined}
-                building={s.timelineBuilding}
-                buildError={s.timelineBuildError}
-                onToggleCombined={timelineToggleCombined}
-                onExportCombined={() => void exportTimelineCut()}
-                onSelect={timelineSelect}
-                onAdd={timelineAdd}
-                onRemove={timelineRemoveRequest}
-                onClose={closeTimelineView}
-                onDrop={timelineHandleDrop}
-                promptFor={timelinePromptFor}
-                onExportSegment={(seg) => void timelineExportSegment(seg)}
-                onToggleExcluded={timelineToggleExcluded}
+            })() : null}
+            {s.dependencyPromptOpen && s.dependencyReport && dependencyWorkflowId ? (
+              <WorkflowDependencyPrompt
+                report={s.dependencyReport}
+                workflowId={dependencyWorkflowId}
+                runOn={dependencyRunOn}
+                onReport={(report) => { s.dependencyReport = report; bump(); }}
+                onRemedy={(remedy) => void runFailureRemedy(remedy, {})}
+                onClose={() => { s.dependencyPromptOpen = false; bump(); }}
               />
-            );
-          })()}
-
-          {hasHistory ? (
-            <>
-              <div className="flex items-center justify-between gap-2">
-                <SectionLabel>{t('common.history')}</SectionLabel>
-                <span className="font-mono text-[11px] text-ink3">{s.generationHistory.length}</span>
-              </div>
-              <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]">
-                {s.generationHistory.map((entry, idx) => {
-                  const active = s.resultUrl ? s.resultUrl === entry.url : idx === 0;
-                  return (
-                    <div
-                      key={entry.id || `${entry.url}-${idx}`}
-                      ref={active ? scrollTileIntoView : undefined}
-                      className={cx(
-                        'group relative cursor-pointer overflow-hidden rounded-lg border bg-bg2 transition-colors duration-150',
-                        active ? 'border-honey' : 'border-line1 hover:border-line2',
-                      )}
-                      role="button"
-                      tabIndex={0}
-                      draggable
-                      onDragStart={(e) => {
-                        try {
-                          e.dataTransfer.setData('application/x-hivemind-output', JSON.stringify({ url: entry.url, section: 'video', mediaType: 'video/*' }));
-                          e.dataTransfer.setData('text/uri-list', entry.url);
-                          e.dataTransfer.effectAllowed = 'copy';
-                        } catch { /* non-critical */ }
-                      }}
-                      onClick={() => openHistoryEntry(entry)}
-                      onKeyDown={(e) => {
-                        if (e.key !== 'Enter' && e.key !== ' ') return;
-                        e.preventDefault();
-                        openHistoryEntry(entry);
-                      }}
-                    >
-                      <HistoryThumb url={entry.url} />
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-bg0/90 to-transparent p-2 pt-6 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
-                        <div className="truncate text-[11px] text-ink1">
-                          {entry.prompt_private ? 'Private prompt (hidden)' : (entry.prompt || '—')}
-                        </div>
-                        <div className="truncate font-mono text-[10px] text-ink3">{entry.model || ''}</div>
-                      </div>
-                      {/* Visible on keyboard focus too, not only under a pointer. */}
-                      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
-                        {chainCapableEntryFor(entry.model) ? (
-                          <IconButton
-                            icon="arrowRight"
-                            size="sm"
-                            label="Continue scene: the next shot picks up where this clip ends"
-                            className="border border-line1 bg-bg0/80 hover:border-honey/40"
-                            onClick={(e) => { e.stopPropagation(); continueSceneFrom(entry.url, entry.model); }}
-                          />
-                        ) : null}
-                        <IconButton
-                          icon="download"
-                          size="sm"
-                          label="Download video"
-                          className="border border-line1 bg-bg0/80 hover:border-line2"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            // No `|| idx` — see ImageStudio: the seal keys off entry.id.
-                            downloadFile(entry.url, videoDownloadName(entry.model, entry.id));
-                          }}
-                        />
-                        <IconButton
-                          icon="trash"
-                          size="sm"
-                          label="Remove from the strip"
-                          className="border border-line1 bg-bg0/80 text-danger hover:border-danger/40"
-                          onClick={(e) => { e.stopPropagation(); s.deleteTarget = entry; bump(); }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </>
-          ) : null}
-
-          {!hasHistory && !s.generating && !s.resultUrl ? (
-            <EmptyState
-              icon="clapper"
-              title="Create your first video"
-              hint="Describe a shot or drop in a starting picture, then press Generate. Your first clip lands right here."
-              className="flex-1"
-            />
-          ) : null}
-        </div>
-      </StudioLayout>
+            ) : null}
+          </>
+        )}
+        stageActions={(
+          <VideoStageActions
+            clipUrl={s.resultUrl}
+            canContinue={Boolean(chainCapableEntryFor(s.resultModel))}
+            chainLength={currentEntry ? collectChainClips(currentEntry, s.generationHistory).length : 0}
+            joining={s.joiningChain}
+            smoothing={s.smoothingClip}
+            canSmooth={isLocalAIAvailable()}
+            isSeedanceResult={isSeedanceResult}
+            onDownload={downloadResult}
+            downloadSettings={downloadSettingsForResult}
+            downloadFilename={videoDownloadName(currentEntry?.model || s.resultModel, currentEntry?.id)}
+            videoRef={stageVideoRef}
+            onContinueScene={() => continueSceneFrom(s.resultUrl, s.resultModel)}
+            onNewPrompt={requestNewPrompt}
+            onRegenerate={regenerate}
+            onBackToSetup={backToSetup}
+            onExtend={extend}
+            onSmoothClip={() => void smoothClip(s.resultUrl, s.resultModel, 2)}
+            onJoinChain={() => void joinChainFrom(currentEntry)}
+            onPostToCivitai={postResultToCivitai}
+            onDelete={() => { s.deleteTarget = currentEntry; bump(); }}
+            labels={{
+              newPrompt: t('common.new'),
+              download: t('common.download'),
+              regenerate: t('common.regenerate'),
+              backToSetup: t('common.backToSetup'),
+              extend: t('video.extend'),
+            }}
+          />
+        )}
+        rail={(
+          <VideoRail
+            segments={s.timelineSegments}
+            selectedId={s.timelineSelectedId}
+            showCombined={s.timelineShowCombined}
+            pendingSegmentId={s.generating && selectedSeg && !selectedSeg.url ? selectedSeg.id : ''}
+            timelineOn={s.timelineOn}
+            generating={s.generating}
+            progress={progressPct}
+            secondsFor={(seg) => Number(
+              s.generationHistory.find((entry) => entry.url === seg.url)?.duration
+              || s.contextStore.recall(seg.url)?.duration
+              || 0,
+            )}
+            promptFor={timelinePromptFor}
+            onSelect={timelineSelect}
+            onAdd={timelineAdd}
+            onOpenTimeline={openTimelineView}
+            onRemove={timelineRemoveRequest}
+            onDrop={timelineHandleDrop}
+            onExportSegment={(seg) => void timelineExportSegment(seg)}
+            onToggleExcluded={timelineToggleExcluded}
+            onOpenSceneTools={openTimelineView}
+            history={s.generationHistory}
+            resultUrl={s.resultUrl}
+            onOpenHistory={openHistoryEntry}
+            onDownloadHistory={(entry) => downloadFile(entry.url, videoDownloadName(entry.model, entry.id))}
+            onRemoveHistory={(entry) => { s.deleteTarget = entry; bump(); }}
+            onContinueHistory={(entry) => continueSceneFrom(entry.url, entry.model)}
+            canContinue={(entry) => Boolean(chainCapableEntryFor(entry.model))}
+          />
+        )}
+        stage={(
+          <VideoStage
+            clipUrl={s.resultUrl}
+            clipModel={s.resultModel}
+            clipUnmuted={Boolean(s.resultUnmuted)}
+            // H3 renders audio with every clip; other lanes are silent unless a
+            // join carried sound through.
+            clipHasAudio={/minimax/.test(String(s.resultModel || ''))
+              || (s.chainCombined?.url === s.resultUrl && Boolean(s.chainCombined?.audioJoined))
+              || (s.timelineCombined?.url === s.resultUrl && Boolean(s.timelineCombined?.audioJoined))}
+            clipAspect={String(s.progressContext?.aspectRatio || s.setup.ar || '16:9').replace(':', ' / ')}
+            shotLabel={stageShotLabel}
+            videoRef={stageVideoRef}
+            generating={s.generating}
+            progressTitle={t('video.progressTitle')}
+            progressPhase={progressStageLabel}
+            progressSteps={progressSteps}
+            progressValue={progressPct}
+            progressModelName={s.progressContext?.modelName || s.progressContext?.model || ''}
+            progressDetail={progressDetail}
+            progressPreviewUrl={s.progressContext?.imageUrl || ''}
+            progressElapsed={progressElapsed}
+            progressEta={progressEta}
+            elapsedLabel={t('video.progress.elapsed')}
+            queueNote={queueNote}
+            overtimeNote={overtimeNote}
+            onCancel={cancelGeneration}
+            hasHistory={hasHistory}
+            labels={{ cancel: t('common.cancel') }}
+          />
+        )}
+      />
 
       {s.authOpen ? (
         <AuthModal
@@ -5896,6 +5460,32 @@ export function VideoStudio({
         body="The dropped clip takes this segment's place. The clip it replaces stays in the strip and in History."
         confirmLabel="Replace"
         cancelLabel="Keep the current clip"
+      />
+
+      {/* Start fresh takes more than the prompt, so it says what it is about to
+          take — in the words on screen, listed from the same setup the
+          transition clears. `tone="primary"` rather than danger: nothing here
+          is deleted. Every clip it drops is still in History. */}
+      <ConfirmModal
+        open={s.startFreshConfirm}
+        tone="primary"
+        title={t('common.startFreshTitle')}
+        confirmLabel={t('common.startFresh')}
+        cancelLabel={t('common.keepWhatIHave')}
+        body={(
+          <div className="flex flex-col gap-2 text-[13px] leading-relaxed text-ink2">
+            <p>This empties the composer. It clears:</p>
+            <ul className="flex list-disc flex-col gap-1 pl-5">
+              {startFreshSummary(s.setup).map((item) => <li key={item}>{item}</li>)}
+            </ul>
+            <p>
+              Your model, clip length, aspect and everything in Advanced stay exactly as they are,
+              and the clips you have already made stay in History.
+            </p>
+          </div>
+        )}
+        onClose={() => { s.startFreshConfirm = false; bump(); }}
+        onConfirm={newPrompt}
       />
 
       {/* Attaching a source clip costs a model switch and/or the attached

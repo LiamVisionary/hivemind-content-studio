@@ -230,6 +230,14 @@ export function RunOnPicker({
   label = '',
   searchable = true,
   readinessFor = null, onFixReadiness = null, busyAction = '',
+  // The studio frame asks the same question in two more shapes — a word inside
+  // the recipe sentence, and the card at the top of Advanced — so the anchor is
+  // pluggable. (open, toggle, readoutLabel) => node. Omit it and the chip the
+  // panel and composer have always used is what draws.
+  renderTrigger = null,
+  // `contents` on the wrapper collapses it into the parent's flow, which is what
+  // the compact chip wants but NOT what an inline sentence token wants.
+  bare = false,
 }) {
   const shown = isAutomatic ? (automatic?.target || value) : value;
   const readout = runOnReadout(shown, {
@@ -237,12 +245,12 @@ export function RunOnPicker({
     automatic: isAutomatic,
   });
   return (
-    <div className={cx(compact ? 'contents' : 'flex flex-col gap-2', className)}>
-      {compact ? null : <SectionLabel>{label || t('runOn.label')}</SectionLabel>}
+    <div className={cx((compact || bare) ? 'contents' : 'flex flex-col gap-2', className)}>
+      {(compact || bare) ? null : <SectionLabel>{label || t('runOn.label')}</SectionLabel>}
       <Menu
         width="w-[320px]"
         panelClassName="max-h-[min(480px,70vh)]"
-        trigger={(open, toggle) => (
+        trigger={(open, toggle) => (renderTrigger ? renderTrigger(open, toggle, readoutText(readout), readout) : (
           <ChipButton
             icon={shown?.place === PLACE_THIS_MAC ? 'cpu' : 'cloud'}
             value={readoutText(readout)}
@@ -252,7 +260,7 @@ export function RunOnPicker({
             label={compact ? t('runOn.label') : ''}
             className={compact ? '' : 'w-full max-w-full justify-between'}
           />
-        )}
+        ))}
       >
         {(close) => (
           <RunOnList
@@ -274,7 +282,7 @@ export function RunOnPicker({
           />
         )}
       </Menu>
-      {!compact && isAutomatic && readout.note ? (
+      {!compact && !bare && isAutomatic && readout.note ? (
         <small className="text-[11px] text-ink3">
           {t('runOn.automaticPrefix')}{readout.note}
         </small>

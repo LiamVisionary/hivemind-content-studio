@@ -1,5 +1,12 @@
 // Deliberately textual: which value survives a reload, and which one rides out
 // as run_on, are storage and payload facts.
+//
+// The state and the payload still live in ImageStudio.jsx / VideoStudio.jsx and
+// are read there. The Runs-on PICKER no longer does: the Image and Video routes'
+// JSX moved into per-route composer and drawer components, so the prop checks
+// point at those (src/studios/image/ImageComposer.jsx,
+// src/studios/image/ImageSettingsPanel.jsx, src/studios/video/VideoComposerBar.jsx,
+// src/studios/video/VideoAdvanced.jsx).
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -254,14 +261,22 @@ test('the studios send the tab pin as run_on, persist it, and copy it with the t
   assert.match(video.match(/const currentVideoPreferences = [\s\S]*?\n  \}\);/)[0], /rentedMachineId: s\.setup\.rentedMachineId/);
   // …and hand the picker the value + the writer, so the machine list edits THIS
   // tab. The rented card lives INSIDE the Runs-on list now — a rental is a
-  // property of This Mac, not a mode of its own — so both studios hand the pin
-  // to RunOnPicker and it mounts the panel under the This Mac group.
+  // property of This Mac, not a mode of its own — so every surface that renders
+  // the picker hands it the pin, and it mounts the panel under This Mac.
   assert.match(
     read('src/components/RunOnPicker.jsx'),
     /<RentedSourceStatus engine=\{engine\} page=\{page\} pinned=\{pinned\} onPin=\{onPin\} \/>/,
   );
+  // Both routes ask in two places now: the Advanced drawer's body and the
+  // floating composer. The studios above still OWN the pin (they read it into
+  // the payload and persist it, asserted just above); what moved is only where
+  // it is rendered, so the props are checked where the picker actually mounts.
+  // Passing the pin without its writer would give a tab a machine it cannot
+  // change, so the three stay adjacent and in this order.
   for (const [file, page] of [['src/studios/image/ImageSettingsPanel.jsx', 'image'],
-    ['src/studios/image/ImageComposer.jsx', 'image'], ['src/studios/VideoStudio.jsx', 'video']]) {
+    ['src/studios/image/ImageComposer.jsx', 'image'],
+    ['src/studios/video/VideoAdvanced.jsx', 'video'],
+    ['src/studios/video/VideoComposerBar.jsx', 'video']]) {
     assert.match(read(file), new RegExp(`page="${page}"\\n\\s+pinned=\\{runOn\\.pinned\\}\\n\\s+onPin=\\{runOn\\.onPin\\}`));
   }
   assert.match(image, /onPin: pinMachine,/);

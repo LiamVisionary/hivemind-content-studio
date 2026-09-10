@@ -17,6 +17,8 @@ module.exports = {
                 ink1: 'rgb(var(--ink-1-rgb) / <alpha-value>)',
                 ink2: 'rgb(var(--ink-2-rgb) / <alpha-value>)',
                 ink3: 'rgb(var(--ink-3-rgb) / <alpha-value>)',
+                // Between ink2 and ink3 — the studio frame's recede-but-readable grey.
+                inkSoft: 'rgb(var(--ink-soft-rgb) / <alpha-value>)',
                 honey: {
                     DEFAULT: 'rgb(var(--honey-rgb) / <alpha-value>)',
                     bright: 'rgb(var(--honey-bright-rgb) / <alpha-value>)',

@@ -6,6 +6,14 @@
 // Deliberately textual: every rule here is a pointer interaction — a dismiss
 // region that includes its own trigger, a press that opens a preview, a pick
 // that switches the model — and a server render paints one frame and stops.
+//
+// The video studio's presentation was split after these rules were written.
+// VideoStudio.jsx still owns the state and the handlers, and still BUILDS the
+// drawer's FRAMES node (`drawerFrames`, handed to VideoAdvanced.jsx), while the
+// always-on-screen copy of the same control — the composer's frames door — is
+// built in video/VideoComposerBar.jsx. The keyframe rules below are therefore
+// checked at both build sites: a copy that hides the picker instead of dimming
+// it strands the same start frame wherever it renders.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -42,12 +50,16 @@ test('a set frame or attached chip opens a full-size preview when pressed', () =
 });
 
 test('armed character references dim the frames picker instead of hiding it', () => {
-    const studio = read('src/studios/VideoStudio.jsx');
-    // Hiding the picker stranded an already-set start frame: nothing on screen
-    // could change it or add the end frame until the references were cleared.
-    assert.doesNotMatch(studio, /refsArmed \? null/);
-    assert.match(studio, /inactiveNote=\{refsArmed/);
-    assert.match(studio, /ignored=\{refsArmed\}/, 'the plain start-frame picker dims its chip too');
+    // Both places the picker is built: the drawer's FRAMES node (VideoStudio's
+    // `drawerFrames`) and the composer's frames door (VideoComposerBar).
+    for (const file of ['src/studios/VideoStudio.jsx', 'src/studios/video/VideoComposerBar.jsx']) {
+        const source = read(file);
+        // Hiding the picker stranded an already-set start frame: nothing on screen
+        // could change it or add the end frame until the references were cleared.
+        assert.doesNotMatch(source, /refsArmed \? null/, `${file} never unmounts the picker while refs are armed`);
+        assert.match(source, /inactiveNote=\{refsArmed/, `${file} dims the slots picker and says why`);
+        assert.match(source, /ignored=\{refsArmed\}/, `${file} dims the plain start-frame picker's chip too`);
+    }
 
     const frames = read('src/studios/video/FrameSlotsPicker.jsx');
     assert.match(frames, /inactiveNote = ''/);
@@ -75,11 +87,14 @@ test('end-frame models get the combined slots picker, never twin icon buttons', 
 
     // FLF models (H3 FL2VA, remote first/last) render ONE FrameSlotsPicker with
     // Start/End rows — two compact single-image pickers side by side read as
-    // identical unlabeled icon buttons.
-    const studio = read('src/studios/VideoStudio.jsx');
-    assert.match(studio, /endFrameVisible \? \(/);
-    assert.match(studio, /\{ key: 'end', label: 'End \(optional\)', url: s\.setup\.endImageUrl \}/);
-    assert.doesNotMatch(studio, /keepOpenOnSelect=\{endFrameVisible\}/);
+    // identical unlabeled icon buttons. Checked at both build sites: the
+    // drawer's FRAMES node and the composer's frames door.
+    for (const file of ['src/studios/VideoStudio.jsx', 'src/studios/video/VideoComposerBar.jsx']) {
+        const source = read(file);
+        assert.match(source, /endFrameVisible \? \(/, `${file} branches on the end-frame model`);
+        assert.match(source, /\{ key: 'end', label: 'End \(optional\)', url: s\.setup\.endImageUrl \}/, `${file} gives that branch an End row`);
+        assert.doesNotMatch(source, /keepOpenOnSelect=\{endFrameVisible\}/, `${file} has no second single-image picker to keep open`);
+    }
 });
 
 test('every reference kind rides one menu and routes to the reference workflow', () => {
@@ -107,13 +122,23 @@ test('a start-frame pick that switches to a keyframe model opens that picker', (
     const frames = read('src/studios/video/FrameSlotsPicker.jsx');
     assert.match(frames, /useState\(autoOpen && !disabled\)/);
 
+    // The pulse is still raised and cleared in VideoStudio.jsx, which kept the
+    // state and the handlers through the UI split.
     const studio = read('src/studios/VideoStudio.jsx');
     assert.match(studio, /framesPanelAutoOpen: false/);
     assert.match(studio, /const hadFrameSlots = frameSlotsVisible\(s\.setup, s\.catalogs\)/);
     assert.match(studio, /if \(!hadFrameSlots && frameSlotsVisible\(setup, s\.catalogs\)\) \{\s*\n\s*s\.framesPanelAutoOpen = true;/);
     // Consumed at mount, then cleared so unrelated remounts don't pop it open.
     assert.match(studio, /useEffect\(\(\) => \{ s\.framesPanelAutoOpen = false; \}\)/);
-    assert.match(studio, /autoOpen=\{s\.framesPanelAutoOpen\}/);
+
+    // It is consumed by the composer's frames door, which is the copy the pick
+    // leaves you looking at — the drawer's copy is behind Advanced, so opening
+    // that one would show the user nothing.
+    const composer = read('src/studios/video/VideoComposerBar.jsx');
+    assert.match(composer, /autoOpen=\{s\.framesPanelAutoOpen\}/, 'the composer picker mounts open after the switch');
+    // And only that one: the pulse is a single render's flag, so a second picker
+    // reading it would fly open alongside the first on one start-frame pick.
+    assert.doesNotMatch(studio, /autoOpen=/, 'the drawer copy does not also consume the pulse');
 });
 
 test('clearing the start frame keeps a local workflow selected', () => {

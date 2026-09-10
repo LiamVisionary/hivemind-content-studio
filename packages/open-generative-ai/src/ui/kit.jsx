@@ -271,10 +271,20 @@ function arTileClass(on) {
   );
 }
 
-export function AspectRatioPicker({ options, value, onChange, nameFor, custom = null, disabled = false, className = '' }) {
+// Literal so Tailwind's scanner finds them; a template string would be purged.
+const COLS = { 2: 'grid-cols-2', 3: 'grid-cols-3', 4: 'grid-cols-4', 6: 'grid-cols-6' };
+
+export function AspectRatioPicker({
+  options, value, onChange, nameFor, custom = null, disabled = false, className = '',
+  // The settings panel gives this a full 320px column and three across; the
+  // studio frame's Advanced drawer packs the same tiles six across, without a
+  // per-ratio name. One control, two densities — not two controls.
+  columns = 3,
+}) {
   const customOn = value === 'custom';
+  const cols = COLS[columns] || COLS[3];
   return (
-    <div role="radiogroup" className={cx('grid grid-cols-3 gap-1.5', disabled && 'opacity-40', className)}>
+    <div role="radiogroup" className={cx('grid gap-1.5', cols, disabled && 'opacity-40', className)}>
       {options.map((ar) => {
         const on = ar === value;
         const [w, h] = String(ar).split(':').map(Number);
@@ -776,7 +786,10 @@ export function StudioRestartAction({ className = '' }) {
 // The studio is not answering — said once, at the top of whatever studio the
 // user is standing in, with the same Retry the topbar pill offers. A press that
 // cannot possibly work is greyed out by each studio; this line is why.
-function StudioOfflineBanner() {
+// `floating` is for the studio frame, whose notices are rounded cards over a
+// full-bleed stage rather than a band across the top of a scrolling column.
+// Same reading, same two actions — only the edge differs.
+export function StudioOfflineNotice({ floating = false }) {
   const status = useApiStatus();
   const [busy, setBusy] = useState(false);
   if (status.tone !== 'offline') return null;
@@ -787,7 +800,10 @@ function StudioOfflineBanner() {
   return (
     <div
       role="status"
-      className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warn/40 bg-warn/10 px-3.5 py-2 text-xs text-ink1"
+      className={cx(
+        'flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 bg-warn/10 px-3.5 py-2 text-xs text-ink1',
+        floating ? 'rounded-lg border border-warn/40 shadow-pop backdrop-blur-sm' : 'border-b border-warn/40',
+      )}
     >
       <span className="font-semibold">{t('app.notRunning')}</span>
       <span className="min-w-0 text-ink2">{apiOfflineSentence()}</span>
@@ -830,7 +846,7 @@ export function StudioLayout({
         </>
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
-        <StudioOfflineBanner />
+        <StudioOfflineNotice />
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
         {/* Below lg the panel lives in a sheet; its opener sits in its own row so it
             can never cover the composer (a floating button used to sit on the chips). */}

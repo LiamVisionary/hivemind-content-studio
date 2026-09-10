@@ -55,6 +55,13 @@ html, body {
   mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 20px), transparent);
 }
 
+/* The studio frame (Image/Video) reserves its right rail's width on the stage and
+   the floating composer. Below sm the rail is not drawn, so the reservation has
+   to go with it or both leave a dead strip down the right edge. */
+@media (max-width: 639px) {
+  [data-studio-frame] { --frame-rail-w: 0px; }
+}
+
 /* ---- Native control restyling ---- */
 input, textarea, select, button { font: inherit; color: inherit; }
 

@@ -8,6 +8,12 @@
 //
 // Deliberately textual: which entry a save targets, and how the menu scopes
 // its list to the current base model, are handler wiring.
+//
+// The base families the menu scopes by are still assembled in ImageStudio.jsx /
+// VideoStudio.jsx, but the Video studio's LoraSection moved into the Advanced
+// drawer (src/studios/video/VideoAdvanced.jsx), so the studio now writes them
+// into a `loraProps` object literal instead of onto a JSX element. Both halves
+// are pinned: the studio writes the families, the drawer spreads the bag.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -40,9 +46,15 @@ test('the groups menu scopes the list to the current base model', () => {
     assert.match(menu, /\{showOther \? other\.map\(\(entry\) => row\(entry, true\)\) : null\}/);
     // Saving records the family so new groups scope by family, not just model id.
     assert.match(menu, /loraGroupFromSelection\(getSelection\?\.\(\) \|\| selection, \{ baseModelId, baseLabel, baseModels \}\)/);
-    // Both studios feed the matcher their base families.
+    // Both studios feed the matcher their base families. Both write it into the
+    // LoraSection prop bag they assemble — the Video studio's LoraSection now
+    // renders a drawer away, in VideoAdvanced.jsx, so the bag is the seam.
     assert.match(read('src/studios/ImageStudio.jsx'), /baseModels: s\.loraBaseModels,/);
-    assert.match(read('src/studios/VideoStudio.jsx'), /baseModels=\{loraModel\.compatibleBaseModels \|\| \[\]\}/);
+    assert.match(read('src/studios/VideoStudio.jsx'), /baseModels: loraModel\.compatibleBaseModels \|\| \[\],/);
+    // …and the drawer spreads that bag onto the section, so the families
+    // actually arrive. Assembling them and never delivering them would leave
+    // every video group listed under "Other models".
+    assert.match(read('src/studios/video/VideoAdvanced.jsx'), /<LoraSection \{\.\.\.loraProps\} \/>/);
 });
 
 test('the LoRA group saver lists the saved groups and pre-aims at the loaded one', () => {
