@@ -292,6 +292,76 @@ class HivemindosTopUpBody(BaseModel):
     amountUsd: float = Field(default=5.0, ge=5.0, le=100.0)
 
 
+class AccountHandleBody(BaseModel):
+    """What to call this account on this machine. Empty restores the derived name."""
+
+    handle: str = Field(default="", max_length=24)
+
+
+class AccountEmailStartBody(BaseModel):
+    """The address a six-digit code is going to."""
+
+    email: str = Field(default="", max_length=254)
+
+
+class AccountEmailVerifyBody(BaseModel):
+    """The code, and the challenge it answers."""
+
+    challengeId: str = Field(default="", max_length=80)
+    code: str = Field(default="", max_length=6)
+
+
+class AccountSubscriptionBody(BaseModel):
+    """Which monthly plan to start."""
+
+    tier: Literal["plus", "pro", "max"] = "plus"
+
+
+class AccountSubscriptionCancelBody(BaseModel):
+    """Cancelling is typed out, not clicked past: the confirmation constant is
+    the press, exactly as HivemindOS itself requires."""
+
+    confirmation: str = Field(default="", max_length=64)
+
+
+class AccountDepositQuoteBody(BaseModel):
+    """Where the USDC is coming from, and how much of it.
+
+    Bounded here as well as at the gateway for the same reason the card
+    checkout is: a mistyped zero is the owner's money.
+    """
+
+    payer: str = Field(default="", max_length=64)
+    amountUsd: float = Field(default=5.0, ge=1.0, le=500.0)
+
+
+class AccountDepositSettleBody(BaseModel):
+    """The transfer that landed, named by the quote it answers and its hash."""
+
+    paymentId: str = Field(default="", max_length=64)
+    transactionHash: str = Field(default="", max_length=80)
+
+
+class AccountWalletPayBody(BaseModel):
+    """How much to ask the HivemindOS app's wallet for."""
+
+    amountUsd: float = Field(default=5.0, ge=1.0, le=500.0)
+
+
+class AccountWalletClaimBody(BaseModel):
+    """What the desktop app presents to learn which account to credit."""
+
+    nonce: str = Field(default="", max_length=256)
+
+
+class AccountWalletResultBody(BaseModel):
+    """The desktop app's verdict on a payment the owner answered."""
+
+    nonce: str = Field(default="", max_length=256)
+    settled: bool = False
+    detail: str = Field(default="", max_length=400)
+
+
 class StoryProducerBody(BaseModel):
     """One question the Story studio asks its producer.
 

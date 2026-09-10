@@ -416,6 +416,27 @@ def forget_credit_token() -> None:
     _write_store(store)
 
 
+def store_value(key: str) -> Any:
+    """A plain (unencrypted) value this module's store holds for its siblings.
+
+    `hivemindos_account` keeps the chosen display name here rather than opening
+    a second file beside this one: same owner, same 0600 store, same lifetime as
+    the account it names. Only for values that are NOT credentials — the account
+    key has its own encrypted slot above.
+    """
+    return _read_store().get(key)
+
+
+def set_store_value(key: str, value: Any) -> None:
+    """Write (or, with None, remove) one of those values."""
+    store = _read_store()
+    if value is None:
+        store.pop(key, None)
+    else:
+        store[key] = value
+    _write_store(store)
+
+
 # What a HivemindOS account token looks like. Checked here so a typo is refused
 # with "that does not look like one" instead of spending a round trip to be told
 # the account does not exist.
@@ -806,12 +827,19 @@ def start_top_up(*, amount_usd: float = 5.0, return_url: str = "",
     Nothing is charged by this call: the card is entered on the gateway's own
     page, by the owner.
     """
-    if resolve_route() == ROUTE_APP:
+    existing = credit_token()
+    # With the app running this used to refuse outright, on the reasoning that a
+    # checkout here would open a SECOND balance beside the app's. That is only
+    # true when no key resolves: `credit_token` falls back to the app's own vault
+    # key on this machine, and presenting it tops up the very balance the app
+    # spends. So the refusal now applies to the case it was actually about —
+    # no key at all, where the gateway would mint one — and the credits sheet
+    # works with the app open, which is when most people have it open.
+    if not existing and resolve_route() == ROUTE_APP:
         raise HivemindosModelsError(
             "Add credits in the HivemindOS app, so this studio and the app keep sharing one balance.",
             remedy="open-hivemindos",
         )
-    existing = credit_token()
     payload = _gateway_request(
         f"/api/paid-agents/{gateway_slug()}/credits/checkout",
         method="POST",
