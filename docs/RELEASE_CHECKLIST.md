@@ -198,31 +198,62 @@ of them is ever printed, written into an artifact, or committed in any form.
 The updater's **public** key is a config value in
 [`desktop/src-tauri/updater.json`](../desktop/src-tauri/updater.json) and ships inside the
 app; `tauri.conf.json` must agree with it, which
-`scripts/check_updater_config.py` enforces. Get the pair from
-`signer generate`, commit only the public half, and store the private half as
-the repository secret above.
+`scripts/check_updater_config.py` enforces. The **private** half is a secret and
+never enters this repository in any form.
 
-**`signer` is part of the Tauri CLI, which is not installed by checking this
-repository out.** `cargo tauri signer generate` fails with `no such command:
-tauri` until you have it — this repo has no npm project, so there is no
-`npm run tauri` either (which is also why `release-desktop.yml` installs the
-Rust CLI and passes `tauriScript: cargo tauri`). Either form works:
+### Generating the updater key pair — do this ONCE
+
+Two things about `signer generate` catch people, and they compound:
+
+1. **The plain form prints both halves and saves nothing.** No file, no
+   keychain, nothing. Close the terminal and the key is gone.
+2. **Every run mints a brand-new, unrelated pair.** So "just run it again"
+   does not recover the last one — it replaces it.
+
+Run it three times without saving and you have three orphaned keys and an
+empty `pubkey`, which is exactly the state that looks like "it isn't
+persisting".
+
+**It only matters once.** An app installed with public key A can *only* ever be
+updated by a build signed with private key A — there is no channel left to
+correct it through. So while `pubkey` is still empty and no signed build has
+been promoted, regenerating is free; after that, it is permanent.
+
+Copy this whole block, not just the first line. It ends with the key in all
+three places it has to be, and none of the three is optional:
 
 ```bash
-# One-off, nothing installed, no Rust compile:
+# 1. Generate. `signer` is part of the Tauri CLI, which checking this repo out
+#    does NOT install — a bare `cargo tauri` fails with `no such command:
+#    tauri`, and there is no npm project here so `npm run tauri` does not exist
+#    either (which is why release-desktop.yml installs the Rust CLI and passes
+#    `tauriScript: cargo tauri`). npx needs nothing installed:
 npx --yes @tauri-apps/cli@^2 signer generate
+#    Or, if you want the CLI on PATH permanently (a few minutes of compiling):
+#    cargo install tauri-cli --version "^2.11" --locked && cargo tauri signer generate
 
-# Or the CLI the release workflow uses, if you want it on PATH (a few minutes):
-cargo install tauri-cli --version "^2.11" --locked
-cargo tauri signer generate
+# 2. PRIVATE half -> this machine's credential store, so a local signed build
+#    can find it later. Prompts without echo, so it never reaches shell history.
+passbook-add TAURI_SIGNING_PRIVATE_KEY
+#    …and TAURI_SIGNING_PRIVATE_KEY_PASSWORD too, only if you gave it a password.
+
+# 3. PRIVATE half -> the repository secret the release workflow reads. Also
+#    prompts, for the same reason.
+gh secret set TAURI_SIGNING_PRIVATE_KEY
+
+# 4. PUBLIC half -> BOTH config files, which must match exactly:
+#      desktop/src-tauri/updater.json      .pubkey
+#      desktop/src-tauri/tauri.conf.json   .plugins.updater.pubkey
+#    Then prove the channel is complete:
+python3 scripts/check_updater_config.py --require-key
+
+# 5. Clear the scrollback — the private key is still sitting in it.
+printf '\033[3J\033[H\033[2J'
 ```
 
-`signer generate` **prints** both halves and writes nothing unless you pass
-`-w <path>`, so the plain form is the one to use for CI: copy the printed
-private key into the `TAURI_SIGNING_PRIVATE_KEY` secret. It prompts for a
-password unless you pass `-p` or `--ci`; if you give the key a password, the
-build needs `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` too, and if you leave it empty
-that variable is not needed at all.
+`signer generate` prompts for a password unless you pass `-p` or `--ci`. If you
+give the key a password, the build needs `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+as well; if you leave it empty, that variable is not needed at all.
 
 Tauri reads three variables, and the release workflow deliberately sets only
 the two that suit a CI secret:
@@ -237,9 +268,20 @@ So a signed build **on this machine** — which step 4's smoke test needs, since
 the DMG a person installs is the only place the Download control and the
 updater can really be exercised — wants the path form:
 
+If you already followed the block above, the key is in the credential store and
+the string form is what you have — so hand it to the build from there rather
+than generating a second key, which would orphan the first:
+
 ```bash
-# `npx --yes @tauri-apps/cli@^2 signer …` works here too — see the note above.
-cargo tauri signer generate -w ~/.tauri/hivemind-content-studio.key
+passbook run --only TAURI_SIGNING_PRIVATE_KEY -- <the build command>
+```
+
+If you would rather have the key as a FILE (the `_PATH` form), generate it with
+`-w` **instead of** step 1 above — not as well as it, or you end up with two
+pairs and no way to tell which one the release was signed with:
+
+```bash
+npx --yes @tauri-apps/cli@^2 signer generate -w ~/.tauri/hivemind-content-studio.key
 export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.tauri/hivemind-content-studio.key"
 # and, only if you gave the key a password:
 # export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=...

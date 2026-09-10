@@ -145,11 +145,13 @@ def check(*, require_key: bool) -> list[str]:
     if require_key and not pubkey:
         problems.append(
             f"{UPDATER_CONFIG.name} has no pubkey, so an update could not be verified by the app that "
-            "receives it. Generate a key pair with `npx --yes @tauri-apps/cli@^2 signer generate` "
-            "(the Tauri CLI is not installed by checking this repo out, so a bare `cargo tauri` "
-            "fails), put the PUBLIC half "
-            f"here, and store the private half as the {secret_name or 'TAURI_SIGNING_PRIVATE_KEY'} "
-            "repository secret. Never commit the private half."
+            "receives it. Follow docs/RELEASE_CHECKLIST.md \u00a7 'Generating the updater key pair' "
+            "end to end rather than only its first line: `signer generate` PRINTS the pair and saves "
+            "nothing, and every run mints a new unrelated one, so generating without storing leaves "
+            "exactly this state. The short form is `npx --yes @tauri-apps/cli@^2 signer generate` "
+            "(a bare `cargo tauri` fails: checking this repo out does not install the Tauri CLI), then "
+            f"the PUBLIC half here and in tauri.conf.json, and the private half in {secret_name or 'TAURI_SIGNING_PRIVATE_KEY'} "
+            "-- both the repository secret and this machine's store. Never commit the private half."
         )
 
     if TAURI_CONFIG.is_file():
