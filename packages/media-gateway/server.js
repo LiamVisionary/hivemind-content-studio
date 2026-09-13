@@ -1245,6 +1245,18 @@ function proxyPromptToNativeApi(req, res) {
       'x-token': token,
       'accept': req.headers.accept || 'application/json',
     };
+    // WHO asked, carried across the hop. The gateway already reads both of these
+    // off a prompt (see promptroutes: requester_spki decides who may read the
+    // job, owner_spki decides whose vault the output is sealed to) — this proxy
+    // just never passed them on, so every video render arrived anonymous and
+    // the gateway sealed to whichever account is is_owner. On a machine with
+    // two workspaces that is the wrong one, and the clip came back "Can't
+    // decrypt — Sealed for a different key" in the library of the workspace
+    // that made it (2026-09-12).
+    for (const name of ['x-e2e-requester-pub', 'x-e2e-owner-pub']) {
+      const value = req.headers[name];
+      if (typeof value === 'string' && value.trim()) headers[name] = value.trim();
+    }
     const upstreamReq = http.request(target, { method: req.method, headers }, (upstream) => {
       const responseChunks = [];
       upstream.on('data', (chunk) => responseChunks.push(chunk));

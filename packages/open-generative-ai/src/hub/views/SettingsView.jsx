@@ -38,7 +38,7 @@ import {
 import { Icon } from '../../ui/icons.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import {
-  Button, Card, Field, NativeSelect, Pill, SectionLabel, Spinner, StudioRestartAction, TextInput, Toggle, cx,
+  Button, Card, Field, LoadingState, NativeSelect, Pill, SectionLabel, StudioRestartAction, TextInput, Toggle, cx,
 } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { api, toastFailed } from '../hubData.js';
@@ -313,7 +313,7 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
           </div>
 
           {loading && !payload ? (
-            <div className="grid flex-1 place-items-center py-16"><Spinner size={22} className="text-ink2" /></div>
+            <LoadingState label={t('app.loading')} />
           ) : null}
 
           {payload?.readable === false ? (

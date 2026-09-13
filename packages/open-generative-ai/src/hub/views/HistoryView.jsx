@@ -19,7 +19,7 @@ import { requestVaultUnlock } from '../../lib/vaultSession.js';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { Menu, MenuItem } from '../../ui/Menu.jsx';
-import { EmptyState, NativeSelect, Pill, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
+import { CardGridSkeleton, EmptyState, NativeSelect, Pill, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
 import {
   canvasEntryModelLabel, copyCanvasPrompt, copyText, deleteCanvasOutput, deletePrompt,
   inspectCanvasHistoryEntry, insertPromptIntoComposer, loadCanvasOutputInCanvas,
@@ -346,22 +346,6 @@ function GroupHeading({ kicker, title, right }) {
   );
 }
 
-function SkeletonGrid({ count = 8 }) {
-  return (
-    <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]" aria-busy="true" aria-label={t('history.loadingOutputs')}>
-      {Array.from({ length: count }, (_, i) => (
-        <div key={i} className="flex flex-col overflow-hidden rounded-lg border border-line1 bg-bg2">
-          <div className="aspect-square animate-pulse bg-bg3" />
-          <div className="flex flex-col gap-1.5 p-2.5">
-            <div className="h-3 w-1/2 animate-pulse rounded bg-bg3" />
-            <div className="h-2.5 w-2/3 animate-pulse rounded bg-bg3" />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // Client-side text match. Prompts match on their text; outputs on the model
 // name or the file name — both lists are already in memory.
 function matchesQuery(haystack, needle) {
@@ -469,7 +453,7 @@ export function HistoryView({ active }) {
             !s.historyLoaded && !hasData ? (
               <section className="flex flex-col gap-3">
                 <GroupHeading kicker={t('history.studiosAndCanvas')} title={t('history.outputs')} />
-                <SkeletonGrid />
+                <CardGridSkeleton count={12} label={t('history.loadingOutputs')} />
               </section>
             ) : outputs.length ? (
               <section className="flex flex-col gap-3">
@@ -533,7 +517,7 @@ export function HistoryView({ active }) {
             !s.historyLoaded && !hasData ? (
               s.historyFilter ? (
                 <section className="flex flex-col gap-3" aria-busy="true">
-                  <GroupHeading kicker={t('history.promptLibrary')} title={t('history.loadingEllipsis')} />
+                  <GroupHeading kicker={t('history.promptLibrary')} title={t('app.loading')} />
                   <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
                     {Array.from({ length: 4 }, (_, i) => <div key={i} className="h-24 animate-pulse rounded-lg border border-line1 bg-bg2" />)}
                   </div>

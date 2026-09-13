@@ -25,6 +25,11 @@ OUTPUT_ENCRYPTION_ENABLED = os.environ.get("ZIMG_OUTPUT_ENCRYPTION", "1") != "0"
 OUTPUT_ENCRYPTION_SERVICE = os.environ.get("ZIMG_OUTPUT_KEYCHAIN_SERVICE", "zimage-output-encryption")
 OUTPUT_ENCRYPTION_ITER = int(os.environ.get("ZIMG_OUTPUT_ENCRYPTION_ITER", "50000"))
 OUTPUT_PLAINTEXT_GRACE_SECONDS = int(os.environ.get("ZIMG_OUTPUT_PLAINTEXT_GRACE", "0"))
+# The backstop for a plaintext output that nobody ever came back for — a crashed
+# runner, a render driven straight from ComfyUI's own UI. Below this age the
+# sweeper defers to the idle check instead, because a fresh output is normally
+# being read back by the job that just made it.
+OUTPUT_PLAINTEXT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_OUTPUT_PLAINTEXT_MAX_AGE", "900"))
 OUTPUT_ENCRYPTION_SUFFIX = ".zenc"
 # Phase-2 client-side E2E media (off by default; coexists with legacy .zenc).
 # When on AND the owner has created a vault (public key present), new output is
@@ -185,6 +190,10 @@ def _staged_by_the_pipeline(candidate, root):
 
 def _nothing_can_be_reading_staged_inputs():
     """True when no job on this machine could still open a staged input.
+
+    The output sweeper asks the same question about a file it is about to seal,
+    because the two sides fail the same way: a running job is the one thing that
+    still needs plaintext on disk.
 
     Anything unknown counts as busy: a lane that will not answer, an import
     that fails, a queue shape we do not recognise. The cost of being wrong in
@@ -384,11 +393,23 @@ def output_path_is_active(path):
         return str(Path(path).resolve()) in active_output_paths
 
 
-def is_encryptable_output(path):
+def is_encryptable_output(path, ignore_active=False):
+    """`ignore_active` is for the JOB THAT MADE THE FILE.
+
+    The active guard exists to stop the sweeper sealing a file that is still
+    being written. But a runner marks its output active for the whole render and
+    then seals it INSIDE that window (native_mlx.py: mirror_output_to_comfy_output
+    sits in the try, mark_output_inactive in the finally) — so the guard rejected
+    the one seal that carries the job's own recipients. The job silently no-oped,
+    and the sweeper sealed it seconds later to this machine's default vault with
+    no recipients at all. Every LTX clip a second workspace made was unopenable
+    by the person who made it, and no image ever was, because images never take
+    this guard (2026-09-12).
+    """
     path = Path(path)
     if not OUTPUT_ENCRYPTION_ENABLED:
         return False
-    if output_path_is_active(path):
+    if not ignore_active and output_path_is_active(path):
         return False
     if path.name.endswith(OUTPUT_ENCRYPTION_SUFFIX) or path.name.endswith(E2E_MEDIA_SUFFIX):
         return False
@@ -668,6 +689,51 @@ def _seal_file_with_helper(spki, source, envelope, media_name):
             pass
 
 
+# THE one place that answers "whose vault key seals this output".
+#
+# It used to be answered in three, and they disagreed the moment this machine
+# held two workspaces: api/context.py resolved the SIGNED-IN account per request
+# (right), media-studio-mcp.mjs substituted a machine-wide file, and this module
+# fell back to whichever account is `is_owner`. A user working in account 2 got
+# their video sealed to account 1 and read "Can't decrypt — Sealed for a
+# different key" over their own clip (2026-09-12).
+#
+# The precedence, and there is deliberately only one:
+#   1. the key the REQUEST presented, registered at the job's 202
+#   2. this machine's default owner vault — sanctioned for a headless agent run
+#      that presents nothing, but never silent, because every time it fires for
+#      a browser-initiated job it is sealing to the wrong person.
+SEAL_SOURCE_CALLER = "caller"
+SEAL_SOURCE_MACHINE = "machine-default"
+
+_machine_seal_warned = set()
+
+
+def seal_recipient(owner_spki, media_name=""):
+    """`(spki, source)` — the public key this output must be sealed to.
+
+    `spki` is None only when no vault exists on this machine at all, which is
+    the caller's cue to fall back to legacy at-rest encryption.
+    """
+    scoped = promptroutes.normalized_requester_spki(owner_spki)
+    if scoped:
+        return scoped, SEAL_SOURCE_CALLER
+    fallback = vault_public_key_spki()
+    if fallback:
+        name = str(media_name or "")
+        if name not in _machine_seal_warned:
+            if len(_machine_seal_warned) >= 512:
+                _machine_seal_warned.clear()
+            _machine_seal_warned.add(name)
+            print(
+                f"[e2e-media] {name or 'an output'} is being sealed to this machine's DEFAULT owner "
+                "vault: the request presented no X-E2E-Owner-Pub. A browser-initiated job that "
+                "lands here will be unopenable in any other workspace.",
+                file=sys.stderr,
+            )
+    return fallback, SEAL_SOURCE_MACHINE
+
+
 def seal_output_to_e2e(path, agent_spki=None, owner_spki=None):
     """Seal media to the owner vault public key as <name>.e2e; delete plaintext.
 
@@ -681,22 +747,37 @@ def seal_output_to_e2e(path, agent_spki=None, owner_spki=None):
     vault exists yet). The gateway can encrypt here but can never decrypt.
     """
     path = Path(path).resolve()
-    # The job's own owner key first, exactly as the harvest path does. The global
-    # VAULT_DB is one path on a machine that can hold several workspaces, and it
-    # pointed at a file the accounts migration had moved — which is what made
-    # every local generation fall back to legacy .zenc instead of sealing.
-    spki = promptroutes.normalized_requester_spki(owner_spki) or vault_public_key_spki()
-    if not spki:
-        return False
+    # One question, one answer. See seal_recipient above for the precedence and
+    # for why this is not an inline `or` any more.
+    # The FULL path, not the basename: a job's own copy and ComfyUI's duplicate
+    # share a name, and only one of them carries the job's recipients — reading
+    # a warning about the duplicate as one about the output is a mistake this
+    # already caused once.
+    # Already sealed by whoever got here first — answer before asking who the
+    # recipient would be. Asking first meant a redundant no-op attempt logged a
+    # "falling back to the machine default" warning about a file that had in
+    # fact been sealed correctly, which is a diagnostic that lies.
     envelope = e2e_envelope_path_for(path)
     if envelope.exists() and not path.exists():
         return True
+    spki, _source = seal_recipient(owner_spki, media_name=str(path))
+    if not spki:
+        return False
     if not path.exists() or not path.is_file():
         return False
     with encryption_lock:
         if envelope.exists() and not path.exists():
             return True
         source_stat = path.stat()
+        # Who this envelope is actually readable by, recorded at the moment it
+        # is written. Fingerprints, never key material. Without this the only
+        # evidence of a wrong recipient is a user saying "it will not open".
+        print(
+            f"[e2e-media] sealing {path.name}: owner fp "
+            f"{promptroutes.requester_fingerprint(spki)} ({_source}), agent fp "
+            f"{promptroutes.requester_fingerprint(promptroutes.normalized_requester_spki(agent_spki)) if agent_spki else 'none'}",
+            file=sys.stderr, flush=True,
+        )
         _seal_file_with_helper(spki, path, envelope, path.name)
         os.utime(envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         agent_spki = promptroutes.normalized_requester_spki(agent_spki)
@@ -714,7 +795,7 @@ def seal_output_to_e2e(path, agent_spki=None, owner_spki=None):
     return True
 
 
-def encrypt_output_file(path, agent_spki=None, owner_spki=None):
+def encrypt_output_file(path, agent_spki=None, owner_spki=None, ignore_active=False):
     """Encrypt output media in place as <name>.zenc and remove plaintext.
 
     `agent_spki` (optional) adds a second sealed envelope for that recipient on
@@ -723,7 +804,7 @@ def encrypt_output_file(path, agent_spki=None, owner_spki=None):
     Returns the logical original path (the filename the UI should keep using).
     """
     path = Path(path).resolve()
-    if not is_encryptable_output(path):
+    if not is_encryptable_output(path, ignore_active=ignore_active):
         return path
     # Prefer client-side E2E sealing when enabled and a vault exists; otherwise
     # fall through to the legacy Keychain-key .zenc path unchanged.
@@ -925,11 +1006,26 @@ def send_output_file(handler, path):
     handler.wfile.write(data)
 
 
-def encrypt_existing_outputs_once(max_age_seconds=3):
+def encrypt_existing_outputs_once(max_age_seconds=3, defer_to_readers=True):
+    """Seal plaintext output the normal path did not get to.
+
+    This is a backstop, not the primary seal: a gateway job seals its own
+    outputs in `encrypt_outputs`, with the job's own owner and agent recipients.
+    Sealing under a job that is still running breaks it twice over — the output
+    loses those recipients, and `run_z_image_turbo.py` reads its image back over
+    HTTP the moment the history entry appears, so deleting the plaintext first
+    404s that fetch and fails the generation AFTER the model has already run.
+    So below the ceiling the sweep waits for the machine to go quiet, exactly as
+    the staged-input sweeper does. `defer_to_readers=False` is for the migration
+    pass at startup, where there is no job of ours to wait for.
+    """
     if not OUTPUT_ENCRYPTION_ENABLED:
         return 0
     now = time.time()
     changed = 0
+    # Resolved at most once per sweep, and only if some plaintext is actually
+    # sitting there for the answer to change anything.
+    idle = None
     for root in [config.OUT_DIR, config.COMFY_OUTPUT_DIR]:
         try:
             if not root.exists():
@@ -939,8 +1035,14 @@ def encrypt_existing_outputs_once(max_age_seconds=3):
                     continue
                 try:
                     # Avoid racing a writer that is still flushing the file.
-                    if now - p.stat().st_mtime < max_age_seconds:
+                    age = now - p.stat().st_mtime
+                    if age < max_age_seconds:
                         continue
+                    if defer_to_readers and age < OUTPUT_PLAINTEXT_MAX_AGE_SECONDS:
+                        if idle is None:
+                            idle = _nothing_can_be_reading_staged_inputs()
+                        if not idle:
+                            continue
                     encrypt_output_file(p)
                     changed += 1
                 except Exception as e:

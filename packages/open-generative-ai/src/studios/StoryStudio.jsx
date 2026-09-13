@@ -1083,7 +1083,16 @@ export function StoryStudio({ active = true } = {}) {
   );
 
   return (
-    <StudioLayout panel={rail} panelTitle="Stages" panelWidth="w-[252px]" composer={dock}>
+    <StudioLayout
+      panel={rail}
+      panelTitle="Stages"
+      panelWidth="w-[252px]"
+      floatingPanel
+      floatingComposer
+      // The same 820px the stages and the producer bar use.
+      composerWidth="max-w-[820px]"
+      composer={dock}
+    >
       <ProducerBar
         summary={[story.title || 'Untitled production', `${story.motion.seconds}s`, story.aspect].join(' · ')}
         producer={producer}

@@ -27,7 +27,7 @@ import { localAI } from '../../lib/localInferenceClient.js';
 import { formatCount } from '../../lib/modelLibrary.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Modal } from '../../ui/Modal.jsx';
-import { Button, EmptyState, NativeSelect, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
+import { Button, CardGridSkeleton, EmptyState, NativeSelect, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { t, tf } from '../../lib/i18n.js';
 
@@ -255,6 +255,9 @@ export function InspoView({ active }) {
   const [items, setItems] = useState([]);
   const [nextCursor, setNextCursor] = useState('');
   const [scanned, setScanned] = useState(0);
+  // Non-empty when Civitai cut the paging short. Results still arrived; this is
+  // the sentence explaining why there are fewer of them than asked for.
+  const [partial, setPartial] = useState('');
   const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState(null);
   const [baseModelOptions, setBaseModelOptions] = useState([]);
@@ -276,6 +279,7 @@ export function InspoView({ active }) {
       setItems(result.items);
       setNextCursor(result.nextCursor || '');
       setScanned(result.scanned || 0);
+      setPartial(result.partial || '');
       if (result.baseModelOptions.length) setBaseModelOptions(result.baseModelOptions);
       setState({
         status: 'done',
@@ -297,6 +301,7 @@ export function InspoView({ active }) {
       setItems((current) => mergeInspoResults(current, result.items));
       setNextCursor(result.nextCursor || '');
       setScanned((current) => current + (result.scanned || 0));
+      setPartial(result.partial || '');
     } catch (error) {
       setState({ status: 'error', message: error.message });
     } finally {
@@ -397,6 +402,16 @@ export function InspoView({ active }) {
               </span>
             </div>
 
+            {/* Results DID arrive, so this is a note and not an alarm: the grid
+                below is real, it is just short, and "Load more" resumes from
+                the page Civitai refused. */}
+            {partial && items.length ? (
+              <div role="status" className="mb-3 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-tint px-3 py-2 text-[11px] leading-relaxed text-ink2">
+                <Icon name="warning" size={13} className="mt-px shrink-0 text-warn" />
+                <span>{tf('inspo.partialFeed', partial)}</span>
+              </div>
+            ) : null}
+
             {items.length ? (
               <>
                 <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]">
@@ -419,14 +434,25 @@ export function InspoView({ active }) {
                     : null}
                 </p>
               </>
-            ) : state.status !== 'loading' ? (
+            ) : state.status === 'loading' ? (
+              // The wait, at the size of the thing being waited for. This used
+              // to be `null` — a 14px spinner in the toolbar and an empty page
+              // body, which is the same picture a search that found nothing
+              // draws.
+              <CardGridSkeleton
+                count={12}
+                minWidth={200}
+                aspect="aspect-[3/4]"
+                label={t('discover.searching')}
+              />
+            ) : (
               <EmptyState
                 icon={state.status === 'error' ? 'warning' : 'sparkles'}
                 title={state.status === 'error' ? t('discover.searchFailed') : t('discover.nothingYet')}
                 hint={state.status === 'error' ? state.message : t('inspo.searchToSee')}
                 action={state.status === 'error' ? <Button onClick={() => void search(filters)}>{t('common.retry')}</Button> : null}
               />
-            ) : null}
+            )}
           </div>
         </>
       )}

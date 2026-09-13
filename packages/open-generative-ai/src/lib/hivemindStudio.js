@@ -162,6 +162,24 @@ export function inpaintWorkflowForHivemindModel(id) {
         && String(entry.workflowFamily || '').toLowerCase() === family) || null;
 }
 
+// The plain text-to-video lane for a model whose graph needs conditioning it
+// has not been given. An IC-LoRA ingredients workflow exists to read a reference
+// sheet; with no sheet attached there is nothing for it to condition on, and
+// refusing the run told the user LTX 2.3 cannot do text-to-video, which is not
+// true — that lane is a sibling in the same registry family. A model that needs
+// no conditioning is its own answer. Null when the registry names no fallback,
+// or names one this catalog does not serve, which keeps the composer's refusal
+// as the honest outcome rather than routing a run into nothing.
+export function textToVideoWorkflowForHivemindModel(id) {
+    const model = getHivemindVideoModelById(id);
+    if (!model) return null;
+    if (!model.supportsIngredientImages) return model;
+    const target = String(model.textToVideoWorkflowId || '');
+    if (!target) return null;
+    return hiveVideoModels.find((entry) => entry.workflowId === target
+        && !entry.supportsIngredientImages) || null;
+}
+
 export function mapHivemindWorkflowModels(catalog) {
     const provider = workflowProvider(catalog);
     if (!provider?.models?.length) return [];
@@ -232,6 +250,9 @@ export function mapHivemindWorkflowModels(catalog) {
                 ingredientInputs: workflow.ingredient_inputs && typeof workflow.ingredient_inputs === 'object'
                     ? workflow.ingredient_inputs
                     : null,
+                // The workflow a prompt-only run goes to when this graph's
+                // conditioning is absent (see textToVideoWorkflowForHivemindModel).
+                textToVideoWorkflowId: String(workflow.text_to_video_workflow || ''),
             };
         })(),
         id: hivemindVideoModelId(workflow.id),
@@ -467,6 +488,51 @@ export async function fetchHivemindReferences({ kind = 'image' } = {}) {
                 thumbnail: ref.poster_url ? String(ref.poster_url) : null,
                 timestamp: typeof ref.timestamp === 'number' ? new Date(ref.timestamp * 1000).toISOString() : '',
                 serverReference: true,
+            }));
+    } catch {
+        return [];
+    }
+}
+
+// The owner's Library — every output the studios have already made, the same
+// encrypted output index the Library page paginates — shaped like an
+// upload-history entry so a reference picker can offer past generations beside
+// past uploads. Until this existed, reusing a generation as an input meant
+// downloading it and uploading it straight back.
+//
+// `kind` is not decoration: these rows carry no small poster the way a saved
+// reference does, so drawing a tile means decrypting the WHOLE asset. That is
+// fine for a still and ruinous for a screen recording, which is why only
+// pictures reach a picture grid. Empty outside studio mode, and empty rather
+// than throwing when the endpoint is unavailable — an unreadable Library is a
+// missing row in a menu, never a broken picker.
+export async function fetchHivemindLibraryOutputs({ kind = 'image', limit = 60 } = {}) {
+    if (!isHivemindStudioEnabled()) return [];
+    try {
+        const query = new URLSearchParams({
+            page: '1',
+            page_size: String(Math.max(1, Math.min(100, Math.trunc(limit) || 60))),
+        });
+        const response = await fetch(`/api/canvas/history?${query.toString()}`, { credentials: 'same-origin' });
+        if (!response.ok) return [];
+        const data = await response.json().catch(() => ({}));
+        const rows = Array.isArray(data.history) ? data.history : [];
+        return rows
+            .filter((row) => row && row.media_url)
+            .filter((row) => !kind || String(row.media_type || '').startsWith(`${kind}/`))
+            .map((row) => ({
+                id: `library:${row.history_id}`,
+                name: String(row.output_basename || ''),
+                uploadedUrl: String(row.media_url),
+                // No poster exists for an output; its tile decrypts the still itself.
+                thumbnail: null,
+                timestamp: typeof row.created_at === 'number'
+                    ? new Date(row.created_at * 1000).toISOString()
+                    : String(row.created_at || ''),
+                // What tells the picker this is a generation and not a reference:
+                // it has to be promoted into one before it can be attached, and it
+                // is never deletable from a reference grid.
+                libraryOutput: true,
             }));
     } catch {
         return [];

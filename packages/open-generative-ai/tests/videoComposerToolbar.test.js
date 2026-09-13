@@ -182,7 +182,11 @@ test('one trigger primitive, distinct icons, H3-only grammar controls, nothing p
     // Distinct icons, so which press does what is readable without opening one:
     // frames is the film strip, references the layers (or the persona), Refine
     // the wand, Starters the folder, Camera the camera, and `more` the dots.
-    assert.match(composer, /<ComposerTool\s+icon="wand"\s+label=\{t\('composer\.refine'\)\}/);
+    // Refine left the row in 2026-09-12 for the prompt box's own corner, at the
+    // clear badge's 22px — it rewrites the words in the box, where every other
+    // door in the row attaches something to the run.
+    assert.match(composer, /<ComposerPromptAction\s+icon="wand"\s+label=\{t\('composer\.refine'\)\}/);
+    assert.match(composer, /corner=\{\(\s*<ComposerPromptAction/, 'and the box draws it, beside the clear badge');
     assert.match(composer, /chip=\{\{ icon: 'folder', label: t\('composer\.starters'\), title: t\('composer\.startersTitle'\) \}\}/);
     assert.match(read('src/studios/video/CameraMotionMenu.jsx'), /icon="camera"\s+label=\{t\('composer\.camera'\)\}/);
     assert.match(composer, /<ComposerTool icon="more" label="More"/);
@@ -201,7 +205,13 @@ test('one trigger primitive, distinct icons, H3-only grammar controls, nothing p
     // has no prompt) — the frame and reference controls do not, so they are
     // mounted before the gate.
     assert.match(composer, /const promptWritable = !promptUi\.disabled;/);
-    assert.match(writingDoors, /<ComposerTool\s+icon="wand"[\s\S]{0,700}?<SavedPromptsMenu[\s\S]{0,1200}?<CameraMotionMenu/);
+    assert.match(writingDoors, /<SavedPromptsMenu[\s\S]{0,1200}?<CameraMotionMenu/);
+    // Refine is gated the same way even though it is no longer in that block:
+    // ComposerPrompt drops the corner when the box is disabled, which is the
+    // same `promptUi.disabled` the gate reads.
+    assert.doesNotMatch(writingDoors, /composer\.refine/, 'Refine is not one of the row\'s doors any more');
+    assert.match(read('src/studios/frame/ComposerPanel.jsx'), /\{corner && !disabled \? \(/,
+        'a watermark remover has no prompt, so it has no door onto one');
     assert.ok(composer.indexOf('<FrameSlotsPicker') < writingGate, 'the frames picker must not go with the prompt');
     assert.ok(composer.indexOf('<ReferencesMenu') < writingGate, 'the references menu must not go with the prompt');
 

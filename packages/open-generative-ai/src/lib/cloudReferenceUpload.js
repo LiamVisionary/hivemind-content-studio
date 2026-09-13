@@ -42,6 +42,32 @@ async function dataUrlToFile(dataUrl, index) {
 // public URLs pass through untouched; anything else is decrypted in-browser and
 // uploaded once, with the result cached per source so a re-generate does not send
 // the same image again.
+/**
+ * The hosted rail's uploader, for `resolveCloudReferences`'s `upload` seam.
+ *
+ * Same shape as MUAPI's and a different destination: the bytes go to the
+ * HivemindOS gateway's own input store rather than to a vendor unrelated to
+ * the model about to run. Which one a press uses follows the model the picker
+ * selected, so a picture is never sent to an account the run does not touch.
+ */
+export async function uploadHostedInput(file) {
+  const data = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read the selected reference image.'));
+    reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+    reader.readAsDataURL(file);
+  });
+  const response = await fetch('/api/media-studio/hosted-input', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ data_base64: data, content_type: file.type || 'image/png' }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(String(body?.detail?.message || 'The reference could not be sent to the hosted model.'));
+  return String(body?.url || '');
+}
+
 export async function resolveCloudReferences(sources, { cache, upload = (file) => muapi.uploadFile(file) } = {}) {
     const resolved = [];
     for (const [index, raw] of (Array.isArray(sources) ? sources : []).entries()) {

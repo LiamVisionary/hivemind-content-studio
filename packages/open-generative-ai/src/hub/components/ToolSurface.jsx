@@ -83,7 +83,7 @@ export function ToolSurface({ name, title, kicker, active }) {
           ) : (
             <div className="pointer-events-none absolute inset-0 grid place-items-center bg-bg0">
               <div className="flex flex-col items-center gap-3 text-ink3">
-                <Spinner size={20} className="text-honey" />
+                <Spinner size={32} className="text-honey" />
                 <span className="text-xs">{`Starting ${title}…`}</span>
               </div>
             </div>

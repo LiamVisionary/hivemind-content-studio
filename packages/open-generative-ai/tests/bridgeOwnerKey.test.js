@@ -129,3 +129,36 @@ test('every route that starts a job forwards the key', () => {
     assert.match(call, /\.\.\.ownerPubHeaders\(req\)/, `${route} drops the workspace key`);
   }
 });
+
+// ── the VIDEO door had the same hole, ten weeks later ────────────────────────
+//
+// Images come through the bridge above. Video does not: the MCP posts the graph
+// to /comfy/api/prompt on the media gateway's node proxy (server.js
+// proxyPromptToNativeApi), which forwarded content-type, content-length, its own
+// token and accept — and dropped both identity headers. So every video render
+// reached the gateway anonymous.
+//
+// The Python side was never the problem: promptroutes already records
+// `requester_spki` (who may read the job) and `owner_spki` (whose vault the
+// output is sealed to) straight off those headers. Nothing was arriving.
+//
+// Deliberately textual: the proxy builds one header object and hands it to
+// http.request; standing up the socket pair the tests above use would assert on
+// the same three lines through far more machinery, and the claim here is simply
+// that these two names are not dropped from that object.
+test('the prompt proxy carries the caller identity across to the gateway', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(
+        path.join(__dirname, '../../media-gateway/server.js'), 'utf8',
+    );
+    const start = source.indexOf('function proxyPromptToNativeApi');
+    assert.ok(start > 0, 'proxyPromptToNativeApi has moved');
+    const body = source.slice(start, start + 3000);
+    for (const header of ['x-e2e-requester-pub', 'x-e2e-owner-pub']) {
+        assert.match(body, new RegExp(header), `the prompt proxy drops ${header}`);
+    }
+    // Forwarded from the REQUEST, not read from a file or an env var — the
+    // whole failure was a machine-wide key standing in for the caller's.
+    assert.match(body, /req\.headers\[name\]/);
+});

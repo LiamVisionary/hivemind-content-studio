@@ -21,6 +21,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+const { renderComponent } = require('./helpers/render.js');
+
 const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
 const prefs = () => import('../src/studios/image/imagePrefs.js');
 
@@ -175,8 +177,54 @@ test('the prompt badge clears the prompt alone, with an Undo and no dialog', () 
     const panel = read('src/studios/frame/ComposerPanel.jsx');
     assert.match(panel, /const clearable = Boolean\(onClear\) && !disabled && Boolean\(String\(value \|\| ''\)\.trim\(\)\)/,
         'no badge on an empty box, and none on a box that cannot be typed in');
-    assert.match(panel, /clearable && 'pr-8'/, 'the text makes room for it');
-    assert.match(panel, /aria-label=\{t\('composer\.clearPrompt'\)\}/);
+    // Room for the corner cluster in pixels, not on the rem scale: this page's
+    // root is 14px, so `pr-14` would reserve 49 for a 52px pill.
+    assert.match(panel, /clearable \? 'pr-\[56px\]' : corner && !disabled \? 'pr-\[30px\]' : null/,
+        'the text makes room for it');
+    assert.match(panel, /aria-label=\{armed \? t\('composer\.clearPromptConfirm'\) : t\('composer\.clearPrompt'\)\}/);
+});
+
+/* ---------------- and it takes two presses to do it ---------------- */
+
+// A 22px door that sits ON the first line of the text, whose press throws away
+// what you just typed. One press was too easy to hit on the way to the box, so
+// it arms first: the icon becomes a pill that says Clear, and only the second
+// press inside three seconds empties anything.
+//
+// The state itself is a timer, which a server render cannot run — so the two
+// faces are rendered from the prop that decides them, and the timing is read
+// off the source that sets it.
+test('the clear badge arms before it clears, and forgets after three seconds', async () => {
+    const panel = read('src/studios/frame/ComposerPanel.jsx');
+
+    // One button in both faces, not two swapped: a swap would put the second
+    // press on an element that had just been unmounted.
+    const resting = await renderComponent('src/studios/frame/ComposerPanel.jsx', 'ClearPromptBadge', { armed: false });
+    const armed = await renderComponent('src/studios/frame/ComposerPanel.jsx', 'ClearPromptBadge', { armed: true });
+    for (const face of [resting, armed]) assert.equal((face.match(/<button/g) || []).length, 1);
+    assert.match(resting, /w-\[22px\]/, 'resting, it is the size of a round icon');
+    assert.match(armed, /w-\[52px\]/, 'armed, it is a pill');
+    assert.match(armed, /data-clear-armed="true"/);
+    // The word is only READ in the armed face; it is in the markup either way so
+    // the width can animate between them rather than the content popping in.
+    assert.match(resting, /Clear<\/span>/);
+    assert.match(resting, /opacity-0[^"]*">Clear/, 'the word is invisible until it is asked for');
+    assert.match(armed, /aria-label="Press again to clear/, 'and a reader is told there is a second press');
+    assert.match(resting, /aria-label="Clear what you typed/);
+
+    // Three seconds, then the question expires on its own.
+    assert.match(panel, /export const CLEAR_CONFIRM_MS = 3000;/);
+    const press = panel.match(/const pressClear = \(\) => \{[\s\S]*?\n  \};/)[0];
+    assert.match(press, /if \(armed\) \{ disarm\(\); onClear\?\.\(\); return; \}/, 'the second press is the one that clears');
+    assert.match(press, /setTimeout\(\(\) => \{ timer\.current = null; setArmed\(false\); \}, CLEAR_CONFIRM_MS\)/);
+    // A box that empties under an armed badge (Start fresh, a restore, a weave)
+    // leaves no live timer and no armed pill behind, and neither does unmounting.
+    assert.match(panel, /if \(!clearable\) disarm\(\);\n\s*return \(\) => clearTimeout\(timer\.current\);/);
+
+    // The helper beside it gets out of the pill's way — and is not reachable
+    // while it is out of the way, by pointer or by Tab.
+    assert.match(panel, /armed \? 'w-0 opacity-0' : 'w-\[26px\] opacity-100'/);
+    assert.match(panel, /inert=\{armed\}/);
 });
 
 /* ---------------- reference roles follow the count ---------------- */
@@ -449,7 +497,10 @@ test('the composer keeps its doors on the left and Generate pinned in its own gr
     // among the doors. (imageTiering renders this and checks it holds.)
     assert.equal((composer.match(/<ComposerPrimary\b/g) || []).length, 1, 'one primary press');
     assert.match(composer, /primary=\{\(\s*<ComposerPrimary/);
-    const tools = composer.slice(composer.indexOf('const tools = ('), composer.indexOf('\n  return ('));
+    // Anchored on the return that FOLLOWS the doors, not the file's first one:
+    // ImageComposer.jsx also declares UploadOnlyComposer above the component.
+    const toolsAt = composer.indexOf('const tools = (');
+    const tools = composer.slice(toolsAt, composer.indexOf('\n  return (', toolsAt));
     assert.ok(tools.length > 0, 'the doors are still declared');
     assert.doesNotMatch(tools, /<ComposerPrimary|<ComposerSecondary/, 'the press is not one of the doors');
     // Every icon-only door carries its name: ComposerTool draws no label, so
@@ -551,4 +602,61 @@ test('every finished picture carries how long it took, and the tile and viewer s
         const block = studio.slice(at, studio.indexOf('});', at));
         assert.match(block, /\.\.\.tookSince\(tookFrom\),/, `${prefix} carries its time`);
     }
+});
+
+test('an upscale says so ON the picture, and takes the place of what it upscaled', () => {
+    // 2026-09-11: pressing Upscale used to put a spinner in the bottom-right
+    // corner of the window — feedback that named no picture — and drop the
+    // result at the top of the session with a "it is in your library" toast.
+    // Both halves moved onto the subject.
+    const studio = read('src/studios/ImageStudio.jsx');
+    const at = studio.indexOf('const upscaleEntry = async');
+    assert.ok(at > 0);
+    const body = studio.slice(at, studio.indexOf('\n  };', at));
+
+    // The working state is keyed by the url being upscaled, because every
+    // surface drawing that picture reads it to decide whether to wear the rim.
+    assert.match(body, /s\.upscaling\.set\(entry\.url, \{ mode, startedAt: Date\.now\(\) \}\)/);
+    assert.match(body, /if \(s\.upscaling\.has\(entry\.url\)\) return;/, 'one run per picture');
+    assert.match(body, /finally \{\n\s+s\.upscaling\.delete\(entry\.url\);/, 'cleared on failure too');
+    assert.doesNotMatch(body, /toast\.loading/, 'the corner spinner is what this replaced');
+
+    // Where it lands: the source's own slot, read AFTER the await so a render
+    // that finished meanwhile has not moved it.
+    assert.match(body, /const sourceIndex = s\.history\.findIndex\(\(e\) => e\.url === entry\.url\);/);
+    assert.ok(body.indexOf('await localAI.upscale') < body.indexOf('const sourceIndex'), 'read after the run');
+    assert.match(body, /\}, null, Math\.max\(0, sourceIndex\)\);/);
+    assert.match(read('src/studios/ImageStudio.jsx'), /s\.history\.splice\(at, 0, entry\);/);
+
+    // And what shows it: whatever was showing the source. The line only fires
+    // when the result landed somewhere nobody is looking.
+    assert.match(body, /const wasViewed = s\.viewerUrl === entry\.url;/);
+    assert.match(body, /if \(wasViewed\) viewImage\(result\.url\);/);
+    assert.match(body, /const onScreen = wasViewed \|\| \(!s\.viewerUrl && s\.history\[0\]\?\.url === result\.url\);/);
+    assert.match(body, /if \(!onScreen\) toast\.success\(/);
+
+    // Three surfaces draw a result, and all three read the same map.
+    assert.match(studio, /upscalingUrls=\{s\.upscaling\}/, 'the rail');
+    assert.match(studio, /upscaling=\{stageEntry \? s\.upscaling\.get\(stageEntry\.url\) \|\| null : null\}/, 'the stage');
+    assert.match(studio, /upscaling=\{s\.upscaling\.get\(s\.viewerUrl\) \|\| null\}/, 'the viewer');
+
+    // The rim is inset: the viewer, the stage and the rail all clip their
+    // overflow, so an outward ring would be shorn off along two sides.
+    const css = read('src/styles/base.css');
+    assert.match(css, /@property --spectral-angle/);
+    assert.match(css, /\.spectral-rim::after \{[\s\S]*?inset: 0;/);
+    assert.match(css, /animation: spectral-spin [\d.]+s linear infinite, spectral-hue/);
+
+    // The viewer's rim goes on a wrapper that shrink-wraps the picture, not on
+    // the plate around it — the plate is letterboxed and the rim would trace
+    // the black bars.
+    const gallery = read('src/studios/image/GalleryAndViewer.jsx');
+    assert.match(gallery, /<div className="relative">\n\s+<img/);
+    assert.match(gallery, /\{upscaling \? <UpscaleOverlay mode=\{upscaling\.mode\} startedAt=\{upscaling\.startedAt\} \/> : null\}/);
+
+    // Reduced motion calms this indicator rather than freezing it: a loader
+    // that stops moving reads as a run that stopped running.
+    const overlay = read('src/studios/image/UpscaleOverlay.jsx');
+    assert.match(overlay, /spectral-rim hive-motion-keep/);
+    assert.match(overlay, /spectral-ring hive-motion-keep/);
 });

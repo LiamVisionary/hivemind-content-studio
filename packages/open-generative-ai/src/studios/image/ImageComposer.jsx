@@ -25,9 +25,10 @@
 // Still presentational: it reads and writes the caller's mutable engine object
 // and calls `bump()` / `persist()`, exactly as the studio did inline. No
 // generation, persistence, resume or queue logic lives here.
-import { lazy, Suspense, useState } from 'react';
+import { Suspense, useRef, useState } from 'react';
 
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../../lib/promptUtils.js';
+import { lazyChunk } from '../../lib/lazyChunk.js';
 import { runOnReadout } from '../../lib/runTargets.js';
 import { t, aspectRatioName } from '../../lib/i18n.js';
 import { ugcVariantAt } from '../../lib/ugcMode.js';
@@ -38,15 +39,106 @@ import {
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import { CompletionPingToggle } from '../../ui/CompletionPingToggle.jsx';
 import { DrawerChoice } from '../frame/AdvancedDrawer.jsx';
-import { ExploreDockItem } from '../frame/ExploreDockItem.jsx';
+import { PromptLibraryItem } from '../frame/PromptLibraryItem.jsx';
+import { PromptLibraryMenu } from '../frame/PromptLibraryMenu.jsx';
 import {
-  ComposerMeta, ComposerPanel, ComposerPrimary, ComposerPrompt, ComposerSecondary, ComposerTool,
+  ComposerMeta, ComposerPanel, ComposerPrimary, ComposerPrompt, ComposerPromptAction, ComposerSecondary, ComposerTool,
 } from '../frame/ComposerPanel.jsx';
 import { RecipeLine } from '../frame/RecipeLine.jsx';
-import { UploadPicker } from '../UploadPicker.jsx';
+import { Thumb, UploadPicker } from '../UploadPicker.jsx';
 import { CameraMenu } from './CameraMenu.jsx';
 import { ReferenceRolesMenu } from './ReferenceRolesMenu.jsx';
 import { RunOnPicker } from '../../components/RunOnPicker.jsx';
+
+/**
+ * The composer for a model whose entire request is one picture.
+ *
+ * 19 of the hosted rail's editing rows have no `prompt` field upstream at all
+ * — AI Ghibli Style's whole schema is one required `image_url`, and the
+ * upscaler, the colorizer and the background remover are the same shape. Over
+ * one of those, a prompt box, a Starters shelf, an Improve door and a Clear
+ * badge are five controls that read nothing, so the composer collapses to the
+ * single input the press actually takes.
+ *
+ * It is an EMPTY STATE, not a label and a button pushed to opposite edges of a
+ * wide bar: the whole area is the target, centred, and it takes a drop as
+ * readily as a click. `data-upload-picker` is the frame's own guard — the
+ * composer's drop handler skips anything inside one, so a file dropped here is
+ * attached once rather than twice.
+ *
+ * A picture already attached is kept rather than asked for again — switching
+ * to this model from an edit lane should not throw away what is on screen —
+ * and the X puts the door back so another can take its place.
+ */
+function UploadOnlyComposer({ url, busy = false, onFiles, onDropData, onClear }) {
+  const inputRef = useRef(null);
+  // dragenter/dragleave fire for every child, so a boolean flickers as the
+  // pointer crosses the icon and the text. Count them (same fix UploadPicker
+  // makes for its own panel).
+  const depth = useRef(0);
+  const [over, setOver] = useState(false);
+  const take = (event) => {
+    const files = Array.from(event.target.files || []);
+    // Cleared so picking the SAME file twice still fires a change event.
+    event.target.value = '';
+    if (files.length) onFiles(files.slice(0, 1));
+  };
+  const browse = () => { if (!busy) inputRef.current?.click(); };
+
+  if (url) {
+    return (
+      <div data-upload-picker className="flex flex-col items-center gap-2 py-3">
+        <span className="relative h-24 w-24 overflow-hidden rounded-lg border border-line1 bg-bg3">
+          <Thumb src={url} alt={t('image.uploadOnlyAlt')} className="object-contain" />
+        </span>
+        <span className="flex items-center gap-1.5 text-[12.5px] text-ink2">
+          {t('image.uploadOnlyReady')}
+          <IconButton icon="x" size="sm" label={t('image.uploadOnlyClear')} onClick={onClear} />
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div
+      data-upload-picker
+      role="button"
+      tabIndex={0}
+      aria-label={t('image.uploadOnlyEmpty')}
+      onClick={browse}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); browse(); } }}
+      onDragEnter={(e) => { e.preventDefault(); depth.current += 1; setOver(true); }}
+      onDragOver={(e) => e.preventDefault()}
+      onDragLeave={() => { depth.current = Math.max(0, depth.current - 1); if (!depth.current) setOver(false); }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        depth.current = 0;
+        setOver(false);
+        onDropData?.(e.dataTransfer);
+      }}
+      className={cx(
+        'flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed py-7 transition-colors',
+        over ? 'border-honey/70 bg-honey/[0.07]' : 'border-line1 hover:border-line2 hover:bg-white/[0.02]',
+        busy && 'pointer-events-none opacity-60',
+      )}
+    >
+      <Icon name="upload" size={20} className={over ? 'text-honey' : 'text-ink3'} />
+      <span className="text-[13.5px] text-ink2">{t('image.uploadOnlyEmpty')}</span>
+      {/* The input lives INSIDE the clickable zone, so its own synthetic click
+          would bubble straight back into browse() and re-open the dialog for
+          ever. Stopped here rather than by moving the input out, which would
+          cost the zone its single owner of the file it takes. */}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onClick={(e) => e.stopPropagation()}
+        onChange={take}
+      />
+    </div>
+  );
+}
 
 // The Starters popover carries the whole shipped prompt library — the animation
 // shelf, the cast/persona prompts and the H3 character notes — which made it by
@@ -54,7 +146,7 @@ import { RunOnPicker } from '../../components/RunOnPicker.jsx';
 // Loaded when the door is pressed: the placeholder below is the same ChipButton,
 // so the row does not move, and the menu comes up already open because the click
 // that armed it IS the click that opens it.
-const SavedPromptsMenuLazy = lazy(() => import('../SavedPromptsMenu.jsx').then((m) => ({ default: m.SavedPromptsMenu })));
+const SavedPromptsMenuLazy = lazyChunk(() => import('../SavedPromptsMenu.jsx').then((m) => ({ default: m.SavedPromptsMenu })));
 
 
 export function ImageComposer({
@@ -115,11 +207,22 @@ export function ImageComposer({
   onToggleAdvanced,
   // ---- generate ----
   coupleOn,
+  // The selected model takes a picture and NOTHING else — no prompt field
+  // upstream at all. The composer becomes one upload door (UploadOnlyComposer).
+  uploadOnly = false,
+  onUploadFiles,
+  onUploadDrop,
   promptPlaceholder,
   generateLabel,
   generateBlocked,
   generateTitle,
   etaLabel,
+  // What this press costs, when the bill can be known before it is made. Only
+  // the hosted rail can say: it prices per request, and the studio quotes the
+  // exact one the composer is holding. Overrides the place's own note, which
+  // is a standing sentence about the bill ("free, stays here") rather than a
+  // figure for THIS run.
+  costLabel = '',
   onGenerate,
   onCancel,
   onNewPrompt,
@@ -168,7 +271,7 @@ export function ImageComposer({
   // runs, and the note runOnReadout writes for the picker ("free, stays here",
   // "$0.42/hr") — trimmed to its first clause so a mono readout can hold it.
   const runOnShown = runOn.isAutomatic ? (runOn.automatic?.target || runOn.value) : runOn.value;
-  const runCost = String(runOnReadout(runOnShown).note || '').split(',')[0].trim();
+  const runCost = costLabel || String(runOnReadout(runOnShown).note || '').split(',')[0].trim();
   const metaLabel = etaLabel ? `~${etaLabel}${runCost ? ` · ${runCost}` : ''}` : '';
 
   // The two actions that belong to references once some are attached: "who is
@@ -197,7 +300,7 @@ export function ImageComposer({
           onClick={onClearReferences}
           title={t('composer.clearReferencesTitle')}
         >
-          {t('common.clearReferences')}
+          {t('common.clear')}
         </Button>
       </div>
     </>
@@ -339,6 +442,7 @@ export function ImageComposer({
           readinessFor={runOn.readinessFor}
           onFixReadiness={runOn.onFixReadiness}
           busyAction={runOn.busyAction}
+          priceContext={runOn.priceContext}
           renderTrigger={(open, toggle, readoutLabel) => (
             <button
               type="button"
@@ -361,6 +465,15 @@ export function ImageComposer({
     },
     { text: '.' },
   ];
+
+  // The same sentence with the clauses that cannot apply taken out. A model
+  // that reads only a picture makes one image, at the reference's own shape,
+  // in no style it can be told about, from the one picture above — so "Make 1
+  // image at 1:1 in no style with no references" is five readings of nothing.
+  // Where it runs stays: it is how you leave this model again. So does
+  // Advanced, which still holds the source and the model section.
+  const uploadOnlyRecipe = recipeParts.filter((part) => !part.key || part.key === 'runOn')
+    .filter((part) => part.text !== 'Make' && part.text !== 'at' && part.text !== 'in' && part.text !== 'with');
 
   /* ---------------- the cards that open over the prompt ---------------- */
 
@@ -454,6 +567,57 @@ export function ImageComposer({
     </>
   );
 
+  /* ---------------- the door on the text itself ---------------- */
+
+  // IMPROVE: one door for "make my prompt better", with the three routes inside
+  // it instead of three chips that all say the same. It sits in the prompt box's
+  // own corner rather than in the action row below, beside the clear badge and
+  // at that badge's size: both of them act on the words in the box, and neither
+  // attaches anything to the run. `align="end"` because the corner is the box's
+  // right edge — the panel would otherwise open off the composer.
+  const improveDoor = (
+    <Menu
+      up
+      align="end"
+      width="w-64"
+      trigger={(open, toggle) => (
+        <ComposerPromptAction
+          icon="wand"
+          label={t('composer.improve')}
+          title={t('composer.improveTitle')}
+          active={open}
+          onClick={toggle}
+        />
+      )}
+    >
+      {(close) => (
+        <>
+          <MenuItem
+            icon="sparkles"
+            disabled={!hasPrompt}
+            title={hasPrompt ? undefined : helperDisabledTitle}
+            onClick={() => { s.localPromptHelperOpen = true; bump(); close(); }}
+          >
+            Refine with the prompt helper
+          </MenuItem>
+          {helper ? (
+            <MenuItem
+              icon="wand"
+              disabled={s.promptHelper.busy || !hasPrompt}
+              title={hasPrompt ? undefined : helperDisabledTitle}
+              onClick={() => { onRunWorkflowHelper(); close(); }}
+            >
+              {helper.label || "This model's own helper"}
+            </MenuItem>
+          ) : null}
+          <MenuItem icon="plus" onClick={() => { s.enhancerOpen = true; bump(); close(); }}>
+            Add style tags
+          </MenuItem>
+        </>
+      )}
+    </Menu>
+  );
+
   /* ---------------- the action row's doors ---------------- */
 
   const tools = (
@@ -477,47 +641,6 @@ export function ImageComposer({
         label={t('composer.attach')}
         footer={refCount > 0 ? referenceActions() : null}
       />
-
-      {/* Improve: one door for "make my prompt better", with the three routes
-          inside it instead of three chips that all say the same. */}
-      <Menu
-        up
-        width="w-64"
-        trigger={(open, toggle) => (
-          <ComposerTool
-            icon="wand"
-            label={t('composer.improve')}
-            active={open}
-            onClick={toggle}
-          />
-        )}
-      >
-        {(close) => (
-          <>
-            <MenuItem
-              icon="sparkles"
-              disabled={!hasPrompt}
-              title={hasPrompt ? undefined : helperDisabledTitle}
-              onClick={() => { s.localPromptHelperOpen = true; bump(); close(); }}
-            >
-              Refine with the prompt helper
-            </MenuItem>
-            {helper ? (
-              <MenuItem
-                icon="wand"
-                disabled={s.promptHelper.busy || !hasPrompt}
-                title={hasPrompt ? undefined : helperDisabledTitle}
-                onClick={() => { onRunWorkflowHelper(); close(); }}
-              >
-                {helper.label || "This model's own helper"}
-              </MenuItem>
-            ) : null}
-            <MenuItem icon="plus" onClick={() => { s.enhancerOpen = true; bump(); close(); }}>
-              Add style tags
-            </MenuItem>
-          </>
-        )}
-      </Menu>
 
       {/* Starters: quick prompts, the UGC block and the saved library are
           sections of ONE menu — and the library is the heaviest thing on this
@@ -594,8 +717,7 @@ export function ImageComposer({
           that belongs where its outcome is felt rather than at the bottom of a
           tuning panel.
           17rem rather than the old w-60: the library's row is the longest label
-          in here, and it lost its last word to the ellipsis as soon as the
-          selected check took 24px off the line. */}
+          in here, and it lost its last word to the ellipsis at that width. */}
       <Menu
         up
         width="w-[17rem]"
@@ -613,8 +735,9 @@ export function ImageComposer({
           <>
             {/* The prompt library reads first: like the starters door it writes
                 the box, where the two below it change what the next press does.
-                It kept its own toggle semantics, so it does not close(). */}
-            <ExploreDockItem />
+                Its panel opens over this menu's own button (PromptLibraryMenu,
+                mounted below), so like Camera it closes the menu behind it. */}
+            <PromptLibraryItem close={close} />
             <MenuItem
               icon="camera"
               meta={cameraArmed ? `${cameraRig.focal}mm · ${cameraRig.aperture}` : ''}
@@ -641,6 +764,11 @@ export function ImageComposer({
         )}
       </Menu>
 
+      {/* The prompt library's popover, anchored where the "more" button sits —
+          it used to be a fixed panel in the window's top-right corner, a screen
+          away from the row that opened it. Mounts itself when that row asks. */}
+      <PromptLibraryMenu />
+
       {/* The camera rig's own popover, anchored where the "more" menu's Camera
           item sat. Mounted only while it is open — the studio owns that flag, so
           ?page=cinema still routes straight into it (takeComposerMenuRequest)
@@ -661,7 +789,15 @@ export function ImageComposer({
   return (
     <ComposerPanel
       above={above}
-      prompt={coupleOn ? (
+      prompt={uploadOnly ? (
+        <UploadOnlyComposer
+          url={s.uploadedImageUrls[0] || ''}
+          busy={Boolean(s.composerAttaching)}
+          onFiles={onUploadFiles}
+          onDropData={onUploadDrop}
+          onClear={onClearReferences}
+        />
+      ) : coupleOn ? (
         <div className="flex items-center gap-2 py-1 text-[13px] text-ink2">
           <Icon name="info" size={14} className="shrink-0 text-ink3" />
           Couple mode is on — set the character prompts in the settings panel; they compose into one generation.
@@ -673,8 +809,11 @@ export function ImageComposer({
           value={s.prompt}
           onChange={(e) => setPromptValue(e.target.value)}
           // The small door, in the box's own corner: empties this box and
-          // nothing else. Start fresh (in `more`) is the big one.
+          // nothing else. Start fresh (in `more`) is the big one. Two presses:
+          // the first turns it into a pill that says Clear.
           onClear={onClearPrompt}
+          // And Improve beside it, at the same size.
+          corner={improveDoor}
           // Cmd/Ctrl+Enter generates, same guards as the button.
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -686,12 +825,12 @@ export function ImageComposer({
       )}
       recipe={(
         <RecipeLine
-          parts={recipeParts}
+          parts={uploadOnly ? uploadOnlyRecipe : recipeParts}
           advancedOpen={advancedOpen}
           onToggleAdvanced={onToggleAdvanced}
         />
       )}
-      tools={tools}
+      tools={uploadOnly ? null : tools}
       meta={!s.generating && metaLabel ? (
         <ComposerMeta title={t('composer.etaTitle')}>{metaLabel}</ComposerMeta>
       ) : null}

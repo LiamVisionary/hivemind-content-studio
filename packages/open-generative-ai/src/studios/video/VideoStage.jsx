@@ -63,7 +63,7 @@ const joinDot = (...parts) => parts.filter(Boolean).join(' · ');
  * The clip itself. A leaf because `useMediaSrc` decrypts through the vault and
  * a hook cannot be called conditionally — mounting the leaf is the condition.
  */
-function StageClip({ url, unmuted, hasAudio, onNode, onTiming }) {
+function StageClip({ url, unmuted, hasAudio, onNode, onTiming, onPlayingChange, onMutedChange }) {
   const src = useMediaSrc(url);
   const report = (event) => {
     const node = event.currentTarget;
@@ -81,7 +81,11 @@ function StageClip({ url, unmuted, hasAudio, onNode, onTiming }) {
       <video
         ref={onNode}
         src={src}
-        controls controlsList="nodownload"
+        // No `controls`: the studio's own bar is the transport (StagePlayerBar),
+        // and the native strip auto-hid during playback while the bar above it
+        // kept reserving its space — which read as an unexplained gap of video.
+        // controlsList="nodownload" went with it; downloading is the action
+        // column's job, which honours the studio's download settings.
         loop
         autoPlay
         // `unmuted` — the clip reached the canvas through a user gesture (a rail
@@ -91,9 +95,12 @@ function StageClip({ url, unmuted, hasAudio, onNode, onTiming }) {
         // started silent gave no cue that there was any.
         muted={!unmuted}
         playsInline
-        onLoadedMetadata={report}
+        onLoadedMetadata={(event) => { report(event); onMutedChange?.(event.currentTarget.muted); }}
         onDurationChange={report}
         onTimeUpdate={report}
+        onPlay={() => onPlayingChange?.(true)}
+        onPause={() => onPlayingChange?.(false)}
+        onVolumeChange={(event) => onMutedChange?.(event.currentTarget.muted)}
         className="h-full w-full bg-bg0 object-contain"
       />
       {hasAudio ? (
@@ -183,9 +190,27 @@ export function VideoStage({
       : next));
   }, []);
 
-  // The bar is a READOUT and a shortcut, not the transport — the native
-  // controls underneath still own play, volume, speed and fullscreen. It draws
-  // where the eye already is (the artboard's chrome strip) and seeks on click.
+  // The bar IS the transport. It used to be a readout sitting 48px up to clear
+  // the browser's own control strip, but that strip auto-hides during playback
+  // — leaving the bar floating over a band of untouched video. One bar, on the
+  // edge, owning what you reach for; fullscreen stays in the action column.
+  const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(true);
+
+  const togglePlay = useCallback(() => {
+    const node = nodeRef.current;
+    if (!node) return;
+    if (node.paused) void node.play()?.catch?.(() => {});
+    else node.pause();
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    const node = nodeRef.current;
+    if (!node) return;
+    node.muted = !node.muted;
+    setMuted(node.muted);
+  }, []);
+
   const seek = useCallback((event) => {
     const node = nodeRef.current;
     const total = Number(node?.duration);
@@ -261,15 +286,17 @@ export function VideoStage({
       // Keyed on the clip so a landing render scales in: the moment the whole
       // app exists for should look like something arrived.
       <Stage key={clipUrl} aspect={aspect} className="hive-scale-in" overlay={(
-        // Zero-height carrier: it lifts the bar clear of the browser's own
-        // control strip (~40px) instead of stacking two dark bands on the same
-        // edge. StagePlayerBar pins itself to this box's bottom.
-        <div className="absolute inset-x-0 bottom-12 h-0">
+        // On the edge, not lifted: there is no second control strip to clear.
+        <div className="absolute inset-x-0 bottom-0 h-0">
           <StagePlayerBar
             time={`${clock(timing.time)} / ${clock(timing.duration)}`}
             progress={timing.duration ? (timing.time / timing.duration) * 100 : 0}
             meta={joinDot(shotLabel, clipModel)}
             onSeek={seek}
+            playing={playing}
+            onPlayPause={togglePlay}
+            muted={muted}
+            onMute={toggleMute}
           />
         </div>
       )}
@@ -279,6 +306,8 @@ export function VideoStage({
           unmuted={clipUnmuted}
           hasAudio={clipHasAudio}
           onNode={attachNode}
+          onPlayingChange={setPlaying}
+          onMutedChange={setMuted}
           onTiming={onTiming}
         />
       </Stage>

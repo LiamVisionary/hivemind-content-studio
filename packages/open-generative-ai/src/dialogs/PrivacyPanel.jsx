@@ -11,6 +11,7 @@
 // for the detail, so somebody deciding what to keep in which workspace is
 // deciding on the real boundary.
 import { toast } from 'react-hot-toast';
+import { forgetDrafts } from '../lib/draftVault.js';
 import { clearOwnerHandoff, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, SectionLabel } from '../ui/kit.jsx';
@@ -41,6 +42,11 @@ export function PrivacyPanel({ onClose }) {
     window.dispatchEvent(new Event('hivemind-owner-lock-broadcast'));
     clearOwnerHandoff();
     resetVaultSession();
+    // Unsent drafts are keyed to this BROWSER, not to the workspace that wrote
+    // them, so the next workspace would open tab 1 holding the last one's
+    // words. Deliberately leaving for another workspace is the one moment that
+    // is unambiguous, so the drafts and the key that opens them go here.
+    await forgetDrafts();
     try {
       await fetch('/api/owner/lock', { method: 'POST' });
     } catch {

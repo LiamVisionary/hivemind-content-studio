@@ -156,6 +156,51 @@ function threeChoices(plan) {
 /* Spend                                                              */
 /* ------------------------------------------------------------------ */
 
+// The gateway transport's single purse: the worker bills HivemindOS credit
+// whichever marketplace the box came from, so there is no marketplace to top up
+// at — the app's own checkout is the door.
+const GATEWAY_PURSE = 'hivemindos';
+
+// `credit_url` is NOT reliably a URL. On the gateway transport it is a sentence
+// ("your HivemindOS account (Add credits)") and on the direct one a bare host
+// ("vast.ai", "runpod.io/console/billing"). Only the second kind is navigable,
+// and it needs a scheme before it stops resolving as a relative path.
+function billingUrl(purse) {
+  const raw = String(purse?.credit_url || '').trim();
+  if (!raw || purse?.provider === GATEWAY_PURSE || /\s/.test(raw)) return null;
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+}
+
+// Where money is added depends on who is billing. A marketplace purse tops up
+// on that marketplace. The HivemindOS purse opens the studio's own credits
+// sheet — the same one the sidebar opens — rather than starting a checkout from
+// here: that sheet is where card, USDC, wallet and plans already live, and it
+// is the only path that keeps this studio and the HivemindOS app on ONE balance.
+function addCredits(purse) {
+  const url = billingUrl(purse);
+  if (url) {
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  window.dispatchEvent(new CustomEvent('open-credits'));
+}
+
+function AddCreditsButton({ purse }) {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      icon="external"
+      onClick={() => addCredits(purse)}
+      title={billingUrl(purse)
+        ? `Opens ${purse.label}'s billing page in your browser.`
+        : 'Opens the credits sheet — the same balance the rest of the studio spends.'}
+    >
+      Add credits
+    </Button>
+  );
+}
+
 // The first thing on the page, because it is the question a bill raises. Credit
 // is per marketplace (Vast credit does not pay a RunPod bill), so the strip
 // sums the burn and names each purse underneath rather than adding purses up.
@@ -190,19 +235,33 @@ function SpendStrip({ account, rentals }) {
       <div className="h-9 w-px bg-line1" />
       <div className="flex flex-col gap-0.5">
         <span className="text-[12px] text-ink3">Credit left</span>
-        <b className="font-mono text-[22px] font-medium tracking-[-.01em] text-ink1">{usd(credit)}</b>
+        <div className="flex items-center gap-2">
+          <b className="font-mono text-[22px] font-medium tracking-[-.01em] text-ink1">{usd(credit)}</b>
+          {/* With one purse the destination is unambiguous, so the door sits on
+              the number itself. With several, credit is spendable only where it
+              sits — the button moves to each purse in the breakdown below,
+              because "add credits" is then not one action. */}
+          {purses.length === 1 ? <AddCreditsButton purse={purses[0]} /> : null}
+        </div>
       </div>
-      <div className="h-9 w-px bg-line1" />
-      <div className="flex flex-col gap-0.5">
-        <span className="text-[12px] text-ink3">That lasts about</span>
-        <b className="text-[22px] font-medium tracking-[-.01em] text-ink1">
-          {runway != null
-            ? `${runway < 10 ? runway.toFixed(1) : Math.round(runway)} hours`
-            : running > 0
-              ? (credit == null ? 'unknown' : 'no credit left')
-              : 'as long as you like'}
-        </b>
-      </div>
+      {/* A runway is credit ÷ burn, so with nothing running there is no runway
+          to report — and the slot is dropped rather than filled with a
+          reassurance. "That lasts about: as long as you like" over $1.85 is
+          true of the burn and a lie about the balance, and it is read as the
+          latter by someone one click from renting. */}
+      {running > 0 ? (
+        <>
+          <div className="h-9 w-px bg-line1" />
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[12px] text-ink3">That lasts about</span>
+            <b className="text-[22px] font-medium tracking-[-.01em] text-ink1">
+              {runway != null
+                ? `${runway < 10 ? runway.toFixed(1) : Math.round(runway)} hours`
+                : credit == null ? 'unknown' : 'no credit left'}
+            </b>
+          </div>
+        </>
+      ) : null}
       <span className="ml-auto max-w-[260px] text-[12px] leading-relaxed text-ink3">
         {running > 0 && credit == null
           ? 'A marketplace did not report its balance, so the runway above is unknown rather than unlimited.'
@@ -215,9 +274,10 @@ function SpendStrip({ account, rentals }) {
       {purses.length > 1 ? (
         <div className="flex w-full flex-wrap gap-x-4 gap-y-1 border-t border-line1 pt-3 text-[11px] text-ink3">
           {purses.map((purse) => (
-            <span key={purse.provider}>
+            <span key={purse.provider} className="inline-flex items-center gap-1">
               {purse.label}: <span className="font-mono text-ink2">{usd(purse.credit)}</span>
               {Number(purse.usd_per_hour_running) > 0 ? ` · ${usd(purse.usd_per_hour_running)}/hr` : ''}
+              <AddCreditsButton purse={purse} />
             </span>
           ))}
         </div>
@@ -346,8 +406,9 @@ function MachineRow({
 
         <div className="min-w-[150px]">
           <div className={cx('text-[13px]', failed ? 'text-danger' : 'text-ink1')}>
-            {ready ? 'Ready'
-              : paused ? (resumeBlocked ? 'Waiting on the host' : resuming ? 'Starting again' : 'Paused')
+            {tunnelDown ? 'Not connected'
+              : ready ? 'Ready'
+                : paused ? (resumeBlocked ? 'Waiting on the host' : resuming ? 'Starting again' : 'Paused')
                 : failed ? 'Could not start'
                   : provisioning ? 'Getting ready'
                     : (humanize(machine.phase) || 'Unknown')}
@@ -599,6 +660,33 @@ function LadderTable({ plan, unit, selectedClass }) {
         A pricier card is not always faster for this job — the per-{unit} column is the honest comparison.
       </small>
     </div>
+  );
+}
+
+// The machine list answers in one call; the prices behind it are one live
+// marketplace query PER TIER, so the rent half of the page is empty for a
+// noticeable beat after the rest has painted. A lone spinner there gave that
+// beat no shape — this holds the panel's real layout (heading, tier chips,
+// three cards, the rent bar) so nothing jumps when the prices land.
+function RentPanelSkeleton({ hasMachines }) {
+  return (
+    <section className="flex flex-col gap-3.5" aria-busy="true" aria-label="Loading marketplace prices">
+      <div className="flex flex-wrap items-center gap-3.5">
+        <h3 className="text-[15px] font-semibold text-ink1">{hasMachines ? 'Rent another' : 'Rent a machine'}</h3>
+        <div className="h-ctl-md w-[220px] animate-pulse rounded-md bg-bg1" />
+        <small className="text-[12px] text-ink3">Checking live marketplace prices…</small>
+      </div>
+      <div className="grid gap-3 md:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="h-[190px] animate-pulse rounded-lg border border-line1 bg-bg1" />
+        ))}
+      </div>
+      <Card className="flex items-center gap-4 border-line1 bg-bg1 p-3.5">
+        <div className="h-4 w-[280px] max-w-full animate-pulse rounded-sm bg-bg2" />
+        <span className="ml-auto" />
+        <div className="h-ctl-lg w-[150px] animate-pulse rounded-md bg-bg2" />
+      </Card>
+    </section>
   );
 }
 
@@ -1403,16 +1491,19 @@ export function GpuMachinesView({ active }) {
           ) : null}
 
           {loading ? (
-            <div className="flex flex-col gap-8">
+            // The page's own shape, held empty. Every block below is where the
+            // real one lands, so the first paint does not reflow.
+            <div className="flex flex-col gap-8" aria-busy="true" aria-label="Loading your machines">
               <Card className="h-[92px] animate-pulse bg-bg1" />
               <div className="flex flex-col gap-3">
-                <div className="flex items-center gap-2">
+                <div className="flex items-baseline gap-2">
                   <h3 className="text-[15px] font-semibold text-ink1">Your machines</h3>
-                  <Spinner size={13} className="text-honey" />
                   <small className="text-[12px] text-ink3">Reading your marketplace accounts…</small>
                 </div>
-                <Card className="h-24 animate-pulse bg-bg1" />
+                <Card className="h-[104px] animate-pulse bg-bg1" />
+                <Card className="h-[104px] animate-pulse bg-bg1 opacity-60" />
               </div>
+              <RentPanelSkeleton hasMachines={false} />
             </div>
           ) : (
             <>
@@ -1512,7 +1603,7 @@ export function GpuMachinesView({ active }) {
               ) : loadError ? (
                 <small className="text-[12px] text-ink3">Prices unavailable — {loadError}</small>
               ) : (
-                <Spinner size={18} className="text-ink2" />
+                <RentPanelSkeleton hasMachines={Boolean(rentals?.length)} />
               )}
 
               <SetupSection plans={plans} active={active} />

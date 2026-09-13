@@ -22,6 +22,11 @@
 // this Mac's work is currently landing on — shown as "Runs on: RTX 5090 ·
 // $0.42/hr" with the per-tab pin behind it as the override.
 //
+// It IS a fourth tab (RUN_TABS, below), and those are different claims. The
+// place is what routes and what bills; the tab is only what a person is asked
+// to choose between, and "runs on silicon you own" and "runs on a box costing
+// $0.42 every hour it stays attached" are not one question with one answer.
+//
 // This module holds the vocabulary, the joins and the ladder. It renders
 // nothing and fetches nothing, so both the picker and the tests apply exactly
 // the rules the studio applies.
@@ -60,6 +65,71 @@ export const RUN_PLACES = Object.freeze([
 ]);
 
 export const placeMeta = (placeId) => RUN_PLACES.find((place) => place.id === placeId) || null;
+
+/**
+ * The rented box, as a TAB.
+ *
+ * Not a fourth place: `place` is the routing identity and the bill, and a
+ * rental is still This Mac's — the gateway routes it by lane, the pin is per
+ * tab, and `PLACE_THIS_MAC` is what every caller dispatches on. What changes
+ * here is only what a person is asked to choose between. Stacked in one list,
+ * the models this Mac runs on its own silicon and the ones it can only run on a
+ * box billed by the hour were the same grey rows with a different name on the
+ * right, and the rent CTA was buried under whichever was longer.
+ */
+export const TAB_RENTAL = 'rental';
+
+/** Which tab a target belongs on. A This Mac row that a rented machine is
+ *  actually serving is the rental's; everything else is its place's. */
+export const tabOfTarget = (target) => (
+  target?.place === PLACE_THIS_MAC && target.machine ? TAB_RENTAL : (target?.place || '')
+);
+
+/**
+ * The four tabs, in the order the strip shows them.
+ *
+ * Deliberately NOT the RUN_PLACES order. That list is a ladder — cheapest and
+ * most private first — and it reads top to bottom as one page. A strip is four
+ * doors side by side with a default already open, so it is ordered the way the
+ * question is usually asked instead: the house account, the box you are paying
+ * for by the hour, this machine, then the accounts that are nobody's business
+ * but yours.
+ */
+export const RUN_TABS = Object.freeze([
+  Object.freeze({
+    id: PLACE_HIVEMINDOS, label: t('runOn.tabHivemind'), blurb: t('place.hivemindosBlurb'),
+  }),
+  Object.freeze({ id: TAB_RENTAL, label: t('runOn.tabRental'), blurb: t('runOn.rentalBlurb') }),
+  Object.freeze({ id: PLACE_THIS_MAC, label: t('runOn.tabLocal'), blurb: t('place.thisMacBlurb') }),
+  Object.freeze({ id: PLACE_ACCOUNTS, label: t('runOn.tabAccounts'), blurb: t('place.accountsBlurb') }),
+]);
+
+/** Every tab with the targets that fall on it — empties INCLUDED, because the
+ *  rental tab earns its place with nothing rented (it is where the rent CTA
+ *  lives) and only the caller knows whether it is showing that card. */
+export function runTabsFor(targets) {
+  return RUN_TABS.map((tab) => ({
+    ...tab,
+    targets: (targets || []).filter((target) => tabOfTarget(target) === tab.id),
+  }));
+}
+
+/**
+ * Which tab opens first.
+ *
+ * Local when this machine has a model it can actually run, because that is the
+ * free, private, already-here answer and the one a creator wants offered before
+ * anything that bills. Otherwise HivemindOS credits, which is the house default
+ * and the only bill a fresh install already has. Neither: the first tab holding
+ * anything, so an empty strip is never what opens.
+ */
+export function defaultRunTab(targets) {
+  const tabs = runTabsFor(targets);
+  const hasReady = (id) => tabs.some((tab) => tab.id === id && tab.targets.some((target) => target.ready));
+  if (hasReady(PLACE_THIS_MAC)) return PLACE_THIS_MAC;
+  if (tabs.some((tab) => tab.id === PLACE_HIVEMINDOS && tab.targets.length)) return PLACE_HIVEMINDOS;
+  return tabs.find((tab) => tab.targets.length)?.id || PLACE_THIS_MAC;
+}
 
 /** The rental a generation with this model would actually land on, honouring
  *  THIS TAB's pin — the same ordering the gateway applies to its requests. */
@@ -133,7 +203,8 @@ export function credentialReady(row, available = true) {
  */
 function makeTarget({
   id, provider, source, label, rating = '', ratingReason = '', accepts = null, family = '', available = true,
-  needs = '', keys = null, detail = '', machines = null, pinned = '', kind = 'image',
+  needs = '', keys = null, detail = '', machines = null, pinned = '', kind = 'image', capabilities = null,
+  hostedRoutes = null, requiresImage = false,
 }) {
   const row = { id, provider, source, accepts, family };
   const place = placeFor(row);
@@ -149,6 +220,25 @@ function makeTarget({
     family,
     accepts,
     place,
+    // What one ROW can do, when the row stands for several endpoints.
+    //
+    // The hosted rail lists an endpoint per capability: `flux-3` is four rows
+    // upstream — text-to-image, image-to-image, text-to-video, image-to-video
+    // — which are four prices and one model. The catalog collapses them, and
+    // these are the badges that say so, in the kind's own terms. Empty for
+    // every row that is only ever one thing.
+    capabilities: Array.isArray(capabilities) ? capabilities.filter(Boolean).map(String) : [],
+    // capability -> {model, usd}. The endpoint each badge stands for, and its
+    // catalogue price where it has one — ten of the rail's 538 do; the rest
+    // are quoted per request, which is what the row asks for when it is on
+    // screen. Null for every row that is not the hosted rail.
+    hostedRoutes: hostedRoutes && typeof hostedRoutes === 'object' ? hostedRoutes : null,
+    // This row cannot start from text: every capability it has takes a picture
+    // in. The hosted rail is full of these — AI Ghibli Style's whole upstream
+    // schema is one required `image_url` — and the studio used to find out at
+    // the Generate press, after a prompt had been written for a model with no
+    // prompt field. The catalog knows; now the picker and the composer do too.
+    requiresImage: Boolean(requiresImage),
     // The ONE display label for where this runs. When a rental serves the
     // model, the machine IS the place: "This Mac" would be a true sentence
     // about the lane and a false one about the hardware doing the work.
@@ -226,6 +316,13 @@ export function buildRunTargets({
         label: String(model.label || model.name || modelId),
         family: String(model.family || ''),
         accepts: Array.isArray(model.accepts) ? model.accepts : null,
+        // `hosted_routes` is capability -> {model, usd}; the keys are what
+        // this row can do in this kind.
+        capabilities: model.hosted_routes && typeof model.hosted_routes === 'object'
+          ? Object.keys(model.hosted_routes)
+          : null,
+        hostedRoutes: model.hosted_routes || null,
+        requiresImage: model.requires_image === true,
         available: provider.available !== false,
         // The provider row's own account of what it is waiting for — the
         // sentence the server wrote ("Needs a MUAPI key") and the credential
@@ -296,6 +393,11 @@ export function runTargetsFromRows(rows, { kind = 'image', machines = null, pinn
       evidence: row.evidence || '',
       ...(declared ? { place: row.place, placeLabel: row.placeLabel || target.placeLabel } : {}),
       ...(row.badge ? { badge: row.badge } : {}),
+      // An inventory that knows its own bill says so here, and runOnReadout
+      // prints it instead of guessing from the place. Restore's rented lane is
+      // the case: it lands on This Mac with no `machine` object to price, and
+      // the place's own default note is "free, stays here".
+      ...(row.note ? { note: row.note } : {}),
       ready: declared ? !blocked : (blocked ? false : target.ready),
       reason: blocked && row.unavailableReason ? row.unavailableReason : (declared ? '' : target.reason),
     };
@@ -377,9 +479,14 @@ export function runOnReadout(target, { reason = '', automatic = false } = {}) {
   if (!target) {
     return { place: t('runOn.nowhere'), model: '', note: t('runOn.nothingRuns'), automatic: false };
   }
+  // `target.note` is for an inventory that knows its own bill and is not a
+  // rented MACHINE this app booked. Restore's lanes are the case: a paid lane
+  // is somebody else's card reached through this Mac, so it lands on This Mac
+  // with no `machine` object — and without this it fell through to "free,
+  // stays here", which put the word FREE on the row that bills by the hour.
   const note = target.machine
     ? hourly(target.machine)
-    : (reason || (target.place === PLACE_THIS_MAC ? t('runOn.freeStaysHere') : ''));
+    : (reason || target.note || (target.place === PLACE_THIS_MAC ? t('runOn.freeStaysHere') : ''));
   return { place: target.placeLabel || t('place.thisMac'), model: target.label, note, automatic: Boolean(automatic) };
 }
 
@@ -392,6 +499,95 @@ export function readoutText(readout) {
     : [readout.place];
   const head = parts.filter(Boolean).join(' · ');
   return readout.note ? `${head} — ${readout.note}` : head;
+}
+
+/**
+ * One group's rows, split by the ACCOUNT they run on, in the order they came.
+ *
+ * A place can hold several accounts — "Your accounts" is MUAPI and OpenAI and
+ * xAI and Higgsfield at once — and an account reachable two ways (a key and a
+ * sign-in) is two of them, because they are repaired differently. The two
+ * halves of the key are exactly what `makeTarget` already writes: the place
+ * label and, where there is a sibling, which door this row goes through.
+ *
+ * Rows are grouped so that whatever is true of an ACCOUNT can be said once
+ * for the account instead of once per model. On this machine MUAPI serves 125
+ * of them, and "This machine has no MUAPI key yet…" was printed under every
+ * single row, with its own Add key button, 125 times.
+ */
+export function accountRunsOf(targets) {
+  const runs = [];
+  const byKey = new Map();
+  for (const target of targets || []) {
+    const key = `${target.provider}:${target.credentialLabel || ''}`;
+    let run = byKey.get(key);
+    if (!run) {
+      run = { key, label: target.placeLabel || '', credentialLabel: target.credentialLabel || '', targets: [] };
+      byKey.set(key, run);
+      runs.push(run);
+    }
+    run.targets.push(target);
+  }
+  return runs;
+}
+
+/**
+ * The one thing true of every row in an account, when there IS one.
+ *
+ * Returns the shared readiness only when the account holds more than one row
+ * and every row is blocked on exactly the same thing with exactly the same
+ * repair — which is the case this exists for, and is not the case for an
+ * account whose models fail for different reasons. Null otherwise, and each
+ * row keeps its own block.
+ */
+export function sharedAccountReadiness(targets, readinessFor) {
+  const rows = targets || [];
+  if (rows.length < 2 || typeof readinessFor !== 'function') return null;
+  const first = readinessFor(rows[0]);
+  // Not only the states that BLOCK. "Sign-in status unknown — Check again"
+  // does not stop a press, and it was still printed three times under three
+  // xAI rows with three identical buttons. Whether it blocks decides whether
+  // the models fold away (below), not whether it is said once.
+  if (!first || first.state === 'ready') return null;
+  const identity = (readiness) => (readiness ? [
+    readiness.state, readiness.label, readiness.detail,
+    readiness.action?.kind || '', readiness.action?.key || '', readiness.action?.provider || '',
+  ].join('\u0000') : '');
+  const wanted = identity(first);
+  return rows.every((target) => identity(readinessFor(target)) === wanted) ? first : null;
+}
+
+/**
+ * One group's accounts, the usable ones first, each carrying whatever is true
+ * of the whole account.
+ *
+ * Order matters more than it looks. On this machine MUAPI serves 125 of the
+ * 137 models in "Your accounts" and holds no key, so listing accounts in the
+ * order they arrive buried every OTHER account's Add key button 125 rows
+ * down the list — the Higgsfield one was off the bottom of the panel. An
+ * account you can use comes first because it is the answer; an account that
+ * needs setting up comes next, with its own door, and they end up together.
+ */
+export function accountSectionsOf(targets, readinessFor) {
+  const runs = accountRunsOf(targets).map((run) => {
+    const shared = sharedAccountReadiness(run.targets, readinessFor);
+    return {
+      ...run,
+      // What the account says once, above its models.
+      shared,
+      // …and whether that stops every press. Only then are the models folded:
+      // an account whose sign-in status is merely unknown might still run,
+      // so its rows stay where a person can reach them.
+      blocked: shared?.blocks ? shared : null,
+    };
+  });
+  // Ordered by whether the account can RUN something, not by whether its
+  // state happened to be hoisted. A one-model account is never hoisted (one
+  // row is not a repetition) and was sorting above the grouped ones purely
+  // for that reason, which put an unusable account at the top.
+  const canRun = (run) => run.targets.some((target) => target.ready && !readinessFor?.(target)?.blocks);
+  const usable = runs.filter(canRun);
+  return [...usable, ...runs.filter((run) => !canRun(run))];
 }
 
 /**

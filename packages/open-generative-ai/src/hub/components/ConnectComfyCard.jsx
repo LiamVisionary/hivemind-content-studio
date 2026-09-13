@@ -29,7 +29,7 @@ function LaneRow({ lane, onDetach, busy }) {
         <div className="flex items-center gap-2">
           <span className="truncate text-[12px] font-semibold text-ink1">{lane.label}</span>
           <Pill tone={lane.reachable ? 'ok' : 'neutral'} dot>
-            {lane.reachable ? t('setup.comfyAnswering') : t('setup.comfyNotAnswering')}
+            {lane.reachable ? t('setup.comfyAnswering') : t('common.notConnected')}
           </Pill>
           {lane.attached ? <Pill tone="honey">{t('setup.comfyAttached')}</Pill> : null}
         </div>

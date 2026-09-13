@@ -286,6 +286,36 @@ const PATHS = {
     </>
   ),
   cloud: <path d="M17.5 19a4.5 4.5 0 0 0 .9-8.9 7 7 0 0 0-13.7 1.8A4 4 0 0 0 6 19h11.5" />,
+  // The credit sheet's four rails need four faces: a card, a wallet, an
+  // envelope for the code that backs an account up, and a coin for the balance
+  // itself. Nothing else in the app had a use for them until now.
+  card: (
+    <>
+      <rect x="2" y="5" width="20" height="14" rx="3" />
+      <path d="M2 10h20" />
+      <path d="M6 15h4" />
+    </>
+  ),
+  wallet: (
+    <>
+      <path d="M3 7a2 2 0 0 1 2-2h12v4" />
+      <path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2H5" />
+      <circle cx="16.5" cy="13" r="1.2" fill="currentColor" stroke="none" />
+    </>
+  ),
+  mail: (
+    <>
+      <rect x="2" y="4" width="20" height="16" rx="3" />
+      <path d="m3 7 8.2 5.6a1.4 1.4 0 0 0 1.6 0L21 7" />
+    </>
+  ),
+  coin: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v10" />
+      <path d="M14.8 9.4A3 3 0 0 0 12 8h-.3a2.2 2.2 0 0 0-.3 4.4h1.2a2.2 2.2 0 0 1-.3 4.4H12a3 3 0 0 1-2.8-1.4" />
+    </>
+  ),
   shield: (
     <>
       <path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z" />
@@ -296,6 +326,12 @@ const PATHS = {
     <>
       <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
       <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
     </>
   ),
   history: (

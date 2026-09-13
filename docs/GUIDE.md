@@ -247,19 +247,28 @@ The stage rail lets you go back; nothing is thrown away when you do.
 
 Restoration and upscaling for footage you already have, with SeedVR2.
 
+The comparison fills the window. Everything you press floats over it in one
+composer at the bottom: the clip, then a sentence saying what the render will be
+— *Restore 14 chunks at 2K with 7B FP8 on This Mac* — where every underlined
+value opens the control that sets it. **Advanced** opens the rest of the dials
+down the left; past restorations are the rail down the right.
+
 1. **Load a clip**.
-2. Press **Test 2s** first. It renders one chunk from wherever the marker is —
-   the cheap way to find out whether this model helps this footage.
-3. Look at the result four ways: **Restored**, **Original**, **Compare** (drag a
-   divider across the frame) and **Side by side**.
+2. Press **Test 2s** first. It renders one chunk from wherever the marker in the
+   sentence is — the cheap way to find out whether this model helps this footage.
+3. Look at the result four ways, from the layers door at the top right of the
+   picture: **Restored**, **Original**, **Compare** (drag a divider across the
+   frame) and **Side by side**.
 4. Then press **Restore** — the button says how many chunks that will be, and
    the price when the machine is a paid one.
 
 Every finished chunk is a checkpoint, so closing the tab or losing the machine
-costs you the chunk in flight and nothing else. When you come back, the button
-reads **Resume from chunk N**.
+costs you the chunk in flight and nothing else. The bar along the bottom of the
+picture says which chunk it is on, what has been charged so far and how long is
+left. When you come back, the button reads **Resume from chunk N**.
 
-The panel is explicit about which of three machines it is about to use:
+The sentence — and **Advanced**, in full — is explicit about which of three
+machines it is about to use:
 
 * **This Mac** — free. Chunks are kept losslessly here, so seams dissolve
   and the finish can be redone any time.

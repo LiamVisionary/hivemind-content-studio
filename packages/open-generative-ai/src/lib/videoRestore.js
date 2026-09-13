@@ -464,6 +464,11 @@ export function restoreRunTargets(lanes) {
         }
         : null,
       available: Boolean(lane.available),
+      // The bill, in the one-line readout the chip and the composer's sentence
+      // both print. A rented lane is somebody else's card reached through this
+      // Mac — it carries no `machine` object for runOnReadout to price — so
+      // without this the row read "free, stays here" while billing by the hour.
+      note: lane.available && lane.paid && !hosted ? t('runOn.rentedByTheHour') : '',
       unavailableReason: lane.available ? '' : (lane.reason || describeLane(lane)),
       // What choosing this lane actually means, and — where it matters — what
       // its VAE acceleration is doing.
@@ -489,7 +494,7 @@ export function laneReadinessFor(lanes) {
     const remedy = lane?.remedy ? remedyFor(lane.remedy) : null;
     return {
       state: 'unroutable',
-      label: t('localModels.offline'),
+      label: t('common.unavailable'),
       // The lane's own sentence is already printed on the row above it;
       // repeating it here would say it twice.
       detail: '',

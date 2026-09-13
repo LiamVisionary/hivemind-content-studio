@@ -22,7 +22,7 @@
 // what will actually run.
 import { t } from './i18n.js';
 import { pref, setPrefs } from './prefs.js';
-import { formatBytes, modelStatus } from './promptHelperRuntime.js';
+import { canSelect, formatBytes, modelStatus, preferredModelId } from './promptHelperRuntime.js';
 
 export const LOCAL = 'local';
 export const HIVEMINDOS = 'hivemindos';
@@ -313,6 +313,33 @@ export function tabCounts(payload) {
 export function startingModelId(payload, lastUsedId = '') {
   if (lastUsedId && rowFor(payload, lastUsedId)) return lastUsedId;
   return String(payload?.defaultModelId || '');
+}
+
+/**
+ * The same question for the one surface that can also LOAD a model.
+ *
+ * The prompt helper reads two things, and they answer at different moments: the
+ * catalog (every model on all three bills) and the local runtime scan (what is
+ * on this disk, what is in RAM, what will not fit). Settling on whichever
+ * arrived first is how the owner's remembered choice got lost — the local scan
+ * cannot SEE a HivemindOS or account model, so it read a remembered one as
+ * "gone from disk" and quietly answered with a local model instead. Both reads,
+ * or neither.
+ */
+export function startingModelIdWithRuntime(
+  payload,
+  { lastUsedId = '', runtimeModels = [], loadedId = '' } = {},
+) {
+  // The owner's choice wins wherever it still exists — including on a bill this
+  // machine's scan cannot see. One exception: a LOCAL model that cannot be
+  // loaded right now is a padlock, not a choice.
+  if (lastUsedId && rowFor(payload, lastUsedId)) {
+    const local = (runtimeModels || []).find((row) => row.id === lastUsedId);
+    if (!local || canSelect(local, { unloadOthers: true })) return lastUsedId;
+  }
+  // Otherwise the machine decides, local first: one already in RAM, else one
+  // that fits, and only then the server's suggestion (which may be a cloud row).
+  return preferredModelId(runtimeModels, { loadedId }) || String(payload?.defaultModelId || '');
 }
 
 /* ------------------------------------------------------------------ cost */

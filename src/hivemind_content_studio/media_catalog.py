@@ -28,6 +28,13 @@ class MediaModel:
     supports_loras: bool = False
     compatible_base_models: tuple[str, ...] = ()
     ingredient_inputs: dict | None = None
+    # The lane a prompt-only run goes to when this workflow's conditioning is
+    # absent. An IC-LoRA ingredients graph reads a reference sheet; with no
+    # sheet there is nothing to condition on, so the run belongs on the family's
+    # plain text-to-video lane instead of being refused. Declared per workflow
+    # rather than inferred from the family: which build counts as "plain" is a
+    # checkpoint decision the registry owns.
+    text_to_video_workflow: str = ""
     # How many reference pictures / videos / audio clips the workflow's graph
     # actually wired (MiniMax H3 Reference mode). The studio sizes its
     # References panel from this instead of hardcoding the counts.
@@ -80,6 +87,16 @@ class MediaModel:
     # which workflows need a picture before it offers them for a text-only
     # /video-gen. False on a built-in fallback row, which does not know.
     requires_image: bool = False
+    # A hosted row stands for one MODEL, not one endpoint.
+    #
+    # The HivemindOS media gateway lists `flux-3` four times — text-to-image,
+    # image-to-image, text-to-video, image-to-video — which are four prices
+    # and one model. The studio shows one row with its capabilities as badges
+    # and picks the endpoint from what the composer actually has attached;
+    # this is that map, ``capability -> {model, usd}``, where `usd` is a fixed
+    # catalogue price when the model has one (10 of 538 do) and None when it
+    # is quoted per request. None on every non-hosted row.
+    hosted_routes: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -179,9 +196,11 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
         ("google-imagen4", ("reference",)),
         ("nano-banana-pro-edit", ("reference",)),
     )),
-    MediaProviderModels("hivemindos-hosted-media", "HivemindOS hosted", "image", (
-        MediaModel("automatic", "Automatic hosted model", ("reference",), None, "hosted catalog schema"),
-    )),
+    # Models come from the live gateway (see _hosted_media_models); the tuple
+    # is empty because there is nothing honest to hardcode. It used to hold one
+    # synthetic row called "Automatic hosted model", which is what the picker
+    # showed under HivemindOS while 538 real models went unlisted.
+    MediaProviderModels("hivemindos-hosted-media", "HivemindOS hosted", "image", ()),
     MediaProviderModels("xai-imagine-api", "xAI · Imagine API", "video", (
         MediaModel("grok-imagine-video", "Grok Imagine Video", ("start",), 1),
     )),
@@ -212,9 +231,7 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
         ("veo3.1-image-to-video", ("start", "reference")),
         ("vidu-q2-reference", ("reference",)),
     )),
-    MediaProviderModels("hivemindos-hosted-media", "HivemindOS hosted", "video", (
-        MediaModel("automatic", "Automatic hosted model", ("start", "end", "reference"), None, "hosted catalog schema"),
-    )),
+    MediaProviderModels("hivemindos-hosted-media", "HivemindOS hosted", "video", ()),
 )
 
 
@@ -325,6 +342,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
             supports_loras=bool(workflow.get("supports_loras")),
             compatible_base_models=tuple(str(value) for value in workflow.get("compatible_base_models", []) if str(value).strip()),
             ingredient_inputs=dict(workflow.get("ingredient_inputs")) if isinstance(workflow.get("ingredient_inputs"), dict) else None,
+            text_to_video_workflow=str(workflow.get("text_to_video_workflow") or "").strip(),
             reference_slots=dict(workflow.get("reference_slots")) if isinstance(workflow.get("reference_slots"), dict) else None,
             aspect_ratios=tuple(str(value) for value in workflow.get("aspect_ratios", []) if str(value).strip()),
             default_duration_seconds=float(defaults["duration_seconds"]) if defaults.get("duration_seconds") is not None else None,
@@ -343,6 +361,91 @@ def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, 
     return _media_studio_registry(status)[0]
 
 
+# What a hosted row is allowed to be sent, beside the prompt. Only the knobs
+# the gateway demonstrably reads: a live quote of the same request moves with
+# `duration` and `resolution` (flux-3-text-to-video: $0.94 at 3s, $1.56 at 5s,
+# $3.13 at 10s; $1.56 at 720p, $2.63 at 1080p), and its provider translation
+# normalises `aspect_ratio` and `seed` generically.
+_HOSTED_ACCEPTS = {"image": ("prompt", "aspect_ratio", "seed"), "video": ("prompt", "aspect_ratio", "duration", "resolution", "seed")}
+# Which studio field each capability's extra input lands in.
+_HOSTED_INPUT_ACCEPTS = {"image": "image_url", "video": "video_url", "audio": "audio_url"}
+# The reference role a picture plays, per kind: a still handed to an image
+# model is a REFERENCE it edits, and one handed to a video model is the frame
+# it STARTS from.
+_HOSTED_IMAGE_ROLE = {"image": "reference", "video": "start"}
+
+
+def _hosted_media_models(kind: str) -> tuple[tuple[MediaModel, ...], bool]:
+    """The hosted rail's models, one row per model rather than per endpoint.
+
+    Live from the gateway's public catalogue, remembered across a blink. The
+    tuple is empty only when nothing has ever answered — never a placeholder,
+    because a row standing in for 135 real ones is worse than an honest gap.
+    """
+    from .hivemindos_hosted_media import (
+        CAPABILITY_INPUT, cached_hosted_media_catalog, consolidate_hosted_models,
+        hosted_endpoint_refused, hosted_price_usd,
+    )
+
+    catalog, live = cached_hosted_media_catalog()
+    if catalog is None:
+        return (), False
+    # VIDEO is listed but not yet runnable from this studio: the clip path
+    # (modelRunner.clipRouteFor) serves the local Media Studio lane and
+    # nothing else, so every hosted clip row would be a greyed line saying so
+    # — 293 of them, which is a worse Hivemind tab than the one placeholder it
+    # replaced. Held back until the hosted clip lane is wired (submit, poll,
+    # adopt through /api/media/managed); the STILLS half is complete and
+    # shipping. One line to undo.
+    if kind == "video":
+        return (), live
+    models: list[MediaModel] = []
+    for row in consolidate_hosted_models(catalog["models"]).get(kind, []):
+        # A route the rail refuses to price is one it cannot RUN either —
+        # generate goes through the same quote — so it is not an endpoint,
+        # and a row with no endpoints left is not a model. Seven of the
+        # catalogue's 135 image rows are free local tools the gateway has no
+        # route for; listing them offers a press that can only fail.
+        routes: dict = {
+            capability: {**route, "usd": route.get("usd") or hosted_price_usd(route["model"])}
+            for capability, route in row["routes"].items()
+            if not hosted_endpoint_refused(route["model"])
+        }
+        if not routes:
+            continue
+        inputs = {CAPABILITY_INPUT[capability] for capability in routes if CAPABILITY_INPUT.get(capability)}
+        accepts = list(_HOSTED_ACCEPTS[kind]) + [_HOSTED_INPUT_ACCEPTS[name] for name in sorted(inputs) if name in _HOSTED_INPUT_ACCEPTS]
+        takes_picture = "image" in inputs
+        models.append(MediaModel(
+            id=row["id"],
+            label=row["label"],
+            reference_roles=(_HOSTED_IMAGE_ROLE[kind],) if takes_picture else (),
+            max_reference_images=1 if takes_picture else 0,
+            limit_source="HivemindOS hosted media catalog",
+            accepts=tuple(accepts),
+            family="hivemindos-hosted",
+            aspect_ratios=("1:1", "16:9", "9:16", "4:3", "3:4"),
+            # True only when EVERY capability here needs one. A consolidated
+            # row that also does text-to-video does not require a picture.
+            requires_image=all(CAPABILITY_INPUT.get(capability) for capability in routes),
+            description=_hosted_description(routes),
+            hosted_routes=routes,
+        ))
+    return tuple(models), live
+
+
+_CAPABILITY_WORDS = {
+    "text-to-image": "text to image", "image-to-image": "image editing",
+    "text-to-video": "text to video", "image-to-video": "image to video",
+    "video-to-video": "video to video", "audio-to-video": "audio to video",
+}
+
+
+def _hosted_description(routes: dict) -> str:
+    words = [_CAPABILITY_WORDS[capability] for capability in routes if capability in _CAPABILITY_WORDS]
+    return f"Billed to HivemindOS credits - {', '.join(sorted(words))}." if words else ""
+
+
 def media_catalog() -> dict[str, list[dict]]:
     readiness = {row["id"]: row for row in provider_report()}
     result: dict[str, list[dict]] = {"image": [], "video": []}
@@ -350,6 +453,8 @@ def media_catalog() -> dict[str, list[dict]]:
         status = readiness.get(provider.id, {})
         if provider.id == "media-studio-mcp" and provider.kind == "video":
             models, registry_live = _media_studio_registry(status)
+        elif provider.id == "hivemindos-hosted-media":
+            models, registry_live = _hosted_media_models(provider.kind)
         else:
             models, registry_live = provider.models, True
         result[provider.kind].append({

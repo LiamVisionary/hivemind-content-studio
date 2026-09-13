@@ -21,10 +21,11 @@ import { useState } from 'react';
 import {
   ACCOUNTS, ALL, accountConnected, accountsOf, costLine, creditsHome, detailLine,
   DRAFT_USAGE, featuredRows, HIVEMINDOS, hiddenVariants, isFreeCloudModel,
-  isPaidCloudModel, modelsForAccount, modelsForTab, rateLine, recommendedId,
+  isPaidCloudModel, LOCAL, modelsForAccount, modelsForTab, rateLine, recommendedId,
   rememberModelUse, remedyFor, rowFor, SECTIONS, sectionLine, sourceState, tabCounts,
 } from '../lib/textModels.js';
 import { t } from '../lib/i18n.js';
+import { Icon } from '../ui/icons.jsx';
 import { Button, Pill, TextInput, cx } from '../ui/kit.jsx';
 
 // Enough rows to browse without turning the picker into a page of its own.
@@ -268,6 +269,268 @@ function ModelRow({ model, selected, recommended, showGroup, usage, onPick, acti
   );
 }
 
+/**
+ * One model in the COMPACT list: a leading state glyph, the name, the one line
+ * that differs, and the price.
+ *
+ * The glyph is the whole difference from `ModelRow`. In a popover 440px wide
+ * there is no room for a section header per bill, so the rows are grouped by
+ * READINESS instead — and readiness is exactly what a glyph can carry: a tick
+ * for the one that is chosen, a padlock for one this machine cannot load, and a
+ * blank column for the rest so every name still starts on the same pixel.
+ */
+function CompactRow({ model, selected, badge, blocked, usage, onPick, action }) {
+  const pick = () => { if (!blocked) { rememberModelUse(model.id); onPick(model.id); } };
+  const detail = blocked || detailLine(model);
+  const cost = costLine(model, usage);
+  const free = /^free/i.test(cost);
+  return (
+    <div
+      role="radio"
+      // Focusable even when it cannot be picked: `aria-disabled` says it is
+      // unavailable, and the row's own line is where the reason — and the
+      // repair — is written. `tabIndex={-1}` hid both from the keyboard.
+      tabIndex={0}
+      aria-checked={selected}
+      aria-disabled={blocked ? true : undefined}
+      onClick={pick}
+      onKeyDown={(event) => {
+        // Only the row itself: the caller puts a real <button> in here (the
+        // prompt helper's Unload), and its Enter bubbles up — pressing Unload
+        // from the keyboard used to select the model instead of unloading it.
+        if (event.target !== event.currentTarget) return;
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); pick(); }
+      }}
+      className={cx(
+        'flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 text-left transition-colors',
+        blocked
+          ? 'cursor-default border-transparent'
+          : selected
+            ? 'cursor-pointer border-honey/60 bg-honey-tint'
+            : 'cursor-pointer border-line1 bg-bg2 hover:border-line2',
+      )}
+    >
+      <span className="grid h-3.5 w-3.5 shrink-0 place-items-center">
+        {selected ? <Icon name="check" size={14} className="text-honey" />
+          : blocked ? <Icon name="lock" size={13} className="text-ink3" /> : null}
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-px">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className={cx('truncate text-[12.5px] font-semibold', blocked ? 'text-ink3' : 'text-ink1')}>
+            {model.name || model.id}
+          </span>
+          {badge ? <Pill tone="honey" className="!h-[17px] shrink-0 !px-[7px] !text-[9.5px]">{badge}</Pill> : null}
+        </span>
+        {detail ? <span className="truncate text-[10.5px] leading-snug text-ink3">{detail}</span> : null}
+      </span>
+      {/* A locked row has no price: it is not a choice, so quoting what it
+          would cost is an offer the machine cannot honour. */}
+      {blocked ? null : (
+        <span
+          className={cx('shrink-0 text-right text-[11px] font-semibold tabular-nums', free ? 'text-ok' : 'text-ink2')}
+          title={rateLine(model) || undefined}
+        >
+          {cost}
+        </span>
+      )}
+      {action ? <span className="shrink-0">{action}</span> : null}
+    </div>
+  );
+}
+
+/**
+ * The same catalog, the same repairs, in a popover instead of a panel.
+ *
+ * The prompt helper's model choice is a header pill, so its list has to fit in
+ * a 440px popover: one segmented bar of the three bills rather than four chips,
+ * rows grouped by READINESS rather than by section, and a search box that
+ * reaches every section at once because a filter you have to guess at is worse
+ * than a list you can type into.
+ *
+ * Everything that is a STATE with a repair — a source that is not available, an
+ * unconnected HivemindOS account, a provider account with no key — is the same
+ * component the full picker uses, so neither can grow a second answer to it.
+ *
+ * The caller owns the group copy and the readiness predicates (`groups`), the
+ * badge (`badgeFor`) and what makes a row unpickable (`blockedFor`): whether a
+ * model is "ready now" is a question about the caller's own resources — this
+ * machine's RAM, for the prompt helper — and not something the catalog knows.
+ */
+export function CompactModelPicker({
+  catalog, selectedId, tab, onTab, query, onQuery, onPick, onRemedy, onConnect, connecting,
+  onLink, linking, account, onAccount, keyField, onKeySave, onKeyCancel, savingKey,
+  groups = [], badgeFor = null, blockedFor = null, rowAction = null, usage = DRAFT_USAGE,
+  footer = null, listLabel = '',
+}) {
+  const counts = tabCounts(catalog);
+  const total = SECTIONS.reduce((sum, section) => sum + (counts[section.id] || 0), 0);
+  const searching = Boolean(String(query || '').trim());
+  const filter = tab || LOCAL;
+  const connected = accountConnected(catalog);
+  const selectedRow = rowFor(catalog, selectedId);
+  const state = sourceState(catalog, filter);
+  const remedy = state.available ? null : remedyFor(state.remedy);
+  // Searching reaches every bill at once: the placeholder promises all of them,
+  // and a name typed in full should find its model without the owner first
+  // guessing which of the three sections HivemindOS filed it under.
+  const listed = searching
+    ? SECTIONS.flatMap((section) => modelsForTab(catalog, section.id, query))
+    : (filter === ACCOUNTS && account
+      ? modelsForAccount(catalog, account, query)
+      : modelsForTab(catalog, filter, query));
+  const shown = listed.slice(0, VISIBLE_MODELS);
+  const held = listed.length - shown.length;
+  const pinned = !searching ? hiddenVariants(catalog, filter, filter === ACCOUNTS ? account : '') : 0;
+  // A connected account that answered with nothing is a different state from one
+  // that was never connected, and it gets its own sentence and its own button.
+  const brokenAccounts = filter === ACCOUNTS && !searching
+    ? accountsOf(catalog).filter((entry) => entry.connected && !entry.count && (!account || entry.id === account))
+    : [];
+
+  // First group whose predicate claims it; anything unclaimed falls through to
+  // an unlabelled tail rather than vanishing.
+  const bucket = (row) => groups.findIndex((group) => group.match(row));
+  const buckets = [...groups.map(() => []), []];
+  shown.forEach((row) => {
+    const index = bucket(row);
+    buckets[index === -1 ? groups.length : index].push(row);
+  });
+  // Headers earn their line only when there is more than one group to tell
+  // apart: on a cloud section every row is ready, and "Ready now" over the
+  // whole list says nothing.
+  const headed = buckets.filter((rows) => rows.length).length > 1;
+
+  return (
+    <div className="flex min-h-0 flex-col">
+      <div className="flex shrink-0 flex-col gap-2 border-b border-line1 p-2.5">
+        <TextInput
+          value={query}
+          onChange={(event) => onQuery(event.target.value)}
+          aria-label="Search models"
+          placeholder={catalog === null ? 'Search models' : `Search ${total.toLocaleString('en-US')} models`}
+          className="!h-[34px] !text-[12.5px]"
+        />
+        <div className="flex items-center gap-1 rounded-md border border-line1 bg-bg0 p-0.5" role="tablist" aria-label="Where the model runs">
+          {SECTIONS.map((section) => (
+            <button
+              key={section.id}
+              type="button"
+              role="tab"
+              aria-selected={filter === section.id}
+              // Also clears the search: while a query is typed the list spans
+              // every bill, so a segment that only moved a highlight was a
+              // control that did nothing.
+              onClick={() => { onQuery(''); onTab(section.id); }}
+              className={cx(
+                'flex h-6 flex-1 items-center justify-center gap-1 truncate rounded-[7px] px-1 text-[11px] font-semibold transition-colors',
+                filter === section.id ? 'bg-bg3 text-ink1 shadow-card' : 'text-ink2 hover:text-ink1',
+              )}
+            >
+              <span className="truncate">{section.label}</span>
+              {catalog === null ? null : (
+                <span className="shrink-0 font-normal text-ink3">{counts[section.id] ?? 0}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex max-h-[300px] min-h-0 flex-col gap-0.5 overflow-y-auto p-2">
+        {/* A catalog that has not answered yet is not a source that is down:
+            `sourceState(null, …)` reports `available: false`, and rendering that
+            as a notice flashed "this source is not available" over an empty list
+            every time the panel was opened before the fetch landed. */}
+        {catalog === null ? (
+          <p className="m-0 grid h-[200px] place-items-center text-[11px] text-ink3">Loading models…</p>
+        ) : !state.available ? (
+          // Never a sentence with nothing to press: a catalog that failed to
+          // load reports every section unavailable with no remedy named, and
+          // asking again is always a real repair.
+          <Notice remedy={remedy || remedyFor('retry')} onRemedy={onRemedy}>
+            {state.detail || 'This source is not available right now.'}
+          </Notice>
+        ) : null}
+        {catalog !== null && !connected && sourceState(catalog, HIVEMINDOS).available
+          && (filter === HIVEMINDOS || isPaidCloudModel(selectedRow)) ? (
+          <ConnectAccount
+            busy={connecting}
+            linking={linking}
+            onConnect={onConnect}
+            onLink={onLink}
+            onTopUp={() => onRemedy(remedyFor('top-up'))}
+          />
+        ) : null}
+        {catalog !== null && filter === ACCOUNTS ? (
+          <AccountStrip
+            catalog={catalog}
+            selected={account}
+            onSelect={onAccount}
+            onRemedy={onRemedy}
+            busy={savingKey}
+            showConnected
+          />
+        ) : null}
+        {filter === ACCOUNTS && keyField ? (
+          <KeyField name={keyField} busy={savingKey} onSave={onKeySave} onCancel={onKeyCancel} />
+        ) : null}
+        {brokenAccounts.map((entry) => (
+          <Notice key={entry.id} remedy={remedyFor(entry.remedy)} onRemedy={onRemedy}>
+            <b>{entry.label}</b> — {entry.detail || 'listed no models just now.'}
+          </Notice>
+        ))}
+
+        <div role="radiogroup" aria-label={listLabel || undefined} className="flex flex-col gap-0.5">
+          {buckets.map((rows, index) => {
+            if (!rows.length) return null;
+            const group = groups[index];
+            return (
+              <div key={group?.id || 'rest'} className="flex flex-col gap-0.5">
+                {headed && group ? (
+                  <div className="flex items-center gap-1.5 px-1 pb-0.5 pt-2.5 first:pt-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-ink2">{group.label}</span>
+                    {group.hint ? <span className="text-[10.5px] text-ink3">{group.hint}</span> : null}
+                  </div>
+                ) : null}
+                {rows.map((model) => (
+                  <CompactRow
+                    key={model.id}
+                    model={model}
+                    selected={selectedId === model.id}
+                    badge={badgeFor ? badgeFor(model) : null}
+                    blocked={blockedFor ? blockedFor(model) : ''}
+                    usage={usage}
+                    onPick={onPick}
+                    action={rowAction ? rowAction(model) : null}
+                  />
+                ))}
+              </div>
+            );
+          })}
+        </div>
+
+        {catalog !== null && !shown.length && state.available ? (
+          <p className="m-0 px-1 py-2 text-[11px] text-ink3">
+            {searching ? 'Nothing matches that.' : 'Nothing to offer here yet.'}
+          </p>
+        ) : null}
+        {/* Never a silent cap — neither the display limit nor the folded pins. */}
+        {held > 0 ? (
+          <p className="m-0 px-1 pt-1.5 text-[11px] text-ink3">
+            Showing {shown.length} of {listed.length} matches. Type more of the name to narrow it.
+          </p>
+        ) : null}
+        {pinned ? (
+          <p className="m-0 px-1 pt-1.5 text-[11px] text-ink3">
+            {pinned} dated and routing variant{pinned === 1 ? '' : 's'} of these models are folded away. Search for one to pick it.
+          </p>
+        ) : null}
+      </div>
+
+      {footer ? <div className="shrink-0 border-t border-line1 bg-bg0">{footer}</div> : null}
+    </div>
+  );
+}
+
 export function ModelSourcePicker({
   catalog, selectedId, tab = ALL, onTab, query, onQuery, onPick, onRemedy, onConnect, connecting,
   onLink, linking, account, onAccount, keyField, onKeySave, onKeyCancel, savingKey,
@@ -298,7 +561,8 @@ export function ModelSourcePicker({
         <TextInput
           value={query}
           onChange={(event) => onQuery(event.target.value)}
-          placeholder={`Search ${total.toLocaleString('en-US')} models`}
+          aria-label="Search models"
+          placeholder={catalog === null ? 'Search models' : `Search ${total.toLocaleString('en-US')} models`}
         />
       ) : null}
 

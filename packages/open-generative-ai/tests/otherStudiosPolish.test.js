@@ -138,7 +138,7 @@ test('the prompt helper waits for the runtime snapshot and keeps Unload out of t
     assert.match(dialog, /label=\{model\.provider === 'mtplx' \? t\('promptHelper\.stopLocalHelper'\) : tf\('promptHelper\.unloadModel', model\.name\)\}/);
     assert.equal(STRINGS['promptHelper.stopLocalHelper'], 'Stop the local helper');
     assert.equal(STRINGS['promptHelper.unloadModel']('Qwen'), 'Unload Qwen');
-    assert.match(dialog, /describeWritingFor\(\{ cast, references \}\)/);
+    assert.match(dialog, /writingForChips\(\{ cast, references \}\)/);
     assert.match(dialog, /https:\/\/github\.com\/ggml-org\/llama\.cpp\/releases/);
     assert.match(dialog, /flattenApiDetail\(payload\?\.detail \?\? payload\?\.error\)/);
 });
@@ -188,30 +188,61 @@ test('the dead preference copies are gone and MetaRow lives in one place', () =>
     assert.doesNotMatch(read('src/studios/LipSyncStudio.jsx'), /function MetaRow/);
 });
 
-test('the prompt helper offers Refine with tucked-away controls, not a revision box', async () => {
+test('the prompt helper offers Refine as one box plus one-press knobs, not a revision box', async () => {
     const dialog = read('src/dialogs/PromptHelperDialog.jsx');
     const { STRINGS } = await import('../src/lib/i18n.js');
-    // The Refine action and its knobs. The words are the table's now; what the
-    // source still has to show is that this dialog asks for them.
+    const { refineSuggestions } = await import('../src/lib/promptHelperRuntime.js');
+    // The Refine action and the box beside it. The words are the table's now;
+    // what the source still has to show is that this dialog asks for them.
     assert.match(dialog, /\{t\('composer\.refine'\)\}/);
     assert.equal(STRINGS['composer.refine'], 'Refine');
-    assert.match(dialog, /title=\{t\('promptHelper\.refinementControls'\)\}/);
-    assert.equal(STRINGS['promptHelper.refinementControls'], 'Refinement controls');
-    assert.match(dialog, /'single', label: t\('promptHelper\.singleStill'\)/);
-    assert.equal(STRINGS['promptHelper.singleStill'], 'Single still');
-    assert.match(dialog, /'more', label: t\('promptHelper\.addShots'\)/);
-    assert.equal(STRINGS['promptHelper.addShots'], 'Add shots');
-    assert.equal(STRINGS['promptHelper.guidancePlaceholder'], 'Steer it: focus more on…, add…, remove…, make … more subtle');
+    assert.equal(STRINGS['promptHelper.refinePlaceholder'], 'What do you wanna change?');
+    // The two Segmented controls became one-press suggestions. What matters is
+    // not that they are still switches but that the STRUCTURED signals survive:
+    // the server turns each into a craft sentence free text would lose, and any
+    // non-enrich pass also emits "keep the level of detail as it is", so a
+    // suggestion sent as prose would contradict itself.
+    const video = refineSuggestions({ mediaType: 'video', chained: false });
+    assert.deepEqual(video.map((entry) => entry.id), ['moreDetail', 'tighten', 'anotherShot', 'singleStill', 'timing']);
+    assert.equal(video.find((entry) => entry.id === 'moreDetail').detail, 'enrich');
+    assert.equal(video.find((entry) => entry.id === 'anotherShot').shots, 'more');
+    assert.equal(video.find((entry) => entry.id === 'singleStill').shots, 'single');
+    // The three with no knob behind them carry a spelled-out instruction, not
+    // the three-word label a person pressed.
+    for (const id of ['tighten', 'timing']) {
+        assert.ok(video.find((entry) => entry.id === id).guidance.length > 40, `${id} ships a bare label`);
+    }
+    assert.equal(STRINGS['promptHelper.suggestMoreDetail'], 'add more detail');
+    assert.equal(STRINGS['promptHelper.suggestAnotherShot'], 'add another shot');
+    assert.equal(STRINGS['promptHelper.suggestSingleStill'], 'make it a single still');
+    assert.equal(STRINGS['promptHelper.suggestMatchShot']('03'), 'match shot 03 harder');
+    // Image mode never sends shot knobs, and never offers the presses that are
+    // nothing but a shot knob — the server ignores `shots` outside video.
+    assert.match(dialog, /mediaType === 'video' \? \(refine\?\.shots \|\| 'keep'\) : 'keep'/);
+    assert.deepEqual(
+        refineSuggestions({ mediaType: 'image' }).map((entry) => entry.id),
+        ['moreDetail', 'tighten'],
+    );
+    // Matching the previous shot is only offered when there IS one: the system
+    // prompt names it through isContinuation/previousPrompt, and asking a fresh
+    // prompt to match a shot it was never shown describes nothing.
+    assert.ok(refineSuggestions({ mediaType: 'video', chained: true }).some((entry) => entry.id === 'matchShot'));
     // The wire shape the backend validates (prompt_profiles.normalize_refine).
     assert.match(dialog, /refine: refine \|\| undefined/);
-    assert.match(dialog, /detail: refineDetail/);
-    // The old model-mediated revision box is gone; the notes field replaced it.
+    assert.match(dialog, /detail: refine\?\.detail \|\| 'keep'/);
+    // The free-text box rides `refine.guidance`, NEVER the older `revision`
+    // field: the profile lock, the structure clause and the structure-loss
+    // guard are all gated on `refine is not None`, and routing the box through
+    // `revision` brings back the flattening seen live on 2026-08-24.
+    // A press and a typed note both mean "what to change", and the server has
+    // exactly one guidance field — so a press carries what is already in the
+    // box instead of throwing it away.
+    assert.match(dialog, /guidance: \[guidance\.trim\(\), \(refine\?\.guidance \|\| ''\)\.trim\(\)\]\.filter\(Boolean\)\.join/);
+    assert.doesNotMatch(dialog, /revision:/);
     assert.doesNotMatch(dialog, /Apply change/);
-    assert.doesNotMatch(dialog, /revision: revise/);
-    // The model picker is a one-line disclosure, closed once a model is settled.
+    // The model picker is a pill in the title bar with a panel behind it.
     assert.match(dialog, /setPickerOpen/);
-    // Image mode never sends shot knobs.
-    assert.match(dialog, /mediaType === 'video' \? refineShots : 'keep'/);
+    assert.match(dialog, /titleAside=\{modelPill\}/);
 });
 
 test('every hub page hides itself when another one is open, and scrolls when it is', () => {

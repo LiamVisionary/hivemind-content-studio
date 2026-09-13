@@ -15,8 +15,9 @@ import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import { runFailureRemedy } from '../../lib/failureRemedy.js';
 import {
   Button, Card, EmptyState, FailureCallout, Field, IconButton, NativeSelect, Pill, SectionLabel,
-  Segmented, Spinner, TextArea, TextInput, Toggle, cx,
+  LoadingState, Segmented, Spinner, TextArea, TextInput, Toggle, cx,
 } from '../../ui/kit.jsx';
+import { t } from '../../lib/i18n.js';
 import {
   addScene, addSimpleImages, attachmentRole, buildRunGenerationCards, capabilityNote,
   clearLoadedCanvasSetup, clearRestoredComposer, createSimpleRun, createWorkflowRun, hubState,
@@ -65,7 +66,7 @@ function RoutePickerList({ kind, close, value, onChange }) {
 
   return (
     <>
-      <div className="sticky top-0 z-10 -mx-1.5 -mt-1.5 mb-1 border-b border-line1 bg-bg1 p-1.5">
+      <div className="sticky -top-1.5 z-10 -mx-1.5 -mt-1.5 mb-1 border-b border-line1 bg-bg1 p-1.5">
         <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 px-2.5 focus-within:border-honey/60">
           <Icon name="search" size={13} className="shrink-0 text-ink3" />
           <input
@@ -707,7 +708,7 @@ function AdvancedForm({ titleRef }) {
   const catalog = s.catalog;
   const [busy, setBusy] = useState(false);
   if (!catalog) {
-    return <div className="grid flex-1 place-items-center p-8"><Spinner size={22} className="text-ink2" /></div>;
+    return <LoadingState label={t('app.loading')} />;
   }
   const roles = providerRolesForLane();
   const budget = Number(w.maxCost || 0);

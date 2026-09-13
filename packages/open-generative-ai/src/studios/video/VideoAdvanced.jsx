@@ -53,7 +53,8 @@ import {
   TextArea, TextInput, Toggle, cx,
 } from '../../ui/kit.jsx';
 import {
-  DrawerBody, DrawerChoice, DrawerDivider, DrawerRow, DrawerRunOn, DrawerSection, DrawerValue,
+  DrawerBody, DrawerChoice, DrawerDivider, DrawerHeading, DrawerRow, DrawerRunOn, DrawerSection,
+  DrawerValue,
 } from '../frame/AdvancedDrawer.jsx';
 import { aspectRatioName } from '../../lib/i18n.js';
 import { PLACE_THIS_MAC } from '../../lib/runTargets.js';
@@ -61,20 +62,6 @@ import { LocalCatalogNotice } from '../LocalCatalogNotice.jsx';
 import { LaneMemoryNotice } from '../LaneMemoryNotice.jsx';
 import { LoraSection } from '../image/LoraSection.jsx';
 import { RunOnPicker } from '../../components/RunOnPicker.jsx';
-
-// DrawerSection's heading on its own. The run-on card is full-bleed and owns
-// its own 19px inset (see DrawerRunOn), so it cannot sit inside a section
-// without being inset twice — the heading is lifted out rather than the card
-// being redrawn here in a second vocabulary.
-function DrawerHeading({ children }) {
-  return (
-    <div className="px-[19px] pb-2.5 pt-1">
-      <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-inkSoft">
-        {children}
-      </span>
-    </div>
-  );
-}
 
 // A sentence that belongs to a DrawerRow rather than to a Field: the paragraph
 // under the Task switch, and the red line naming what a head swap is still

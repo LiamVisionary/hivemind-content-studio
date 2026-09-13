@@ -1,5 +1,17 @@
+// What the prompt helper decides before it writes anything: which local models
+// are safe to load, and which model a press runs on.
+//
+// Deliberately textual: the three blocks below that grep PromptHelperDialog.jsx
+// are claims about WIRING, and this dialog has no rendered form to assert on —
+// its whole body is inside ui/Modal.jsx's createPortal, which react-dom/server
+// refuses, and every behaviour here (the two reads landing, a press held until
+// they do) exists only inside effects a server render never runs. The decision
+// itself is tested for real against the function that makes it, in
+// textModels.test.js; these three check that the dialog is still plugged into
+// it, which is the half a logic test cannot see.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
     blockedReason,
@@ -10,8 +22,10 @@ import {
     lastUsedModelId,
     modelStatus,
     preferredModelId,
+    refineSuggestions,
     rememberModelId,
     sortModels,
+    writingForChips,
 } from '../src/lib/promptHelperRuntime.js';
 
 const model = (fit, extra = {}) => ({ id: `m-${fit}`, fit, estimatedLoadBytes: 21 * 1024 ** 3, ...extra });
@@ -142,4 +156,103 @@ test('the local helper slot reads as a server, not a RAM estimate', () => {
     assert.equal(canSelect(mtplx('fits')), true);
     assert.equal(canSelect(mtplx('loading')), false);
     assert.match(blockedReason(mtplx('loading')), /Still loading/);
+});
+
+
+test('the chips say exactly what the sentence says, one fact each', () => {
+    const context = {
+        cast: [
+            { subject: 1, kind: 'persona', gender: 'female', name: '', voice: true, look: 'red coat' },
+            { subject: 2, kind: 'character', gender: 'male', name: 'Willow', voice: false, look: '' },
+        ],
+        references: { images: 3, videos: [{ useAudio: false }], audios: 0 },
+    };
+    assert.deepEqual(writingForChips(context), [
+        'Subject 1 · woman, look set, voice',
+        'Subject 2 Willow · known character',
+        '3 pictures, 1 clip',
+    ]);
+    // Same source as the sentence, so the two can never disagree about the cast.
+    assert.equal(writingForChips(context).length, describeWritingFor(context).split(' · ').length);
+    // A persona's name is vault-sealed and never reaches a chip either.
+    assert.deepEqual(writingForChips({ cast: [{ subject: 1, kind: 'persona', gender: 'male', name: 'Liam' }] }), ['Subject 1 · man']);
+    assert.deepEqual(writingForChips({}), []);
+});
+
+test('a press that outruns the model list waits for it, instead of being told to pick a model', () => {
+    // Reported 2026-09-13: the helper opened, Generate was pressed, and it said
+    // "Pick a model first." and flung the picker open — then, a second later,
+    // selected the model this browser had been using all along. The dialog was
+    // not missing a choice, it was still reading the list; saying so is the
+    // whole fix.
+    const dialog = readFileSync(new URL('../src/dialogs/PromptHelperDialog.jsx', import.meta.url), 'utf8');
+    const run = /const run = async \(\{ refine = null \} = \{\}\) => \{([\s\S]*?)\n        const ticket =/.exec(dialog);
+    assert.ok(run, 'the dialog no longer has a run() to guard');
+    const held = run[1].indexOf('pendingRunRef.current = { refine }');
+    const complaint = run[1].indexOf("promptHelper.pickModelFirst");
+    assert.ok(held >= 0, 'a press made before the reads answer is not held anywhere');
+    assert.ok(complaint > held, '"pick a model first" must come after the guard that waits for the list');
+    // What the OWNER controls is still answered immediately: an empty box is an
+    // empty box whether or not the list has arrived.
+    assert.ok(run[1].indexOf("promptHelper.writeBeforeHelper") < held);
+    // The held press is released by the effect that watches for a model...
+    assert.match(dialog, /void runRef\.current\(queued\)/);
+    // ...and never survives a close, or it would write a prompt into a dialog
+    // nobody is looking at.
+    assert.match(dialog, /if \(pendingRunRef\.current\) \{ pendingRunRef\.current = null; setBusy\(''\); \}/);
+});
+
+test('the model the dialog starts on is decided once, by both reads together', () => {
+    const dialog = readFileSync(new URL('../src/dialogs/PromptHelperDialog.jsx', import.meta.url), 'utf8');
+    // Preselecting inside the runtime scan is what lost a remembered cloud
+    // model — that scan cannot see one, so it read it as gone.
+    const refresh = /const refresh = useCallback\(async \(\) => \{([\s\S]*?)\n    \}, \[\]\);/.exec(dialog);
+    assert.ok(refresh, 'the dialog no longer has a runtime refresh');
+    assert.doesNotMatch(refresh[1], /setSelected\(/, 'the local scan must not preselect a model on its own');
+    // One decision, from both answers, derived rather than stored.
+    assert.match(dialog, /const modelChoiceSettled = sources\.catalog !== null && runtimeAnswered;/);
+    assert.match(dialog, /const activeId = selected \|\| \(modelChoiceSettled/);
+    assert.match(dialog, /startingModelIdWithRuntime\(sources\.catalog, \{/);
+    // A scan that FAILED still settles the dialog, or the pill would say
+    // "checking…" and every press would wait forever.
+    assert.match(dialog, /\} finally \{[\s\S]*?setRuntimeAnswered\(true\);/);
+});
+
+test('every one-press refinement the runtime offers has a name in the dialog', () => {
+    // The two lists are joined by id: a suggestion added to promptHelperRuntime
+    // with no matching label used to reach `SUGGESTION_LABEL[id]()` and throw.
+    const dialog = readFileSync(new URL('../src/dialogs/PromptHelperDialog.jsx', import.meta.url), 'utf8');
+    const block = /const SUGGESTION_LABEL = \{([\s\S]*?)\n\};/.exec(dialog);
+    assert.ok(block, 'the dialog no longer declares SUGGESTION_LABEL');
+    const named = new Set([...block[1].matchAll(/^\s*([A-Za-z]+):/gm)].map((m) => m[1]));
+    const offered = refineSuggestions({ mediaType: 'video', chained: true }).map((entry) => entry.id);
+    // matchShot names a shot number, so it goes through tf() at the call site.
+    const missing = offered.filter((id) => id !== 'matchShot' && !named.has(id));
+    assert.deepEqual(missing, [], 'a suggestion with no label renders as its own id');
+});
+
+test('every one-press refinement is offered only where it can land', () => {
+    const video = refineSuggestions({ mediaType: 'video' });
+    // The three the server turns into a craft sentence of its own.
+    assert.equal(video.find((entry) => entry.id === 'moreDetail').detail, 'enrich');
+    assert.equal(video.find((entry) => entry.id === 'anotherShot').shots, 'more');
+    assert.equal(video.find((entry) => entry.id === 'singleStill').shots, 'single');
+    // Every entry is a complete wire payload — normalize_refine reads all three
+    // fields, and a missing one would collapse to a default the caller did not
+    // choose rather than the one it meant.
+    for (const entry of video) {
+        assert.equal(typeof entry.detail, 'string');
+        assert.equal(typeof entry.shots, 'string');
+        assert.equal(typeof entry.guidance, 'string');
+    }
+    // `shots` is ignored outside video, so the presses that are nothing but a
+    // shot knob are not offered there — a press that does nothing is worse than
+    // no press.
+    const image = refineSuggestions({ mediaType: 'image' });
+    assert.deepEqual(image.map((entry) => entry.id), ['moreDetail', 'tighten']);
+    assert.ok(image.every((entry) => entry.shots === 'keep'));
+    // Matching the previous shot needs there to BE one.
+    assert.ok(!refineSuggestions({ mediaType: 'video', chained: false }).some((entry) => entry.id === 'matchShot'));
+    const chained = refineSuggestions({ mediaType: 'video', chained: true });
+    assert.ok(chained.find((entry) => entry.id === 'matchShot').guidance.includes('previous shot'));
 });

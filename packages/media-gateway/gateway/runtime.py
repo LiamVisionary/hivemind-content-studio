@@ -168,7 +168,10 @@ def main():
     config.COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
     if media.OUTPUT_ENCRYPTION_ENABLED:
         media.output_encryption_password(create=True)
-        migrated = media.encrypt_existing_outputs_once(max_age_seconds=0)
+        # Nothing of ours is mid-readback before the server is listening, and a
+        # lane that has not come up yet would otherwise read as "busy" and leave
+        # plaintext from the last run sitting there.
+        migrated = media.encrypt_existing_outputs_once(max_age_seconds=0, defer_to_readers=False)
         if migrated:
             print(f"[output-encryption] encrypted {migrated} existing output image(s)", flush=True)
         threading.Thread(target=media.output_encryption_sweeper, daemon=True).start()

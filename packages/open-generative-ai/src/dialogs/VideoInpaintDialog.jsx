@@ -623,7 +623,7 @@ export function VideoInpaintDialog({
                 >
                   {t('inpaint.erase')}
                 </Button>
-                <Button size="sm" variant="ghost" onClick={clearMask} disabled={!hasPaint}>{t('common.clearReferences')}</Button>
+                <Button size="sm" variant="ghost" onClick={clearMask} disabled={!hasPaint}>{t('common.clear')}</Button>
                 <Button
                   size="sm"
                   variant="neutral"

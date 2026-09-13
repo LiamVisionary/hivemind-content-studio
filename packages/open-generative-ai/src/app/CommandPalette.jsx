@@ -20,7 +20,7 @@ import { requestVaultUnlock } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import { Kbd, TextInput, cx } from '../ui/kit.jsx';
-import { NAV_ITEMS } from './navConfig.jsx';
+import { PALETTE_ITEMS } from './navConfig.jsx';
 import { insertIntoActivePrompt } from './promptTarget.js';
 
 
@@ -62,7 +62,7 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
     // reads back an empty list — no second list of which pages have tabs.
     const tabs = readTabLabels(page);
     return buildPaletteEntries({
-      navItems: NAV_ITEMS,
+      navItems: PALETTE_ITEMS,
       studioType: tabs.length ? page : '',
       tabs,
       prompts: library.entries || [],

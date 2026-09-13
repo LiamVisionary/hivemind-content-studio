@@ -24,6 +24,22 @@ export function lockVault() {
     unlocked = false;
 }
 
+/**
+ * The live session key handles, for handing to a trusted first-party surface.
+ *
+ * Returns the very CryptoKeys this module unlocked — NOT key material. Both are
+ * non-extractable (see `completeUnlock`/`loadPrivateKey`) and structured clone
+ * preserves that, so a surface that receives them over postMessage can use the
+ * vault and still cannot export a single byte of it. That is the whole reason
+ * this is safe to hand across an iframe boundary when a raw passphrase is not.
+ *
+ * Null while locked, so a caller cannot mistake "not open yet" for "no vault".
+ */
+export function getVaultKeyHandles() {
+    if (!unlocked || !masterKey || !privateKey) return null;
+    return { masterKey, privateKey };
+}
+
 // ── encoding helpers ─────────────────────────────────────────────────────────
 function toB64url(bytes) {
     let binary = '';

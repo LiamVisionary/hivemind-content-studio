@@ -16,6 +16,7 @@
 // there? is the provider up?) are asked by every studio, and four copies would
 // drift the way the dispatch did.
 import { flattenApiDetail } from './muapiErrors.js';
+import { t } from './i18n.js';
 import { needsBrowserKey, setMuapiKeyOnServer, transportFor } from './modelRunner.js';
 
 /** Which OAuth connection a provider's credential is, when it is a grant
@@ -36,8 +37,17 @@ export const PROVIDER_KEYS = Object.freeze({
   'openai-gpt-image': 'OPENAI_API_KEY',
   'xai-imagine-api': 'XAI_API_KEY',
   'higgsfield-cloud': 'HIGGSFIELD_API_KEY_ID and HIGGSFIELD_API_KEY_SECRET',
-  'hivemindos-hosted-media': 'HIVEMINDOS_DASHBOARD_DEVICE_TOKEN',
+  // NOT hivemindos-hosted-media. It used to name
+  // HIVEMINDOS_DASHBOARD_DEVICE_TOKEN, which the media rail no longer uses —
+  // and because this map is consulted whenever the server declares no keys,
+  // a rail that was merely out of credits (or a service that blinked) was
+  // rendered as "Not configured - HIVEMINDOS_DASHBOARD_DEVICE_TOKEN is not
+  // set", over an "Add key" button, for a token that was present the whole
+  // time. What the hosted rail runs on is a BALANCE, and the door is below.
 });
+
+/** The house account. Not a credential anybody types: it is topped up. */
+export const HOSTED_MEDIA_PROVIDER = 'hivemindos-hosted-media';
 
 /** The credential names a row is waiting for: what the catalog declared, else
  *  the map above. Returns [] when the row needs none this browser can name. */
@@ -180,6 +190,24 @@ export function readinessFor(row, { oauth = null } = {}) {
       };
     }
     return { state: 'ready', label: 'Connected', detail: '', action: null, blocks: false };
+  }
+
+  // The hosted rail is a balance, not a key. Its unavailable states are "no
+  // credits yet" and "the service did not answer", and only the first has a
+  // repair — so only the first gets a button, and neither pretends a
+  // credential is missing.
+  if (String(row?.provider || '') === HOSTED_MEDIA_PROVIDER && row?.available === false) {
+    const said = String(row?.needs || row?.detail || '');
+    const credits = /credit/i.test(said) || !said;
+    return {
+      state: credits ? 'credits' : 'offline',
+      label: credits ? 'No credits yet' : 'Unavailable',
+      detail: said || 'Add HivemindOS credits to run hosted models.',
+      // Never a blocked row with no way forward: out of credits opens the
+      // top-up sheet, and a service that did not answer gets asked again.
+      action: credits ? { kind: 'top-up', label: t('failure.addCredits') } : { kind: 'refresh', label: t('common.checkAgain') },
+      blocks: true,
+    };
   }
 
   const keys = keyNamesFor(row);

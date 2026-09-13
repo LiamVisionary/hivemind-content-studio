@@ -215,6 +215,17 @@ export function adoptDependencyJobs(api, reported = []) {
 const REPORT_TTL_MS = 20000;
 const reports = new Map();
 
+// Every lane the preflight has caught refusing, keyed the same way a report
+// is (workflow + the tab's pin) and deliberately NOT on the report cache's
+// 20-second TTL. A studio that answers a refusal by sending the work
+// somewhere else has to know which of its other lanes have already refused,
+// and asking each candidate is a round trip apiece. An entry is dropped the
+// moment that lane checks clean, so a finished install puts its workflow back
+// in the running without anything having to remember to clear this.
+const blockedLanes = new Set();
+
+const laneKey = (workflowId, runOn = '') => `${String(workflowId || '').trim()} ${runOn || ''}`;
+
 /**
  * The lane's report for a workflow, cached briefly per (workflow, pin) so a
  * model picker that re-renders does not re-ask. `force` after an install.
@@ -222,15 +233,40 @@ const reports = new Map();
 export async function checkWorkflowDependencies(api, { workflowId, runOn = '', force = false } = {}) {
   const id = String(workflowId || '').trim();
   if (!id) return { ok: true, known: false, missing: [] };
-  const key = `${id} ${runOn || ''}`;
+  const key = laneKey(id, runOn);
   const cached = reports.get(key);
   if (!force && cached && cached.at + REPORT_TTL_MS > Date.now()) return cached.report;
   const report = await api.checkWorkflowDependencies({ workflowId: id, runOn });
   reports.set(key, { at: Date.now(), report });
+  if (dependenciesBlockGeneration(report)) blockedLanes.add(key);
+  else blockedLanes.delete(key);
   adoptDependencyJobs(api, report?.jobs || []);
   return report;
 }
 
+/** Whether a lane has already been caught refusing on this pin. */
+export function laneIsBlocked(workflowId, runOn = '') {
+  return blockedLanes.has(laneKey(workflowId, runOn));
+}
+
+/**
+ * The run targets a tab may move to when its own lane refuses: everything
+ * whose workflow is not already known to refuse on the same pin. A target
+ * with no workflow — every cloud model — has no preflight to fail and is
+ * always a candidate, which is what makes HivemindOS credits the answer on a
+ * machine that can run nothing itself.
+ *
+ * Only a filter: the ladder that chooses between what is left is
+ * runTargets.pickRunTarget, the same one the Automatic pick uses.
+ */
+export function targetsWithRunnableLanes(targets, { runOn = '', laneOf = () => '' } = {}) {
+  return (targets || []).filter((target) => {
+    const lane = String(laneOf(target) || '');
+    return !lane || !laneIsBlocked(lane, runOn);
+  });
+}
+
 export function forgetWorkflowDependencyReports() {
   reports.clear();
+  blockedLanes.clear();
 }

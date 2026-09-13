@@ -57,8 +57,11 @@ def register(app, ctx) -> None:
         try:
             if not body.token.strip():
                 hivemindos_models.forget_credit_token()
+                hivemindos_account.invalidate_overview()
                 return {"ok": True, "connected": False}
-            return {"ok": True, **hivemindos_models.connect_account(body.token)}
+            connected = hivemindos_models.connect_account(body.token)
+            hivemindos_account.invalidate_overview()
+            return {"ok": True, **connected}
         except hivemindos_models.HivemindosModelsError as exc:
             raise HTTPException(status_code=400, detail={
                 "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
@@ -153,14 +156,14 @@ def register(app, ctx) -> None:
         })
 
     @router.get("/api/hivemindos/account", dependencies=[Depends(require_owner)])
-    def hivemindos_account_overview() -> dict:
+    def hivemindos_account_overview(fresh: bool = False) -> dict:
         """Everything the sidebar's account row shows, in one read.
 
         Never fails: this is the row that is on screen on every page, and a
         gateway that cannot be reached has to leave a name and an unknown meter
         rather than an empty rectangle.
         """
-        return {"ok": True, **hivemindos_account.overview()}
+        return {"ok": True, **hivemindos_account.overview(fresh=fresh)}
 
     @router.post("/api/hivemindos/account/handle", dependencies=[Depends(require_owner_account)])
     def hivemindos_account_handle(body: AccountHandleBody) -> dict:

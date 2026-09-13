@@ -90,6 +90,33 @@ def _merge(base, override):
     return out
 
 
+def _inherited_model_dependencies(parent, child):
+    """The parent's model files plus the child's own, deduped by filename.
+
+    OPT-IN, via `inherit_model_dependencies` on the child, because the default
+    `_merge` rule is child-wins-per-key and the registry's other families rely
+    on it: minimax-h3-turbo repeats four of its parent's five files and
+    deliberately leaves out the fifth, so concatenating by default would make
+    its preflight demand a model its graph never loads.
+
+    Where it IS opted into, one entry owns the weights a whole family shares —
+    the Klein 9B lanes name their checkpoint once — and a child adds only what
+    is its own. A child that redeclares a file the parent named wins, so a lane
+    can still pin a different build of it.
+    """
+    out = []
+    seen = set()
+    for item in list(child.get("model_dependencies") or []) + list((parent or {}).get("model_dependencies") or []):
+        if not isinstance(item, dict):
+            continue
+        name = os.path.basename(str(item.get("relativePath") or item.get("relative_path") or item.get("file") or "")).lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(json.loads(json.dumps(item)))
+    return out
+
+
 def load_registry(path=None):
     """id -> definition with `inherits` folded in (child wins, dicts deep-merged)."""
     source = Path(path or REGISTRY_PATH)
@@ -115,8 +142,12 @@ def load_registry(path=None):
         if workflow_id in trail:
             raise RuntimeError(f"workflow inheritance cycle at {workflow_id}")
         parent = str(item.get("inherits") or "").strip()
-        merged = _merge(resolve(parent, trail + (workflow_id,)), item) if parent else json.loads(json.dumps(item))
+        inherited = resolve(parent, trail + (workflow_id,)) if parent else None
+        merged = _merge(inherited, item) if parent else json.loads(json.dumps(item))
+        if parent and item.get("inherit_model_dependencies"):
+            merged["model_dependencies"] = _inherited_model_dependencies(inherited, item)
         merged.pop("inherits", None)
+        merged.pop("inherit_model_dependencies", None)
         merged["id"] = workflow_id
         resolved[workflow_id] = merged
         return merged
@@ -142,7 +173,16 @@ def workflow_graph_path(definition):
     if raw.startswith("comfy:"):
         return (config.COMFY / raw[len("comfy:"):]).expanduser()
     path = Path(raw).expanduser()
-    return path if path.is_absolute() else (config.BASE / path)
+    if path.is_absolute():
+        return path
+    # A bare filename names the registry's own workflows/ folder — the shape
+    # `workflow_file` has always taken, and the one the studio bridge resolves
+    # (hosted-local-models.js joins it with workflows/). Read as gateway-root
+    # relative it landed outside the allowlist, so minimax-h3-image answered
+    # every preflight with "no graph here" and ran unchecked.
+    if len(path.parts) == 1:
+        return config.REGISTRY_WORKFLOW_DIR / path
+    return config.BASE / path
 
 
 def _graph_roots():
@@ -340,6 +380,12 @@ def _model_source(definition, filename):
                 "relative_path": relative or f"{folder}/{filename}",
                 "bytes": int(item.get("bytes") or 0),
                 "sha256": str(item.get("sha256") or "").strip().lower(),
+                # A file the studio cannot fetch for you still has a known
+                # home: gated weights (Flux.2 Klein's, for one) need a licence
+                # accepted on the host before any download works, so the entry
+                # carries the sentence that says where to get it instead of a
+                # URL that would answer 401.
+                "note": str(item.get("note") or "").strip(),
                 "provenance": "registry",
             }
     return None
@@ -432,6 +478,7 @@ def check_workflow(workflow_id, lane="default", registry=None):
                 "source": source,
                 **({"reason": "Rented machines are provisioned with their models; re-provision the machine instead."} if remote and source else {}),
                 **({"reason": f"No known download for {os.path.basename(filename)}. Place it in ComfyUI/models/{_guess_folder(input_key)} yourself."} if not source else {}),
+                **({"reason": source["note"]} if source and not source.get("url") and source.get("note") else {}),
             })
     for item in missing:
         if not hardware["supported"]:

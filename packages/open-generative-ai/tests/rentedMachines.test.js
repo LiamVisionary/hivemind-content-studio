@@ -252,7 +252,7 @@ test('the studios send the tab pin as run_on, persist it, and copy it with the t
   // TOGETHER on every local generate, not that they sit on two lines. Two of
   // them moved onto one line when the calls were routed through modelRunner.
   const generateCalls = image.match(/studio_lane: studioLane,\s*\.\.\.runOn\(\),/g) || [];
-  assert.equal(generateCalls.length, 5, 'every local generate call carries the pin');
+  assert.equal(generateCalls.length, 6, 'every local generate call carries the pin');
   assert.match(image, /localAI\.upscale\(\{[^}]*\.\.\.runOn\(\) \}\)/);
   // Video: the hivemind request carries it, gated the same way.
   assert.match(video, /\.\.\.\(setup\.rentedMachineId \? \{ run_on: setup\.rentedMachineId \} : \{\}\),/);

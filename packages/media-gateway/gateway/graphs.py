@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import sys
@@ -19,7 +19,7 @@ import shutil
 from pathlib import Path
 from urllib.request import Request
 
-from gateway import config, history, jobs, lanes, loras as _loras, native_mlx, net, private_inputs, util
+from gateway import config, direction_reference, history, jobs, lanes, loras as _loras, native_mlx, net, private_inputs, util
 
 
 def _prompt_nodes_from_body(body):
@@ -676,6 +676,51 @@ def _auto_fill_missing_required_inputs(graph, error_payload, lane_url):
     return healed
 
 
+def _auto_rejection_reason(graph, error_payload):
+    """One sentence for a prompt ComfyUI refused to queue, or None.
+
+    A validation refusal is a list of node_errors, and the common one names a
+    file the lane does not have. Its `value_not_in_list` detail carries the
+    lane's WHOLE model folder inline, which is how "MiniMax H3 Image, pressed
+    on a Mac that has none of H3's weights" reached the studio as 500
+    characters of JSON with no sentence and no repair in it. Name the file, the
+    node that wants it, and how many more there are; the caller keeps the raw
+    payload as the detail behind Details.
+    """
+    try:
+        detail = json.loads(error_payload or "{}")
+    except (TypeError, ValueError):
+        return None
+    node_errors = detail.get("node_errors") if isinstance(detail, dict) else None
+    if not isinstance(node_errors, dict):
+        return None
+    wanted = []
+    for node_id, node_error in node_errors.items():
+        node = (graph or {}).get(str(node_id)) or {}
+        class_type = str(node.get("class_type") or "") if isinstance(node, dict) else ""
+        for err in (node_error.get("errors") or []) if isinstance(node_error, dict) else []:
+            if not isinstance(err, dict) or err.get("type") != "value_not_in_list":
+                continue
+            extra = err.get("extra_info") if isinstance(err.get("extra_info"), dict) else {}
+            name = str(extra.get("input_name") or "")
+            value = str(extra.get("received_value") or "")
+            if not (name and value):
+                # Older lanes only put it in the human string: "<input>: '<value>' not in [...]".
+                match = re.match(r"\s*([\w.-]+):\s*'([^']*)'", str(err.get("details") or ""))
+                if not match:
+                    continue
+                name, value = match.group(1), match.group(2)
+            wanted.append((class_type or f"node {node_id}", name, os.path.basename(value)))
+    if not wanted:
+        return None
+    class_type, input_name, filename = wanted[0]
+    more = f" (and {len(wanted) - 1} more)" if len(wanted) > 1 else ""
+    return (
+        f"This machine's ComfyUI has no {filename} for {class_type}.{input_name}{more}. "
+        "Install what the workflow needs, or run it on a machine that already has it."
+    )
+
+
 def _auto_fit_regional_prompt(node, prompt_text):
     """Regional-prompt nodes (ForgeCouple style) need one prompt line per region.
 
@@ -1033,6 +1078,275 @@ def _apply_h3_studio_director(graph, director_id, prompt, options, rec):
         # path a run actually took.
         rec["options"].setdefault("route", str(inputs.get("route") or "auto"))
     return names
+
+
+# ---- Flux.2 Klein direction lanes -------------------------------------------
+#
+# Eric Venti's Eyes-Direction and Sun-Direction LoRAs are steered by a second
+# reference image rather than by words: the eyes look at a red dot, the light
+# arrives from wherever a reference sphere is lit. The graphs the registry
+# ships are his workflows with his two custom nodes replaced by plain
+# LoadImage, because one of them only renders inside a ComfyUI browser tab
+# (direction_reference explains why) and the studio drives ComfyUI headless.
+#
+# Everything below patches THOSE graphs. Roles are read off `_meta.title`
+# rather than node ids so the graphs stay editable: re-saving one from ComfyUI
+# renumbers every node but keeps the titles.
+DIRECTION_LANE_KINDS = {
+    direction_reference.EYES_LORA_FILE: "eyes",
+    direction_reference.SUN_LORA_FILE: "sun",
+}
+_DIRECTION_SOURCE_TITLE = "Source image"
+_DIRECTION_REFERENCE_TITLE = "Direction reference"
+
+
+def _direction_lane_kind(graph):
+    """'eyes' / 'sun' when this is a direction graph, else None.
+
+    Keyed on the LoRA the graph loads, because the LoRA IS the lane: these two
+    edits are the same eighteen nodes wired the same way, and the only thing
+    that decides which direction is being controlled is which file the
+    LoraLoaderModelOnly names.
+    """
+    for node in (graph or {}).values():
+        if isinstance(node, dict) and str(node.get("class_type")) == "LoraLoaderModelOnly":
+            kind = DIRECTION_LANE_KINDS.get(str(_node_inputs(node).get("lora_name") or ""))
+            if kind:
+                return kind
+    return None
+
+
+def _direction_nodes_titled(graph, title):
+    for node_id, node in (graph or {}).items():
+        meta = node.get("_meta") if isinstance(node, dict) else None
+        if isinstance(meta, dict) and str(meta.get("title") or "") == title:
+            yield str(node_id), node
+
+
+def _direction_node(graph, title):
+    for node_id, node in _direction_nodes_titled(graph, title):
+        return node_id, node
+    raise RuntimeError(f"the direction graph has no '{title}' node")
+
+
+def _stage_direction_image(path_or_bytes, name):
+    """Put a reference where ComfyUI's LoadImage can read it and answer its
+    name. Bytes are the rendered control, which exists only in memory until
+    here; a path is the picture being edited, copied in when it lives
+    elsewhere. Staging into COMFY_INPUT_DIR is also what lets
+    push_prompt_inputs_to_lane find both files when the lane is rented."""
+    comfy_input = config.COMFY_INPUT_DIR.resolve()
+    comfy_input.mkdir(parents=True, exist_ok=True)
+    if isinstance(path_or_bytes, (bytes, bytearray)):
+        staged = comfy_input / util.safe_name(name)
+        staged.write_bytes(bytes(path_or_bytes))
+        return staged.name
+    path = Path(str(path_or_bytes)).expanduser().resolve()
+    if not path.is_file():
+        raise RuntimeError(f"reference image is missing: {path.name}")
+    if util._is_under(path, comfy_input):
+        return path.name
+    staged = comfy_input / util.safe_name(path.name)
+    staged.write_bytes(path.read_bytes())
+    return staged.name
+
+
+def _prune_unreachable(graph):
+    """Drop every node no output node can reach.
+
+    Used when the sun lane's overcast pass is switched off: rewiring the
+    relight to read the source image directly orphans a whole sampler, and
+    ComfyUI would still validate the orphans' model files.
+    """
+    reachable = set()
+    frontier = [node_id for node_id, node in graph.items()
+                if str(node.get("class_type")) in {"SaveImage", "PreviewImage"}]
+    while frontier:
+        node_id = str(frontier.pop())
+        if node_id in reachable or node_id not in graph:
+            continue
+        reachable.add(node_id)
+        for value in _node_inputs(graph[node_id]).values():
+            if isinstance(value, list) and value and isinstance(value[0], (str, int)):
+                frontier.append(str(value[0]))
+    for node_id in [node_id for node_id in graph if node_id not in reachable]:
+        del graph[node_id]
+
+
+def _cap_direction_canvas(graph, source_id, staged, rec):
+    """Keep a big source inside the range Klein 9B stays coherent over.
+
+    These graphs size their canvas from the source image itself, so the edit
+    comes back at the picture's own dimensions and its aspect is never squeezed
+    — which is what an edit needs, and better than snapping to a bucket. What it
+    has no answer for is a source far outside the trained range: a 12MP photo
+    would sample a 12MP canvas. So the author's own ImageScaleToTotalPixels node
+    (which he ships bypassed) is spliced in ahead of everything that reads the
+    source, at the same ceiling the BigLove lane uses. Under the ceiling
+    nothing is inserted and the picture is untouched, because scaling a small
+    source up only costs sharpness.
+    """
+    dims = _image_dimensions(staged)
+    if not dims or dims[0] <= 0 or dims[1] <= 0:
+        return
+    pixels = dims[0] * dims[1]
+    if pixels <= BIGLOVE_KLEIN3_MAX_PIXELS:
+        return
+    scale_id = str(max([int(k) for k in graph if str(k).isdigit()] or [0]) + 1)
+    graph[scale_id] = {
+        "class_type": "ImageScaleToTotalPixels",
+        "inputs": {"image": [source_id, 0], "upscale_method": "lanczos",
+                   "megapixels": round(BIGLOVE_KLEIN3_MAX_PIXELS / 1_000_000, 3)},
+        "_meta": {"title": "Source canvas cap"},
+    }
+    for node_id, node in graph.items():
+        if node_id == scale_id:
+            continue
+        for key, value in list(_node_inputs(node).items()):
+            if isinstance(value, list) and value and str(value[0]) == str(source_id):
+                node["inputs"][key] = [scale_id, 0]
+    rec["options"]["source_pixels_capped"] = pixels
+
+
+def direction_prompt_text(kind, extra=""):
+    """The LoRA's trigger sentence, then whatever the caller added.
+
+    The trigger is not advice: it is the phrase both LoRAs were trained on, and
+    the author's note is that extra words help — naming the style for a
+    non-realistic picture on the eyes lane, naming the sky ("add a clear blue
+    sky", "keep the cloudy sky") on the sun lane. So the user's text is
+    appended to the trigger, never allowed to replace it.
+    """
+    trigger = direction_reference.SUN_TRIGGER if kind == "sun" else direction_reference.EYES_TRIGGER
+    extra = str(extra or "").strip()
+    return f"{trigger}, {extra}" if extra else trigger
+
+
+# Which loader each shared weight declaration drives. The LoRA is deliberately
+# absent: it is baked into the graph because it IS the lane (_direction_lane_kind
+# reads it to decide which direction is being controlled), and the registry
+# declares it only so the preflight can fetch it.
+_DECLARED_WEIGHT_LOADERS = {
+    "diffusion_models": ("UNETLoader", "unet_name"),
+    "unet": ("UNETLoader", "unet_name"),
+    "text_encoders": ("CLIPLoader", "clip_name"),
+    "clip": ("CLIPLoader", "clip_name"),
+    "vae": ("VAELoader", "vae_name"),
+}
+
+
+def _registry_definition_for_graph(workflow_file):
+    """The registry entry that ships `workflow_file`, or None."""
+    from gateway import dependencies  # local: dependencies imports history -> graphs
+    wanted = Path(str(workflow_file or "")).name.lower()
+    if not wanted:
+        return None
+    for definition in dependencies.load_registry().values():
+        declared = str(definition.get("api_workflow") or definition.get("workflow_file") or "")
+        if declared and Path(declared).name.lower() == wanted:
+            return definition
+    return None
+
+
+def apply_declared_weights(graph, definition):
+    """Point a shipped graph's loaders at the weights its registry entry names.
+
+    The filenames in the graph JSON are defaults, not the decision: the registry
+    is where a Klein 9B lane's checkpoint is chosen, and both this and the
+    preflight read it, so swapping the model (base Klein for the BigLove
+    finetune, bf16 for fp8, a KV build) is one line in one file and the run
+    cannot end up on a different checkpoint than the one the preflight checked.
+    Returns the names it set, for the job record.
+    """
+    applied = {}
+    for item in (definition or {}).get("model_dependencies") or []:
+        target = _DECLARED_WEIGHT_LOADERS.get(str(item.get("folder") or "").strip())
+        if not target:
+            continue
+        class_type, input_key = target
+        # ComfyUI names a model by its path RELATIVE to the folder, so a
+        # declaration that nests one (loras/ltx/2.3/x.safetensors) keeps the
+        # nesting and only the folder itself is stripped.
+        name = str(item.get("relativePath") or item.get("relative_path") or item.get("file") or "").strip()
+        if not name:
+            continue
+        for node in graph.values():
+            if isinstance(node, dict) and str(node.get("class_type")) == class_type:
+                node.setdefault("inputs", {})[input_key] = name
+                applied[input_key] = name
+    return applied
+
+
+def _apply_direction_lane(graph, kind, prompt, options, rec):
+    """Point a direction graph at this run: the picture being edited, the
+    rendered control, the LoRA strength, the seed and the prompt."""
+    request = options.get("direction") if isinstance(options.get("direction"), dict) else {}
+    references = options.get("reference_image_paths") or []
+    if not references:
+        raise RuntimeError("a direction edit needs the image it is editing")
+
+    definition = _registry_definition_for_graph(options.get("workflow_file"))
+    applied = apply_declared_weights(graph, definition)
+    if applied.get("unet_name"):
+        rec["options"]["checkpoint"] = applied["unet_name"]
+
+    if kind == "sun":
+        rotation = util.float_option(request, "rotation", 0.0, *direction_reference.SUN_ROTATION_RANGE)
+        elevation = util.float_option(request, "elevation", 45.0, *direction_reference.SUN_ELEVATION_RANGE)
+        intensity = util.float_option(request, "intensity", 1.5, *direction_reference.SUN_INTENSITY_RANGE)
+        control = direction_reference.render_sun_sphere_png(rotation, elevation, intensity)
+        rec["options"].update({"rotation": rotation, "elevation": elevation, "intensity": intensity})
+    else:
+        dot_x = util.float_option(request, "x", 0.5, 0.0, 1.0)
+        dot_y = util.float_option(request, "y", 0.5, 0.0, 1.0)
+        control = direction_reference.render_eyes_dot_png(dot_x, dot_y)
+        rec["options"].update({"x": dot_x, "y": dot_y})
+
+    source_name = _stage_direction_image(references[0], "")
+    control_name = _stage_direction_image(control, f"direction_{kind}_{uuid.uuid4().hex[:8]}.png")
+    source_id, source_node = _direction_node(graph, _DIRECTION_SOURCE_TITLE)
+    source_node["inputs"]["image"] = source_name
+    _direction_node(graph, _DIRECTION_REFERENCE_TITLE)[1]["inputs"]["image"] = control_name
+    _cap_direction_canvas(graph, source_id, config.COMFY_INPUT_DIR / source_name, rec)
+
+    lora_node = _direction_node(graph, "Direction LoRA")[1]
+    # The author's ranges: 0.5-1 for photographic and realistic styles, pushed
+    # to 1.25-1.5 for anime and other drawn work that resists the edit.
+    strength = util.float_option(request, "strength", 1.0, 0.0, 2.0)
+    lora_node["inputs"]["strength_model"] = strength
+    rec["options"]["lora_strength"] = strength
+
+    _direction_node(graph, "Direction prompt")[1]["inputs"]["text"] = direction_prompt_text(kind, prompt)
+
+    seed = config.resolve_seed_option(options)
+    rec["options"]["seed"] = seed
+    for title in ("Direction noise", "Overcast noise"):
+        for _, node in _direction_nodes_titled(graph, title):
+            node["inputs"]["noise_seed"] = seed
+    if options.get("steps"):
+        steps = util.int_option(options, "steps", 4, 1, 20)
+        rec["options"]["steps"] = steps
+        for title in ("Direction schedule", "Overcast schedule"):
+            for _, node in _direction_nodes_titled(graph, title):
+                node["inputs"]["steps"] = steps
+
+    # The sun lane flattens the existing light first, on the base model. An
+    # already-overcast picture does not need it, and the author's note is that
+    # the second pass is the one that matters — so skipping it is a switch, not
+    # a different workflow: the relight reads the source image instead of the
+    # flattened one, and the orphaned first pass is pruned away.
+    if kind == "sun" and request.get("flatten_light") is False:
+        source_id = _direction_node(graph, _DIRECTION_SOURCE_TITLE)[0]
+        flattened_id = _direction_node(graph, "Flattened light")[0]
+        for node in graph.values():
+            for key, value in list(_node_inputs(node).items()):
+                if isinstance(value, list) and value and str(value[0]) == flattened_id:
+                    node["inputs"][key] = [source_id, 0]
+        _prune_unreachable(graph)
+        rec["options"]["flatten_light"] = False
+    elif kind == "sun":
+        rec["options"]["flatten_light"] = True
+    rec["direction"] = kind
 
 
 def _node_inputs(node):
@@ -2167,6 +2481,54 @@ def detect_native_mlx_biglove_prompt(body):
             **({'image_paths': image_names} if len(image_names) > 1 else {}),
         },
     }
+
+
+def poll_local_comfy_progress(job_id, lane, prompt_id, stop_event, poll_seconds=0.4):
+    """Mirror a local lane's real sampler counters into the wrapper job record.
+
+    ComfyUI publishes step counts over its websocket only, addressed to the
+    client id that submitted the prompt — and the z-image runner submits over
+    HTTP and never holds that socket, so the studio's bar had nothing but a
+    time estimate. The hivemind-progress custom node records the counters and
+    serves them at /hivemind/progress; this reads them the same way
+    promptroutes._record_lane_progress reads a rented lane's.
+
+    A lane without that node simply answers 404 and the bar keeps the estimate.
+
+    Reports the SAMPLER's own fraction, unscaled. Sampling is not the whole job
+    — measured on a 1024x1024 8-step Z-Image run, model load and text encode ran
+    27% of the wall time before the first step and the decode/save/fetch-back
+    another 7% after the last — but how much of a bar those phases deserve is a
+    presentation question, and the client is the side that knows where its bar
+    had already got to when step 1 landed. Scaling here would only make the
+    number harder to place there.
+    """
+    if not prompt_id:
+        return
+    path = "/hivemind/progress?prompt_id=" + quote(str(prompt_id))
+    while not stop_event.is_set():
+        try:
+            with net.urlopen(lanes.comfy_lane_request(lane, path), timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8") or "{}")
+            value, maximum = float(payload.get("value") or 0), float(payload.get("max") or 0)
+            if maximum > 0:
+                fraction = max(0.0, min(1.0, value / maximum))
+                with jobs.jobs_lock:
+                    job = jobs.jobs.get(job_id)
+                    if job and job.get("status") == "running":
+                        job.update({
+                            "current_step": int(value),
+                            "total_steps": int(maximum),
+                            "progress": round(fraction * 100, 1),
+                            "progress_phase": "sampling",
+                        })
+                        jobs.jobs[job_id] = job
+        except Exception:
+            # A 404 (no counters yet, or a lane without the node), a lane that
+            # will not answer, a shape we do not recognise: all mean the same
+            # thing here — no news, keep the estimate, ask again.
+            pass
+        stop_event.wait(poll_seconds)
 
 
 def poll_swift_flux2_progress(job_id, total_steps, stop_event):

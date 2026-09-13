@@ -152,3 +152,39 @@ test('the combine key is the filled clips in order, and two clips make a cut', a
     // Reordering changes the key — a built cut for the old order is stale.
     assert.notEqual(timelineCombineKey([list[2], list[0]]), timelineCombineKey(list));
 });
+
+// --- the "+" always produces a slot ------------------------------------------
+//
+// Reported 2026-09-13: "i pressed the add the next shot button and it does
+// nothing." Self-inflicted the same day. Once a finished render started landing
+// in the strip BEFORE the scene had been opened, the rail's "+" still branched
+// on `timelineOn`: with the scene closed it called onOpenTimeline, which set the
+// flag and then seeded nothing (seedTimelineSegments returns early when segments
+// already exist). Nothing was added and nothing moved on screen.
+//
+// Deliberately textual for the rail half: the branch under test is one onClick
+// in a component whose siblings need a drag-and-drop harness to mount, and the
+// claim is about which handler the press reaches.
+test('adding the next shot appends a slot and selects it', async () => {
+    const { addTimelineSegment } = await lib();
+    const before = [seg('a', '/clip-1.mp4', 'ltx')];
+    const after = addTimelineSegment(before);
+    assert.equal(after.segments.length, 2, 'the next shot must appear as a slot');
+    assert.equal(after.segments[1].url, '', 'and it is empty, waiting for the render');
+    assert.equal(after.selectedId, after.segments[1].id, 'the new slot is what the next render fills');
+});
+
+test('the rail asks for the next shot whenever the sequence has anything in it', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const rail = fs.readFileSync(path.join(__dirname, '../src/studios/video/VideoRail.jsx'), 'utf8');
+    // Not `timelineOn` alone: a strip holding a shot is a started sequence
+    // whether or not the scene was ever opened by hand.
+    assert.match(rail, /if \(timelineOn \|\| segments\.length\) onAdd\?\.\(\);/,
+        'the "+" branches on the flag again, so a closed-but-filled sequence adds nothing');
+
+    const studio = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
+    const add = studio.slice(studio.indexOf('const timelineAdd = ()'), studio.indexOf('const timelineAdd = ()') + 700);
+    assert.match(add, /if \(!s\.timelineOn\) \{/, 'timelineAdd no longer opens the scene it is adding to');
+    assert.match(add, /addTimelineSegment\(s\.timelineSegments\)/);
+});

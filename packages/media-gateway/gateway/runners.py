@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import tempfile
 import uuid
@@ -16,6 +17,20 @@ from urllib.request import Request
 from urllib.error import HTTPError
 
 from gateway import config, graphs as _graphs, history as _history, jobs, lanes, loras as _loras, media, models, net, promptroutes, util, workflow_index
+
+
+def _runner_lane():
+    """The lane name for the ComfyUI `run_z_image_turbo.py` actually submits to.
+
+    The runner reads ZIMG_COMFY_HTTP and defaults to 8188, so the lane it uses
+    is not necessarily the one a graph would have been routed to. Naming it by
+    URL keeps the progress mirror pointed at the box doing the work; an unknown
+    URL falls back to "default", where comfy_lane_request lands anyway."""
+    target = os.environ.get("ZIMG_COMFY_HTTP", "http://127.0.0.1:8188").rstrip("/")
+    for lane, url in lanes.COMFY_LANES.items():
+        if str(url or "").rstrip("/") == target:
+            return lane
+    return "default"
 
 
 def run_generation(job_id, prompt, loras=None, options=None):
@@ -28,15 +43,45 @@ def run_generation(job_id, prompt, loras=None, options=None):
         if not config.RUNNER.exists():
             raise RuntimeError(f"Runner not found: {config.RUNNER}")
         seed_arg = str(safe_options.get("seed")) if safe_options.get("seed") not in (None, "", -1) else ""
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [str(config.RUNNER), prompt, json.dumps(loras or []), seed_arg, json.dumps(safe_options)],
             cwd=str(config.COMFY),
             text=True,
-            capture_output=True,
-            timeout=900,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
-        stdout = proc.stdout.strip()
-        stderr = proc.stderr.strip()
+        # The runner flushes {"submitted": <prompt_id>} as soon as the lane
+        # accepts the graph, and that id is the only way to mirror this job's
+        # REAL sampler counters while the subprocess is still running — without
+        # it the studio's bar is a time estimate for the whole render. Reading
+        # one line before communicate() is safe: communicate() drains both
+        # pipes from its own threads, so a chatty stderr cannot deadlock us.
+        first_line = proc.stdout.readline()
+        progress_stop = threading.Event()
+        progress_thread = None
+        try:
+            submitted = json.loads(first_line or "{}").get("submitted")
+        except Exception:
+            submitted = None
+        if submitted:
+            progress_thread = threading.Thread(
+                target=_graphs.poll_local_comfy_progress,
+                args=(job_id, _runner_lane(), submitted, progress_stop),
+                daemon=True,
+            )
+            progress_thread.start()
+        try:
+            rest, stderr_text = proc.communicate(timeout=900)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            rest, stderr_text = proc.communicate()
+            raise
+        finally:
+            progress_stop.set()
+            if progress_thread is not None:
+                progress_thread.join(timeout=1)
+        stdout = ((first_line or "") + (rest or "")).strip()
+        stderr = (stderr_text or "").strip()
         if proc.returncode != 0:
             raise RuntimeError(f"runner exited {proc.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
 
@@ -233,12 +278,19 @@ def run_comfy_api_image(job_id, prompt, options=None):
         rec["workflow"] = workflow_path.stem
 
         director_id = _graphs._h3_studio_director_id(graph)
+        direction_kind = _graphs._direction_lane_kind(graph)
         if director_id:
             # An H3 Studio graph: one Director owns prompt/canvas/seed/route
             # and the references, so none of the KSampler patching below
             # applies (its sampler is a SamplerCustomAdvanced with no
             # positive/negative inputs to follow).
             _graphs._apply_h3_studio_director(graph, director_id, prompt, options, rec)
+        elif direction_kind:
+            # A Klein direction graph: the instruction is a rendered reference
+            # image, the prompt is a fixed trigger sentence, and the sampler is
+            # a SamplerCustomAdvanced behind a CFGGuider — so the same
+            # exception applies as for the Director above.
+            _graphs._apply_direction_lane(graph, direction_kind, prompt, options, rec)
         else:
             sampler = next(
                 (node for node in graph.values() if str(node.get("class_type")) in _graphs._AUTO_SAMPLER_CLASSES),
@@ -343,7 +395,8 @@ def run_comfy_api_image(job_id, prompt, options=None):
         except HTTPError as exc:
             error_payload = exc.read().decode("utf-8", errors="replace")
             if exc.code != 400 or not _graphs._auto_fill_missing_required_inputs(graph, error_payload, lane_url):
-                raise RuntimeError(f"ComfyUI rejected the workflow: {error_payload[:500]}") from exc
+                reason = _graphs._auto_rejection_reason(graph, error_payload)
+                raise RuntimeError(reason or f"ComfyUI rejected the workflow: {error_payload[:500]}") from exc
             rec["healed_inputs"] = True
             queued = _graphs._auto_submit_prompt(lane_url, graph, client_id)
         prompt_id = queued.get("prompt_id")

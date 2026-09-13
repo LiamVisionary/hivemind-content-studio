@@ -32,12 +32,15 @@ renames it keeps their choice from then on.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import time
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import hivemindos_models as models
@@ -108,21 +111,31 @@ def derive_handle(seed: str) -> str:
     return f"{adjective}{noun}{int.from_bytes(digest[2:4], 'big') % 1000:03d}"
 
 
+# The colours an avatar is allowed to be, as PAIRS rather than as a hue and an
+# offset. Two reasons, both learned by looking at the result: a free 0-359 spin
+# lands in the 55-100 band often enough to matter, and olive on this app's warm
+# graphite reads as a stain rather than as a person; and an offset applied to a
+# safe first hue can still slide the second stop into that band. Naming both
+# ends removes the arithmetic that kept producing mustard. Each pair is a short
+# walk around the wheel, so the gradient reads as depth rather than as two
+# colours fighting.
+_AVATAR_PAIRS = (
+    (2, 22), (12, 340), (24, 4), (38, 18),
+    (172, 192), (186, 166), (198, 176), (208, 188),
+    (220, 244), (232, 206), (248, 224), (262, 286),
+    (276, 250), (292, 268), (312, 290), (334, 310),
+)
+
+
 def derive_avatar(seed: str) -> dict[str, Any]:
     """A face with no picture in it: two hues and a monogram, drawn by the
     browser. No network, no upload, nothing to leak — and the same account is
     the same colour on every machine, which is what makes it recognisable."""
     digest = _seed_digest(seed)
-    hue = digest[4] * 360 // 256
+    hue, hue2 = _AVATAR_PAIRS[digest[4] % len(_AVATAR_PAIRS)]
     handle = derive_handle(seed)
     letters = re.findall(r"[A-Z]", handle) or [handle[:1].upper() or "H"]
-    return {
-        "hue": hue,
-        # A second hue a fixed distance away: far enough to read as a gradient,
-        # near enough that it never turns into a clashing pair.
-        "hue2": (hue + 38 + digest[5] % 34) % 360,
-        "monogram": "".join(letters[:2]),
-    }
+    return {"hue": hue, "hue2": hue2, "monogram": "".join(letters[:2])}
 
 
 def set_handle(name: str) -> dict[str, Any]:
@@ -132,12 +145,14 @@ def set_handle(name: str) -> dict[str, Any]:
     cleaned = " ".join(str(name or "").split())
     if not cleaned:
         models.set_store_value(HANDLE_KEY, None)
+        invalidate_overview()
         return identity()
     if not _HANDLE_SHAPE.match(cleaned):
         raise HivemindosModelsError(
             "A name can be up to 24 letters, numbers, spaces, dashes or underscores.",
         )
     models.set_store_value(HANDLE_KEY, cleaned)
+    invalidate_overview()
     return identity()
 
 
@@ -188,10 +203,19 @@ def account_id(*, opener: Callable[..., Any] = urllib.request.urlopen) -> str:
     return str((payload or {}).get("accountId") or "") if isinstance(payload, dict) else ""
 
 
-def identity(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
-    """The account row's left half: a face, a name, and how safe it is."""
-    account = account_id(opener=opener)
-    status = account_status(opener=opener)
+def identity(
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+    account: str | None = None,
+    status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The account row's left half: a face, a name, and how safe it is.
+
+    `account` and `status` are injectable so `overview` can fetch them
+    alongside the other two reads instead of after them — see the note there.
+    """
+    account = account_id(opener=opener) if account is None else account
+    status = account_status(opener=opener) if status is None else status
     seed = account or models.device_id()
     stored = str(models.store_value(HANDLE_KEY) or "").strip()
     return {
@@ -213,11 +237,34 @@ def identity(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str
 
 # ------------------------------------------------------------ the free meter
 #
-# The gateway meters the free model per device per UTC day and — since the
-# `usage` block landed on its status route — will say how much of that is left
-# without spending any of it. That is the whole meter: no local high-water
-# bookkeeping, no probe that costs a request, and it stays right when the same
-# account burns allowance from another app on this machine.
+# THE RULE THIS IS BUILT ON, because getting it wrong is what made the meter say
+# "unknown" while the numbers were sitting right there: **an expired window is
+# not an unknown one.** The free tier resets at UTC midnight. If the newest
+# thing anyone recorded is from a window that has already rolled over, then
+# nothing has been spent in the current one and what is left is the whole daily
+# allowance — which the gateway states outright, for free, on its status route.
+# "Unknown" is only honest when the gateway itself cannot be reached.
+#
+# Three places know something, and none of them knows everything:
+#
+#   the gateway's status route  the daily CEILING, always, free to ask. It also
+#                               carried a live `usage` block for part of
+#                               2026-09-10 and did not the same evening, so that
+#                               is read when present and never depended on.
+#   this studio's own record    headers from the free calls THIS studio made
+#                               (`hivemindos_models.record_free_allowance`).
+#   the HivemindOS app's cache  the same headers from the calls the APP made, in
+#                               ~/.hivemindos/cache/. Read because the app and
+#                               the studio spend the SAME per-device allowance
+#                               when the studio proxies through it, so ignoring
+#                               it would show a full meter over an empty tank.
+#
+# Whichever snapshots belong to the current window are merged by taking the
+# lowest remaining count: they are views of one counter, and the lowest is the
+# most recently true.
+
+APP_ALLOWANCE_CACHE = ("cache", "hivemindos-free-allowance.json")
+
 
 def free_device_id() -> str:
     """The device identity this studio's free calls actually carry.
@@ -236,14 +283,47 @@ def free_device_id() -> str:
     return models.device_id()
 
 
+def _app_allowance_record() -> dict[str, Any]:
+    """What the HivemindOS app last saw of the allowance, or {}."""
+    if models.resolve_route() != ROUTE_APP:
+        # A different device identity is being metered; the app's numbers are
+        # about somebody else's counter.
+        return {}
+    try:
+        raw = (models.app_home().joinpath(*APP_ALLOWANCE_CACHE)).read_text(encoding="utf-8")
+        record = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def _in_current_window(record: dict[str, Any]) -> bool:
+    """Is this snapshot about the allowance that is running RIGHT NOW?
+
+    A snapshot whose reset moment has passed describes a window that is over.
+    Its numbers are not stale-but-indicative, they are simply about a different
+    day — which is why they are dropped rather than shown with a caveat.
+    """
+    reset_at = str(record.get("resetAt") or "").strip()
+    if not reset_at:
+        return False
+    try:
+        moment = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment > datetime.now(timezone.utc)
+
+
 def allowance(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
-    """Today's free Swarm Scout allowance, as the gateway counts it right now.
+    """Today's free Swarm Scout allowance: the ceiling, and what is left of it.
 
     Never raises, for the same reason `status` does not: this is a meter beside
-    a name, and an unreachable gateway makes it unknown rather than zero. Zero
-    and unknown look nothing alike to a person about to press Generate.
+    a name, and a gateway that cannot answer makes it unknown rather than zero.
+    Zero and unknown look nothing alike to a person about to press Generate.
     """
-    empty = {
+    unknown = {
         "model": FREE_MODEL_NAME,
         "known": False,
         "remainingRequests": None,
@@ -252,6 +332,7 @@ def allowance(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[st
         "tokenLimit": None,
         "resetAt": "",
         "tierLabel": "",
+        "source": "",
     }
     try:
         payload = models._gateway_request(
@@ -260,36 +341,93 @@ def allowance(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[st
                 "X-HivemindOS-Free-Device": free_device_id(),
                 "X-HivemindOS-Free-Workspace": "hivemind-content-studio",
             },
+            # Tighter than the default 20s because this sits on the critical
+            # path of a row that renders on every page, and the route probes
+            # Modal for its container state — slow when it is cold, and nothing
+            # to do with the number we came for.
+            timeout=8.0,
             opener=opener,
         )
     except HivemindosModelsError:
-        return empty
+        payload = None
     model = (payload or {}).get("model") if isinstance(payload, dict) else None
-    usage = (model or {}).get("usage") if isinstance(model, dict) else None
-    if not isinstance(usage, dict):
-        # An older gateway answers the status route without a `usage` block.
-        # The daily ceilings are still there, and a meter that can only say
-        # "400 a day" is worth more than no meter.
-        limits = (model or {}).get("allowance") if isinstance(model, dict) else None
-        if not isinstance(limits, dict):
-            return empty
-        return {
-            **empty,
-            "known": True,
-            "requestLimit": _count(limits.get("dailyRequests")),
-            "tokenLimit": _count(limits.get("dailyTokens")),
-            "tierLabel": _tier_label(model),
-        }
+    model = model if isinstance(model, dict) else {}
+
+    limits = model.get("allowance") if isinstance(model.get("allowance"), dict) else {}
+    live = model.get("usage") if isinstance(model.get("usage"), dict) else {}
+    # `or` would be wrong here: a limit of 0 is a real (if absurd) answer and
+    # must not fall through to the other source.
+    request_limit = _first_count(live.get("requestLimit"), limits.get("dailyRequests"))
+    token_limit = _first_count(live.get("tokenLimit"), limits.get("dailyTokens"))
+    tier = _tier_label(model)
+    if request_limit is None and token_limit is None:
+        # The gateway did not answer, or answered without its ceilings. The
+        # ceiling is the most STABLE thing about this tier — it moves when a
+        # stake tier does and not otherwise — so a remembered one beats going
+        # blank, and the reset rule below still says what is left of it.
+        remembered = models.free_ceiling_record()
+        request_limit = _count(remembered.get("requestLimit"))
+        token_limit = _count(remembered.get("tokenLimit"))
+        tier = tier or str(remembered.get("tierLabel") or "")
+        if request_limit is None and token_limit is None:
+            return unknown
+    else:
+        models.remember_free_ceiling(request_limit, token_limit, tier)
+
+    # Every snapshot that is about the window running now. `live` is the
+    # gateway's own, when it offers one, and it needs no window check.
+    current: list[dict[str, Any]] = []
+    if _count(live.get("remainingRequests")) is not None or _count(live.get("remainingTokens")) is not None:
+        current.append(live)
+    for record in (models.free_allowance_record(), _app_allowance_record()):
+        if record and _in_current_window(record):
+            current.append(record)
+
+    def lowest(field: str, ceiling: int | None) -> int | None:
+        seen = [value for value in (_count(record.get(field)) for record in current) if value is not None]
+        # Nothing recorded in this window means nothing has been spent in it:
+        # the allowance reset and the whole of it is there. This is the line
+        # that used to read "unknown" over a full tank.
+        return min(seen) if seen else ceiling
+
+    reset_at = str(live.get("resetAt") or "").strip()
+    if not reset_at:
+        for record in current:
+            reset_at = str(record.get("resetAt") or "").strip()
+            if reset_at:
+                break
     return {
         "model": FREE_MODEL_NAME,
         "known": True,
-        "remainingRequests": _count(usage.get("remainingRequests")),
-        "remainingTokens": _count(usage.get("remainingTokens")),
-        "requestLimit": _count(usage.get("requestLimit")),
-        "tokenLimit": _count(usage.get("tokenLimit")),
-        "resetAt": str(usage.get("resetAt") or ""),
-        "tierLabel": _tier_label(model),
+        "remainingRequests": lowest("remainingRequests", request_limit),
+        "remainingTokens": lowest("remainingTokens", token_limit),
+        "requestLimit": request_limit,
+        "tokenLimit": token_limit,
+        "resetAt": reset_at or _next_utc_midnight(),
+        "tierLabel": tier,
+        # Named so the row can be honest about how fresh this is: "live" is the
+        # gateway's own count, "observed" was learned from calls we made, "full"
+        # is a window nothing has spent from yet.
+        "source": "live" if live.get("remainingRequests") is not None
+        else "observed" if current else "full",
     }
+
+
+def _first_count(*values: Any) -> int | None:
+    """The first of these that is a count at all."""
+    for value in values:
+        counted = _count(value)
+        if counted is not None:
+            return counted
+    return None
+
+
+def _next_utc_midnight() -> str:
+    """When the allowance comes back, when nothing told us directly. The free
+    tier's window is the UTC day, so this is derived rather than guessed."""
+    now = datetime.now(timezone.utc)
+    return (now.replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(days=1)).isoformat().replace("+00:00", "Z")
 
 
 def _count(value: Any) -> int | None:
@@ -312,23 +450,75 @@ def _tier_label(model: dict[str, Any]) -> str:
 
 # --------------------------------------------------------------- one read
 
-def overview(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+# How long one read of all this is reused. The row is on screen on every page
+# and both sheets mount their own copy of the hook, so opening the credits sheet
+# used to mean three full round-trips of four calls each. Short enough that a
+# balance never looks wrong for long; every mutation clears it outright.
+_OVERVIEW_TTL_SECONDS = 12.0
+_overview_cache: tuple[float, dict[str, Any]] | None = None
+
+
+def invalidate_overview() -> None:
+    """Forget the cached read. Called by everything that changes the answer —
+    a rename, a sign-in, a settled deposit, a cancelled plan — so the row never
+    shows a person the state they just left."""
+    global _overview_cache
+    _overview_cache = None
+
+
+def overview(
+    *, opener: Callable[..., Any] = urllib.request.urlopen, fresh: bool = False,
+) -> dict[str, Any]:
     """Everything the account row shows, in one request from the browser.
 
-    Three gateway calls behind one door rather than three polls from the
-    sidebar: the row is on screen on every page, and a row that polls three
-    endpoints is three times the noise in the log for the same one line of UI.
+    **Concurrently**, which is the whole point of the rewrite. This is four
+    network calls — the balance, the account, the free meter, and the account
+    id — and run one after another they took 15 seconds on this machine, most
+    of it inside the gateway's free-model status route (it probes Modal for the
+    container state, and a cold one is slow). Run together the total is the
+    slowest single call instead of the sum of all four.
+
+    Sequential was never justified: not one of the four depends on another's
+    answer. They were written in the order the sentence reads.
     """
-    try:
-        credits = models.credits(opener=opener)
-    except HivemindosModelsError:
-        credits = {"configured": False, "credits": None, "label": "Unknown", "source": ""}
-    return {
-        "identity": identity(opener=opener),
+    global _overview_cache
+    if not fresh and _overview_cache is not None:
+        cached_at, cached = _overview_cache
+        if time.monotonic() - cached_at < _OVERVIEW_TTL_SECONDS:
+            return cached
+
+    def safely(call: Callable[[], Any], fallback: Any) -> Any:
+        # Each of the four already refuses to raise for its own reasons; this is
+        # the belt to that pair of braces, because ONE of them throwing inside a
+        # pool would otherwise take the whole row down.
+        try:
+            return call()
+        except Exception:  # noqa: BLE001 - a meter beside a name, never a crash
+            return fallback
+
+    no_credits = {"configured": False, "credits": None, "label": "Unknown", "source": ""}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        credits_call = pool.submit(safely, lambda: models.credits(opener=opener), no_credits)
+        account_call = pool.submit(safely, lambda: account_id(opener=opener), "")
+        status_call = pool.submit(safely, lambda: account_status(opener=opener), {"reachable": False})
+        allowance_call = pool.submit(safely, lambda: allowance(opener=opener), None)
+        credits = credits_call.result()
+        account = account_call.result()
+        status = status_call.result()
+        free = allowance_call.result()
+
+    answer = {
+        "identity": identity(opener=opener, account=account, status=status),
         "credits": credits,
-        "allowance": allowance(opener=opener),
+        "allowance": free if free is not None else allowance(opener=opener),
         "route": models.resolve_route(),
+        # Why the HivemindOS-wallet rail cannot be used, or '' when it can. Sent
+        # with the row's own read so the credits sheet opens already knowing,
+        # rather than learning it from a refused press.
+        "walletPayBlocked": wallet_pay_blocked_reason(),
     }
+    _overview_cache = (time.monotonic(), answer)
+    return answer
 
 
 # ------------------------------------------------------- backing the account up
@@ -396,6 +586,7 @@ def email_link_verify(challenge_id: str, code: str, *,
         method="POST", body={"challengeId": _challenge(challenge_id), "code": _code(code)},
         headers={CREDIT_TOKEN_HEADER: token}, timeout=30.0, opener=opener,
     )
+    invalidate_overview()
     return {"linked": True, "identity": identity(opener=opener)}
 
 
@@ -445,6 +636,7 @@ def email_signin_verify(challenge_id: str, code: str, *,
             models.save_credit_token(minted)
     else:
         models.save_credit_token(minted)
+    invalidate_overview()
     return {
         "signedIn": True,
         "mergedPreviousBalance": merged,
@@ -563,6 +755,7 @@ def subscription_cancel(confirmation: str, *,
         f"/api/paid-agents/{models.gateway_slug()}/credits/subscription/cancel",
         method="POST", body={}, headers={CREDIT_TOKEN_HEADER: token}, timeout=30.0, opener=opener,
     )
+    invalidate_overview()
     return {"cancelled": True, "subscription": subscription(opener=opener)}
 
 
@@ -646,6 +839,7 @@ def deposit_settle(payment_id: str, transaction_hash: str, *,
     minted = str((payload or {}).get("creditToken") or "").strip()
     if minted and not token:
         models.save_credit_token(minted)
+    invalidate_overview()
     return {
         "settled": True,
         "creditedUsd": (payload or {}).get("creditedUsd"),
@@ -665,19 +859,51 @@ def deposit_settle(payment_id: str, transaction_hash: str, *,
 # approval — it sees a nonce come back settled.
 #
 # The nonce is the authorisation, exactly as it is for the account link above:
-# minted here moments ago, single use, five minutes, memory only. What is new is
-# the claim step. The app has to credit the account this studio SPENDS, which is
-# not always the app's own pool — so the app presents the nonce and receives the
-# target. When the two already share one account (the studio adopted the app's
-# key) nothing is handed over at all, because there is nothing to tell it.
+# minted here moments ago, single use, five minutes, memory only. The app claims
+# it to learn the AMOUNT — the figure in the deep-link URL is whatever fired the
+# link, and any local process can fire one, so the number the owner is shown has
+# to come from the request this studio actually made.
+#
+# What this rail deliberately does NOT do is redirect where the credits land.
+# The app tops up the account it already pools, so this only offers itself when
+# that account is the one this studio spends. A studio signed into its own
+# account would be asking the owner to pay into a different balance, and the
+# only honest thing to do about that is to say so and point at the two rails
+# that do work — which is what `wallet_pay_blocked_reason` is for.
 
 PAY_TTL_SECONDS = 300.0
 _pay_requests: dict[str, dict[str, Any]] = {}
 
 
+def wallet_pay_blocked_reason() -> str:
+    """Why the wallet rail cannot be used here, or '' when it can.
+
+    Answered BEFORE the button is pressed, because both reasons are knowable in
+    advance and neither is repaired by trying: there is no app to ask, or the
+    app's balance is not the one this studio spends.
+    """
+    if models.resolve_route() != ROUTE_APP:
+        return "no-app"
+    if models.credit_source() != "app":
+        return "different-account"
+    return ""
+
+
 def start_wallet_payment(amount_usd: float, callback_url: str) -> dict[str, Any]:
     """Mint a payment request and the deep link that carries it to the app."""
     _expire_payments()
+    blocked = wallet_pay_blocked_reason()
+    if blocked == "no-app":
+        raise HivemindosModelsError(
+            "The HivemindOS app is not running on this machine, so there is no wallet to ask.",
+            remedy="open-hivemindos",
+        )
+    if blocked == "different-account":
+        raise HivemindosModelsError(
+            "This studio is signed in to its own HivemindOS account, so the app's wallet would "
+            "top up a different balance. Pay by card or USDC here, or sign in to the same account.",
+            remedy="connect-account",
+        )
     amount = round(float(amount_usd), 2)
     if not 1 <= amount <= 500:
         raise HivemindosModelsError("Choose an amount between $1 and $500.")
@@ -693,11 +919,12 @@ def start_wallet_payment(amount_usd: float, callback_url: str) -> dict[str, Any]
 
 
 def claim_wallet_payment(nonce: str) -> dict[str, Any]:
-    """What the app asks for once the owner has approved: where to send them.
+    """What the app asks for once the owner has approved: how much was asked for.
 
-    Returns the account key ONLY when this studio spends an account the app does
-    not already hold — that is, when the studio signed in on its own. An adopted
-    app key means one balance and nothing to hand over.
+    No credential crosses here, and none needs to: the app credits the account
+    it already pools, which `start_wallet_payment` has established is the one
+    this studio spends. What the app cannot trust on its own is the amount, so
+    that is what this answers.
     """
     _expire_payments()
     request = _pay_requests.get(nonce)
@@ -706,12 +933,7 @@ def claim_wallet_payment(nonce: str) -> dict[str, Any]:
         # process, not the owner's browser, and the difference is a hint.
         raise HivemindosModelsError("That payment request is not open.")
     request["state"] = "claimed"
-    own_key = "" if models.credit_source() == "app" else models.credit_token()
-    return {
-        "amountUsd": request["amountUsd"],
-        # Empty means "your own pool is the right account".
-        "creditToken": own_key,
-    }
+    return {"amountUsd": request["amountUsd"], "app": "Hivemind Content Studio"}
 
 
 def complete_wallet_payment(nonce: str, *, settled: bool, detail: str = "") -> dict[str, Any]:

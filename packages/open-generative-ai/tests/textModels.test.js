@@ -81,6 +81,67 @@ test('the owner’s last choice outlives a reload, and a fresh install starts wh
   assert.equal(startingModelId(CATALOG, ''), 'qwen3-30b');
 });
 
+test('the prompt helper keeps a remembered model its local scan cannot see', async () => {
+  const { startingModelIdWithRuntime } = await load();
+
+  // The helper reads two things — the catalog (all three bills) and the local
+  // runtime scan (this disk, this RAM) — and they answer at different moments.
+  // The scan sees ONLY local models, so a remembered HivemindOS model looked
+  // "gone from disk" to it and was quietly replaced by whichever GGUF fit: the
+  // owner picked a cloud model, reloaded, and was back on a local one.
+  const scan = [{ id: 'qwen3-30b', fit: 'loaded', estimatedLoadBytes: 20e9 }];
+  assert.equal(
+    startingModelIdWithRuntime(CATALOG, {
+      lastUsedId: 'hivemindos/custom:openai/gpt-5.6-luna',
+      runtimeModels: scan,
+      loadedId: 'qwen3-30b',
+    }),
+    'hivemindos/custom:openai/gpt-5.6-luna',
+  );
+  // A remembered model that is gone from the CATALOG is gone for real, and
+  // gives way rather than leaving the dialog pointed at nothing.
+  assert.equal(
+    startingModelIdWithRuntime(CATALOG, { lastUsedId: 'deleted.gguf', runtimeModels: scan, loadedId: 'qwen3-30b' }),
+    'qwen3-30b',
+  );
+  // Nothing remembered: the machine decides, local first.
+  assert.equal(startingModelIdWithRuntime(CATALOG, { runtimeModels: scan, loadedId: 'qwen3-30b' }), 'qwen3-30b');
+  // And a box with no GGUF on it still gets an answer — the one the server
+  // suggests, which is where a cloud-only machine's helper lives.
+  assert.equal(startingModelIdWithRuntime(CATALOG, { runtimeModels: [] }), 'qwen3-30b');
+  assert.equal(
+    startingModelIdWithRuntime({ ...CATALOG, defaultModelId: 'hivemindos/auto' }, { runtimeModels: [] }),
+    'hivemindos/auto',
+  );
+});
+
+test('a remembered local model that cannot be loaded is a padlock, not a choice', async () => {
+  const { startingModelIdWithRuntime } = await load();
+
+  // The one case where the owner's choice loses: it is on THIS machine and this
+  // machine cannot make room for it. Anything else and the dialog would open on
+  // a row the picker itself refuses to let them press.
+  const catalog = {
+    ...CATALOG,
+    models: [...CATALOG.models, { id: 'huge.gguf', name: 'Huge', source: 'local' }],
+  };
+  const scan = [
+    { id: 'huge.gguf', fit: 'insufficient', estimatedLoadBytes: 9e10 },
+    { id: 'qwen3-30b', fit: 'loaded', estimatedLoadBytes: 20e9 },
+  ];
+  assert.equal(
+    startingModelIdWithRuntime(catalog, { lastUsedId: 'huge.gguf', runtimeModels: scan, loadedId: 'qwen3-30b' }),
+    'qwen3-30b',
+  );
+  // Room it CAN make is not a padlock: "unload others first" is on by default,
+  // and that is exactly what makes a borderline model reachable.
+  const borderline = [{ id: 'huge.gguf', fit: 'needs_unload', estimatedLoadBytes: 9e10 }];
+  assert.equal(
+    startingModelIdWithRuntime(catalog, { lastUsedId: 'huge.gguf', runtimeModels: borderline }),
+    'huge.gguf',
+  );
+});
+
 test('the privacy line follows the chosen model rather than describing half of them', async () => {
   const { privacyLine, rowFor } = await load();
 

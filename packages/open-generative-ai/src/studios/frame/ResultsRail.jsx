@@ -7,6 +7,9 @@
 //
 // Nothing here is a link to the Library — the Library is still the Library.
 // This is only what this tab made, in this session.
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+
 import { Icon } from '../../ui/icons.jsx';
 import { cx } from '../../ui/kit.jsx';
 
@@ -134,5 +137,101 @@ export function RailOverflow({ count, onClick, label = 'Show every result in the
 export function RailEmpty({ children }) {
   return (
     <span className="px-1 pt-2 text-center font-mono text-[9px] leading-relaxed text-ink3">{children}</span>
+  );
+}
+
+/* ---------------- the per-card actions, as one popover ---------------- */
+
+/**
+ * The shell every rail card's actions open into.
+ *
+ * Portaled to <body> and fixed-positioned rather than anchored inside the card:
+ * the frame's rail is overflow-y-auto, and a popover rendered inside it is
+ * clipped at the 96/108px edge and scrolls away with the column. Coordinates
+ * are measured after mount, placed to the LEFT of the rail, and clamped to the
+ * viewport — the same idiom kit.jsx's HintBubble uses.
+ *
+ * Lives here rather than in a studio because all three rails need exactly this:
+ * Video wrote it, Image had grown its own copy of the same fifty lines, and
+ * Restore would have been the third. One definition, so a fix to the placement
+ * maths cannot land in two rails out of three.
+ */
+export function RailMenu({ anchor, label, onClose, width = 'w-60', children }) {
+  const panelRef = useRef(null);
+  const [pos, setPos] = useState(null);
+
+  useLayoutEffect(() => {
+    const node = panelRef.current;
+    if (!anchor || !node) return undefined;
+    const place = () => {
+      const target = anchor.getBoundingClientRect();
+      const panel = node.getBoundingClientRect();
+      const margin = 8;
+      const leftOfRail = target.left - panel.width - margin;
+      const next = {
+        left: leftOfRail >= margin
+          ? leftOfRail
+          : Math.max(margin, Math.min(target.right + margin, window.innerWidth - panel.width - margin)),
+        top: Math.min(
+          Math.max(target.top, margin),
+          Math.max(margin, window.innerHeight - panel.height - margin),
+        ),
+      };
+      setPos((prev) => (prev && prev.left === next.left && prev.top === next.top ? prev : next));
+    };
+    place();
+    // Fixed coordinates do not follow the anchor: scrolling the rail under an
+    // open menu would leave it stranded where the card used to be.
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [anchor]);
+
+  useEffect(() => {
+    const onDown = (event) => {
+      if (panelRef.current?.contains(event.target)) return;
+      // A press on the card itself is that card's own business — it toggles.
+      if (anchor?.contains?.(event.target)) return;
+      onClose();
+    };
+    // Capture, and stop there: the frame's drawer also listens for Escape on
+    // window, and the topmost transient layer is the one that owns the key.
+    const onKey = (event) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [anchor, onClose]);
+
+  return createPortal(
+    <div
+      ref={panelRef}
+      role="menu"
+      aria-label={label}
+      style={{ position: 'fixed', left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+      className={cx('hive-scale-in z-[90] rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop', width)}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
+/** The two lines of context a 48/72px card cannot carry: what it is, and what made it. */
+export function RailMenuSubject({ text, model }) {
+  return (
+    <div className="px-2.5 pb-2 pt-1">
+      <p className="line-clamp-2 text-[12px] leading-snug text-ink2">{text || '—'}</p>
+      {model ? <p className="truncate font-mono text-[10px] text-ink3">{model}</p> : null}
+    </div>
   );
 }

@@ -350,6 +350,13 @@ async function studioImage(payload, { row, signal }) {
       aspect_ratio: payload.aspect_ratio || '1:1',
       quality: payload.quality || '',
       seed: Number.isFinite(payload.seed) && payload.seed >= 0 ? payload.seed : null,
+      // A reference the page already put somewhere the provider can fetch.
+      // Empty for every route that takes none, which the server ignores.
+      reference_url: payload.reference_url || '',
+      // The ceiling this press may spend, from the quote the button showed.
+      // The hosted rail re-quotes and refuses to exceed it, so a price that
+      // moved between the quote and the press stops rather than overcharging.
+      ...(payload.maximum_debit_usd > 0 ? { maximum_debit_usd: payload.maximum_debit_usd } : {}),
     }),
   });
   const body = await response.json().catch(() => ({}));

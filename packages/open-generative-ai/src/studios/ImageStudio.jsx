@@ -11,7 +11,7 @@
 //   click/input/change listener trick the old code used (scoped to this studio's
 //   root, not window), plus explicit persist calls on portal-hosted actions.
 // - alert() → toast.error() with identical abort semantics.
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
@@ -19,10 +19,15 @@ import { adoptCloudOutput } from '../lib/cloudAdopt.js';
 import { localRow, needsBrowserKey, placeLabelFor, runImage, transportFor } from '../lib/modelRunner.js';
 import { useRunTargets } from '../lib/useRunTargets.js';
 import { useProviderReadiness } from '../lib/useProviderReadiness.js';
-import { PLACE_THIS_MAC, pickRunTarget } from '../lib/runTargets.js';
+import { PLACE_HIVEMINDOS, PLACE_THIS_MAC, pickRunTarget } from '../lib/runTargets.js';
+import { formatCredits, routeForAttached, useHostedQuote } from '../lib/hostedQuote.js';
 import { imageRunTargets } from './image/imageRunTargets.js';
 import { describeFailure } from '../lib/describeFailure.js';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
+import {
+  checkWorkflowDependencies, dependenciesBlockGeneration, formatDependencyBytes, targetsWithRunnableLanes,
+} from '../lib/workflowDependencies.js';
+import { lazyChunk } from '../lib/lazyChunk.js';
 // Still imported for the NON-generation calls — polling a resumed job and
 // uploading a reference. Generation goes through runImage().
 import { muapi } from '../lib/muapi.js';
@@ -48,7 +53,7 @@ import {
 import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
-import { t } from '../lib/i18n.js';
+import { t, tf } from '../lib/i18n.js';
 import {
   savePendingJob, removePendingJob, getPendingJobs, pendingJobsForTab,
 } from '../lib/pendingJobs.js';
@@ -60,7 +65,7 @@ import { getComposerSection, hydrateComposerState, updateComposerSection } from 
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { civitaiResourcesFromLoras, postMetaFromEntry } from '../lib/civitaiPost.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
-import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
+import { referencesNeedingApproval, resolveCloudReferences, uploadHostedInput } from '../lib/cloudReferenceUpload.js';
 import { OWNERSHIP_HEADING, applyReferenceRoles, normalizeReferenceRoles, referenceLabelStyleFor } from '../lib/imageReferenceRoles.js';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { huntLoraIds, isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraHunt, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
@@ -68,7 +73,8 @@ import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativ
 import { editBudgetForShortSide, editOutputDimensions } from '../lib/editResolution.js';
 import { composeRegionalPrompt, hasActiveRegions } from '../lib/regionPrompt.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
-import { IMAGE_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
+import { IMAGE_TAB_FIELDS, cloneTabValue, draftScope, snapshotTabFields } from '../lib/studioTabs.js';
+import { readDraft, writeDraft } from '../lib/draftVault.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 // The chime is one app-wide setting: this studio only PLAYS it (and primes the
 // audio context near the click). Its toggle lives beside Generate, in
@@ -88,7 +94,7 @@ import {
 import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { useMediaSrc } from '../hooks/hooks.js';
 import {
-  Button, FailureCallout, Spinner,
+  Button, FailureCallout, LoadingState, Spinner,
 } from '../ui/kit.jsx';
 import { Menu } from '../ui/Menu.jsx';
 import { StudioFrame } from './frame/StudioFrame.jsx';
@@ -118,22 +124,27 @@ import { MaskEditorDialog } from './image/MaskEditorDialog.jsx';
 import { AngleVariationsDialog } from './image/AngleVariationsDialog.jsx';
 import { SequenceEditDialog } from './image/SequenceEditDialog.jsx';
 import { angleDialectForModel, angleLabel, editAnglePrompt } from '../lib/editAngles.js';
+import { directionLane, directionPayload, directionPromptText } from '../lib/directionEdit.js';
 
 // Dialogs that are shut on arrival. Statically imported they were part of the
 // landing payload of the app's DEFAULT page: the prompt helper alone drags in
 // the model-source picker, the cast/persona tables and the H3 character notes,
 // and the Civitai poster its whole resource mapper. Loaded at their open sites
 // instead, so the cost is paid by whoever opens them.
-const CivitaiDownloadDialogLazy = lazy(() => import('../dialogs/CivitaiDownloadDialog.jsx').then((m) => ({ default: m.CivitaiDownloadDialog })));
-const CivitaiPostDialogLazy = lazy(() => import('../components/CivitaiPostDialog.jsx').then((m) => ({ default: m.CivitaiPostDialog })));
-const PromptHelperDialogLazy = lazy(() => import('../dialogs/PromptHelperDialog.jsx').then((m) => ({ default: m.PromptHelperDialog })));
+// lazyChunk rather than lazy: a chunk renamed by a rebuild reloads the page
+// instead of throwing the whole studio into its error boundary.
+const CivitaiDownloadDialogLazy = lazyChunk(() => import('../dialogs/CivitaiDownloadDialog.jsx').then((m) => ({ default: m.CivitaiDownloadDialog })));
+const CivitaiPostDialogLazy = lazyChunk(() => import('../components/CivitaiPostDialog.jsx').then((m) => ({ default: m.CivitaiPostDialog })));
+const PromptHelperDialogLazy = lazyChunk(() => import('../dialogs/PromptHelperDialog.jsx').then((m) => ({ default: m.PromptHelperDialog })));
+const WorkflowDependencyPromptLazy = lazyChunk(() => import('../components/WorkflowDependencyPrompt.jsx').then((m) => ({ default: m.WorkflowDependencyPrompt })));
+const DirectionDialogLazy = lazyChunk(() => import('./image/DirectionDialog.jsx').then((m) => ({ default: m.DirectionDialog })));
 
 // While a dialog's chunk is in flight: the same scrim the modal itself lands on,
 // so opening one never flashes the studio unlit and then relights it.
 function DialogLoading() {
   return (
-    <div className="fixed inset-0 z-[100] grid place-items-center bg-scrim" aria-busy="true">
-      <Spinner size={22} className="text-ink2" />
+    <div className="fixed inset-0 z-[100] grid place-items-center bg-scrim">
+      <LoadingState label={t('app.loading')} />
     </div>
   );
 }
@@ -146,6 +157,18 @@ export { normalizeImagePreferences };
 // require one. Models are never hidden based on attached references.
 const apiModelSupportsImage = (id) => i2iModels.some((m) => m.id === id);
 const apiModelRequiresImage = (id) => apiModelSupportsImage(id) && !t2iModels.some((m) => m.id === id);
+
+// Whether the model has a prompt field AT ALL. MUAPI publishes the input
+// schema per model and 19 of the 57 editing rows have no `prompt` in it — AI
+// Ghibli Style's entire schema is one required `image_url`, and an upscaler,
+// a background remover and a colorizer are the same shape. The composer used
+// to invite a paragraph for those and drop it on the floor. Text-to-image
+// rows always take one, so only the editing list is consulted.
+const apiModelTakesPrompt = (id) => {
+  if (t2iModels.some((m) => m.id === id)) return true;
+  const row = i2iModels.find((m) => m.id === id);
+  return row ? row.hasPrompt !== false : true;
+};
 
 // Short-side resolutions offered for local workflows. 0 = the workflow's own
 // default (1024 for the Krea/SDXL-class graphs).
@@ -194,7 +217,11 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   // has hydrated. Prompt text and the negative prompt stay in the encrypted cache.
   // A 'fresh'/'clone' tab skips this entirely — it must not inherit saved tuning.
   let persistedImagePreferences = null;
-  if (boot === 'persisted') {
+  // 'fresh' reads them too. A new tab is a new tab in the SAME studio, so it
+  // opens on the model and settings that studio was last used with — only the
+  // prompt starts empty. It used to boot on catalog defaults, which meant
+  // pressing + threw away the local model you had just chosen.
+  if (boot === 'persisted' || boot === 'fresh') {
     try {
       persistedImagePreferences = normalizeImagePreferences(
         getComposerSection('image').preferences
@@ -265,6 +292,24 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // Following the Automatic run target rather than a choice this tab made.
     // Sticky per tab like every other setting here, and one click either way.
     runOnAutomatic: !persistedImagePreferences,
+    // Workflow preflight: the lane's report for the selected local workflow,
+    // and whether the install prompt is open. Re-asked when the workflow or
+    // the "Run on" pin changes (workflowDependencies.js caches).
+    dependencyReport: null,
+    dependencyPromptOpen: false,
+    dependencyCheckRequest: 0,
+    // Whether a PERSON put the tab on the current lane. Only their pick is
+    // worth a modal; a lane a route or a restored preference arrived on is
+    // answered by moving to one that runs. One-shot — the effect reads it and
+    // clears it, so the next re-check is not mistaken for a second pick.
+    dependencyChosen: false,
+    // Where Cancel goes back to: the run target (and pin) this tab was on
+    // before the pick that hit a wall. Never leave someone on a model whose
+    // Generate can only refuse because they backed out of setting it up.
+    dependencyRevert: null,
+    // The lane the studio moved OFF, and what it moved to — the composer
+    // notice, with the door back. Dismissible; not an error.
+    dependencyMoved: null,
     imageMode: false,
     selectedAr,
     selectedResolution,
@@ -373,11 +418,14 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // The callout carries all three, which is why nothing toasts beside it.
     generateFailure: null,
     localProgress: { active: false, pct: 0, label: '' },
-    // Smooth, time-based ETA bar. Image generation exposes no real per-step
-    // progress on any path, so the bar is driven by elapsed / expected (from the
-    // client-side per-signature duration store), nudged up by the coarse status.
+    // Smooth ETA bar. Elapsed / expected (from the client-side per-signature
+    // duration store) drives the head of a run, where nothing is counting yet.
+    // A local ComfyUI lane then reports REAL sampler steps, and from the first
+    // one the bar follows those instead — anchored to where it had reached, so
+    // it neither jumps back nor freezes. See computeSmoothProgress.
     progressDisplay: 0,
     progressReal: 0,
+    progressAnchor: null,
     progressEstimateSec: null,
     // The values that tick several times a second live in their own store, so
     // the timer repaints the progress card and nothing else. See
@@ -390,6 +438,11 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     generationStartedAt: 0,
     generationTimer: null,
     viewerUrl: null,
+    // Upscales in flight, keyed by the url of the picture being upscaled:
+    // { mode, startedAt }. Keyed rather than a single flag because the mark is
+    // drawn ON the subject — every surface showing that picture reads this to
+    // know whether to wear the rim.
+    upscaling: new Map(),
     // Upscaled entry whose before/after compare overlay is open (null = closed).
     compareEntry: null,
     civitaiPost: null,
@@ -399,6 +452,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // Entry the Edit-area (inpaint) mask editor is open for, and its state.
     inpaintEntry: null,
     inpaintBusy: false,
+    // Direction edit in progress: {entry, kind} for the eyes or sun picker.
+    directionEntry: null,
+    directionBusy: false,
     // Angle-variation and sequence-edit dialogs (sequential client-side runs;
     // the Stop flag is honored between shots, never mid-generation).
     angleEntry: null,
@@ -420,6 +476,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     startFreshConfirm: false,
     cloudRefApproved: new Set(),
     cloudRefUploads: new Map(),
+    // The hosted rail's own upload cache. Separate from MUAPI's on purpose:
+    // the two stores are two accounts, and a URL from one is not a URL the
+    // other's provider should ever be handed.
+    hostedRefUploads: new Map(),
     civitaiOpen: false,
     localPromptHelperOpen: false,
     resumeRemaining: 0,
@@ -436,7 +496,15 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   // A duplicate overlays the source tab's configuration on top of the defaults.
   // The snapshot was already deep-copied at capture; copying again keeps a tab
   // duplicated twice from sharing Maps/arrays with its sibling.
-  if (boot === 'clone' && snapshot) Object.assign(engine, cloneTabValue(snapshot));
+  // A duplicate AND a tab coming back from a reload both overlay a snapshot on
+  // the defaults. They differ only in where it came from: a live sibling, or
+  // sessionStorage (which carries no prompt text — that returns from the
+  // encrypted composer on hydrate).
+  if ((boot === 'clone' || boot === 'restore') && snapshot) {
+    const { result, ...config } = snapshot;
+    Object.assign(engine, cloneTabValue(config));
+    if (result?.url) engine.history = [cloneTabValue(result)];
+  }
   return engine;
 }
 
@@ -512,6 +580,9 @@ export function ImageStudio({
   const rootRef = useRef(null);
   const promptRef = useRef(null);
   const authRetryRef = useRef(null);
+  // The run-target join as of the last render, for the preflight's fallback —
+  // see runnableFallbackTarget.
+  const runTargetsRef = useRef({ targets: [], machines: null, readiness: {} });
   const mountedOnceRef = useRef(false);
   const mountedRef = useRef(true);
 
@@ -544,6 +615,12 @@ export function ImageStudio({
   const pinMachine = (rentalId) => {
     const next = rentalId || '';
     if ((s.rentedMachineId || '') === next) return;
+    // The other half of the preflight's subject. Pinning a box that cannot
+    // run the selected model is a person's choice like picking the model is,
+    // so it gets the prompt — and Cancel puts the pin back.
+    s.dependencyChosen = true;
+    s.dependencyRevert = currentSelectionSnapshot();
+    s.dependencyMoved = null;
     s.rentedMachineId = next;
     persistImagePreferences();
     bump();
@@ -631,7 +708,14 @@ export function ImageStudio({
     bump();
   };
   const currentModelSupportsImage = () => {
-    if (!s.useLocalModel) return apiModelSupportsImage(s.selectedModel);
+    if (!s.useLocalModel) {
+      // The hosted rail consolidates several endpoints into one row, so its
+      // ids ("flux-3", "gpt-image-2") are in NEITHER MUAPI bucket: 30 of the
+      // 70 hosted rows that do take a picture had their upload refused by the
+      // bucket lookup alone. The catalog says so on the row itself.
+      if ((currentRunTarget()?.accepts || []).includes('image_url')) return true;
+      return apiModelSupportsImage(s.selectedModel);
+    }
     const model = localModelById(s.selectedLocalModel);
     // Fail OPEN while the runtime catalog is still loading — an unknown
     // model must not lock the upload button.
@@ -740,6 +824,7 @@ export function ImageStudio({
     s.generationStartedAt = Date.now();
     s.progressDisplay = 0;
     s.progressReal = 0;
+    s.progressAnchor = null;
     s.progressEstimateSec = estimateGenerationSeconds(
       s.progressSignature,
       s.progressWorkUnits,
@@ -757,6 +842,7 @@ export function ImageStudio({
         elapsedSec: (Date.now() - s.generationStartedAt) / 1000,
         estimateSec: Number(s.progressEstimateSec) || 0,
         realFraction: Number(s.progressReal) || 0,
+        realAnchor: s.progressAnchor,
         prevDisplay: s.progressDisplay,
       });
       // Deliberately NOT bump(): the tick repaints the progress card through its
@@ -891,6 +977,11 @@ export function ImageStudio({
   const claimRentedHandoff = () => {
     if (!tabActiveRef.current || !consumeRentedModeRequest('image')) return;
     reconcileRentedModelRef.current = !s.rentedMachines?.length;
+    // "Use in Studio" is a person asking for THAT box. If its lane is short
+    // of something, the prompt says what and points at re-provisioning —
+    // quietly moving them off the machine they just attached would undo the
+    // handoff they pressed.
+    s.dependencyChosen = true;
     setSource(true);
   };
 
@@ -1134,7 +1225,21 @@ export function ImageStudio({
   // Composer drafts (prompt, negative, reference selection) are a single
   // owner-vault section, so only the front tab writes to it — a background tab
   // would otherwise overwrite the draft the next reload restores.
+  // This tab's own words, to the encrypted draft vault, AS THEY ARE TYPED.
+  // The strip's snapshot poll also files them, but it runs every six seconds
+  // and `pagehide` cannot await an encrypt — so a prompt typed and immediately
+  // reloaded came back as the one before it. Every tab writes its own, front
+  // or not; the vault debounces.
+  const rememberOwnDraft = (patch) => {
+    const words = {};
+    for (const key of ['prompt', 'negativePrompt']) if (key in patch) words[key] = patch[key];
+    if (!Object.keys(words).length) return;
+    const scope = draftScope('image', tabIdRef.current);
+    writeDraft(scope, { ...(readDraft(scope) || {}), ...words });
+  };
+
   const updateComposerDraft = (patch) => {
+    rememberOwnDraft(patch);
     if (tabActiveRef.current) updateComposerSection('image', patch);
   };
 
@@ -1294,6 +1399,24 @@ export function ImageStudio({
     bump();
   };
 
+  // What this tab is running right now, in the shape chooseRunTarget takes.
+  // Not currentRunTarget(): that is the READOUT, and the row it synthesizes
+  // for a selection the joined list has not caught up with carries no
+  // `source`, which is the field the branch below dispatches on.
+  const currentSelectionSnapshot = () => ({
+    target: s.useLocalModel
+      ? { place: PLACE_THIS_MAC, source: 'local', id: s.selectedLocalModel, provider: '', label: localModelById(s.selectedLocalModel)?.name || s.selectedLocalModel || '' }
+      : { place: '', source: 'cloud', id: s.selectedModel, provider: s.selectedProvider || 'muapi', label: s.selectedModelName || s.selectedModel || '' },
+    pin: s.rentedMachineId || '',
+    automatic: Boolean(s.runOnAutomatic),
+  });
+
+  const restoreSelection = (snapshot) => {
+    if (!snapshot?.target?.id) return;
+    s.rentedMachineId = snapshot.pin;
+    chooseRunTarget(snapshot.target, { automatic: snapshot.automatic, chosen: false });
+  };
+
   /**
    * The one place a run target becomes a selection.
    *
@@ -1302,9 +1425,20 @@ export function ImageStudio({
    * rental is a property of This Mac: picking a This Mac model that a live
    * machine serves pins the work to that machine, and picking one it does not
    * serve lets the work stay here.
+   *
+   * `chosen` is whether a PERSON pressed this. The preflight reads it to
+   * decide between the install prompt and moving on quietly, and it is false
+   * for exactly two callers: the preflight's own fallback, and the revert
+   * behind Cancel. Both are the studio answering, not being asked.
    */
-  const chooseRunTarget = (target, { automatic = false } = {}) => {
+  const chooseRunTarget = (target, { automatic = false, chosen = true } = {}) => {
     if (!target) return;
+    if (chosen) {
+      s.dependencyChosen = true;
+      s.dependencyRevert = currentSelectionSnapshot();
+      // Their own pick answers the notice, whichever way it goes.
+      s.dependencyMoved = null;
+    }
     s.runOnAutomatic = Boolean(automatic);
     if (target.place === PLACE_THIS_MAC && target.source === 'local') {
       const model = localModelById(target.id);
@@ -1349,6 +1483,18 @@ export function ImageStudio({
       reason: '',
     };
   };
+
+  /**
+   * Whether the cloud selection can only start FROM a picture.
+   *
+   * Two catalogs answer this and both have to be asked. The MUAPI list knows
+   * its own editing-only rows by which bucket they are in. The hosted rail
+   * consolidates several endpoints into one model, so its ids ("flux-3") are
+   * in neither MUAPI bucket — its rows carry the server's own verdict instead,
+   * true only when EVERY capability the row has takes a picture in.
+   */
+  const cloudSelectionNeedsPicture = () => !s.useLocalModel
+    && (Boolean(currentRunTarget()?.requiresImage) || apiModelRequiresImage(s.selectedModel));
 
   const setSource = (nextLocal) => {
     if (nextLocal === s.useLocalModel) return;
@@ -1657,7 +1803,11 @@ export function ImageStudio({
 
   /* ---------------- history / canvas ---------------- */
 
-  const addToHistory = (entry, generationContext = null) => {
+  // `insertAt` is 0 for everything a person generated — newest first, which is
+  // what the rail and the stage read. A derivative (an upscale) passes the index
+  // of what it was made FROM, so it lands beside its source instead of at the
+  // top of a session it did not start.
+  const addToHistory = (entry, generationContext = null, insertAt = 0) => {
     if (generationContext && entry?.url) {
       s.contextStore.remember(entry.url, generationContext);
       // Seal the exact settings so this output can be dragged back in later.
@@ -1669,7 +1819,8 @@ export function ImageStudio({
         downloadName: imageDownloadName(entry.model, entry.id),
       });
     }
-    s.history.unshift(entry);
+    const at = Math.max(0, Math.min(Number(insertAt) || 0, s.history.length));
+    s.history.splice(at, 0, entry);
     saveStudioGenerationHistory('muapi_history', s.history, 50);
     bump();
   };
@@ -1677,11 +1828,19 @@ export function ImageStudio({
   // Post-generation upscale. The image is decrypted client-side (resolveMediaSrc)
   // and sent to the local /api/upscale route as base64 — nothing leaves the Mac.
   // mode 'fast' = R-ESRGAN only (~seconds); 'max' = ESRGAN + diffusion refine.
+  //
+  // Two things this deliberately does NOT do any more. It does not announce
+  // itself in a corner toast: the spectral rim and the centre badge ride on the
+  // picture being upscaled, on every surface drawing it, so the working state
+  // names its subject. And it does not drop the result at the top of the session
+  // and leave you to find it — an upscale takes the PLACE of what it upscaled.
   const upscaleEntry = async (entry, mode = 'fast') => {
     if (!entry?.url) return;
-    const loadingId = toast.loading(mode === 'max'
-      ? 'Upscaling (max quality — this can take a couple minutes)…'
-      : 'Upscaling…');
+    // One run per picture. The doors go disabled the moment this is set, but a
+    // second press can still land in the gap before the re-render.
+    if (s.upscaling.has(entry.url)) return;
+    s.upscaling.set(entry.url, { mode, startedAt: Date.now() });
+    bump();
     try {
       const src = await resolveMediaSrc(entry.url);
       const blob = await (await fetch(src)).blob();
@@ -1694,6 +1853,13 @@ export function ImageStudio({
       const tookFrom = Date.now();
       const result = await localAI.upscale({ image_base64: dataUrl, mode, scale: 1.5, prompt: entry.prompt || '', ...runOn() });
       if (!result?.url) throw new Error('Upscale finished without an image');
+      // Where it goes: the source's own slot, so ← / → out of the upscale lands
+      // on the original rather than walking the whole session back to it. Read
+      // here rather than before the await — a render that finished while this
+      // one ran has already moved the source along. -1 (the source fell off the
+      // 50-entry cap) becomes 0, which is the plain newest-first insert.
+      const sourceIndex = s.history.findIndex((e) => e.url === entry.url);
+      const wasViewed = s.viewerUrl === entry.url;
       addToHistory({
         id: `upscale-${entry.id || 'img'}-${mode}-${Date.now()}`,
         url: result.url,
@@ -1705,16 +1871,96 @@ export function ImageStudio({
         // Pairs this result with what it upscaled so the viewer can offer the
         // synchronized before/after compare.
         sourceUrl: entry.url,
-      });
-      toast.success('Upscaled image added to the gallery.', { id: loadingId });
+      }, null, Math.max(0, sourceIndex));
+      // And what shows it: whatever was showing the source. The viewer wins when
+      // it is open, because it covers the stage.
+      if (wasViewed) viewImage(result.url);
+      const onScreen = wasViewed || (!s.viewerUrl && s.history[0]?.url === result.url);
+      // Only when it landed somewhere you are not looking — upscaling an older
+      // result from the rail while the stage is on a newer one.
+      if (!onScreen) toast.success('Upscaled — it is in the results, next to the original.');
     } catch (error) {
-      toast.error(error?.message || 'Upscale failed', { id: loadingId });
+      toast.error(error?.message || 'Upscale failed');
+    } finally {
+      s.upscaling.delete(entry.url);
+      bump();
     }
   };
 
   // Canvas expansion rides the krea2 lane; the button appears only when that
   // lane is installed locally.
   const krea2LocalModel = () => s.localImageModels.find((m) => m.backend === 'comfy-krea2-turbo-identity-edit') || null;
+
+  // Direction edits (eyes, sun) each ride their own registered Klein lane, so
+  // the button appears when that lane is registered — not when its LoRA is
+  // already downloaded. A lane that is registered but missing a file opens the
+  // preflight when the dialog does, which is the one place that can fix it.
+  const directionLocalModel = (kind) => {
+    const workflowId = directionLane(kind)?.workflowId;
+    return workflowId ? s.localImageModels.find((m) => m.id === workflowId) || null : null;
+  };
+
+  /**
+   * Run a direction edit: render nothing here, send the pick.
+   *
+   * The gateway turns {x, y} or {rotation, elevation} back into the reference
+   * image its LoRA reads, so what crosses the wire is the choice rather than a
+   * picture of it — which is also what lets an agent call the same lane without
+   * a canvas.
+   */
+  const runDirection = async (entry, kind, state) => {
+    const model = directionLocalModel(kind);
+    const lane = directionLane(kind);
+    if (!model || !lane || !entry?.url) return;
+    s.directionBusy = true;
+    bump();
+    const loadingId = toast.loading(t('direction.started'));
+    try {
+      const src = await resolveMediaSrc(entry.url);
+      const blob = await (await fetch(src)).blob();
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('Could not read the image'));
+        reader.readAsDataURL(blob);
+      });
+      const tookFrom = Date.now();
+      const result = await runImage({
+        row: localRow(model.id, model.provider),
+        // The trigger sentence is the prompt. The gateway composes it too, for
+        // callers that never open this dialog; sending it here keeps the
+        // history readable rather than blank.
+        shared: { prompt: directionPromptText(kind, state.extra), seed: -1 },
+        extra: { local: {
+          studio_lane: studioLane,
+          ...runOn(),
+          workflow_file: model.workflowFile,
+          image_base64: dataUrl,
+          direction: directionPayload(kind, state),
+        } },
+      });
+      if (!result?.url) throw new Error('The edit finished without an image');
+      addToHistory({
+        id: `direction-${kind}-${entry.id || 'img'}-${Date.now()}`,
+        url: result.url,
+        prompt: directionPromptText(kind, state.extra),
+        model: `${entry.model || model.name} · ${t(kind === 'sun' ? 'direction.sunModel' : 'direction.eyesModel')}`,
+        aspect_ratio: entry.aspect_ratio,
+        timestamp: new Date().toISOString(),
+        ...tookSince(tookFrom),
+        // Pairs with the source so Compare shows exactly what moved.
+        sourceUrl: entry.url,
+      });
+      s.directionEntry = null;
+      viewImage(result.url);
+      toast.success(t('direction.done'), { id: loadingId });
+    } catch (error) {
+      toast.error(error?.message || t('direction.failed'), { id: loadingId });
+    } finally {
+      s.directionBusy = false;
+      bump();
+    }
+  };
 
   const runExpand = async (entry, { width, height, prompt, offsetX, offsetY }) => {
     const model = krea2LocalModel();
@@ -2224,8 +2470,13 @@ export function ImageStudio({
     // References are sent only when the selected model can take them.
     const sendingRefs = s.uploadedImageUrls.length > 0 && currentModelSupportsImage();
     const sheetActive = !coupleOptions && characterSheetActive();
-    if (!s.useLocalModel && apiModelRequiresImage(s.selectedModel) && s.uploadedImageUrls.length === 0) {
-      toast.error(`${s.selectedModelName} needs a reference image — attach one first.`);
+    // Backstop. The composer already greys the press out with this reason
+    // (referenceMissing), so reaching here means a caller that is not the
+    // button — the queue, a retry, a restored setup.
+    if (cloudSelectionNeedsPicture() && s.uploadedImageUrls.length === 0) {
+      toast.error(apiModelTakesPrompt(s.selectedModel)
+        ? `${s.selectedModelName} edits a picture — attach one with Attach, below the prompt.`
+        : `${s.selectedModelName} only restyles a picture you attach, and takes no prompt — use Attach, below the prompt.`);
       return;
     }
     if (!sendingRefs && !prompt) {
@@ -2266,13 +2517,19 @@ export function ImageStudio({
       startImageProgress();
       bump();
 
-      run.unsub = localAI.onProgress(({ progress, status, message }) => {
+      run.unsub = localAI.onProgress(({ progress, status, message, counted }) => {
         if (run.cancelled) return;
         const pct = Math.round((progress ?? 0) * 100);
         const label = message || (status === 'starting' ? 'Starting...' : `${pct}%`);
         s.localProgress = { active: true, pct, label };
-        // Coarse status nudges the bar up (never down); elapsed/estimate drives it.
+        // A coarse status only nudges the bar up; elapsed/estimate drives it.
         s.progressReal = Math.min(1, Math.max(0, progress ?? 0));
+        // The first REAL step counter takes the bar over from the estimate.
+        // Anchoring here — rather than in the tick — is what stops it jumping
+        // back to step 1 of 8 from wherever the estimate had already carried it.
+        if (counted && !s.progressAnchor && s.progressReal > 0 && s.progressReal < 1) {
+          s.progressAnchor = { display: s.progressDisplay, real: s.progressReal };
+        }
         // The bridge can send these many times a second; only the progress card
         // is showing the label, so only the progress card repaints.
         s.progressStore.set({ label });
@@ -2460,7 +2717,15 @@ export function ImageStudio({
       if (sendingRefs) {
         // Approved above: decrypt anything held locally and upload it so the provider
         // has a URL it can fetch. Already-public references pass straight through.
-        const cloudRefs = await resolveCloudReferences(s.uploadedImageUrls, { cache: s.cloudRefUploads });
+        // Which store the picture goes to follows the MODEL, not the studio:
+        // a HivemindOS press uploads to the HivemindOS gateway, and a MUAPI
+        // press to MUAPI. Sending it to a vendor the run does not touch would
+        // be a disclosure nobody agreed to — so the caches are separate too,
+        // or a URL from one account would be handed to the other.
+        const hostedRun = currentRunTarget().place === PLACE_HIVEMINDOS;
+        const cloudRefs = await resolveCloudReferences(s.uploadedImageUrls, hostedRun
+          ? { cache: s.hostedRefUploads, upload: uploadHostedInput }
+          : { cache: s.cloudRefUploads });
         if (run.cancelled) return;
         const genParams = {
           model: s.selectedModel,
@@ -2492,7 +2757,13 @@ export function ImageStudio({
           // reference off the prompt payload, not a second endpoint.
           extra: {
             muapi: { method: 'generateI2I', ...genParams },
-            studio: { quality: qualityLabel || '' },
+            studio: {
+              quality: qualityLabel || '',
+              reference_url: cloudRefs[0] || '',
+              // The number the button showed. The rail re-quotes and refuses
+              // to exceed it rather than charging what it has become.
+              maximum_debit_usd: hostedRun ? hostedCeilingUsd() : 0,
+            },
           },
           signal: run.abort.signal,
         });
@@ -2517,7 +2788,13 @@ export function ImageStudio({
         res = await runImage({
           row: cloudRow(),
           shared: { prompt: prompt || '', aspect_ratio: s.selectedAr, seed },
-          extra: { muapi: genParams, studio: { quality: qualityLabel || '' } },
+          extra: {
+            muapi: genParams,
+            studio: {
+              quality: qualityLabel || '',
+              maximum_debit_usd: currentRunTarget().place === PLACE_HIVEMINDOS ? hostedCeilingUsd() : 0,
+            },
+          },
           signal: run.abort.signal,
         });
       }
@@ -2701,19 +2978,29 @@ export function ImageStudio({
     void hydrateComposerState().then(() => {
       if (!isPrimaryTab) return;
       const saved = getComposerSection('image');
-      if (typeof saved.prompt === 'string' && saved.prompt && !s.prompt) {
-        setPromptValue(saved.prompt);
+      // A RELOAD already brought this tab's words back with its settings — they
+      // ride the boot seed, decrypted from the draft vault (lib/studioTabs.js).
+      // This path is the COLD START: a browser that was quit and reopened has
+      // no tab strip left, so tab 1 comes up with no seed and asks the vault
+      // directly. Its own draft wins over the composer's, which is one draft
+      // for the whole studio and is what a brand-new browser has instead.
+      const ownDraft = readDraft(draftScope('image', tabIdRef.current)) || {};
+      const savedPrompt = ownDraft.prompt || saved.prompt;
+      if (typeof savedPrompt === 'string' && savedPrompt && !s.prompt) {
+        setPromptValue(savedPrompt);
       }
-      // The negative prompt is prompt text, kept in the encrypted composer only, so
-      // it arrives with hydration — restore it unless the user already typed one.
-      const savedNegative = saved.preferences?.negativePrompt;
+      // The negative prompt is prompt text, so it is never in plaintext storage:
+      // same two sources, same order.
+      const savedNegative = ownDraft.negativePrompt || saved.preferences?.negativePrompt;
       if (typeof savedNegative === 'string' && savedNegative && !s.negativePrompt) {
         s.negativePrompt = savedNegative;
         bump();
       }
       // Per-model negative prompts were stripped from localStorage; the composer
       // holds the full cache — fill in only the ones still missing (never clobber).
-      const savedModelSettings = saved.preferences?.modelSettings;
+      const savedModelSettings = ownDraft.persistedImagePreferences?.modelSettings
+        || ownDraft.modelSettingsById
+        || saved.preferences?.modelSettings;
       if (savedModelSettings && typeof savedModelSettings === 'object') {
         for (const [key, entry] of Object.entries(savedModelSettings)) {
           const current = s.modelSettingsById.get(key);
@@ -2768,6 +3055,11 @@ export function ImageStudio({
         // The live prefs, not the last-persisted ones — a background tab stops
         // persisting, so s.persistedImagePreferences can be stale here.
         persistedImagePreferences: currentImagePreferences(),
+        // The picture on the stage, for the same reason the video studio carries
+        // its clip: a duplicate that opens empty is not a duplicate of what you
+        // were looking at, and a reload that drops it loses the only thing on
+        // screen. One entry, not the gallery.
+        result: s.history[0] ? cloneTabValue(s.history[0]) : null,
       }),
       isBusy: () => Boolean(s.generating || generationQueueRef.current.pending),
       // Cheap enough to call on the strip's poll (snapshot() deep-copies the
@@ -2899,12 +3191,180 @@ export function ImageStudio({
   /* ---------------- render ---------------- */
 
   const activeLocalModel = localModelById(s.selectedLocalModel);
+
+  // Ask the lane what it lacks for the selected local workflow, before
+  // Generate — the same preflight the Video studio runs. Without it, a lane
+  // whose weights live on a rented box (MiniMax H3 Image) looked runnable
+  // here and answered a press with ComfyUI's own validation dump.
+  // While a direction picker is open the preflight subject IS that lane, not
+  // whatever the composer has selected: its LoRA is the thing that has to be
+  // on the machine, and the picker is where a person finds out.
+  const dependencyWorkflowId = s.directionEntry
+    ? String(directionLane(s.directionEntry.kind)?.workflowId || '')
+    : (s.useLocalModel && activeLocalModel?.provider === 'hosted-media-studio'
+      ? String(activeLocalModel.id || '')
+      : '');
+  const dependencyRunOn = s.rentedMachineId || '';
+  // The list, the machines and the readiness the fallback ladder reads, as of
+  // the LAST render rather than the one the effect closed over: the preflight
+  // is a round trip, and at boot it resolves after discovery has refilled the
+  // catalogue underneath it.
+  runTargetsRef.current = { targets: runTargetList, machines: runOnState.machines, readiness: runOnState.readiness };
+
+  /**
+   * Where to send this tab when its lane refuses.
+   *
+   * The Automatic ladder, applied to the list with every lane already known
+   * to refuse on this pin struck out of it — so the answer is a model that
+   * runs here, and failing that HivemindOS credits, which is the whole point:
+   * a machine that cannot run the selected workflow can nearly always still
+   * run something.
+   */
+  const laneOfTarget = (target) => (target?.source === 'local' && target.provider === 'hosted-media-studio'
+    ? String(target.id || '')
+    : '');
+  const runnableFallbackTarget = () => {
+    const { targets, machines, readiness } = runTargetsRef.current;
+    const candidates = targetsWithRunnableLanes(targets, { runOn: dependencyRunOn, laneOf: laneOfTarget });
+    return pickRunTarget('image', { catalog: candidates, machines, readiness }).target;
+  };
+
+  /**
+   * @param {object} options
+   * @param {boolean} [options.force] open the prompt whatever the report says
+   *   (the `install-dependencies` remedy, and the notice's own "Set up" button)
+   * @param {boolean} [options.chosen] a person picked this lane in this tab.
+   *   A refusal is then an answer to something they did, and the prompt is
+   *   right. Nobody picked the lane a route arrives on, so a refusal there is
+   *   answered by picking somewhere else instead of by a modal over an empty
+   *   studio — which is what navigating to Image used to open.
+   */
+  const openDependencyPrompt = async ({ force = false, chosen = false } = {}) => {
+    if (!dependencyWorkflowId) return;
+    const request = ++s.dependencyCheckRequest;
+    const blockedId = dependencyWorkflowId;
+    try {
+      const report = await checkWorkflowDependencies(localAI, { workflowId: blockedId, runOn: dependencyRunOn, force });
+      if (request !== s.dependencyCheckRequest) return;
+      s.dependencyReport = report;
+      if (!dependenciesBlockGeneration(report)) {
+        s.dependencyPromptOpen = force;
+        s.dependencyRevert = null;
+        bump();
+        return;
+      }
+      const fallback = force || chosen ? null : runnableFallbackTarget();
+      if (fallback) {
+        // Not an error and not a stop: the tab keeps working, on something
+        // else, and says so where the model is chosen.
+        s.dependencyPromptOpen = false;
+        // Still Automatic if it was: this IS the ladder's answer, picked from
+        // the rungs that are left.
+        chooseRunTarget(fallback, { chosen: false, automatic: s.runOnAutomatic });
+        s.dependencyMoved = { from: report.title || blockedId, to: fallback.label, workflowId: blockedId, report };
+        bump();
+        return;
+      }
+      // Nothing else runs either. Then the prompt IS the way forward — it
+      // installs what can be installed and points at Machines when it cannot.
+      // Any earlier "moved to X" line goes with it: the tab is standing on
+      // the lane that line called blocked, so it is no longer true.
+      s.dependencyMoved = null;
+      s.dependencyPromptOpen = true;
+      bump();
+    } catch {
+      // A lane that cannot be asked is not a lane that is missing things.
+    }
+  };
+  useEffect(() => {
+    // Cleared on every pass, including this one: a pick that landed on a lane
+    // with no preflight (a cloud model) must not leave the flag standing for
+    // whatever the studio chooses next.
+    if (!dependencyWorkflowId) {
+      s.dependencyChosen = false;
+      s.dependencyReport = null;
+      s.dependencyPromptOpen = false;
+      return;
+    }
+    // A direction picker is a person asking about that lane, so it counts as
+    // chosen: there is no other model to move to, and its LoRA is what they
+    // opened the picker to use.
+    const chosen = s.dependencyChosen || Boolean(s.directionEntry);
+    s.dependencyChosen = false;
+    void openDependencyPrompt({ chosen });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dependencyWorkflowId, dependencyRunOn]);
+
+  // What the notice says behind "What it needs": the card the workflow wants,
+  // or the download it is short of. Both are already sentences the gateway or
+  // the table wrote — neither is a raw refusal.
+  const dependencyMovedDetail = (report) => (report?.hardware?.supported === false
+    ? String(report.hardware.reason || '')
+    : tf('deps.movedItems', report?.missing?.length || 0, formatDependencyBytes(report?.missing_bytes)));
+
+  // The door back: put the tab on the lane it was moved off, which the effect
+  // answers with the install prompt because this time a person asked for it.
+  const setUpMovedLane = () => {
+    const moved = s.dependencyMoved;
+    s.dependencyMoved = null;
+    if (!moved) { bump(); return; }
+    const listed = runTargetsRef.current.targets.find((row) => laneOfTarget(row) === moved.workflowId);
+    chooseRunTarget(listed || { place: PLACE_THIS_MAC, source: 'local', id: moved.workflowId, provider: '', label: moved.from });
+  };
+
+  // Backing out of setting a lane up must not leave the tab standing on it:
+  // its Generate could only refuse. Cancel goes back to whatever was running
+  // before the pick — and to the pin that was in force with it.
+  const closeDependencyPrompt = () => {
+    s.dependencyPromptOpen = false;
+    const revert = s.dependencyRevert;
+    s.dependencyRevert = null;
+    if (revert && dependenciesBlockGeneration(s.dependencyReport)) restoreSelection(revert);
+    else bump();
+  };
+
   const resolutions = s.useLocalModel ? [] : getCurrentResolutions(s.selectedModel);
   const aspectRatios = s.useLocalModel
     ? (activeLocalModel?.aspectRatios || ['1:1'])
     : getCurrentAspectRatios(s.selectedModel);
   const refsSupported = currentModelSupportsImage();
   const refCount = s.uploadedImageUrls.length;
+
+  // What this press costs, on the one rail that can say before it is made.
+  //
+  // The hosted rail prices per REQUEST: 528 of its 538 endpoints quote
+  // dynamically and the ten that do not still move with what is attached. So
+  // the button carries a live quote of the composer's current state rather
+  // than the place's standing sentence about the bill, which for HivemindOS
+  // credits was no sentence at all.
+  const hostedTarget = !s.useLocalModel && currentRunTarget().place === PLACE_HIVEMINDOS ? currentRunTarget() : null;
+  // Which endpoint of a consolidated row gets priced: `flux-3` with a reference
+  // attached is the editing one, and it is not the same money. A row that ONLY
+  // edits is priced AS an edit even with nothing attached yet — asking for its
+  // text-to-image endpoint got the rail's own refusal printed on the composer
+  // ("AI Ghibli Style cannot start from that input. It does: image-to-image"),
+  // which is a true sentence about an endpoint nobody asked for.
+  const hostedRoute = hostedTarget
+    ? routeForAttached(hostedTarget.hostedRoutes, 'image', refsSupported && refCount > 0 ? 'image' : 'none')
+    : null;
+  const hostedQuote = useHostedQuote({
+    enabled: Boolean(hostedTarget),
+    model: hostedTarget?.id || '',
+    kind: 'image',
+    attached: hostedRoute?.attached || (refsSupported && refCount > 0 ? 'image' : 'none'),
+    aspect_ratio: s.selectedAr || '1:1',
+  });
+  // What a press is allowed to spend. The quote plus a little headroom, so a
+  // price that ticked up between the quote and the press still runs — and a
+  // price that jumped does not. Falls back to the rail's own $25 ceiling only
+  // when nothing could be quoted, which is the case the gateway itself bounds.
+  const hostedCeilingUsd = () => (hostedQuote.usd > 0 ? Math.min(25, Math.max(0.01, hostedQuote.usd * 1.2)) : 0);
+  const hostedCostLabel = hostedTarget
+    ? (hostedQuote.loading
+      ? 'pricing…'
+      : formatCredits(hostedQuote.credits, { exact: hostedRoute?.exact !== false }) || hostedQuote.error || '')
+    : '';
+
   const refsIgnored = refCount > 0 && !refsSupported;
   const helper = currentPromptHelper();
   const runtimeModes = activeLocalModel?.runtimeModes || [];
@@ -2953,7 +3413,23 @@ export function ImageStudio({
   const offlineReason = offlineBlocked
     ? 'The studio is not running — start it again to generate.'
     : '';
-  const generateBlocked = rentedBlocked || localBlocked || offlineBlocked;
+  // Nothing to press yet: the model takes a picture in and none is attached.
+  // The old shape let the press through to a toast that said the same thing
+  // and offered nothing — a dead end the house rules forbid — so the reason
+  // now rides on the button and in the box, beside the Attach door that fixes
+  // it. Same information the guard in generate() had, an entire prompt earlier.
+  const referenceMissing = s.uploadedImageUrls.length === 0 && cloudSelectionNeedsPicture();
+  const referenceMissingReason = referenceMissing
+    ? (apiModelTakesPrompt(s.selectedModel)
+      ? `${s.selectedModelName} edits a picture — attach one below to generate.`
+      : `${s.selectedModelName} takes one picture and no prompt — drop one on the composer, or click it to browse.`)
+    : '';
+  const generateBlocked = rentedBlocked || localBlocked || offlineBlocked || referenceMissing;
+  // The model reads a picture and nothing else: no prompt field upstream, no
+  // text-to-image route. The composer becomes ONE upload door — see
+  // UploadOnlyComposer for why the prompt box, Starters, Improve, Attach and
+  // Clear all stand down rather than sitting there reading nothing.
+  const uploadOnly = !s.useLocalModel && cloudSelectionNeedsPicture() && !apiModelTakesPrompt(s.selectedModel);
   // Edit workflows (requires.image) take their ASPECT from the reference on the
   // server, so the aspect-ratio preset would be a lie while a reference is
   // attached — replace it with the truth. The size is still the caller's to set:
@@ -3081,11 +3557,20 @@ export function ImageStudio({
   // swelled to 300px and reflowed the chip row.
   const generateLabel = s.generating ? t('common.generating') : t('common.generate');
 
+  // A model that can only edit says so where the person is about to type, not
+  // after they press. "Describe the image you want" over a model whose whole
+  // upstream schema is one required picture is the box asking for work it will
+  // throw away — and for the 19 editing rows with no prompt field at all, the
+  // paragraph never reaches the provider even once a picture is attached.
   const promptPlaceholder = refCount > 1
     ? `${refCount} ${t('image.multiImageNote')}`
     : refCount > 0
       ? t('image.placeholderTransform')
-      : t('image.placeholder');
+      : referenceMissing
+        ? (apiModelTakesPrompt(s.selectedModel)
+          ? `Attach a picture — ${s.selectedModelName} edits one, it cannot start from text`
+          : `${s.selectedModelName} restyles a picture you attach — it takes no prompt`)
+        : t('image.placeholder');
 
   // Everything the Runs-on readout needs, in one object: the joined list, the
   // Automatic pick and its reason, and this tab's own choice. Assembled here
@@ -3100,6 +3585,10 @@ export function ImageStudio({
     onAutomatic: followAutomatic,
     pinned: s.rentedMachineId || '',
     onPin: pinMachine,
+    // What the composer holds, so a hosted row can price the press it would
+    // actually make — an attached reference is the editing endpoint, and that
+    // is not the same money as the text one.
+    priceContext: { kind: 'image', attached: refsSupported && refCount > 0 ? 'image' : 'none', aspectRatio: s.selectedAr || '1:1' },
     // Whether a row can actually run, and the button that repairs it, ON the
     // row — resolved before the press instead of arriving as a provider's
     // sentence after it. The MUAPI key opens this studio's own dialog; every
@@ -3207,6 +3696,7 @@ export function ImageStudio({
       schedulerChoices={schedulerChoices}
       krea2Selected={krea2Selected}
       etaLabel={etaLabel}
+      costLabel={hostedCostLabel}
       coupleOn={coupleOn}
       sheetOn={sheetOn}
       coupleCapable={coupleCapableModel()}
@@ -3385,6 +3875,11 @@ export function ImageStudio({
       advancedOpen={s.advancedOpen}
       onToggleAdvanced={toggleAdvanced}
       coupleOn={coupleOn}
+      uploadOnly={uploadOnly}
+      onUploadFiles={handleComposerFiles}
+      // The frame's own drop, handed to the zone: files attach, a picture
+      // dragged out of the gallery goes up through the same reference upload.
+      onUploadDrop={composerDrop.onDrop}
       promptPlaceholder={promptPlaceholder}
       generateLabel={generateLabel}
       generateBlocked={generateBlocked}
@@ -3392,8 +3887,9 @@ export function ImageStudio({
         ? offlineReason
         : rentedBlocked
           ? 'Rent a machine (or switch the source to Local) to generate.'
-          : (localBlockedReason || t('image.generateTooltip'))}
+          : (localBlockedReason || referenceMissingReason || t('image.generateTooltip'))}
       etaLabel={etaLabel}
+      costLabel={hostedCostLabel}
       onGenerate={generate}
       onCancel={cancelGeneration}
       onNewPrompt={requestNewPrompt}
@@ -3440,6 +3936,7 @@ export function ImageStudio({
                 onRemedy={(remedy) => void runFailureRemedy(remedy, {
                   onMuapiKey: () => { authRetryRef.current = () => generate(); s.authOpen = true; bump(); },
                   onLowerResolution: lowerResolution,
+                  onInstallDependencies: () => void openDependencyPrompt({ force: true }),
                   onRetry: () => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); },
                 })}
                 onRetry={generate}
@@ -3450,12 +3947,44 @@ export function ImageStudio({
                 dismissLabel="Dismiss"
               />
             ) : null}
+
+            {/* The studio moved itself off a lane that cannot run here. Said
+                where the model is chosen, in the composer's own colour rather
+                than in red: nothing failed, and there is a way back on the
+                row. Navigating to this studio used to open the install modal
+                over an empty stage instead. */}
+            {s.dependencyMoved ? (
+              <FailureCallout
+                tone="notice"
+                title={tf('deps.movedTitle', s.dependencyMoved.from, s.dependencyMoved.to)}
+                detail={dependencyMovedDetail(s.dependencyMoved.report)}
+                detailsLabel="What it needs"
+                remedy={{ label: tf('deps.setUpAnyway', s.dependencyMoved.from) }}
+                onRemedy={() => setUpMovedLane()}
+                onDismiss={() => { s.dependencyMoved = null; bump(); }}
+                dismissLabel="Dismiss"
+              />
+            ) : null}
+
+            {s.dependencyPromptOpen && s.dependencyReport && dependencyWorkflowId ? (
+              <Suspense fallback={<DialogLoading />}>
+                <WorkflowDependencyPromptLazy
+                  report={s.dependencyReport}
+                  workflowId={dependencyWorkflowId}
+                  runOn={dependencyRunOn}
+                  onReport={(report) => { s.dependencyReport = report; if (report?.ok) s.dependencyRevert = null; bump(); }}
+                  onRemedy={(remedy) => void runFailureRemedy(remedy, {})}
+                  onClose={closeDependencyPrompt}
+                />
+              </Suspense>
+            ) : null}
           </>
         )}
         rail={(
           <ImageRail
             entries={s.history}
             selectedUrl={s.viewerUrl || s.history[0]?.url || ''}
+            upscalingUrls={s.upscaling}
             generating={s.generating}
             canReuse={refsSupported}
             onOpen={openGalleryEntry}
@@ -3468,6 +3997,9 @@ export function ImageStudio({
           <ImageStage
             entry={stageEntry}
             historyCount={s.history.length}
+            emptyHint={uploadOnly
+              ? `${s.selectedModelName} works on a picture you give it. Drop one on the composer below and press Generate — everything you have made before is in the Library.`
+              : ''}
             generating={s.generating}
             progressStore={s.progressStore}
             progressHeading={s.useLocalModel ? t('image.generatingLocally') : t('common.generating')}
@@ -3487,6 +4019,12 @@ export function ImageStudio({
             onInpaint={isLocalAIAvailable() && krea2LocalModel()
               ? (entry) => { s.inpaintEntry = entry; bump(); }
               : undefined}
+            onPointEyes={isLocalAIAvailable() && directionLocalModel('eyes')
+              ? (entry) => { s.directionEntry = { entry, kind: 'eyes' }; bump(); }
+              : undefined}
+            onMoveSun={isLocalAIAvailable() && directionLocalModel('sun')
+              ? (entry) => { s.directionEntry = { entry, kind: 'sun' }; bump(); }
+              : undefined}
             onAngles={isLocalAIAvailable() && angleEditModel()
               ? (entry) => { s.angleEntry = entry; bump(); }
               : undefined}
@@ -3494,6 +4032,7 @@ export function ImageStudio({
               ? (entry) => { s.sequenceEntry = entry; bump(); }
               : undefined}
             onUpscale={isLocalAIAvailable() ? (entry, mode) => upscaleEntry(entry, mode) : undefined}
+            upscaling={stageEntry ? s.upscaling.get(stageEntry.url) || null : null}
             onUseAsVideoFrame={(entry) => void sendToVideoStartFrame(entry.url)}
             videoFrameBusy={s.sendingToVideo}
             onPostToCivitai={stagePostToCivitai}
@@ -3542,12 +4081,19 @@ export function ImageStudio({
             bump();
           }}
           onUpscale={isLocalAIAvailable() ? (mode) => upscaleEntry(viewerEntry, mode) : undefined}
+          upscaling={s.upscaling.get(s.viewerUrl) || null}
           onCompare={viewerEntry?.sourceUrl ? () => { s.compareEntry = viewerEntry; bump(); } : undefined}
           onExpand={isLocalAIAvailable() && krea2LocalModel() && viewerEntry
             ? () => { s.expandEntry = viewerEntry; bump(); }
             : undefined}
           onInpaint={isLocalAIAvailable() && krea2LocalModel() && viewerEntry
             ? () => { s.inpaintEntry = viewerEntry; bump(); }
+            : undefined}
+          onPointEyes={isLocalAIAvailable() && directionLocalModel('eyes') && viewerEntry
+            ? () => { s.directionEntry = { entry: viewerEntry, kind: 'eyes' }; bump(); }
+            : undefined}
+          onMoveSun={isLocalAIAvailable() && directionLocalModel('sun') && viewerEntry
+            ? () => { s.directionEntry = { entry: viewerEntry, kind: 'sun' }; bump(); }
             : undefined}
           onAngles={isLocalAIAvailable() && angleEditModel() && viewerEntry
             ? () => { s.angleEntry = viewerEntry; bump(); }
@@ -3603,6 +4149,18 @@ export function ImageStudio({
           onSubmit={(mask) => void runInpaint(s.inpaintEntry, mask)}
           onSmartSelect={isLocalAIAvailable() ? (request) => smartSelectMask(s.inpaintEntry, request) : undefined}
         />
+      ) : null}
+
+      {s.directionEntry ? (
+        <Suspense fallback={<DialogLoading />}>
+          <DirectionDialogLazy
+            kind={s.directionEntry.kind}
+            entry={s.directionEntry.entry}
+            busy={s.directionBusy}
+            onClose={() => { s.directionEntry = null; bump(); }}
+            onSubmit={(state) => void runDirection(s.directionEntry.entry, s.directionEntry.kind, state)}
+          />
+        </Suspense>
       ) : null}
 
       {s.angleEntry ? (

@@ -13,7 +13,9 @@
 // only ever a shortcut.
 //
 // The doors that are not settings sit on the action row, left of Generate:
-// frames · improve · starters · camera · more. `more` is where the controls the
+// frames · starters · camera · more — with Improve moved up into the prompt
+// box's own corner, beside the clear badge, because it rewrites the text rather
+// than attaching anything to the run. `more` is where the controls the
 // design draws no door for went — Style, Emotion, UGC, Shots, the source clip,
 // the Hivemind prompt library, Start fresh, the completion chime and the manual
 // timeline — rather than being dropped. Nothing in the old row was removed;
@@ -40,9 +42,10 @@ import { AspectRatioPicker, NativeSelect, Slider, Spinner, Toggle, cx } from '..
 import { ChipButton, MenuItem, useDismissable } from '../../ui/Menu.jsx';
 import { CompletionPingToggle } from '../../ui/CompletionPingToggle.jsx';
 import {
-  ComposerMeta, ComposerPanel, ComposerPrimary, ComposerPrompt, ComposerSecondary, ComposerTool,
+  ComposerMeta, ComposerPanel, ComposerPrimary, ComposerPrompt, ComposerPromptAction, ComposerSecondary, ComposerTool,
 } from '../frame/ComposerPanel.jsx';
-import { ExploreDockItem } from '../frame/ExploreDockItem.jsx';
+import { PromptLibraryItem } from '../frame/PromptLibraryItem.jsx';
+import { PromptLibraryMenu } from '../frame/PromptLibraryMenu.jsx';
 import { RecipeLine, RecipeToken } from '../frame/RecipeLine.jsx';
 import { SavedPromptsMenu } from '../SavedPromptsMenu.jsx';
 import { UgcMenu } from '../UgcMenu.jsx';
@@ -622,17 +625,6 @@ export function VideoComposerBar({
           frame, reference and clip controls do not. */}
       {promptWritable ? (
         <>
-          {/* IMPROVE. The helper, named for what it does here: it refines what is
-              in the box — told the cast, the lane, the clip length and the
-              attached references — rather than replacing it. */}
-          <ComposerTool
-            icon="wand"
-            label={t('composer.refine')}
-            disabled={!hasPrompt}
-            title={hasPrompt ? t('composer.refineTitle') : t('composer.improveDisabled')}
-            onClick={onOpenPromptHelper}
-          />
-
           {/* STARTERS. The shipped shelf and the saved library are sections of
               ONE menu, as they already were — renamed to the door the design
               draws, so Image and Video call the same thing by the same word. */}
@@ -713,9 +705,9 @@ export function VideoComposerBar({
             {/* The prompt library reads first among the doors: like the pickers
                 above it, it writes the box. It came from the retired topbar,
                 which carried it on every page including the ones with no prompt
-                to insert into. It keeps its own toggle semantics, so unlike its
-                neighbours it does not close(). */}
-            <ExploreDockItem />
+                to insert into. Its panel opens over this menu's own button
+                (PromptLibraryMenu, mounted below), so it closes the menu. */}
+            <PromptLibraryItem close={close} />
             {timeline ? (
               <MenuItem
                 icon="clapper"
@@ -746,6 +738,11 @@ export function VideoComposerBar({
         )}
       </LoosePopover>
 
+      {/* The prompt library's popover, anchored where the "more" button sits —
+          it used to be a fixed panel in the window's top-right corner, a screen
+          away from the row that opened it. Mounts itself when that row asks. */}
+      <PromptLibraryMenu />
+
       {/* An upload in flight has to be visible with every popover shut. */}
       {s.videoUploading ? <Spinner size={14} className="text-honey" /> : null}
     </>
@@ -763,8 +760,22 @@ export function VideoComposerBar({
           onChange={(e) => setPrompt(e.target.value)}
           // The small door, in the box's own corner: empties this box and
           // nothing else — the frames, the cast and the clip stay. Start fresh
-          // (in `more`) is the big one.
+          // (in `more`) is the big one. Two presses: the first turns it into a
+          // pill that says Clear.
           onClear={onClearPrompt}
+          // IMPROVE, beside it. The helper refines what is in the box — told the
+          // cast, the lane, the clip length and the attached references — rather
+          // than replacing it, so it belongs ON the text it rewrites rather than
+          // in the row of doors that attach things to the run.
+          corner={(
+            <ComposerPromptAction
+              icon="wand"
+              label={t('composer.refine')}
+              disabled={!hasPrompt}
+              title={hasPrompt ? t('composer.refineTitle') : t('composer.improveDisabled')}
+              onClick={onOpenPromptHelper}
+            />
+          )}
           // ⌘/Ctrl+Enter generates, the same as every other composer, behind the
           // guards it has always used. Deliberately NOT the button's `disabled`
           // expression: reconciling the two is a behaviour change, and this file

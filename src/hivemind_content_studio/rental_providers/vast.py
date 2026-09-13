@@ -145,7 +145,9 @@ class VastProvider:
         # Where the money is topped up depends on who is billing: the worker
         # spends HivemindOS credit, the direct transport spends the Vast
         # account's own.
-        return gateway.CREDIT_URL if gateway.routes(self.key) else "vast.ai"
+        # The billing page itself, not the marketing site: this string is now a
+        # button's destination, and "vast.ai" landed on the front door.
+        return gateway.CREDIT_URL if gateway.routes(self.key) else "cloud.vast.ai/billing/"
 
     def configured(self) -> bool:
         if gateway.routes(self.key):

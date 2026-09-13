@@ -425,7 +425,7 @@ export function ImageSettingsPanel({
                     onClick={referenceProps.onClearReferences}
                     title={t('composer.clearReferencesTitle')}
                   >
-                    {t('common.clearReferences')}
+                    {t('common.clear')}
                   </Button>
                 ) : null}
               </DrawerRow>

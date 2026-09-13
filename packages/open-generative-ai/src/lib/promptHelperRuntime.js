@@ -152,3 +152,75 @@ export function describeWritingFor({ cast = [], references = null } = {}) {
     if (counts.length) parts.push(counts.join(', '));
     return parts.join(' · ');
 }
+
+/**
+ * The same facts as `describeWritingFor`, as one chip each.
+ *
+ * A sentence made of six ' · ' separated clauses is a sentence nobody reads —
+ * and the thing it is answering ("does it know who is in this shot?") is a
+ * checklist, not prose. Same source, same wording inside each part; only the
+ * punctuation between the parts changes, so the two can never say different
+ * things about the same cast.
+ */
+export function writingForChips({ cast = [], references = null } = {}) {
+    const sentence = describeWritingFor({ cast, references });
+    if (!sentence) return [];
+    // The parenthesised notes become a second clause on the chip itself: at chip
+    // size the brackets are noise, and the separator already reads as "with".
+    return sentence.split(' · ').map((part) => part.replace(/\s*\(([^)]*)\)\s*$/, ' · $1').trim());
+}
+
+// How far a Refine pass may go, as the three fields the server actually reads
+// (`prompt_profiles.normalize_refine`). Nothing here is UI copy — the labels
+// live in the key table beside every other word the dialog says — and the
+// guidance strings ARE prompt text, which is why they are spelled out rather
+// than shipped as the three-word label a person pressed.
+//
+// The split matters: `detail` and `shots` are knobs the server turns into
+// precise craft sentences (enrich's "well beyond the minimum", single's locked
+// tripod, more's "never past its end"), and every non-enrich pass ALSO emits
+// "Keep the level of detail as it is". Sending "add more detail" as free text
+// would therefore ship both instructions at once and leave a 12B helper to pick.
+const SUGGESTIONS = [
+    { id: 'moreDetail', detail: 'enrich' },
+    {
+        id: 'tighten',
+        guidance: 'Cut it down: say the same thing in fewer words and drop the least '
+            + 'load-bearing detail. Keep every fact, every subject and every line of dialogue.',
+    },
+    { id: 'anotherShot', shots: 'more', video: true },
+    { id: 'singleStill', shots: 'single', video: true },
+    {
+        id: 'timing',
+        video: true,
+        guidance: 'Re-time the beats so they are evenly spaced and every shot lands inside the '
+            + 'clip, with an explicit timestamp on each.',
+    },
+    {
+        id: 'matchShot',
+        chained: true,
+        guidance: 'Match the previous shot harder: the same subjects, the same wardrobe, the '
+            + 'same room, palette, lens and light, and open on the framing it closed on.',
+    },
+];
+
+/**
+ * The one-press refinements to offer, already shaped for the wire.
+ *
+ * `shots` is inert outside video (the server gates both shot sentences behind
+ * `media_type == "video"`), and asking a prompt to match a previous shot that
+ * was never named describes a clip the model was not shown — so both are
+ * offered only where they can land, rather than as presses that quietly do
+ * nothing.
+ */
+export function refineSuggestions({ mediaType = 'video', chained = false } = {}) {
+    const video = mediaType === 'video';
+    return SUGGESTIONS
+        .filter((entry) => (!entry.video || video) && (!entry.chained || chained))
+        .map((entry) => ({
+            id: entry.id,
+            detail: entry.detail || 'keep',
+            shots: video ? (entry.shots || 'keep') : 'keep',
+            guidance: entry.guidance || '',
+        }));
+}

@@ -8,12 +8,12 @@ import { useSyncExternalStore } from 'react';
 import { toast } from 'react-hot-toast';
 import { setNavBadges } from '../app/navBadges.js';
 import { setApiStatus as setApiStatusStore } from '../app/statusStore.js';
-import { decryptMedia } from '../lib/e2eVault.js';
+import { decryptMedia, getVaultKeyHandles } from '../lib/e2eVault.js';
 import { loadStudioSetup } from '../app/promptTarget.js';
 import { updateComposerSection } from '../lib/composerState.js';
 import { basenameOf, resolveGenerationSetup } from '../lib/generationSetupStore.js';
 import { describeFailure } from '../lib/describeFailure.js';
-import { VAULT_UNLOCKED_EVENT } from '../lib/vaultSession.js';
+import { VAULT_UNLOCKED_EVENT, ensureVaultReady } from '../lib/vaultSession.js';
 
 // Prompt fields sealed to the owner vault arrive as "vseal:v1:{envelope}". The
 // server holds no key — decrypt them in-browser for display. Fail-soft so a
@@ -962,6 +962,7 @@ function ownerAccessFrameForEvent(event) {
 async function postOwnerAccess(frame, type) {
   if (!frame?.contentWindow) return;
   let ownerSession = false;
+  let vaultKeys = null;
   if (type === 'hivemind-owner-unlock' && !ownerPassphrase) {
     try {
       ownerSession = Boolean((await api('/api/owner/session')).unlocked);
@@ -970,10 +971,24 @@ async function postOwnerAccess(frame, type) {
     }
     if (!ownerSession) return;
   }
+  // On most loads the passphrase is the one thing we HAVEN'T got: it is retired
+  // the moment this browser holds a device wrap (vaultSession retireSignInSecrets)
+  // and a passkey sign-in never leaves one at all. Sending only "you are signed
+  // in" left the surface with proof of identity where it needed key material,
+  // so it fell back to asking for the password a second time. Hand it the open
+  // vault instead — the same non-extractable handles this app holds, which
+  // structured clone keeps non-extractable, so the surface can use the vault
+  // without being able to export it or learn the password behind it.
+  if (type === 'hivemind-owner-unlock') {
+    try {
+      if (await ensureVaultReady()) vaultKeys = getVaultKeyHandles();
+    } catch { /* a locked vault is not fatal — the surface keeps its own gate */ }
+  }
   try {
     frame.contentWindow.postMessage({
       type,
       ...(ownerPassphrase ? { passphrase: ownerPassphrase } : {}),
+      ...(vaultKeys ? { vaultKeys } : {}),
       ...(ownerSession ? { ownerSession: true } : {}),
     }, toolSurfaceOrigin(frame));
   } catch { /* frame gone */ }

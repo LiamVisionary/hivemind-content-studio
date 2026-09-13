@@ -41,6 +41,7 @@ from .private_access import (
     PrivateFieldCipher,
 )
 from .gpu_rentals import register_gpu_rental_routes
+from .hivemindos_hosted_media import warm_hosted_media_prices_in_background
 from .observability import (
     access_route,
     configure_logging,
@@ -99,6 +100,7 @@ from .media_catalog import media_catalog  # noqa: F401
 from .media_studio import (  # noqa: F401
     cancel_video as run_media_studio_video_cancel,
     check_video as run_media_studio_video_check,
+    current_owner_spki as media_studio_owner_spki,
     finish_video as run_media_studio_video_finish,
     generate_video as run_media_studio_video,
     smart_mask as run_smart_mask,
@@ -792,6 +794,12 @@ def build_control_app(
     # Staged plaintext a crashed request left behind goes at boot, and
     # hourly after that. Registered here because build_context has no app.
     app.state.startup_hooks.append(ctx.start_media_studio_staging_sweeper)
+    # Every hosted model's price, before anyone opens a picker. 146 endpoints,
+    # sixteen at a time, ~17s on a cold cache and nothing at all on a warm one
+    # — off the boot thread either way, because a price is a convenience and a
+    # studio that would not start without one is not a trade worth making.
+    # Asking per row as it scrolled into view is what made them pop in.
+    app.state.startup_hooks.append(warm_hosted_media_prices_in_background)
 
     # Registered last so every API route above wins; serves root-level build
     # files the unified frontend references absolutely (/hosted-local-ai.js,

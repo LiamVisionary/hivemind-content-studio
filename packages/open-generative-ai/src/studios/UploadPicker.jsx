@@ -29,20 +29,34 @@
 // - history delete also fires deleteHivemindStudioUpload fire-and-forget (remote
 //   reference cleanup, warn on failure) and drops the URL from the selection
 // - upload failure: console.error + toast (replaces alert), file input reset
+//
+// The panel opens on a list of SOURCES rather than on one grid: "Previous
+// uploads" (this browser's history merged with the owner's saved server
+// references) and "Library" (every output the studios have made). Each row
+// carries the four most recent images in it as a 2x2 face, and pressing one
+// shows that source in the same grid the panel always had. The Library used to
+// be unreachable from here, so reusing a generation meant downloading it and
+// uploading it back; picking one now promotes it into a reference
+// (promoteOutputToReference, the path "Use as starting frame" already takes) so
+// what reaches `onChange` is an ordinary reference URL and every studio
+// downstream sees exactly what an upload gives it.
+//
 // Restore-a-past-generation is silent by construction: the parent sets `values`
 // directly, which never fires onChange (replaces the old setImages({silent}) API).
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { useMediaSrc } from '../hooks/hooks.js';
 import {
   deleteHivemindStudioUpload,
+  fetchHivemindLibraryOutputs,
   fetchHivemindReferences,
   isHivemindStudioEnabled,
   uploadFileToHivemindStudio,
 } from '../lib/hivemindStudio.js';
 import { muapi } from '../lib/muapi.js';
 import { muapiKeyMissing } from '../lib/modelRunner.js';
+import { promoteOutputToReference } from '../lib/outputToReference.js';
 import {
   generateThumbnail,
   getUploadHistory,
@@ -53,7 +67,7 @@ import {
 import { useDismissable } from '../ui/Menu.jsx';
 import { ConfirmModal, Modal } from '../ui/Modal.jsx';
 import { Icon } from '../ui/icons.jsx';
-import { Button, SectionLabel, Spinner, cx } from '../ui/kit.jsx';
+import { Button, SectionLabel, Skeleton, Spinner, cx } from '../ui/kit.jsx';
 import { toastFailure } from '../ui/failureToast.jsx';
 
 // What a dropped/picked file has to be to get in. MIME first; some browsers
@@ -159,9 +173,62 @@ function AttachedChip({ url, name, thumbnail, onRemove, onPreview, disabled, ign
   );
 }
 
+// One row of the panel's opening list: where references can come from, how many
+// are in there, and the four most recent as a 2x2 face. Exported, like Thumb
+// and ReferencePreview, so a test can render it — the panel it lives in is
+// behind a state flag a static render never reaches. The tiles are the same
+// E2E-aware Thumb the grid uses, so a sealed reference decrypts here too.
+//
+// `entries` is null while the source is still being read — which is what draws
+// the skeleton. A source with nothing in it is shown rather than hidden (the two
+// rows are where references come from, and that is worth saying even when one is
+// empty) but it does not open onto an empty grid.
+export function SourceCard({ title, noun, entries, onOpen }) {
+  const loading = entries === null;
+  const items = entries || [];
+  const empty = !loading && items.length === 0;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      disabled={empty}
+      title={empty ? `Nothing in ${title.toLowerCase()} yet` : `Show ${title.toLowerCase()}`}
+      className={cx(
+        'flex w-full items-center gap-2 rounded-lg border border-line1 bg-bg2 p-2 text-left transition-colors duration-150',
+        empty ? 'cursor-default opacity-60' : 'hover:border-line2 hover:bg-bg3',
+      )}
+    >
+      <span className="min-w-0 flex-1 pl-0.5">
+        <span className="block truncate text-[12.5px] font-medium text-ink1">{title}</span>
+        {loading ? (
+          <Skeleton className="mt-1 h-2.5 w-16" rounded="rounded-sm" />
+        ) : (
+          <span className="mt-0.5 block truncate text-[11px] text-ink3">
+            {empty ? 'Nothing yet' : `${items.length} ${items.length === 1 ? noun.replace(/s$/, '') : noun}`}
+          </span>
+        )}
+      </span>
+      <Icon name="chevronRight" size={12} className="shrink-0 text-ink3" />
+      <span className="grid h-[52px] w-[52px] shrink-0 grid-cols-2 grid-rows-2 gap-0.5">
+        {Array.from({ length: 4 }, (_, index) => {
+          const entry = items[index];
+          if (loading) return <Skeleton key={index} className="h-full w-full" rounded="rounded-[3px]" />;
+          return (
+            <span key={entry?.id || `blank-${index}`} className="overflow-hidden rounded-[3px] bg-bg3">
+              {entry ? <Thumb src={entry.thumbnail || entry.uploadedUrl} alt="" /> : null}
+            </span>
+          );
+        })}
+      </span>
+    </button>
+  );
+}
+
 export function UploadPicker({
   values = [],
-  onChange,
+  // Wrapped below as `onChange`, which is what the rest of this file calls: every
+  // selection change has to write valuesRef on its way out.
+  onChange: onSelectionChange,
   uploadFn,
   requireApiKey,
   maxImages = 1,
@@ -189,10 +256,39 @@ export function UploadPicker({
   // Past uploads saved server-side (sealed) so they reappear even when the
   // browser's composer state is empty. Merged (deduped) into the displayed grid.
   const [serverRefs, setServerRefs] = useState([]);
+  // Which source the panel is showing: null is the opening list of them, and a
+  // press drills into that source's grid.
+  const [section, setSection] = useState(null);
+  // The owner's Library, null until the panel has read it once (which is what
+  // draws the skeleton on its row).
+  const [library, setLibrary] = useState(null);
+  // Library URL -> the reference URL it was promoted to, for this session, so a
+  // second pick of the same output re-uses that copy instead of making another.
+  const [promoted, setPromoted] = useState({});
+  // The Library URLs being promoted right now, shown on their own tiles. A set
+  // rather than one URL: two tiles can be picked while the first is still
+  // uploading, and the first to finish must not clear the other's spinner.
+  const [promoting, setPromoting] = useState(() => new Set());
   // Full-size preview of an attached chip's image.
   const [previewUrl, setPreviewUrl] = useState(null);
   const fileInputRef = useRef(null);
   const pendingFilesRef = useRef(null);
+  // The selection as it stands RIGHT NOW, which `values` cannot be: it is a
+  // prop, so it only catches up when the parent re-renders. That was harmless
+  // while picking was instant. A Library pick selects only after its upload
+  // finishes, so two picks can resolve in the same tick — before either render
+  // commits — and the second one, reading the prop, replaced the first instead
+  // of adding to it. Measured: two rapid picks uploaded both and kept one.
+  //
+  // So every change writes here on its way out (see onChange just below), and
+  // the effect takes it back from the prop once the parent has actually
+  // re-rendered — which keeps the parent the authority over what was kept.
+  const valuesRef = useRef(values);
+  useEffect(() => { valuesRef.current = values; }, [values]);
+  const onChange = useCallback((next) => {
+    valuesRef.current = next;
+    onSelectionChange?.(next);
+  }, [onSelectionChange]);
   // The dismissable region wraps the TRIGGER as well as the panel: with it on the
   // panel alone, clicking the open trigger dismissed on pointerdown and the click
   // re-opened it, so the panel could never be closed from its own button.
@@ -205,6 +301,20 @@ export function UploadPicker({
     fetchHivemindReferences().then((refs) => { if (alive) setServerRefs(refs); }).catch(() => {});
     return () => { alive = false; };
   }, []);
+
+  // The Library is read when the panel OPENS rather than on mount: the video
+  // studio mounts several pickers at once and none of them should cost a history
+  // page until someone looks. Later opens refresh it quietly behind the list
+  // already on screen, so a generation made since the last look is there without
+  // the row flashing back to a skeleton.
+  useEffect(() => {
+    if (!panelOpen) return undefined;
+    let alive = true;
+    fetchHivemindLibraryOutputs({ kind: acceptKind(accept) || 'image' })
+      .then((rows) => { if (alive) setLibrary(rows); })
+      .catch(() => { if (alive) setLibrary((current) => current || []); });
+    return () => { alive = false; };
+  }, [panelOpen, accept]);
 
   const isMulti = maxImages > 1;
   const studioMode = isHivemindStudioEnabled();
@@ -224,6 +334,10 @@ export function UploadPicker({
 
   const processFiles = async (files) => {
     setUploading(true);
+    // Whatever the panel was showing, what happens next belongs to Previous
+    // uploads — a multi-mode upload reopens the panel, and it should reopen on
+    // the list the new files just landed in.
+    setSection('uploads');
     try {
       if (maxImages === 1) {
         // Single mode: first file only, replace the selection.
@@ -343,7 +457,8 @@ export function UploadPicker({
 
   const toggleFromHistory = (entry) => {
     const url = entry.uploadedUrl;
-    const idx = values.indexOf(url);
+    const current = valuesRef.current;
+    const idx = current.indexOf(url);
     if (!isMulti) {
       // Tapping the already-selected reference clears it, and the panel stays open
       // so a replacement can be picked in the same pass.
@@ -358,11 +473,47 @@ export function UploadPicker({
       return;
     }
     if (idx !== -1) {
-      onChange?.(values.filter((u) => u !== url));
+      onChange?.(current.filter((u) => u !== url));
     } else {
-      if (values.length >= maxImages) return; // at max — can't select more
-      onChange?.([...values, url]);
+      if (current.length >= maxImages) return; // at max — can't select more
+      onChange?.([...current, url]);
     }
+  };
+
+  // A Library output is not a reference yet: it is a sealed generation in the
+  // output index. Promoting it (decrypted in-browser, re-uploaded sealed) is what
+  // every other "use this generation as an input" path already does, and it is
+  // what makes the pick behave exactly like an upload everywhere downstream —
+  // including the studios that hand a picked URL straight to a model.
+  const promoteAndPick = async (entry) => {
+    setPromoting((busy) => new Set(busy).add(entry.uploadedUrl));
+    try {
+      const url = await promoteOutputToReference(entry.uploadedUrl, {
+        kind: acceptKind(accept) || 'image',
+        // The output's own filename. Without it the reference would be named
+        // after the media route's last segment, which is "media" for every one.
+        ...(entry.name ? { name: entry.name } : {}),
+      });
+      setPromoted((map) => ({ ...map, [entry.uploadedUrl]: url }));
+      refreshHistory();
+      toggleFromHistory({ ...entry, uploadedUrl: url });
+    } catch (err) {
+      console.error('[UploadPicker] Could not reuse the Library image:', err);
+      toastFailure(err, { operation: 'Reusing the Library image' });
+    } finally {
+      setPromoting((busy) => {
+        const next = new Set(busy);
+        next.delete(entry.uploadedUrl);
+        return next;
+      });
+    }
+  };
+
+  const pickEntry = (entry) => {
+    if (!entry.libraryOutput) { toggleFromHistory(entry); return; }
+    const already = promoted[entry.uploadedUrl];
+    if (already) { toggleFromHistory({ ...entry, uploadedUrl: already }); return; }
+    void promoteAndPick(entry);
   };
 
   const deleteHistoryEntry = (entry) => {
@@ -382,6 +533,16 @@ export function UploadPicker({
   const knownUrls = new Set(history.map((entry) => entry.uploadedUrl));
   const mergedHistory = [...history, ...serverRefs.filter((entry) => !knownUrls.has(entry.uploadedUrl))];
   const historyByUrl = new Map(mergedHistory.map((entry) => [entry.uploadedUrl, entry]));
+  const noun = KIND_NOUN[acceptKind(accept) || 'image'] || 'images';
+  const isLibrary = section === 'library';
+  const sectionEntries = isLibrary ? (library || []) : mergedHistory;
+  const panelTitle = section === 'uploads'
+    ? 'Previous uploads'
+    : isLibrary ? 'Library' : 'Reference images';
+  // A Library pick is promoted into a reference before it is selected, so what
+  // lands in `values` is the NEW reference URL — this is how the tile of the
+  // output it came from still knows it is the selected one.
+  const selectionUrl = (entry) => (entry.libraryOutput ? promoted[entry.uploadedUrl] || '' : entry.uploadedUrl);
   const count = values.length;
   const canAddMore = count < maxImages;
   const triggerLabel = label || (isMulti ? `Add up to ${maxImages} images` : 'Reference image');
@@ -443,7 +604,7 @@ export function UploadPicker({
         disabled={disabled}
         title={triggerTitle}
         aria-label={triggerTitle}
-        onClick={() => setPanelOpen((v) => !v)}
+        onClick={() => { setPanelOpen((v) => !v); setSection(null); }}
         className={cx(
           'inline-flex h-9 shrink-0 select-none items-center justify-center gap-1.5 rounded-md border text-xs font-medium transition-colors duration-150',
           compact ? 'w-9' : 'px-2.5',
@@ -471,11 +632,24 @@ export function UploadPicker({
       {panelOpen ? (
         <div className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[288px] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop">
           <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-line1 pb-2.5">
-            <div className="min-w-0">
-              <SectionLabel>Reference images</SectionLabel>
-              {isMulti ? (
-                <span className="mt-0.5 block text-[11px] text-ink3">Select up to {maxImages} images</span>
+            <div className="flex min-w-0 items-center gap-1.5">
+              {section ? (
+                <button
+                  type="button"
+                  onClick={() => setSection(null)}
+                  aria-label="Back to the reference sources"
+                  title="Back"
+                  className="-ml-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+                >
+                  <Icon name="chevronLeft" size={12} />
+                </button>
               ) : null}
+              <div className="min-w-0">
+                <SectionLabel>{panelTitle}</SectionLabel>
+                {isMulti ? (
+                  <span className="mt-0.5 block text-[11px] text-ink3">Select up to {maxImages} images</span>
+                ) : null}
+              </div>
             </div>
             <Button
               size="sm"
@@ -489,16 +663,33 @@ export function UploadPicker({
             </Button>
           </div>
 
-          {mergedHistory.length === 0 ? (
+          {section === null ? (
+            <div className="flex flex-col gap-2">
+              <SourceCard
+                title="Previous uploads"
+                noun={noun}
+                entries={mergedHistory}
+                onOpen={() => setSection('uploads')}
+              />
+              <SourceCard
+                title="Library"
+                noun={noun}
+                entries={library}
+                onOpen={() => setSection('library')}
+              />
+            </div>
+          ) : sectionEntries.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-6 text-ink3">
-              <Icon name="upload" size={22} />
-              <span className="text-xs">No uploads yet</span>
+              <Icon name={isLibrary ? 'clock' : 'upload'} size={22} />
+              <span className="text-xs">{isLibrary ? 'Nothing in the Library yet' : 'No uploads yet'}</span>
             </div>
           ) : (
             <div className="grid max-h-56 grid-cols-3 gap-2 overflow-y-auto pr-0.5">
-              {mergedHistory.map((entry) => {
-                const selIdx = values.indexOf(entry.uploadedUrl);
+              {sectionEntries.map((entry) => {
+                const selected = selectionUrl(entry);
+                const selIdx = selected ? values.indexOf(selected) : -1;
                 const isSelected = selIdx !== -1;
+                const busy = promoting.has(entry.uploadedUrl);
                 const atMax = isMulti && !isSelected && values.length >= maxImages;
                 return (
                   <div
@@ -509,12 +700,12 @@ export function UploadPicker({
                       ? `${entry.name || 'Reference'} — click to unselect`
                       : entry.name}
                     onClick={() => {
-                      if (!atMax) toggleFromHistory(entry);
+                      if (!atMax && !busy) pickEntry(entry);
                     }}
                     onKeyDown={(e) => {
-                      if ((e.key === 'Enter' || e.key === ' ') && !atMax) {
+                      if ((e.key === 'Enter' || e.key === ' ') && !atMax && !busy) {
                         e.preventDefault();
-                        toggleFromHistory(entry);
+                        pickEntry(entry);
                       }
                     }}
                     className={cx(
@@ -529,22 +720,33 @@ export function UploadPicker({
                         {isMulti ? selIdx + 1 : <Icon name="check" size={11} />}
                       </span>
                     ) : null}
-                    <span className="absolute inset-x-0 bottom-0 flex justify-end bg-gradient-to-t from-black/60 to-transparent p-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/cell:opacity-100">
-                      <button
-                        type="button"
-                        aria-label="Remove from history"
-                        title="Remove from history"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          // One click on a 20px button used to DELETE the sealed
-                          // reference from the server — it asks first now.
-                          setDeleteEntry(entry);
-                        }}
-                        className="grid h-5 w-5 place-items-center rounded-sm bg-danger/80 text-white transition-colors hover:bg-danger"
-                      >
-                        <Icon name="x" size={10} />
-                      </button>
-                    </span>
+                    {busy ? (
+                      <span className="absolute inset-0 grid place-items-center bg-black/50">
+                        <Spinner size={14} className="text-white" label="Adding the Library image" />
+                      </span>
+                    ) : null}
+                    {/* A Library row is a GENERATION, not a saved reference: the
+                        X here deletes a reference, and pointing it at an output
+                        would make a reference picker a place your work can be
+                        destroyed from. The Library page owns that. */}
+                    {entry.libraryOutput ? null : (
+                      <span className="absolute inset-x-0 bottom-0 flex justify-end bg-gradient-to-t from-black/60 to-transparent p-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/cell:opacity-100">
+                        <button
+                          type="button"
+                          aria-label="Remove from history"
+                          title="Remove from history"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // One click on a 20px button used to DELETE the sealed
+                            // reference from the server — it asks first now.
+                            setDeleteEntry(entry);
+                          }}
+                          className="grid h-5 w-5 place-items-center rounded-sm bg-danger/80 text-white transition-colors hover:bg-danger"
+                        >
+                          <Icon name="x" size={10} />
+                        </button>
+                      </span>
+                    )}
                   </div>
                 );
               })}

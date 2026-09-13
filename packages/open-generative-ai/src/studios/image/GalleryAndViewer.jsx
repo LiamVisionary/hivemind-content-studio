@@ -6,6 +6,7 @@ import { t } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Modal } from '../../ui/Modal.jsx';
 import { ActionButton, IconButton, Pill, cx } from '../../ui/kit.jsx';
+import { UpscaleOverlay } from './UpscaleOverlay.jsx';
 
 
 // "Created" as a readable local date, not the raw ISO string.
@@ -133,7 +134,8 @@ function MetaRow({ label, value }) {
 }
 
 export function ViewerModal({
-  url, entry, onClose, onBackToSetup, onRegenerate, onDownload, onUpscale, onCompare, onExpand, onInpaint, onAngles, onSequence,
+  url, entry, onClose, onBackToSetup, onRegenerate, onDownload, onUpscale, onCompare, onExpand, onInpaint,
+  onPointEyes, onMoveSun, onAngles, onSequence,
   onUseAsVideoFrame, videoFrameBusy, onPostToCivitai,
   // "Use this one as a reference for the next image". It used to live only on
   // the gallery tile, and the gallery is a 96px rail now — which is hidden
@@ -143,6 +145,8 @@ export function ViewerModal({
   onReuse,
   // Walking the gallery from inside the viewer: position = { index, total } (0-based).
   onPrev, onNext, position = null,
+  // { mode, startedAt } while an upscale of THIS picture is in flight, else null.
+  upscaling = null,
 }) {
   const src = useMediaSrc(url);
   const bodyRef = useRef(null);
@@ -178,10 +182,13 @@ export function ViewerModal({
               from the left (mr-auto) while everything you can DO stays right. */}
           <ActionButton variant="neutral" icon="chevronLeft" label={t('common.backToSetup')} className="mr-auto" onClick={onBackToSetup} />
           <ActionButton variant="neutral" icon="refresh" label={t('common.regenerate')} onClick={onRegenerate} />
+          {/* Both doors stay put and go dim while one of them is running: the
+              picture is already carrying the working state, and a button that
+              vanished mid-run would move every other action along the row. */}
           {onUpscale ? (
             <>
-              <ActionButton variant="neutral" icon="wand" label="Upscale" onClick={() => onUpscale('fast')} />
-              <ActionButton variant="neutral" icon="sparkles" label="Upscale (max quality)" onClick={() => onUpscale('max')} />
+              <ActionButton variant="neutral" icon="wand" label="Upscale" disabled={Boolean(upscaling)} onClick={() => onUpscale('fast')} />
+              <ActionButton variant="neutral" icon="sparkles" label="Upscale (max quality)" disabled={Boolean(upscaling)} onClick={() => onUpscale('max')} />
             </>
           ) : null}
           {/* Compare appears for entries that pair with a source (upscales,
@@ -196,6 +203,13 @@ export function ViewerModal({
           {/* Masked edit — same gate as Expand (krea2 soft-inpaint lane). */}
           {onInpaint ? (
             <ActionButton variant="neutral" icon="layers" label="Edit area" onClick={onInpaint} />
+          ) : null}
+          {/* Direction edits — each on its own Klein LoRA lane. */}
+          {onPointEyes ? (
+            <ActionButton variant="neutral" icon="eye" label={t('direction.eyesTitle')} onClick={onPointEyes} />
+          ) : null}
+          {onMoveSun ? (
+            <ActionButton variant="neutral" icon="sun" label={t('direction.sunTitle')} onClick={onMoveSun} />
           ) : null}
           {/* Viewpoint variants + staged edit chains — Klein/Qwen edit lanes. */}
           {onAngles ? (
@@ -233,19 +247,27 @@ export function ViewerModal({
     >
       <div ref={bodyRef} className="flex flex-col gap-4">
         <div className="relative grid place-items-center overflow-hidden rounded-lg border border-line1 bg-bg0">
-          <img
-            src={src}
-            alt={entry?.prompt || 'Generated image'}
-            className="max-h-[52vh] w-auto max-w-full object-contain"
-            draggable
-            onDragStart={(e) => {
-              try {
-                e.dataTransfer.setData('application/x-hivemind-output', JSON.stringify({ url, section: 'image', mediaType: 'image/*' }));
-                e.dataTransfer.setData('text/uri-list', url);
-                e.dataTransfer.effectAllowed = 'copy';
-              } catch { /* non-critical */ }
-            }}
-          />
+          {/* This wrapper exists for the upscale rim. The plate around it is as
+              wide as the dialog and the picture inside is letterboxed, so a rim
+              on the plate would trace the black bars instead of the image. A
+              grid item shrink-wraps its content, so this div is exactly the
+              rendered picture — which is the box the rim wants. */}
+          <div className="relative">
+            <img
+              src={src}
+              alt={entry?.prompt || 'Generated image'}
+              className="max-h-[52vh] w-auto max-w-full object-contain"
+              draggable
+              onDragStart={(e) => {
+                try {
+                  e.dataTransfer.setData('application/x-hivemind-output', JSON.stringify({ url, section: 'image', mediaType: 'image/*' }));
+                  e.dataTransfer.setData('text/uri-list', url);
+                  e.dataTransfer.effectAllowed = 'copy';
+                } catch { /* non-critical */ }
+              }}
+            />
+            {upscaling ? <UpscaleOverlay mode={upscaling.mode} startedAt={upscaling.startedAt} /> : null}
+          </div>
           {hasPrev || hasNext ? (
             <>
               <IconButton

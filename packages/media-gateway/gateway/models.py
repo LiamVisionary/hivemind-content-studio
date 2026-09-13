@@ -3,6 +3,7 @@ bundles and what is equipped."""
 import hashlib
 import json
 import os
+import random
 import re
 import subprocess
 import threading
@@ -32,8 +33,18 @@ CIVITAI_TOKEN_ENV_KEYS = (
     'CIVITAI_PAT',
 )
 CIVITAI_API = "https://civitai.com/api/v1"
+# The "ask again later" family. A 401 or a 404 means the same thing however
+# many times it is asked; these do not.
+CIVITAI_BUSY_CODES = (429, 500, 502, 503, 504)
 CIVITAI_BASE_MODELS_CACHE = {'at': 0, 'items': None}
 CIVITAI_BASE_MODELS_TTL = 6 * 60 * 60
+# One scrape at a time. Filling this cache costs six /models pages at limit=100,
+# and opening the inspiration finder asks for it TWICE at once — the images
+# handler wants the filter vocabulary for its own response while the browser
+# fetches it directly. Unlocked, a cold cache meant twelve heavy calls landing
+# on Civitai in the same second as the images search they were meant to
+# decorate; whoever loses that race waits here and reuses the answer instead.
+CIVITAI_BASE_MODELS_LOCK = threading.Lock()
 # modelId -> {'at': ts, 'versions': [{'id', 'name', 'baseModel'}]} for update checks.
 CIVITAI_MODEL_VERSIONS_CACHE = {}
 CIVITAI_MODEL_VERSIONS_TTL = 6 * 60 * 60
@@ -156,6 +167,29 @@ def civitai_download_url(url, token_override=None):
     return parsed._replace(query=query).geturl()
 
 
+def civitai_retry_after(exc, attempt):
+    """How long to wait before repeating a call Civitai turned away.
+
+    Two things the previous fixed ladder got wrong. Civitai sends `Retry-After`
+    on a 429 and the ladder ignored it, so the retries were spent well inside
+    the window the server had just named. And the delay was deterministic, so
+    several calls rejected in the same wobble — the base-model scrape fires six
+    at once — woke up together and collided again. Honour the header when it is
+    there, and jitter what we choose ourselves.
+    """
+    header = getattr(exc, 'headers', None)
+    raw = header.get('Retry-After') if header else None
+    if raw:
+        try:
+            # Seconds is the form Civitai uses; an HTTP-date is legal and rare,
+            # so an unparseable value falls through to the ladder rather than
+            # turning into a crash on a path whose whole job is recovery.
+            return max(0.5, min(float(str(raw).strip()), 10.0))
+        except (TypeError, ValueError):
+            pass
+    return min(2 ** attempt * 0.4, 3.0) * random.uniform(0.7, 1.3)
+
+
 def civitai_json(path, params=None, token_override=None, retries=0):
     """One Civitai API call.
 
@@ -176,13 +210,37 @@ def civitai_json(path, params=None, token_override=None, retries=0):
         except HTTPError as e:
             # Only the upstream-is-busy family is worth repeating; a 401 or a
             # 404 means the same thing however many times it is asked.
-            if attempt >= retries or e.code not in (429, 500, 502, 503, 504):
+            if attempt >= retries or e.code not in CIVITAI_BUSY_CODES:
                 raise
-        except (URLError, TimeoutError):
+            delay = civitai_retry_after(e, attempt + 1)
+        except (URLError, TimeoutError) as e:
             if attempt >= retries:
                 raise
+            delay = civitai_retry_after(e, attempt + 1)
         attempt += 1
-        time.sleep(min(2 ** attempt * 0.4, 3.0))
+        time.sleep(delay)
+
+
+def civitai_error_message(exc):
+    """An upstream Civitai failure as a sentence somebody can act on.
+
+    `str(HTTPError)` is "HTTP Error 503: Service Unavailable", and that is
+    exactly what the browser used to show: a number that names neither who was
+    unavailable nor what to do next. The retries above already absorb the
+    ordinary wobble, so reaching this means the wobble outlasted them — which
+    is a "try again" and not a broken studio, and it should say so.
+    """
+    if isinstance(exc, HTTPError):
+        if exc.code == 429:
+            return 'Civitai is rate-limiting this machine. Wait a minute, then search again.'
+        if exc.code in CIVITAI_BUSY_CODES:
+            return 'Civitai is busy and turned the search away. Search again in a moment.'
+        if exc.code in (401, 403):
+            return 'Civitai refused the API key. Check the Civitai key on the Settings page.'
+        return f'Civitai answered {exc.code} to this search.'
+    if isinstance(exc, (URLError, TimeoutError)):
+        return 'Could not reach Civitai from this machine. Check the connection, then search again.'
+    return str(exc) or 'The Civitai search failed.'
 
 
 def civitai_search_models(params):
@@ -268,10 +326,25 @@ def civitai_search_images(params):
     cursor = clean.get('cursor')
     pages = 0
     scanned = 0
+    partial = ''
     while len(items) < requested and pages < 6:
         if cursor:
             clean['cursor'] = cursor
-        data = civitai_json('/images', clean, retries=3)
+        try:
+            data = civitai_json('/images', clean, retries=3)
+        except (HTTPError, URLError, TimeoutError) as exc:
+            # A page failing is not the search failing. The filter yield is
+            # ~40%, so filling 24 results usually takes two pages or more, and
+            # letting this propagate threw away every result already in hand —
+            # the whole grid replaced by "HTTP Error 503" because page two
+            # wobbled. Keep what arrived and say the feed was cut short; only
+            # an empty hand is worth an error. `metadata` still holds the last
+            # GOOD page's nextCursor, which is the cursor this page failed on,
+            # so "Load more" resumes by retrying exactly here.
+            if not items:
+                raise
+            partial = civitai_error_message(exc)
+            break
         pages += 1
         batch = data.get('items') or []
         scanned += len(batch)
@@ -291,6 +364,7 @@ def civitai_search_images(params):
             'scanned': scanned,
             'requestedLimit': requested,
             'returned': min(len(items), requested),
+            'partial': partial,
         },
     }
 
@@ -479,12 +553,27 @@ def civitai_base_model_options(force=False):
     We keep a broad fallback list and opportunistically harvest live baseModel
     values from top /models pages so new values appear without frontend edits.
     """
-    import time
-    now = time.time()
-    cached = CIVITAI_BASE_MODELS_CACHE.get('items')
-    if cached and not force and now - float(CIVITAI_BASE_MODELS_CACHE.get('at') or 0) < CIVITAI_BASE_MODELS_TTL:
-        return cached
+    def fresh():
+        cached = CIVITAI_BASE_MODELS_CACHE.get('items')
+        if cached and not force and time.time() - float(CIVITAI_BASE_MODELS_CACHE.get('at') or 0) < CIVITAI_BASE_MODELS_TTL:
+            return cached
+        return None
 
+    hit = fresh()
+    if hit:
+        return hit
+    with CIVITAI_BASE_MODELS_LOCK:
+        # Checked again inside the lock: the thread that just finished the
+        # scrape filled the cache while this one waited for it.
+        hit = fresh()
+        if hit:
+            return hit
+        return _civitai_scrape_base_model_options()
+
+
+def _civitai_scrape_base_model_options():
+    """The scrape itself. Called only under CIVITAI_BASE_MODELS_LOCK."""
+    now = time.time()
     values = []
     values.extend(current_base_models())
     values.extend(CIVITAI_FALLBACK_BASE_MODELS)

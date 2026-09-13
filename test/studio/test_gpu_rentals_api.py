@@ -752,7 +752,9 @@ def test_account_state_reports_burn_and_runway(tmp_path: Path, monkeypatch) -> N
     # Broken out per marketplace as well, because the totals cannot authorize a
     # rental: credit is only spendable where it sits.
     assert body["providers"] == [{
-        "provider": "vast", "label": "Vast.ai", "credit_url": "vast.ai",
+        # The billing page, not the marketing site: the studio renders this as
+        # an "Add credits" button's destination.
+        "provider": "vast", "label": "Vast.ai", "credit_url": "cloud.vast.ai/billing/",
         "credit": 9.87, "usd_per_hour_running": 1.87,
         "hours_remaining": 5.3, "machines_running": 2,
     }]

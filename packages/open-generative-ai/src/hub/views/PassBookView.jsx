@@ -68,7 +68,7 @@ function CredentialRow({ row, value, onChange, onSave, busy }) {
                         disabled={busy || !String(value || '').trim()}
                         onClick={() => onSave(row.key, Boolean(configured)).then(() => setEditing(false))}
                     >
-                        {configured ? t('passbook.replace') : t('common.save')}
+                        {configured ? t('common.replace') : t('common.save')}
                     </Button>
                 </div>
             )}

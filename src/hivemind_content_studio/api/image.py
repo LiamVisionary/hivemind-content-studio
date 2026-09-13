@@ -6,6 +6,9 @@ Moved out of control_api.py unchanged (2026-09-04).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import math
 import mimetypes
 import time
 import urllib.request
@@ -20,7 +23,47 @@ from .. import image_router
 from ..private_access import e2e_media_exists, seal_private_media_e2e
 from .cloud_output import cloud_output_suffix
 from .media_common import _encrypt_private_media, _private_media_exists
-from .models import CloudOutputAdoptBody, StudioImageBody
+from .models import CloudOutputAdoptBody, HostedMediaInputBody, HostedMediaQuoteBody, StudioImageBody
+
+
+# What a hosted model can be handed as a starting picture. Mirrors the
+# gateway's own list; refusing here means the refusal names the file rather
+# than arriving as an HTTP 415 from a Worker.
+_REFERENCE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+_REFERENCE_MAX_BYTES = 64 * 1024 * 1024
+
+
+class _Reference:
+    """The two fields _decode_reference reads, for a caller that has its own
+    field names."""
+
+    def __init__(self, reference_base64: str, reference_type: str) -> None:
+        self.reference_base64 = reference_base64
+        self.reference_type = reference_type
+
+
+def _decode_reference(body) -> tuple[bytes, str] | None:
+    """The attached picture, as bytes and a type the provider can read."""
+    encoded = (getattr(body, "reference_base64", "") or "").strip()
+    if not encoded:
+        return None
+    kind = (getattr(body, "reference_type", "") or "").split(";")[0].strip().lower()
+    # A data: URL is what a browser has to hand; take either shape.
+    if encoded.startswith("data:"):
+        header, _, tail = encoded.partition(",")
+        kind = kind or header[5:].split(";")[0].strip().lower()
+        encoded = tail
+    if kind not in _REFERENCE_TYPES:
+        raise ValueError(f"{kind or 'That file type'} cannot be sent to a hosted model")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("The attached reference could not be read") from exc
+    if not raw:
+        raise ValueError("The attached reference is empty")
+    if len(raw) > _REFERENCE_MAX_BYTES:
+        raise ValueError(f"A hosted reference must be {_REFERENCE_MAX_BYTES // (1024 * 1024)} MB or smaller")
+    return raw, kind
 
 
 def register(app, ctx) -> None:
@@ -50,6 +93,10 @@ def register(app, ctx) -> None:
         output = outputs_root() / name
         started = time.perf_counter()
         try:
+            reference = _decode_reference(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"message": str(exc), "remedy": "", "provider": ""}) from exc
+        try:
             result = await asyncio.to_thread(
                 image_router.render_image,
                 provider=body.provider.strip(),
@@ -59,7 +106,15 @@ def register(app, ctx) -> None:
                 output=output,
                 quality=body.quality.strip(),
                 seed=body.seed,
+                reference=reference,
+                reference_url=body.reference_url.strip(),
+                maximum_debit_usd=float(body.maximum_debit_usd or 1.0),
             )
+        except ValueError as exc:
+            # A model that cannot start from what is attached, an oversized
+            # reference, a quote above the approved ceiling: all of them are
+            # sentences the person can act on, not 500s.
+            raise HTTPException(status_code=400, detail={"message": str(exc), "remedy": "", "provider": ""}) from exc
         except image_router.ImageRouterError as exc:
             # The remedy travels WITH the failure so the studio can offer the
             # button instead of printing the provider's sentence.
@@ -87,6 +142,72 @@ def register(app, ctx) -> None:
             "output": landed.name,
             "url": f"/api/media-studio/generated/{urllib.parse.quote(landed.name)}",
             "seconds": round(time.perf_counter() - started, 3),
+        }
+
+    @router.post("/api/media-studio/hosted-input", dependencies=[Depends(require_owner)])
+    async def store_hosted_input(body: HostedMediaInputBody) -> dict:
+        """Put one local picture where a hosted provider can fetch it.
+
+        The browser holds its references sealed and a provider fetches by URL,
+        so the bytes are decrypted in the page, sent here, and forwarded to
+        the gateway's input store — which holds them under an unguessable
+        name for a day. The page uploads once per picture and caches the URL,
+        so a second press on the same reference sends nothing.
+        """
+        from ..hivemindos_hosted_media import upload_input
+
+        try:
+            raw, kind = _decode_reference(_Reference(body.data_base64, body.content_type))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail={"message": str(exc)}) from exc
+        try:
+            url = await asyncio.to_thread(upload_input, raw, content_type=kind)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"message": str(exc)}) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail={"message": str(exc)}) from exc
+        return {"ok": True, "url": url}
+
+    @router.post("/api/media-studio/hosted-quote", dependencies=[Depends(require_owner)])
+    async def quote_hosted_media(body: HostedMediaQuoteBody) -> dict:
+        """What the press about to be made would cost, in USD and in credits.
+
+        Read-only and free: the gateway's quote route takes no credential and
+        reserves nothing. It exists because the studio has no honest number
+        without it — the catalogue prices ten of 538 endpoints, and even those
+        move with duration and resolution.
+        """
+        from ..hivemindos_hosted_media import hosted_media_quote, hosted_route_for
+
+        payload: dict = {"prompt": body.prompt.strip() or "a photograph", "aspect_ratio": body.aspect_ratio.strip() or "1:1"}
+        if body.duration_seconds:
+            payload["duration"] = body.duration_seconds
+        if body.resolution.strip():
+            payload["resolution"] = body.resolution.strip()
+        # An image-to-* endpoint prices the same whatever the picture is, and
+        # the quote route does not fetch it, so a placeholder keeps a price
+        # visible before anything is attached or uploaded.
+        if body.attached != "none":
+            payload[f"{body.attached}_url"] = "https://hivemindos.app/placeholder"
+        try:
+            endpoint, capability = await asyncio.to_thread(
+                hosted_route_for, body.model.strip(), kind=body.kind, attached=body.attached)
+            quote = await asyncio.to_thread(hosted_media_quote, model=endpoint, payload=payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"message": str(exc)}) from exc
+        except RuntimeError as exc:
+            # No price is not a failed press; the button says "price unknown"
+            # and the run still quotes itself before it spends.
+            raise HTTPException(status_code=503, detail={"message": str(exc)}) from exc
+        usd = float(quote.get("priceUsd") or quote.get("retailUsd") or 0)
+        return {
+            "ok": True,
+            "model": endpoint,
+            "capability": capability,
+            "usd": usd,
+            # The ONE conversion both apps use (media-model-catalog.v1).
+            "credits": math.ceil(usd * 500) if usd > 0 else 0,
+            "category": str(quote.get("category") or ""),
         }
 
     @router.post("/api/media-studio/adopt", dependencies=[Depends(require_owner)])

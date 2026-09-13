@@ -81,6 +81,42 @@ test('there are three places, they are three bills, and a rental is not a fourth
   assert.equal(zimage.placeLabel, 'RTX 5090');
 });
 
+/* ---------------- and the four tabs over them ---------------- */
+
+test('the picker segments into four tabs, and the rented box is the one the places do not have', async () => {
+  const { RUN_TABS, TAB_RENTAL, runTabsFor } = await import('../src/lib/runTargets.js');
+  assert.deepEqual(RUN_TABS.map((tab) => tab.label), ['Hivemind', 'Rental', 'Local', 'My accounts']);
+
+  const targets = await build({
+    localModels: [...localModels, { id: 'wan22', name: 'Wan 2.2', provider: 'wan2gp' }],
+    machines: { live: [machine({ models_served: ['wan22'] })], idle: [], broken: [] },
+  });
+  const tabs = Object.fromEntries(runTabsFor(targets).map((tab) => [tab.id, tab.targets.map((x) => x.label)]));
+  // The split is the MACHINE, not the place: both rows are This Mac's, and only
+  // the one a live box is serving moves.
+  assert.deepEqual(tabs[TAB_RENTAL], ['Wan 2.2']);
+  assert.deepEqual(tabs['this-mac'], ['Z-Image Turbo']);
+  assert.deepEqual(tabs.hivemindos, ['Automatic hosted model']);
+  assert.deepEqual(tabs.accounts, ['GPT Image 2', 'Flux 2 Pro']);
+  // …and the place under the tab is untouched, because that is what routes.
+  const rented = targets.find((target) => target.label === 'Wan 2.2');
+  assert.equal(rented.place, 'this-mac');
+  assert.equal(rented.machine?.rental_id, 'vast:1');
+});
+
+test('the strip opens on Local when this machine can run something, and on Hivemind when it cannot', async () => {
+  const { defaultRunTab } = await import('../src/lib/runTargets.js');
+  assert.equal(defaultRunTab(await build()), 'this-mac', 'a Mac with a model of its own opens on its own');
+  assert.equal(defaultRunTab(await build({ localModels: [] })), 'hivemindos', 'and on the house bill when it has none');
+  // A local row nobody can press is not a local model this machine HAS: the
+  // bridge is down, the engine is not answering, the weights are not installed.
+  // Opening on a tab of greyed rows would be a default that offers nothing.
+  const unrunnable = (await build()).map((target) => (target.place === 'this-mac' ? { ...target, ready: false } : target));
+  assert.equal(defaultRunTab(unrunnable), 'hivemindos');
+  // Nothing anywhere is still a real answer rather than an empty strip.
+  assert.equal(defaultRunTab([]), 'this-mac');
+});
+
 test('a machine that does not serve the model leaves the row on This Mac', async () => {
   const targets = await build({ machines: { live: [machine({ models_served: ['wan22'] })], idle: [], broken: [] } });
   const zimage = targets.find((target) => target.id === 'z-image-turbo');
@@ -320,9 +356,13 @@ test('an image runs on the account the picker chose, not always on MUAPI', async
   assert.doesNotMatch(studio, /muapiRow\(/, 'no cloud call assumes the account any more');
   // Both cloud calls declare a payload for the studio transport, or resolveRun
   // refuses the row rather than sending a MUAPI body somewhere else.
-  const calls = studio.match(/row: cloudRow\(\),[\s\S]{0,900}?signal: run\.abort\.signal,/g) || [];
+  const calls = studio.match(/row: cloudRow\(\),[\s\S]{0,1400}?signal: run\.abort\.signal,/g) || [];
   assert.equal(calls.length, 2, 'both cloud generate paths route on the provider');
-  for (const call of calls) assert.match(call, /studio: \{ quality/);
+  for (const call of calls) assert.match(call, /studio: \{\s*\n?\s*quality/);
+  // Both also carry the ceiling the button's quote set, so a hosted press
+  // that got more expensive between the quote and the press stops rather
+  // than charging what it has become.
+  for (const call of calls) assert.match(call, /maximum_debit_usd: /);
   // The account travels with the tab and survives a reload.
   const { normalizeImagePreferences } = await import('../src/studios/image/imagePrefs.js');
   assert.equal(normalizeImagePreferences({ modelId: 'm', providerId: 'openai-gpt-image-oauth' }).providerId,
@@ -347,7 +387,8 @@ test('an image runs on the account the picker chose, not always on MUAPI', async
  *
  * The Video route used to ask from `VideoStudio.jsx` itself; its presentation
  * has since moved into the drawer body and the composer, so its two entries
- * below are the same one question asked in two places. That move is also why
+ * below are the same one question asked in two places — and Restore, now on the
+ * same frame, has the same pair. That move is also why
  * the list is now DERIVED and compared rather than merely walked: a hand-kept
  * list of surfaces goes stale the moment a surface moves, and a stale list is a
  * surface nobody is checking.
@@ -357,6 +398,7 @@ const RUN_ON_SURFACES = [
   'src/studios/SpriteStudio.jsx',
   'src/studios/image/ImageComposer.jsx',
   'src/studios/image/ImageSettingsPanel.jsx',
+  'src/studios/restore/RestoreComposer.jsx',
   'src/studios/restore/RestoreSettings.jsx',
   'src/studios/story/CastStage.jsx',
   'src/studios/story/MotionStage.jsx',

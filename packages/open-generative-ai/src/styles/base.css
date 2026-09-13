@@ -112,6 +112,73 @@ input[type='range'].hive-range::-moz-range-thumb {
 .hive-fade-in { animation: hive-fade-in var(--t-med) both; }
 .hive-scale-in { animation: hive-scale-in var(--t-med) both; }
 
+/* ---- Work in flight, drawn on the picture itself ----
+   The rim an image wears while something is being made FROM it (an upscale
+   today). Dropped over the box that BOUNDS the picture, so it hugs the result
+   rather than the panel around it.
+
+   Two deliberate departures from the house rules, both because this marks one
+   specific picture as busy rather than decorating the chrome: it loops (which
+   DESIGN.md allows for explicit progress indicators, and this is one), and it
+   leaves the single honey accent for the full spectrum, which is what tells you
+   at a glance that this is not the ordinary render bar on the stage.
+
+   The ring is drawn INSIDE the picture's edge (inset: 0), never outside it: the
+   viewer, the stage and the rail all clip their overflow, so an outward glow
+   would be shorn off on whichever pair of sides the picture fills.
+
+   Two animations on purpose. The angle spin needs a registered custom property
+   (@property, Safari 16.4+); where that is missing the angle stays put and the
+   hue travel alone carries the motion, instead of the gradient failing to parse
+   and leaving no rim at all. The literal `0deg` below is what makes that true —
+   without it `var(--spectral-angle)` is unresolvable on those engines. */
+@property --spectral-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.spectral-rim,
+.spectral-ring {
+  /* Vivid on a near-black ground, and inherited into the pseudo-element. */
+  --spectral-stops: #ff453a, #ff9f0a, #ffd60a, #32d74b, #40c8e0, #5e5ce6, #bf5af2, #ff453a;
+}
+
+.spectral-rim::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  padding: var(--spectral-rim-w, 4px);
+  --spectral-angle: 0deg;
+  background: conic-gradient(from var(--spectral-angle), var(--spectral-stops));
+  /* A ring, not a fill: the content box is punched out of the border box. */
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: spectral-spin 3.6s linear infinite, spectral-hue 9s linear infinite;
+}
+
+/* The centre loader's ring. Round, so it spins on a transform and needs no
+   registered property at all — the gradient inside it holds still. */
+.spectral-ring {
+  --spectral-angle: 0deg;
+  border-radius: 9999px;
+  background: conic-gradient(from var(--spectral-angle), var(--spectral-stops));
+  -webkit-mask: radial-gradient(farthest-side, #0000 calc(100% - 3px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, #0000 calc(100% - 3px), #000 calc(100% - 3px));
+  animation: hive-spin 1.1s linear infinite;
+}
+
+@keyframes spectral-spin { to { --spectral-angle: 360deg; } }
+@keyframes spectral-hue {
+  from { filter: hue-rotate(0deg) drop-shadow(0 0 5px rgb(255 255 255 / 0.22)); }
+  to { filter: hue-rotate(360deg) drop-shadow(0 0 5px rgb(255 255 255 / 0.22)); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

@@ -65,12 +65,30 @@ export function resolvedMediaCacheStats() {
     return { bytes: cachedBytes, entries: blobCache.size, held: holders.size, budget: cacheBudgetBytes };
 }
 
+// Object URLs that were superseded or dropped while something was still showing
+// them. Revoking one blanks a live <img>, so it waits for the last holder.
+const retired = new Map(); // original url -> [object urls awaiting their release]
+
+function revokeSrc(src) {
+    try { URL.revokeObjectURL(src); } catch { /* already gone */ }
+}
+
 function dropCacheEntry(url) {
     const entry = blobCache.get(url);
     if (!entry) return;
     blobCache.delete(url);
     cachedBytes = Math.max(0, cachedBytes - entry.bytes);
-    URL.revokeObjectURL(entry.src);
+    // Eviction already skips held entries, but REPLACING one did not, and the
+    // two components that show the same fresh output — the stage and the viewer
+    // over it — resolved it at once, so the second decrypt to land revoked the
+    // first one's URL out from under a mounted <img>. Reported 2026-09-11 as a
+    // picture that looked right in the viewer and was a broken-image icon on the
+    // stage behind it.
+    if (holders.get(url)) {
+        retired.set(url, [...(retired.get(url) || []), entry.src]);
+        return;
+    }
+    revokeSrc(entry.src);
 }
 
 function evictOverBudget() {
@@ -83,7 +101,15 @@ function evictOverBudget() {
 }
 
 function rememberResolved(url, src, bytes) {
-    dropCacheEntry(url); // replacing: the old object URL is nobody's now
+    const existing = blobCache.get(url);
+    if (existing?.src === src) {
+        // Re-registering the same object URL is not a replacement: retiring it
+        // would queue the live entry's own src for revocation.
+        blobCache.delete(url);
+        cachedBytes = Math.max(0, cachedBytes - existing.bytes);
+    } else {
+        dropCacheEntry(url);
+    }
     const size = Math.max(0, Number(bytes) || 0);
     blobCache.set(url, { src, bytes: size });
     cachedBytes += size;
@@ -106,8 +132,18 @@ export function retainResolvedMedia(url) {
 export function releaseResolvedMedia(url) {
     if (!url || typeof url !== 'string') return;
     const next = (holders.get(url) || 0) - 1;
-    if (next > 0) holders.set(url, next);
-    else holders.delete(url);
+    if (next > 0) {
+        holders.set(url, next);
+    } else {
+        holders.delete(url);
+        // Nothing is showing the superseded URLs any more, so they stop being a
+        // leak and become reclaimable.
+        const waiting = retired.get(url);
+        if (waiting) {
+            retired.delete(url);
+            for (const src of waiting) revokeSrc(src);
+        }
+    }
     // The last consumer unmounting is the moment a long scroll frees anything at
     // all, so this is where the budget is re-checked.
     evictOverBudget();
@@ -183,10 +219,27 @@ export function isProbablyMediaUrl(url) {
     return typeof url === 'string' && /\/(image|video)\//.test(url);
 }
 
-export async function resolveMediaSrc(url) {
-    if (!url || typeof url !== 'string') return url;
+// One decrypt per URL, however many components are showing it.
+//
+// The stage and the viewer over it mount against the same fresh output within a
+// frame of each other, both miss the cache, and both used to fetch and decrypt
+// it independently — two copies of the pixels, two object URLs, and the second
+// to land replacing (and until 2026-09-11, revoking) the first. Sharing the
+// in-flight promise makes the second consumer free and leaves exactly one blob.
+const inflight = new Map(); // original url -> Promise<resolved src>
+
+export function resolveMediaSrc(url) {
+    if (!url || typeof url !== 'string') return Promise.resolve(url);
     const hit = peekResolvedMediaSrc(url);
-    if (hit) return hit;
+    if (hit) return Promise.resolve(hit);
+    const pending = inflight.get(url);
+    if (pending) return pending;
+    const run = decryptMediaSrc(url).finally(() => { inflight.delete(url); });
+    inflight.set(url, run);
+    return run;
+}
+
+async function decryptMediaSrc(url) {
     let response;
     try {
         // Same URL, different envelope per key: presenting this device's key is
@@ -300,11 +353,10 @@ async function tryAgentReveal(url) {
 /** Drop everything cached about `url` so the next read fetches and decrypts it
  * again -- for a clip whose envelope on the server was just replaced. */
 export function forgetResolvedMedia(url) {
-    const entry = blobCache.get(url);
-    if (entry) {
-        try { URL.revokeObjectURL(entry.src); } catch { /* already gone */ }
-        blobCache.delete(url);
-    }
+    // Through dropCacheEntry, so this keeps the byte accounting straight (it did
+    // not before) and leaves an object URL a mounted <img> is still showing
+    // alive until that component lets go.
+    dropCacheEntry(url);
     noteSealFailure(url, null);
 }
 
@@ -353,7 +405,9 @@ export function clearMediaSealFailures() {
 }
 
 export function clearResolvedMediaCache() {
-    for (const entry of blobCache.values()) URL.revokeObjectURL(entry.src);
+    for (const entry of blobCache.values()) revokeSrc(entry.src);
+    for (const waiting of retired.values()) for (const src of waiting) revokeSrc(src);
+    retired.clear();
     blobCache.clear();
     cachedBytes = 0;
     for (const url of [...sealFailures.keys()]) noteSealFailure(url, null);

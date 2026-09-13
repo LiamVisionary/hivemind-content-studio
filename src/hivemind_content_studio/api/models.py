@@ -247,6 +247,54 @@ class StudioImageBody(BaseModel):
     aspect_ratio: str = "1:1"
     quality: str = ""
     seed: int | None = None
+    # A starting picture, base64 with its type, for a model that edits one
+    # rather than drawing from a prompt. The bytes go to the provider (through
+    # the hosted rail's own input store), so the studio asks before sending —
+    # the same consent the MUAPI reference upload takes.
+    reference_base64: str = Field(default="", max_length=90_000_000)
+    reference_type: str = Field(default="", max_length=100)
+    # …or the URL of one already uploaded, which is what the browser sends:
+    # it uploads once per picture and caches, so a re-generate does not push
+    # the same bytes again.
+    reference_url: str = Field(default="", max_length=4096)
+    # What this press may spend, from the quote the button showed. The hosted
+    # rail re-quotes the exact request and refuses to exceed this, so a price
+    # that moved between the quote and the press stops the run instead of
+    # silently charging more.
+    maximum_debit_usd: float | None = Field(default=None, gt=0, le=25)
+
+
+class HostedMediaInputBody(BaseModel):
+    """One local picture, on its way to somewhere a provider can fetch it.
+
+    Every image-to-* model upstream takes its start by URL and nothing on this
+    machine has one, so the bytes go to the gateway's own input store. They
+    leave in the clear, which is why the studio asks first — the same consent
+    the MUAPI reference upload takes.
+    """
+
+    data_base64: str = Field(..., max_length=90_000_000)
+    content_type: str = Field(default="image/png", max_length=100)
+
+
+class HostedMediaQuoteBody(BaseModel):
+    """What one hosted press would cost, for the button that is about to make it.
+
+    528 of the rail's 538 endpoints price dynamically and the ten that do not
+    still move with duration and resolution, so there is no catalogue figure
+    the studio could honestly print — the number has to come from a quote of
+    the request the composer is actually holding.
+    """
+
+    model: str = Field(..., max_length=200)
+    kind: Literal["image", "video"] = "image"
+    # What the composer has attached, which decides WHICH endpoint of a
+    # consolidated row is priced.
+    attached: Literal["none", "image", "video", "audio"] = "none"
+    prompt: str = Field(default="", max_length=8000)
+    aspect_ratio: str = Field(default="1:1", max_length=20)
+    duration_seconds: float | None = Field(default=None, gt=0, le=120)
+    resolution: str = Field(default="", max_length=20)
 
 
 class CloudOutputAdoptBody(BaseModel):

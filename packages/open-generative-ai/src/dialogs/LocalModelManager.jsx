@@ -360,7 +360,7 @@ function Wan2gpModelCard({ model }) {
       </div>
       <div className="shrink-0">
         <Pill tone={ready ? 'ok' : 'warn'} dot>
-          {ready ? t('localModels.available') : t('localModels.offline')}
+          {ready ? t('localModels.available') : t('common.unavailable')}
         </Pill>
       </div>
     </div>

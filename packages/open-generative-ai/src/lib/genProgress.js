@@ -17,11 +17,47 @@
 //   measured at 4 steps estimate the same run at 8 steps as roughly double,
 //   instead of falling back to a flat constant.
 
-export function computeSmoothProgress({ elapsedSec = 0, estimateSec = 0, realFraction = 0, prevDisplay = 0 } = {}) {
+// Where the bar stands when the sampler reports its last step. The phases that
+// follow — VAE decode, save, the runner's fetch-back — report nothing, and ran
+// ~7% of the wall time on a measured 1024x1024 8-step local render, so leave
+// about that much for elapsed time to finish off.
+export const SAMPLER_BAND_END = 0.95;
+
+// `realAnchor` is what turns a real step counter from a nudge into the thing
+// actually driving the bar. Without it the counter could only ever push the bar
+// UP (Math.max), so a short estimate still ran to the 98.5% cap while the render
+// was half done — measured on a 23s Z-Image run whose first-ever estimate was
+// 10s. It cannot simply CAP the bar either: the bar is monotonic, so a cap below
+// where time had already reached would just freeze it.
+//
+// So: remember where the bar stood when the first counter arrived, and map the
+// sampling that remains onto the space that remains. The bar never jumps back,
+// never stalls, and from the first step onward it advances at the rate real work
+// is being done rather than at the rate a guess predicted. Callers with no
+// counters (or before the first one lands) pass no anchor and get the original
+// purely time-driven behaviour, which is all the head of a run — model load and
+// text encode, 27% of that same render — can be driven by anyway.
+export function computeSmoothProgress({
+  elapsedSec = 0,
+  estimateSec = 0,
+  realFraction = 0,
+  realAnchor = null,
+  prevDisplay = 0,
+} = {}) {
   const timeFraction = estimateSec > 0 ? elapsedSec / estimateSec : 0;
   const real = Number.isFinite(realFraction) ? realFraction : 0;
-  const target = Math.min(0.985, Math.max(timeFraction, real));
-  return Math.max(Number(prevDisplay) || 0, target);
+  let target = Math.max(timeFraction, real);
+  const anchorDisplay = Number(realAnchor?.display);
+  const anchorReal = Number(realAnchor?.real);
+  if (Number.isFinite(anchorDisplay) && Number.isFinite(anchorReal) && anchorReal < 1) {
+    const remaining = Math.max(0, Math.min(1, (real - anchorReal) / (1 - anchorReal)));
+    const band = Math.max(0, SAMPLER_BAND_END - anchorDisplay);
+    target = anchorDisplay + remaining * band;
+    // Sampling is done and the untimed tail is running: hand the rest back to
+    // elapsed time rather than sitting at the band's end until the image lands.
+    if (real >= 1) target = Math.max(target, timeFraction);
+  }
+  return Math.max(Number(prevDisplay) || 0, Math.min(0.985, target));
 }
 
 export function formatElapsed(elapsedMs) {

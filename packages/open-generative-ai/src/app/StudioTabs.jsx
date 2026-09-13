@@ -22,8 +22,8 @@ import { useMediaPoster } from '../hooks/hooks.js';
 import { getPendingJobs, pendingJobsForTab } from '../lib/pendingJobs.js';
 import { publishTabLabels, tabChipLabel } from '../lib/studioTabLabel.js';
 import {
-  addTab, closeTab, consumeSeed, insertTabAfter, loadTabState, saveTabState, selectTab,
-  studioInstanceId, studioLaneId,
+  addTab, closeTab, consumeSeed, insertTabAfter, loadTabState, pruneClosedTabDrafts,
+  saveTabState, selectTab, studioInstanceId, studioLaneId,
 } from '../lib/studioTabs.js';
 import { Icon } from '../ui/icons.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
@@ -158,7 +158,12 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
   // Restored from sessionStorage, so a reload brings the whole strip back and every
   // tab that was rendering can reclaim its run. Without this only Tab 1 survived and
   // every other tab's generation was orphaned mid-flight.
-  const [state, setState] = useState(() => loadTabState(studioType));
+  // Read once, and kept: snapshotsRef below needs the same object the strip
+  // started from.
+  const initialStateRef = useRef(null);
+  if (!initialStateRef.current) initialStateRef.current = loadTabState(studioType);
+  const initialState = initialStateRef.current;
+  const [state, setState] = useState(initialState);
   // Which tabs are actually MOUNTED. A restored strip can be 24 tabs deep and a
   // tab is a whole studio: its model list, its saved-library reads, its
   // rented-machine timer, its composer hydration. Mounting all of them put
@@ -198,6 +203,39 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
   const instanceIdRef = useRef(null);
   if (!instanceIdRef.current) instanceIdRef.current = studioInstanceId();
 
+  // Each tab's latest settings, kept here so a reload can bring the strip back
+  // as it stood rather than as N copies of the studio-wide preferences.
+  // Refreshed on a slow multiple of the busy poll rather than every tick:
+  // snapshot() deep-copies the tab's references and there is no reason to pay
+  // that at 1.5s intervals for something only a reload reads.
+  // Seeded from what the strip was restored WITH, not left empty: a lazily
+  // mounted tab publishes no api until it is fronted, so the first save after a
+  // reload would otherwise write it back with no settings at all — losing them
+  // for good on the second reload, and before that leaving it to boot from the
+  // studio-wide preferences like the bug this whole change is about.
+  const snapshotsRef = useRef(Object.fromEntries(
+    (initialState.tabs || [])
+      .filter((tab) => tab.seed?.snapshot)
+      .map((tab) => [tab.id, tab.seed.snapshot]),
+  ));
+  // The listener below is installed once; without this it would close over the
+  // strip as it stood at mount and write that back on the way out.
+  const stateRef = useRef(null);
+  const snapshotTickRef = useRef(0);
+
+  const captureSnapshots = () => {
+    const next = {};
+    apisRef.current.forEach((ref, id) => {
+      const taken = ref?.current?.snapshot?.();
+      if (taken) next[id] = taken;
+    });
+    // A tab that has never been fronted has no api and therefore no snapshot of
+    // its own; keep the one it was restored with so closing the app twice in a
+    // row does not quietly empty it.
+    snapshotsRef.current = { ...snapshotsRef.current, ...next };
+    return snapshotsRef.current;
+  };
+
   const apiFor = (id) => {
     if (!apisRef.current.has(id)) apisRef.current.set(id, { current: null });
     return apisRef.current.get(id);
@@ -213,11 +251,29 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
   // The studio consumes its seed on first render; drop it afterwards so a
   // duplicate's reference images aren't retained twice for the session.
   useEffect(() => {
-    const seeded = state.tabs.find((tab) => tab.seed);
+    // Only a tab that has actually BOOTED has consumed anything. The strip
+    // mounts tabs lazily, so nulling the seed of a tab nobody has fronted threw
+    // away the settings it was going to boot with — it then came up on the
+    // studio-wide preferences instead of its own.
+    const seeded = state.tabs.find((tab) => tab.seed && mounted.has(tab.id));
     if (seeded) setState((prev) => consumeSeed(prev, seeded.id));
-  }, [state]);
+  }, [state, mounted]);
 
-  useEffect(() => { saveTabState(studioType, state); }, [studioType, state]);
+  stateRef.current = state;
+  useEffect(() => { saveTabState(studioType, state, snapshotsRef.current); }, [studioType, state]);
+
+  // The last word before the page goes. A reload fires pagehide, so whatever a
+  // tab was set to a moment ago is what comes back — not what the slow poll
+  // happened to have captured.
+  useEffect(() => {
+    const flush = () => saveTabState(studioType, stateRef.current, captureSnapshots());
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', flush);
+    };
+  }, [studioType]);
 
   // Another studio asking for a specific tab before it sends work there. The
   // one-shot setup bridge only drains into the tab that is mounted AND active
@@ -266,6 +322,11 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
         id, index: chip.index, label: chip.label, busy: chip.busy,
       })));
 
+      // Every fourth tick (~6s): often enough that a crash loses little, rare
+      // enough that the deep copy is not a per-second cost across every tab.
+      snapshotTickRef.current = (snapshotTickRef.current + 1) % 4;
+      if (snapshotTickRef.current === 0) saveTabState(studioType, stateRef.current, captureSnapshots());
+
       const busyNow = [...next.values()].some((chip) => chip.busy);
       if (active && busyNow && !wasBusyRef.current && state.tabs.length === 1) showTabsHint();
       wasBusyRef.current = busyNow;
@@ -312,7 +373,14 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
 
   const forget = (id) => {
     apisRef.current.delete(id);
-    setState((prev) => closeTab(prev, id));
+    delete snapshotsRef.current[id];
+    setState((prev) => {
+      const next = closeTab(prev, id);
+      // Closing a tab is a deliberate "done with this", so its draft goes with
+      // it rather than waiting to be aged out of the vault.
+      pruneClosedTabDrafts(studioType, next);
+      return next;
+    });
   };
 
   const requestClose = (id) => {

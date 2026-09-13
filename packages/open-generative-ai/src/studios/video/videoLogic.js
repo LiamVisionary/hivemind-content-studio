@@ -570,7 +570,13 @@ export function deriveControlVisibility(s, c) {
 }
 
 // Extend banner (old 1087-1099): '' means hidden.
-export function deriveExtendBanner(s, c) {
+//
+// `ingredientsFallbackLabel` is the plain lane a prompt-only run on an
+// ingredients model goes to, when there is one. It belongs on the banner rather
+// than only in the ingredients panel, because the panel lives inside the
+// References control: a run that quietly renders on a different lane is exactly
+// the invisible state this banner exists to state out loud.
+export function deriveExtendBanner(s, c, { ingredientsFallbackLabel = '' } = {}) {
   if (s.v2vMode) return '';
   const model = currentModel(s, c);
   if (videoRequestPlan(s).sendMotionContext) {
@@ -586,12 +592,20 @@ export function deriveExtendBanner(s, c) {
   if (model?.requiresRequestId) {
     return 'Extending previous Seedance 2.0 generation; add an optional prompt to guide the continuation';
   }
+  if (ingredientsFallbackLabel) {
+    return `No ingredients attached — this renders from the prompt alone, on ${ingredientsFallbackLabel}. Add reference views to render it through the IC-LoRA instead.`;
+  }
   return '';
 }
 
 // Derived textarea placeholder/disabled — replaces the ~14 imperative
 // textarea.placeholder writes in the old file with one state-derived rule.
-export function derivePromptUi(s, c) {
+// `ingredientsActive` is the one piece of composer state that does not live in
+// the setup: which ingredient sheet is armed is studio state, and the placeholder
+// has to tell "describe the shot for these references" from "describe the shot"
+// — the ingredients panel is optional, and a line naming references the user has
+// not selected is what made it read as mandatory.
+export function derivePromptUi(s, c, { ingredientsActive = false } = {}) {
   const model = currentModel(s, c);
   if (s.v2vMode) {
     if (model?.imageField) {
@@ -625,7 +639,7 @@ export function derivePromptUi(s, c) {
   if (model?.requiresRequestId) {
     return { placeholder: 'Optional: describe how to continue the video...', disabled: false };
   }
-  if (model?.supportsIngredientImages) {
+  if (model?.supportsIngredientImages && ingredientsActive) {
     return { placeholder: 'Describe the shot using the selected character references', disabled: false };
   }
   // Local workflows (H3, LTX) take the start frame as an OPTIONAL input — H3 is

@@ -63,7 +63,13 @@ test('job ownership tolerates a junk registry', () => {
 test('the tab strip is persisted and each tab is told which run is its own', () => {
     const tabs = readSource('src/app/StudioTabs.jsx');
     assert.match(tabs, /loadTabState\(studioType\)/, 'the strip is restored on mount');
-    assert.match(tabs, /saveTabState\(studioType, state\)/, 'and written back on every change');
+    // Written back with each tab's own settings alongside its id (2026-09-12):
+    // the strip used to persist ids only, so every restored tab re-read the one
+    // studio-wide preferences blob and came back identical to its neighbours.
+    assert.match(tabs, /saveTabState\(studioType, state, snapshotsRef\.current\)/,
+        'the strip is written back with each tab’s settings');
+    assert.match(tabs, /window\.addEventListener\('pagehide', flush\)/,
+        'and flushed before the page goes, so a reload keeps the latest');
     assert.match(tabs, /tabId=\{tab\.id\}/, 'each studio knows its tab id');
     assert.match(tabs, /primary=\{tab\.id === state\.tabs\[0\]\.id && !tab\.seed\}/,
         'exactly one tab is primary, decided by position rather than by a null seed');

@@ -87,6 +87,10 @@ test('video workflow discovery recovers after an owner-session startup race', as
             // Not a routing target — it is a tier the user picks directly.
             routingOnly: false,
             ingredientInputs: { max_images: 12, layout: 'adaptive-pack' },
+            // Where a prompt-only run goes when no sheet is attached. Empty
+            // here because this fixture's registry entry names no fallback,
+            // which keeps the composer's refusal rather than routing nowhere.
+            textToVideoWorkflowId: '',
             id: 'hivemind-media:ltx23-ic-ingredients-lora',
             workflowId: 'ltx23-ic-ingredients-lora',
             // Null for a model with only one build; set when a workflow declares

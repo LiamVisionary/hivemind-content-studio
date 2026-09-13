@@ -416,6 +416,77 @@ def forget_credit_token() -> None:
     _write_store(store)
 
 
+# ------------------------------------------------- the free tier's own meter
+#
+# The gateway reports what is LEFT of the daily free allowance in headers on the
+# responses to real free calls, and nowhere else that can be relied on. (Its
+# status route grew a `usage` block at some point on 2026-09-10 and had lost it
+# again hours later, which is exactly why this exists: the meter cannot be built
+# on a field that comes and goes.) So every free call this studio makes leaves
+# its headers here on the way past, and the meter reads the record.
+FREE_ALLOWANCE_KEY = "freeAllowance"
+
+_ALLOWANCE_HEADERS = {
+    "remainingRequests": "x-hivemindos-free-remaining-requests",
+    "remainingTokens": "x-hivemindos-free-remaining-tokens",
+}
+
+
+def record_free_allowance(headers: dict[str, str]) -> None:
+    """Keep what one free response said about the allowance it just spent.
+
+    Best effort in the strongest sense: this runs on the way out of a
+    generation the owner is waiting on, and a meter is never worth failing that
+    for.
+    """
+    try:
+        reset_at = str(headers.get("x-hivemindos-free-reset-at") or "").strip()
+        if not reset_at:
+            return
+        snapshot: dict[str, Any] = {"resetAt": reset_at, "observedAt": time.time()}
+        for field, header in _ALLOWANCE_HEADERS.items():
+            try:
+                value = int(str(headers.get(header) or "").strip())
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                snapshot[field] = value
+        if len(snapshot) > 2:
+            set_store_value(FREE_ALLOWANCE_KEY, snapshot)
+    except OSError:
+        pass
+
+
+FREE_CEILING_KEY = "freeCeiling"
+
+
+def remember_free_ceiling(requests: int | None, tokens: int | None, tier: str = "") -> None:
+    """Keep the daily ceiling the gateway last stated.
+
+    The most stable fact about this tier — it moves when a stake tier does and
+    not otherwise — so remembering it means a slow or unreachable status route
+    costs the meter its freshness rather than its existence.
+    """
+    try:
+        set_store_value(FREE_CEILING_KEY, {
+            "requestLimit": requests, "tokenLimit": tokens,
+            "tierLabel": str(tier or ""), "at": time.time(),
+        })
+    except OSError:
+        pass
+
+
+def free_ceiling_record() -> dict[str, Any]:
+    record = store_value(FREE_CEILING_KEY)
+    return record if isinstance(record, dict) else {}
+
+
+def free_allowance_record() -> dict[str, Any]:
+    """The last thing a free call told us, or {}."""
+    record = store_value(FREE_ALLOWANCE_KEY)
+    return record if isinstance(record, dict) else {}
+
+
 def store_value(key: str) -> Any:
     """A plain (unencrypted) value this module's store holds for its siblings.
 
@@ -539,6 +610,7 @@ def _gateway_request(
     headers: dict[str, str] | None = None,
     timeout: float = 20.0,
     opener: Callable[..., Any] = urllib.request.urlopen,
+    headers_sink: dict[str, str] | None = None,
 ) -> Any:
     sent = {"Accept": "application/json", "User-Agent": USER_AGENT, **(headers or {})}
     data = None
@@ -546,14 +618,37 @@ def _gateway_request(
         data = json.dumps(body).encode("utf-8")
         sent["Content-Type"] = "application/json"
     request = urllib.request.Request(f"{gateway_url()}{path}", data=data, method=method, headers=sent)
-    return _send(request, timeout=timeout, opener=opener, where="gateway")
+    return _send(request, timeout=timeout, opener=opener, where="gateway", headers_sink=headers_sink)
 
 
-def _send(request: urllib.request.Request, *, timeout: float, opener: Callable[..., Any], where: str) -> Any:
+def _send(
+    request: urllib.request.Request, *, timeout: float, opener: Callable[..., Any], where: str,
+    headers_sink: dict[str, str] | None = None,
+) -> Any:
+    """`headers_sink`, when given, is filled with the response headers.
+
+    The free tier's remaining allowance is reported ONLY on the responses to
+    real free calls (see `record_free_allowance`), so the one place it can be
+    learned for free is here, on the way past.
+    """
     try:
         with opener(request, timeout=timeout) as response:
+            if headers_sink is not None:
+                try:
+                    headers_sink.update({str(k).lower(): str(v) for k, v in response.headers.items()})
+                except (AttributeError, TypeError):
+                    # A test double that answers bytes and nothing else. The
+                    # body is what the caller came for; headers are a bonus.
+                    pass
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        # A 429 carries the allowance headers too, and it is the single most
+        # useful moment to record them: this is the call that ran it out.
+        if headers_sink is not None:
+            try:
+                headers_sink.update({str(k).lower(): str(v) for k, v in exc.headers.items()})
+            except (AttributeError, TypeError):
+                pass
         raise _http_error(exc, where=where) from None
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         if where == "app":
@@ -970,16 +1065,23 @@ class HivemindosRuntime:
                 timeout=timeout, opener=self._opener,
             )
         elif model_id == FREE_MODEL_ID:
-            # The free rail is device-scoped and never touches credits.
-            payload = _gateway_request(
-                f"/api/free-models/{FREE_MODEL_UPSTREAM}/chat/completions",
-                method="POST", body={**body, "model": FREE_MODEL_UPSTREAM},
-                headers={
-                    "X-HivemindOS-Free-Device": device_id(),
-                    "X-HivemindOS-Free-Workspace": "hivemind-content-studio",
-                },
-                timeout=timeout, opener=self._opener,
-            )
+            # The free rail is device-scoped and never touches credits. Its
+            # response headers are the only reliable statement of what is left
+            # of today's allowance, so they are kept — including on the 429 that
+            # says it has just run out, which `_send` sinks before it raises.
+            spent: dict[str, str] = {}
+            try:
+                payload = _gateway_request(
+                    f"/api/free-models/{FREE_MODEL_UPSTREAM}/chat/completions",
+                    method="POST", body={**body, "model": FREE_MODEL_UPSTREAM},
+                    headers={
+                        "X-HivemindOS-Free-Device": device_id(),
+                        "X-HivemindOS-Free-Workspace": "hivemind-content-studio",
+                    },
+                    timeout=timeout, opener=self._opener, headers_sink=spent,
+                )
+            finally:
+                record_free_allowance(spent)
         else:
             token = credit_token()
             if not token:

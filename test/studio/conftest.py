@@ -195,6 +195,14 @@ def _isolate_hivemindos_models(monkeypatch) -> None:
     # to link a balance without being asked. A developer's real vault would make
     # "is an account connected?" answer differently on their machine than in CI.
     monkeypatch.setenv("HIVEMINDOS_HOME", str(Path(__file__).parent / "no-such-hivemindos"))
+    # And the warmed hosted-media prices, which live in a file on the
+    # developer's machine and in nobody else's. A module-level cache read from
+    # disk is the same machine-dependence trap as the vault above: the catalog
+    # would carry 139 real prices here and none in CI.
+    from hivemind_content_studio import hivemindos_hosted_media
+
+    hivemindos_hosted_media.forget_hosted_media_catalog()
+    hivemindos_hosted_media._prices.update({"at": 0.0, "usd": {}, "refused": set()})
 
 
 @pytest.fixture(autouse=True)

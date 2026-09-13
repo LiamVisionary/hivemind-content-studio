@@ -18,7 +18,7 @@
 // Strictly fail-open: legacy plaintext, locked vault, or any error resolves to
 // the original URL so display is never worse than before.
 
-import { getWorkflowEncryptionSecret } from './workflowEncryption';
+import { getVaultKeyHandles, getWorkflowEncryptionSecret } from './workflowEncryption';
 import { comfyRoute } from '@/api/client';
 
 const PBKDF2_ITERATIONS = 600_000;
@@ -85,6 +85,17 @@ let privateKeyPromise: Promise<CryptoKey | null> | null = null;
 let unlockSecretUsed: string | null = null;
 
 function getPrivateKey(): Promise<CryptoKey | null> {
+  // The shell hands this surface the already-unwrapped private key whenever the
+  // studio vault is open. Preferring it is not just a shortcut past 600k PBKDF2
+  // iterations and an identity fetch: it is the ONLY route on a browser signed
+  // in with a passkey, or one that has retired its passphrase to a device wrap,
+  // because neither has a passphrase left to derive anything from.
+  const handles = getVaultKeyHandles();
+  if (handles) {
+    privateKeyPromise = null;
+    unlockSecretUsed = null;
+    return Promise.resolve(handles.privateKey);
+  }
   const secret = getWorkflowEncryptionSecret();
   if (!secret) {
     privateKeyPromise = null;

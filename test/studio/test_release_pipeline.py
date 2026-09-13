@@ -197,9 +197,35 @@ def test_the_updater_public_key_is_config_and_the_private_key_is_a_name() -> Non
 def test_the_updater_check_reports_drift_and_demands_a_key_before_delivery(tmp_path: Path) -> None:
     checker = _module("scripts/check_updater_config.py")
 
-    # As shipped: no key yet, so unsigned builds are fine and promotion is not.
+    # As shipped: the key pair exists, so the gate passes in both of its moods.
+    # It read "no key yet" until the pair was generated and the PUBLIC half
+    # committed (updater.json + tauri.conf.json); an assertion that the repo is
+    # still unsigned would now fail for the right reason, which is not a reason
+    # to keep it. The demand itself is still checked — against a config with the
+    # key taken out, below, which is the state the sentence is written for.
     assert checker.check(require_key=False) == []
-    assert any("pubkey" in problem for problem in checker.check(require_key=True))
+    assert checker.check(require_key=True) == []
+
+    unsigned = tmp_path / "unsigned.json"
+    unsigned.write_text(
+        json.dumps(
+            {
+                "endpoints": ["https://example.invalid/latest.json"],
+                "pubkey": "",
+                "private_key_secret": "TAURI_SIGNING_PRIVATE_KEY",
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_updater, original_tauri = checker.UPDATER_CONFIG, checker.TAURI_CONFIG
+    checker.UPDATER_CONFIG = unsigned
+    checker.TAURI_CONFIG = tmp_path / "absent.json"
+    try:
+        # Unsigned builds are fine; promotion is not.
+        assert not any("pubkey" in problem for problem in checker.check(require_key=False))
+        assert any("pubkey" in problem for problem in checker.check(require_key=True))
+    finally:
+        checker.UPDATER_CONFIG, checker.TAURI_CONFIG = original_updater, original_tauri
 
     # A tauri.conf.json that disagrees with the one source is caught.
     updater = tmp_path / "updater.json"

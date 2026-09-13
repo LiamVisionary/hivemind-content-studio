@@ -59,15 +59,34 @@
         // The gateway reports real step progress as 0-100. Reading it beats the
         // flat 0.35 this used to emit, which parked the bar at 35% for the whole
         // render and made the ETA beside it meaningless.
+        //
+        // A job carrying step counters is one whose `progress` this gateway
+        // wrote as a PERCENT, so read it as one rather than guessing: the
+        // "> 1 means percent" heuristic below cannot tell 1% from 100%, and the
+        // first step of a long render lands exactly there. Counters are not used
+        // as the fraction themselves — the gateway deliberately scales sampling
+        // into the share it owns, leaving room for the decode and save that
+        // report nothing.
         const reported = Number(last.progress);
+        const counted = Number(last.total_steps) > 0;
         const measured = Number.isFinite(reported) && reported >= 0
-          ? Math.max(0, Math.min(1, reported > 1 ? reported / 100 : reported))
+          ? Math.max(0, Math.min(1, counted || reported > 1 ? reported / 100 : reported))
           : null;
         const progress = status === 'success' ? 1 : measured ?? (status === 'running' ? 0.35 : 0.1);
         // This job runs on THIS machine — /local-ai is the local runtime. Saying
         // "hosted" beside a local render contradicted the privacy the rest of
         // the studio is careful about.
-        emitProgress({ status, progress, message: status === 'success' ? 'Done' : 'Generating on this machine' });
+        //
+        // `counted` separates a real step counter from the coarse 0.35 this
+        // falls back to. The studio's bar only hands itself over to a number
+        // that is actually counting something; anchoring on the fallback would
+        // pin it at 35% for the whole render.
+        emitProgress({
+          status,
+          progress,
+          counted: counted && measured != null,
+          message: status === 'success' ? 'Done' : 'Generating on this machine',
+        });
         if (status === 'success') {
           if (!last.url) throw new Error('Generation finished without an image');
           return { url: last.url, seed: last.seed };
@@ -358,6 +377,11 @@
     modelCard,
     downloadBinary: async () => ({ ok: true, source: 'hosted' }),
     listModels: () => jsonFetch('/local-ai/models'),
+    // The rendered control a direction edit sends to its LoRA. Same origin as
+    // this bridge, so the picker can point an <img> straight at it instead of
+    // round-tripping the bytes through here.
+    directionReferenceUrl: (params) =>
+      `${apiBase}/local-ai/direction-reference?${new URLSearchParams(params || {})}`,
     listLoras,
     generatePrompt: (params) => jsonFetch('/local-ai/prompt-helper', {
       method: 'POST',

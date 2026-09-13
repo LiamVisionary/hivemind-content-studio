@@ -16,6 +16,24 @@ export function DrawerBody({ children }) {
 }
 
 /**
+ * DrawerSection's heading on its own.
+ *
+ * The run-on card is full-bleed and owns its own 19px inset (see DrawerRunOn),
+ * so it cannot sit inside a section without being inset twice. Every drawer
+ * that opens with "Runs on" needs the heading lifted out of the section rather
+ * than redrawn in a second vocabulary.
+ */
+export function DrawerHeading({ children }) {
+  return (
+    <div className="px-[19px] pb-2.5 pt-1">
+      <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-inkSoft">
+        {children}
+      </span>
+    </div>
+  );
+}
+
+/**
  * A labelled group of rows: OUTPUT, LOOK, CONTROL, SAMPLING, SHOT, CAST…
  * `hint` prints on the right of the label — the one-line summary of what the
  * section is currently set to, so a shut section still answers for itself.

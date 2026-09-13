@@ -105,10 +105,28 @@ export function StageProgress({
 }
 
 /** The player bar under a clip: time, scrubber, what it is. */
-export function StagePlayerBar({ time = '', progress = 0, meta = '', onSeek }) {
+export function StagePlayerBar({
+  time = '', progress = 0, meta = '', onSeek,
+  // The transport. This bar used to be a readout floating 48px up to clear the
+  // browser's own control strip — but that strip AUTO-HIDES during playback, so
+  // what you actually saw was the bar hovering over a band of untouched video
+  // with nothing in it. One bar on the edge, owning play and mute, is the whole
+  // fix; fullscreen already lives in the stage's action column.
+  playing = false, onPlayPause, muted = false, onMute,
+}) {
   const pct = Math.max(0, Math.min(100, progress));
   return (
     <div className="absolute inset-x-0 bottom-0 flex items-center gap-3 bg-gradient-to-t from-bg0/85 to-transparent px-4 pb-3.5 pt-8">
+      {onPlayPause ? (
+        <button
+          type="button"
+          onClick={onPlayPause}
+          aria-label={playing ? 'Pause' : 'Play'}
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-ink1 transition-colors hover:bg-white/10"
+        >
+          <Icon name={playing ? 'pause' : 'play'} size={13} />
+        </button>
+      ) : null}
       <span className="shrink-0 font-mono text-[10.5px] text-inkSoft">{time}</span>
       <button
         type="button"
@@ -118,6 +136,16 @@ export function StagePlayerBar({ time = '', progress = 0, meta = '', onSeek }) {
       >
         <span className="absolute inset-y-0 left-0 rounded-full bg-ink1" style={{ width: `${pct}%` }} />
       </button>
+      {onMute ? (
+        <button
+          type="button"
+          onClick={onMute}
+          aria-label={muted ? 'Unmute' : 'Mute'}
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-ink1 transition-colors hover:bg-white/10"
+        >
+          <Icon name={muted ? 'mute' : 'sound'} size={13} />
+        </button>
+      ) : null}
       <span className="shrink-0 truncate font-mono text-[10.5px] text-inkSoft">{meta}</span>
     </div>
   );

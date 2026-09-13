@@ -72,23 +72,41 @@ const canHover = () => (
 // overflow-hidden, so the last button in a footer row lost most of its label at
 // the panel's edge. Fixed coordinates, measured after mount and clamped to the
 // viewport, so the bubble also flips below when there is no room above.
-function HintBubble({ anchor, label }) {
+//
+// Two placements, because a hint has to sit where it does not cover the thing
+// it explains. 'top' is for a horizontal row of buttons. 'right' is for a
+// vertical one — the collapsed sidebar rail, where a bubble above each icon
+// would land on top of the icon above it.
+const HINT_GAP = 6;
+const HINT_MARGIN = 8;
+
+function hintPosition(target, bubble, placement) {
+  const clamp = (value, limit) => Math.min(Math.max(value, HINT_MARGIN), Math.max(HINT_MARGIN, limit));
+  if (placement === 'right') {
+    const beside = target.right + HINT_GAP;
+    const fits = beside + bubble.width + HINT_MARGIN <= window.innerWidth;
+    return {
+      // No room to the right (a rail on a narrow window) flips it to the left
+      // of the anchor rather than letting it run off the edge.
+      left: fits ? beside : Math.max(HINT_MARGIN, target.left - bubble.width - HINT_GAP),
+      top: clamp(target.top + target.height / 2 - bubble.height / 2, window.innerHeight - bubble.height - HINT_MARGIN),
+    };
+  }
+  const above = target.top - bubble.height - HINT_GAP;
+  return {
+    left: clamp(target.left + target.width / 2 - bubble.width / 2, window.innerWidth - bubble.width - HINT_MARGIN),
+    top: above >= HINT_MARGIN ? above : target.bottom + HINT_GAP,
+  };
+}
+
+function HintBubble({ anchor, label, placement = 'top' }) {
   const ref = useRef(null);
   const [pos, setPos] = useState(null);
 
   useLayoutEffect(() => {
     if (!anchor || !ref.current) return undefined;
     const place = () => {
-      const target = anchor.getBoundingClientRect();
-      const bubble = ref.current.getBoundingClientRect();
-      const margin = 8;
-      const centered = target.left + target.width / 2 - bubble.width / 2;
-      const rightmost = Math.max(margin, window.innerWidth - bubble.width - margin);
-      const above = target.top - bubble.height - 6;
-      const next = {
-        left: Math.min(Math.max(centered, margin), rightmost),
-        top: above >= margin ? above : target.bottom + 6,
-      };
+      const next = hintPosition(anchor.getBoundingClientRect(), ref.current.getBoundingClientRect(), placement);
       setPos((prev) => (prev && prev.left === next.left && prev.top === next.top ? prev : next));
     };
     place();
@@ -100,7 +118,7 @@ function HintBubble({ anchor, label }) {
       window.removeEventListener('scroll', place, true);
       window.removeEventListener('resize', place);
     };
-  }, [anchor, label]);
+  }, [anchor, label, placement]);
 
   return createPortal(
     <div
@@ -117,14 +135,44 @@ function HintBubble({ anchor, label }) {
   );
 }
 
+/**
+ * The app's own tooltip, for any control whose label is not on screen.
+ *
+ * Never `title`: the browser's own tooltip takes about a second to appear, is
+ * drawn by the OS in the OS's colours, cannot be styled, and on a rail of a
+ * dozen icons it is the difference between reading the shelf and guessing at
+ * it. This one is the studio's bubble, immediate, and themed with everything
+ * else. A control that adopts it must DROP its `title` — a button carrying both
+ * shows two tooltips, one of them the ugly one.
+ *
+ * `bind` composes onto whatever handlers the control already has; `render`
+ * draws the bubble (nothing until a pointer that can hover is on the control,
+ * or a keyboard focus ring is). `aria-label` is what assistive tech reads —
+ * the bubble is decoration and is never the only copy of the label.
+ */
+export function useHint(placement = 'top') {
+  const [anchor, setAnchor] = useState(null);
+  const reveal = (event) => { if (canHover()) setAnchor(event.currentTarget); };
+  const dismiss = () => setAnchor(null);
+  const bind = (handlers = {}) => ({
+    onMouseEnter: (e) => { handlers.onMouseEnter?.(e); reveal(e); },
+    onMouseLeave: (e) => { handlers.onMouseLeave?.(e); dismiss(); },
+    onFocus: (e) => { handlers.onFocus?.(e); if (e.currentTarget.matches(':focus-visible')) reveal(e); },
+    onBlur: (e) => { handlers.onBlur?.(e); dismiss(); },
+    // A press that opens a sheet over the cursor never fires mouseleave, and the
+    // bubble sits above the modal layer — so the press dismisses it itself.
+    onClick: (e) => { dismiss(); handlers.onClick?.(e); },
+  });
+  const render = (label) => (anchor && label ? <HintBubble anchor={anchor} label={label} placement={placement} /> : null);
+  return { bind, render };
+}
+
 // A Button whose label collapses into a hover hint wherever a pointer can hover,
 // so a crowded action row reads as icons instead of a wall of words. Touch devices
 // keep the label visible — they have no hover to reveal it. The label always
 // reaches assistive tech through aria-label, hidden or not.
 export function ActionButton({ icon, label, className = '', ...rest }) {
-  const [anchor, setAnchor] = useState(null);
-  const reveal = (event) => { if (canHover()) setAnchor(event.currentTarget); };
-
+  const hint = useHint('top');
   return (
     <>
       <Button
@@ -133,14 +181,11 @@ export function ActionButton({ icon, label, className = '', ...rest }) {
         data-hint={label}
         className={className}
         {...rest}
-        onMouseEnter={(e) => { rest.onMouseEnter?.(e); reveal(e); }}
-        onMouseLeave={(e) => { rest.onMouseLeave?.(e); setAnchor(null); }}
-        onFocus={(e) => { rest.onFocus?.(e); if (e.currentTarget.matches(':focus-visible')) reveal(e); }}
-        onBlur={(e) => { rest.onBlur?.(e); setAnchor(null); }}
+        {...hint.bind(rest)}
       >
         <span className="hive-hint-label">{label}</span>
       </Button>
-      {anchor ? <HintBubble anchor={anchor} label={label} /> : null}
+      {hint.render(label)}
     </>
   );
 }
@@ -154,22 +199,30 @@ const ICON_BTN_DIMS = {
 };
 const ICON_BTN_GLYPH = { xs: 12, sm: 14, md: 17, lg: 18 };
 
-export function IconButton({ icon, label, size = 'md', active = false, className = '', ...rest }) {
+/** `hint` swaps the browser's tooltip for the studio's own bubble, and takes the
+ *  side it should sit on ('top' or 'right'). Without it the button keeps the
+ *  native `title` it has always had. */
+export function IconButton({ icon, label, size = 'md', active = false, hint = '', className = '', ...rest }) {
+  const bubble = useHint(hint || 'top');
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      className={cx(
-        'grid shrink-0 place-items-center transition-colors duration-150',
-        ICON_BTN_DIMS[size] || ICON_BTN_DIMS.md,
-        active ? 'bg-honey-tint text-honey' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
-        className,
-      )}
-      {...rest}
-    >
-      <Icon name={icon} size={ICON_BTN_GLYPH[size] || 17} />
-    </button>
+    <>
+      <button
+        type="button"
+        title={hint ? undefined : label}
+        aria-label={label}
+        className={cx(
+          'grid shrink-0 place-items-center transition-colors duration-150',
+          ICON_BTN_DIMS[size] || ICON_BTN_DIMS.md,
+          active ? 'bg-honey-tint text-honey' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
+          className,
+        )}
+        {...rest}
+        {...(hint ? bubble.bind(rest) : null)}
+      >
+        <Icon name={icon} size={ICON_BTN_GLYPH[size] || 17} />
+      </button>
+      {hint ? bubble.render(label) : null}
+    </>
   );
 }
 
@@ -519,6 +572,36 @@ export function Pill({ tone = 'neutral', dot = false, children, className = '', 
 // `remedy` is the repair, `{ label }` plus whatever the caller's runner needs;
 // `onRemedy` receives it. `onRetry`/`onDismiss` are the two ways out DESIGN.md
 // requires; omit either and its button is not rendered.
+/**
+ * A sentence about something the studio could not do, and the buttons that
+ * repair it.
+ *
+ * `tone` is whether it is a FAILURE. 'danger' is the press that refused —
+ * red, and announced. 'notice' is the studio saying what it did instead: a
+ * model that cannot run here and the one now selected is not an error, and
+ * printing it in red taught people to dismiss the colour that means their
+ * generation died. Same shape either way, because the rule is the same — a
+ * problem is never stated without its fix beside it (DESIGN.md).
+ */
+const CALLOUT_TONES = {
+  danger: {
+    box: 'border-danger/40 bg-danger-tint',
+    title: 'text-danger',
+    summary: 'text-danger/80 hover:text-danger',
+    // Evidence, so it is set as evidence: a traceback, a path, a JSON body.
+    detail: 'font-mono text-danger/90',
+    role: 'alert',
+  },
+  notice: {
+    box: 'border-warn/40 bg-warn/10',
+    title: 'text-ink1',
+    summary: 'text-ink3 hover:text-ink1',
+    // A sentence somebody wrote, not a dump — monospace would read as one.
+    detail: 'text-ink2',
+    role: 'status',
+  },
+};
+
 export function FailureCallout({
   title,
   detail = '',
@@ -530,24 +613,26 @@ export function FailureCallout({
   detailsLabel = 'Details',
   dismissLabel = 'Dismiss',
   retryDisabled = false,
+  tone = 'danger',
   className = '',
 }) {
   // A detail identical to the sentence above it is noise, not evidence.
   const tail = String(detail || '').trim();
   const showDetail = Boolean(tail) && tail !== String(title || '').trim();
+  const skin = CALLOUT_TONES[tone] || CALLOUT_TONES.danger;
   return (
     <div
-      className={cx('flex items-start justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-3.5 py-3', className)}
-      role="alert"
+      className={cx('flex items-start justify-between gap-3 rounded-md border px-3.5 py-3', skin.box, className)}
+      role={skin.role}
     >
       <div className="min-w-0">
-        <div className="text-xs font-semibold text-danger">{title}</div>
+        <div className={cx('text-xs font-semibold', skin.title)}>{title}</div>
         {showDetail ? (
           <details className="mt-1.5">
-            <summary className="cursor-pointer list-none text-[11px] font-medium text-danger/80 hover:text-danger">
+            <summary className={cx('cursor-pointer list-none text-[11px] font-medium', skin.summary)}>
               {detailsLabel}
             </summary>
-            <div className="mt-1 max-h-40 overflow-y-auto break-words font-mono text-[11px] leading-relaxed text-danger/90 [overflow-wrap:anywhere]">
+            <div className={cx('mt-1 max-h-40 overflow-y-auto break-words text-[11px] leading-relaxed [overflow-wrap:anywhere]', skin.detail)}>
               {tail}
             </div>
           </details>
@@ -583,7 +668,33 @@ export function EmptyState({ icon = 'sparkles', title, hint, action, className =
   );
 }
 
-export function Spinner({ size = 16, className = '' }) {
+/**
+ * A block standing in for content that has not arrived yet.
+ *
+ * `hive-motion-keep` is the load-bearing class. Under prefers-reduced-motion
+ * this app calms every animation to a single 0.01ms frame, which would leave a
+ * skeleton as a STATIC grey rectangle — indistinguishable from a box that
+ * rendered empty, which is the one thing a loading state must never look like.
+ * The keep-class slows the pulse instead of stopping it, exactly as the
+ * progress bars do.
+ *
+ * Decorative by definition, so it is hidden from screen readers; the container
+ * that owns the skeletons carries `aria-busy` and the real label.
+ */
+export function Skeleton({ className = '', rounded = 'rounded-md' }) {
+  return (
+    <span aria-hidden="true" className={cx('hive-motion-keep block animate-pulse bg-bg3', rounded, className)} />
+  );
+}
+
+/**
+ * `label={null}` makes the spinner decorative — for when it sits INSIDE a
+ * container that already carries role="status" and the real label. Two nested
+ * live regions announce the same wait twice, which is how a screen reader ends
+ * up saying "Loading, Searching Civitai" over one spinner.
+ */
+export function Spinner({ size = 16, className = '', label = 'Loading' }) {
+  const announced = label != null;
   return (
     <svg
       width={size}
@@ -591,12 +702,72 @@ export function Spinner({ size = 16, className = '' }) {
       viewBox="0 0 24 24"
       fill="none"
       className={cx('hive-motion-keep animate-[hive-spin_0.7s_linear_infinite]', className)}
-      role="status"
-      aria-label="Loading"
+      role={announced ? 'status' : undefined}
+      aria-label={announced ? label : undefined}
+      aria-hidden={announced ? undefined : 'true'}
     >
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.2" strokeWidth="2.5" />
       <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
     </svg>
+  );
+}
+
+/**
+ * A page with nothing on it yet.
+ *
+ * The size is the point. A 14px spinner parked in a toolbar leaves the body of
+ * the page reading as EMPTY rather than as busy — which is the same picture a
+ * page shows when a search legitimately found nothing, and the reason a slow
+ * Civitai search looked like a broken tab. A page-level wait claims the space
+ * the content is going to claim, so `min-h` is deliberately generous: this is
+ * for the whole-surface case, not for a spinner beside a button.
+ *
+ * `flex-1` covers the flex-column parents; the `min-h` covers the scroll
+ * containers that are plain blocks, where `flex-1` does nothing.
+ */
+export function LoadingState({ label, hint, size = 44, className = '' }) {
+  return (
+    <div
+      role="status"
+      aria-busy="true"
+      aria-live="polite"
+      className={cx(
+        'flex min-h-[55vh] w-full flex-1 flex-col items-center justify-center gap-3.5 px-6 py-16 text-center',
+        className,
+      )}
+    >
+      <Spinner size={size} className="text-honey" label={null} />
+      {label ? <div className="text-sm font-medium text-ink2">{label}</div> : null}
+      {hint ? <div className="max-w-sm text-[12px] leading-relaxed text-ink3">{hint}</div> : null}
+    </div>
+  );
+}
+
+/**
+ * The same wait, for a surface whose content is a grid of cards. Preferred over
+ * LoadingState there: the cards land in the shape they are about to fill, so
+ * the page does not jump when they arrive. `count` should over-fill a screen —
+ * an under-filled skeleton reads as "this is the whole result".
+ */
+export function CardGridSkeleton({ count = 12, label, minWidth = 180, aspect = 'aspect-square', className = '' }) {
+  return (
+    <div
+      className={cx('grid gap-3', className)}
+      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${minWidth}px, 1fr))` }}
+      role="status"
+      aria-busy="true"
+      aria-label={label}
+    >
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} className="flex flex-col overflow-hidden rounded-lg border border-line1 bg-bg2">
+          <Skeleton rounded="rounded-none" className={cx('w-full', aspect)} />
+          <div className="flex flex-col gap-1.5 p-2.5">
+            <Skeleton rounded="rounded" className="h-3 w-1/2" />
+            <Skeleton rounded="rounded" className="h-2.5 w-2/3" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -676,7 +847,7 @@ export function Tabs({ tabs, value, onChange, className = '' }) {
 // say, and what to do with it.
 //   drop = { accepts(dataTransfer, target), hint(dataTransfer) | string,
 //            onDrop(dataTransfer), busy }
-function ComposerSlot({ drop, children }) {
+function ComposerSlot({ drop, floating = false, width = 'max-w-[880px]', children }) {
   const [over, setOver] = useState(false);
   const [hint, setHint] = useState('');
   // dragenter/dragleave fire for every child element, so a plain boolean
@@ -720,19 +891,33 @@ function ComposerSlot({ drop, children }) {
     }
     : {};
 
-  return (
+  // The drop target, its data attribute and the drag ring all belong to the
+  // PANEL rather than to the row it sits in: floating, the row is a transparent
+  // gutter, and a ring around that would be a ring around nothing.
+  const panel = (
     <div
       {...(active ? { 'data-studio-composer': '' } : {})}
       {...handlers}
       className={cx(
-        'relative shrink-0 border-t bg-bg1/80 p-3 backdrop-blur-sm transition-colors',
-        showing ? 'border-honey' : 'border-line1',
+        'relative transition-shadow',
+        floating
+          ? cx(
+            'mx-auto box-border w-full rounded-[18px] bg-bg0/85 backdrop-blur-xl',
+            width,
+            showing
+              ? 'shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_2px_rgb(var(--honey-rgb))]'
+              : 'shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.07)]',
+          )
+          : cx('border-t bg-bg1/80 p-3 backdrop-blur-sm', showing ? 'border-honey' : 'border-line1'),
       )}
     >
       {children}
       {showing ? (
         <div
-          className="pointer-events-none absolute inset-0 z-30 grid place-items-center border-2 border-dashed border-honey bg-bg0/90"
+          className={cx(
+            'pointer-events-none absolute inset-0 z-30 grid place-items-center border-2 border-dashed border-honey bg-bg0/90',
+            floating && 'rounded-[18px]',
+          )}
           role={busy ? 'status' : undefined}
           aria-live={busy ? 'polite' : undefined}
         >
@@ -744,6 +929,8 @@ function ComposerSlot({ drop, children }) {
       ) : null}
     </div>
   );
+
+  return floating ? <div className="relative shrink-0 px-[22px] pb-[22px] pt-2">{panel}</div> : panel;
 }
 
 // THE remedy for a studio that is not answering, in the two shapes it can take.
@@ -801,8 +988,18 @@ export function StudioOfflineNotice({ floating = false }) {
     <div
       role="status"
       className={cx(
-        'flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 bg-warn/10 px-3.5 py-2 text-xs text-ink1',
-        floating ? 'rounded-lg border border-warn/40 shadow-pop backdrop-blur-sm' : 'border-b border-warn/40',
+        'flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-3.5 py-2 text-xs text-ink1',
+        floating
+          // Floating, this sits over the picture, and a 10% tint behind 4px of
+          // blur left a bright render reading straight through the sentence —
+          // the body copy was unreadable over a light output. The same scrim
+          // every other floating surface uses (composer, Advanced drawer, rail):
+          // an opaque-enough base plus the deep blur, with the warn tint painted
+          // back on top as a flat gradient so it still reads as a warning rather
+          // than as one more dark panel.
+          ? 'rounded-lg border border-warn/40 bg-bg0/85 bg-gradient-to-b from-warn/10 to-warn/10 shadow-pop backdrop-blur-xl'
+          // Flush, it has a solid panel behind it and nothing to read through.
+          : 'border-b border-warn/40 bg-warn/10',
       )}
     >
       <span className="font-semibold">{t('app.notRunning')}</span>
@@ -822,13 +1019,35 @@ export function StudioLayout({
   // A settings panel is 320px; a stage rail is narrower, because its rows are
   // one line of status each rather than sliders and pickers.
   panelWidth = 'w-[320px]',
+  // Draw the panel as a floating card rather than a flush column: detached from
+  // the edges, rounded, translucent over whatever is behind it, one hairline
+  // ring and one deep shadow — the same chrome the redesigned routes give their
+  // composer and their Advanced drawer.
+  //
+  // Opt-in, because it is a look rather than a fix: a route asks for it when
+  // its panel is navigation you glance at, and keeps the flush column when the
+  // panel is a working surface you live in.
+  floatingPanel = false,
+  // …and the composer as a floating panel rather than a bar across the bottom.
+  // Its width should match whatever column the route centres its content in, or
+  // the two read as two different pages stacked on each other.
+  floatingComposer = false,
+  composerWidth = 'max-w-[880px]',
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
   return (
     <div className="relative flex min-h-0 flex-1">
       {panel ? (
         <>
-          <aside className={cx('hidden shrink-0 flex-col gap-4 overflow-y-auto border-r border-line1 bg-bg1 p-4 lg:flex', panelWidth)}>
+          <aside
+            className={cx(
+              'hidden shrink-0 flex-col gap-4 overflow-y-auto lg:flex',
+              floatingPanel
+                ? 'my-3 ml-3 rounded-[18px] bg-bg0/85 p-[19px] shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.07)] backdrop-blur-xl'
+                : 'border-r border-line1 bg-bg1 p-4',
+              panelWidth,
+            )}
+          >
             {panel}
           </aside>
           {panelOpen ? (
@@ -857,7 +1076,11 @@ export function StudioLayout({
             </Button>
           </div>
         ) : null}
-        {composer ? <ComposerSlot drop={composerDrop}>{composer}</ComposerSlot> : null}
+        {composer ? (
+          <ComposerSlot drop={composerDrop} floating={floatingComposer} width={composerWidth}>
+            {composer}
+          </ComposerSlot>
+        ) : null}
       </div>
     </div>
   );

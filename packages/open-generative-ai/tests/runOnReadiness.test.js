@@ -93,12 +93,16 @@ test('readiness is one module, not a check inside each picker', () => {
 const OAUTH_NONE = { openai: { connected: false, detail: 'This account is not connected yet.' }, xai: { connected: false } };
 
 const CATALOG = [
+    // The hosted rail is a BALANCE, not a key. It used to be fixtured with a
+    // device-token name, and the picker duly rendered "Not configured -
+    // HIVEMINDOS_DASHBOARD_DEVICE_TOKEN is not set" over an Add key button for
+    // a token that was present — the rail had simply never been funded.
     {
         id: 'hivemindos-hosted-media',
         available: false,
-        needs: 'Needs a HivemindOS device token.',
-        keys: ['HIVEMINDOS_DASHBOARD_DEVICE_TOKEN'],
-        models: [{ id: 'automatic', label: 'Automatic hosted model' }],
+        needs: 'Connect HivemindOS credits to run hosted models',
+        keys: [],
+        models: [{ id: 'flux-3', label: 'Flux 3' }],
     },
     {
         id: 'openai-gpt-image',
@@ -295,10 +299,169 @@ test('every section says whose money it is, so no paid row reads as free', async
     });
 
     const text = textOf(await drawPicker(targets, (row) => readinessFor(row, { oauth: OAUTH_NONE })));
-    // No media provider publishes a per-press rate the studio could honestly
-    // print, so the section states the bill rather than inventing a figure —
-    // the same policy the text producer states in words.
+    // The section states whose money it is. Only the hosted rail can also
+    // state a FIGURE, and only per request — the composer quotes the press it
+    // is about to make (see hostedQuote.js), because 528 of the rail's 538
+    // endpoints price dynamically and there is no catalogue number to print.
     assert.match(text, /Free, private/);
-    assert.match(text, /One balance of HivemindOS credits/);
+    assert.match(text, /one balance of HivemindOS credits/);
+    // …and it no longer claims the desktop app is involved, because it is not:
+    // the rail is a public gateway this studio calls with its own credit key.
+    assert.doesNotMatch(text, /the HivemindOS app spends/);
     assert.match(text, /Billed by the provider to an account you already pay for/);
+});
+
+// The hosted rail is a balance, not a credential.
+//
+// `PROVIDER_KEYS` used to name HIVEMINDOS_DASHBOARD_DEVICE_TOKEN for this
+// provider, and that map is consulted whenever the server declares no keys —
+// so a rail that was out of credits, or a service that merely blinked, was
+// rendered as "Not configured — HIVEMINDOS_DASHBOARD_DEVICE_TOKEN is not set
+// in the shared Hive environment" over an Add key button, for a token that
+// was set the whole time. Neither half was true and the button fixed nothing.
+test('the hosted rail never asks for a key, and both of its blocked states have a door', async () => {
+    const { readinessFor, PROVIDER_KEYS, keyNamesFor } = await load('src/lib/providerReadiness.js');
+    assert.equal(PROVIDER_KEYS['hivemindos-hosted-media'], undefined, 'the rail has no env-var credential');
+    assert.deepEqual(keyNamesFor({ provider: 'hivemindos-hosted-media', keys: [] }), []);
+
+    const unfunded = readinessFor({
+        provider: 'hivemindos-hosted-media', source: 'cloud', available: false,
+        needs: 'Connect HivemindOS credits to run hosted models',
+    }, { oauth: {} });
+    assert.equal(unfunded.state, 'credits');
+    assert.equal(unfunded.label, 'No credits yet');
+    assert.equal(unfunded.action.kind, 'top-up');
+    assert.doesNotMatch(unfunded.detail, /[A-Z]{2,}_[A-Z0-9_]+/, 'no env-var name reaches the row');
+
+    // A service that did not answer is not a missing credential either — and
+    // it still gets the one thing that can change the answer.
+    const down = readinessFor({
+        provider: 'hivemindos-hosted-media', source: 'cloud', available: false,
+        needs: 'The HivemindOS media service did not answer',
+    }, { oauth: {} });
+    assert.equal(down.state, 'offline');
+    assert.equal(down.action.kind, 'refresh');
+
+    // Funded and up: no readiness furniture at all.
+    const ready = readinessFor({ provider: 'hivemindos-hosted-media', source: 'cloud', available: true }, { oauth: {} });
+    assert.equal(ready.blocks, false);
+});
+
+// One account, one sentence, one button.
+//
+// Liam, on the "My accounts" section: "very messy especially always saying the
+// same block of text." MUAPI serves 125 image models on this machine, and each
+// row carried the account name, "Needs a MUAPI key.", the "No API key" state,
+// the whole "This machine has no MUAPI key yet…" paragraph AND its own Add key
+// button. Four repetitions of one fact, 125 times.
+test('an account says what is wrong once, not once per model it serves', async () => {
+    const {
+        accountRunsOf, sharedAccountReadiness, buildRunTargets, PLACE_ACCOUNTS,
+    } = await load('src/lib/runTargets.js');
+    const { readinessFor } = await load('src/lib/providerReadiness.js');
+
+    // buildRunTargets, not imageRunTargets: the Image studio replaces MUAPI's
+    // models with its own vendored catalogue, which this is not about.
+    const muapi = { id: 'muapi', available: false, needs: 'Needs a MUAPI key.', keys: ['MUAPI_API_KEY'],
+        models: Array.from({ length: 12 }, (_, index) => ({ id: `m${index}`, label: `Model ${index}` })) };
+    const targets = buildRunTargets({ kind: 'image', localModels: [], catalogProviders: [...CATALOG, muapi] });
+    const accounts = targets.filter((target) => target.place === PLACE_ACCOUNTS);
+    const runs = accountRunsOf(accounts);
+
+    // An account reachable two ways is two runs, because they are repaired
+    // differently — a key and a sign-in are not one door.
+    const openai = runs.filter((run) => /OpenAI/.test(run.label));
+    assert.equal(openai.length, 2);
+    assert.deepEqual(openai.map((run) => run.credentialLabel).sort(), ['API key', 'ChatGPT sign-in']);
+
+    const muapiRun = runs.find((run) => /MUAPI/.test(run.label));
+    assert.ok(muapiRun.targets.length >= 12, 'every MUAPI model lands in one run');
+    const shared = sharedAccountReadiness(muapiRun.targets, (row) => readinessFor(row, { oauth: OAUTH_NONE }));
+    assert.ok(shared, 'twelve rows blocked on the same key is one thing to say');
+    // MUAPI is the one account whose key can live in this browser as well as
+    // in the shared store, so it has its own state and its own door.
+    assert.equal(shared.state, 'browser-key');
+    assert.equal(shared.action.kind, 'muapi-key');
+    assert.ok(shared.detail, 'the account still says what to do — once');
+
+    // One row is not a repetition, so it keeps its own block rather than
+    // growing a header above it.
+    assert.equal(sharedAccountReadiness([muapiRun.targets[0]], (row) => readinessFor(row, { oauth: OAUTH_NONE })), null);
+    // Neither is an account whose rows fail for different reasons.
+    const mixed = [muapiRun.targets[0], openai[0].targets[0]];
+    assert.equal(sharedAccountReadiness(mixed, (row) => readinessFor(row, { oauth: OAUTH_NONE })), null);
+});
+
+test('the picker hoists that sentence and strips it off the rows beneath', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'RunOnPicker.jsx'), 'utf8');
+    assert.match(source, /accountSectionsOf\(group\.targets, readinessFor\)/);
+    assert.match(source, /<AccountNotice/);
+    // The row keeps its name and nothing the account already said: not the
+    // state, not the reason, not the account's own name in the meta column.
+    assert.match(source, /accountSaid=\{Boolean\(run\.shared\)\}/);
+    assert.match(source, /const blocked = Boolean\(readiness\) && readiness\.state !== 'ready' && !accountSaid;/);
+    assert.match(source, /accountSaid \? '' : \(target\.reason \|\| ''\)/);
+    assert.match(source, /accountSaid \? '' : placeMetaLabel/);
+    // …but the tooltip still explains a greyed row, whoever said why.
+    assert.match(source, /const why = note\s*\n\s*\|\| \(readiness && readiness\.state !== 'ready'/);
+});
+
+// …and an account that can run nothing does not bury the ones that can.
+//
+// Liam, pointing at a Higgsfield "Add key" off the bottom of the panel: "why
+// is this all the way at the bottom shouldnt it be grouped with the others
+// that can have key added at the top". MUAPI serves 125 of the 137 models in
+// "Your accounts" and holds no key, so 125 greyed names nobody could press
+// sat between the reader and the four buttons that would fix it.
+test('accounts you can use come first, and an account you cannot run folds its models away', async () => {
+    const { accountSectionsOf, buildRunTargets, PLACE_ACCOUNTS } = await load('src/lib/runTargets.js');
+    const { readinessFor } = await load('src/lib/providerReadiness.js');
+
+    const many = { id: 'muapi', available: false, needs: 'Needs a MUAPI key.', keys: ['MUAPI_API_KEY'],
+        models: Array.from({ length: 30 }, (_, index) => ({ id: `m${index}`, label: `Model ${index}` })) };
+    const working = { id: 'higgsfield-cloud', available: true, keys: [],
+        models: [{ id: 'soul', label: 'Soul Standard' }] };
+    const targets = buildRunTargets({ kind: 'image', localModels: [], catalogProviders: [many, working] })
+        .filter((target) => target.place === PLACE_ACCOUNTS);
+
+    const sections = accountSectionsOf(targets, (row) => readinessFor(row, { oauth: OAUTH_NONE }));
+    // The usable account is first, whatever order it arrived in — it is the
+    // answer to "where can this run", and the other is a chore.
+    assert.equal(sections[0].shared, null);
+    assert.match(sections[0].label, /Higgsfield/);
+    assert.ok(sections[1].blocked, 'the account with no key comes after');
+    assert.equal(sections[1].targets.length, 30);
+
+    // The picker folds exactly that one, and never while a query is typed.
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'RunOnPicker.jsx'), 'utf8');
+    assert.match(source, /const folded = Boolean\(run\.blocked\) && !open && !expanded;/);
+    assert.match(source, /expanded=\{Boolean\(query\)\}/);
+    assert.match(source, /tf\('runOn\.accountModels', count\)/);
+});
+
+// Repeating is the problem, not blocking.
+//
+// "Sign-in status unknown — Check again" does not stop a press, so the first
+// cut of the hoist skipped it — and three xAI rows each printed that sentence
+// and that button. Whether a state BLOCKS decides whether the models fold
+// away; whether it REPEATS decides whether it is said once.
+test('a repeated state is said once even when it does not block, and those models stay listed', async () => {
+    const { accountSectionsOf, buildRunTargets, PLACE_ACCOUNTS } = await load('src/lib/runTargets.js');
+    const { readinessFor } = await load('src/lib/providerReadiness.js');
+
+    const xai = { id: 'xai-imagine-oauth', available: true, keys: [],
+        models: [{ id: 'a', label: 'Grok Imagine Image' }, { id: 'b', label: 'Grok Imagine Image Quality' }] };
+    const targets = buildRunTargets({ kind: 'image', localModels: [], catalogProviders: [xai] })
+        .filter((target) => target.place === PLACE_ACCOUNTS);
+    // No OAuth answer at all: the studio could not check, which is a state
+    // with a door ("Check again") and no refusal.
+    const [run] = accountSectionsOf(targets, (row) => readinessFor(row, { oauth: {} }));
+    assert.ok(run.shared, 'two rows saying the same thing is one thing to say');
+    assert.equal(run.shared.blocks, false);
+    assert.equal(run.blocked, null, 'a state that does not block does not fold the models away');
+    assert.equal(run.targets.length, 2);
 });

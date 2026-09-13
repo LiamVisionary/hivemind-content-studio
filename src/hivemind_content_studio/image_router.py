@@ -139,10 +139,38 @@ def _muapi(*, model: str, prompt: str, aspect_ratio: str, output: Path, seed: in
         )
 
 
-def _hosted(*, model: str, prompt: str, aspect_ratio: str, output: Path, **_: Any) -> dict[str, Any]:
+def _hosted(
+    *, model: str, prompt: str, aspect_ratio: str, output: Path, seed: int | None = None,
+    reference: tuple[bytes, str] | None = None, reference_url: str = "",
+    maximum_debit_usd: float = 1.0, **_: Any,
+) -> dict[str, Any]:
+    """One still on the HivemindOS credit rail.
+
+    The picker's row is a MODEL and the gateway wants an ENDPOINT, so which
+    one to call is decided here from what is attached — `flux-3` with a
+    reference is `flux-3-image-to-image`, and without one it is
+    `flux-3-text-to-image`. A reference is a local file and every upstream
+    provider fetches its input by URL, so it goes to the gateway's own input
+    store first; nothing on this machine is reachable from a provider.
+    """
+    from .hivemindos_hosted_media import hosted_route_for, upload_input
+
+    picture = str(reference_url or "").strip()
+    endpoint, _capability = hosted_route_for(
+        model, kind="image", attached="image" if (picture or reference) else "none")
+    payload: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+    if seed is not None and seed >= 0:
+        payload["seed"] = seed
+    # A URL the browser already put in the input store (it uploads once and
+    # caches, so a re-generate does not send the same picture again), or raw
+    # bytes from a caller that has none — an agent, the CLI.
+    if not picture and reference:
+        picture = upload_input(reference[0], content_type=reference[1])
+    if picture:
+        payload["image_url"] = picture
     return generate_hosted_media_asset(
-        model=model, payload={"prompt": prompt, "aspect_ratio": aspect_ratio}, output=output,
-        agent_id="hivemind-content-studio", maximum_debit_usd=1.0,
+        model=endpoint, payload=payload, output=output,
+        agent_id="hivemind-content-studio", maximum_debit_usd=maximum_debit_usd,
         idempotency_key=uuid.uuid4().hex,
     )
 
@@ -186,6 +214,16 @@ def render_image(
     output: str | Path,
     quality: str = "",
     seed: int | None = None,
+    # A starting picture, as (bytes, content type). Only the hosted rail reads
+    # it today; every other route ignores it through its own `**_`.
+    reference: tuple[bytes, str] | None = None,
+    # A reference already reachable by URL, which is what the browser has
+    # after uploading one through /api/media-studio/hosted-input.
+    reference_url: str = "",
+    # The ceiling this press is allowed to spend. The hosted rail quotes the
+    # exact request before it submits and refuses to exceed this, so it is the
+    # number the studio showed on the button.
+    maximum_debit_usd: float = 1.0,
     routes: dict[str, Route] | None = None,
 ) -> dict[str, Any]:
     """Render one still with the generator that belongs to `provider`.
@@ -208,6 +246,7 @@ def render_image(
         result = route.run(
             model=str(model or ""), prompt=prompt, aspect_ratio=aspect_ratio or "1:1",
             output=destination, quality=quality, seed=seed,
+            reference=reference, reference_url=reference_url, maximum_debit_usd=maximum_debit_usd,
         )
     except ImageRouterError:
         raise

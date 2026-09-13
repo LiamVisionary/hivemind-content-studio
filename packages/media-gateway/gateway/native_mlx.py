@@ -251,10 +251,25 @@ def _klein3_native_edit_once(prompt, reference_images, out, *, width, height, st
                 "warm_fallback": None,
             }
         warm_fallback = util.json_safe_text(server_rec.get("error") or "missing output")
-        if native_loras:
-            error = RuntimeError(f"Swift Flux2 persistent server is required for native LoRA edits: {warm_fallback}")
-            error.warm_fallback = warm_fallback
+    # A LoRA the caller asked for used to reach here and go no further: the
+    # command below was built without one, the edit ran on the bare model, and
+    # the job reported success. The CLI carries ONE (its --lora-config-path
+    # JSON is a single object too), so one is carried and several are refused
+    # in words — the warm server is what stacks them.
+    lora_args = []
+    if native_loras:
+        if len(native_loras) > 1:
+            error = RuntimeError(
+                f"stacking {len(native_loras)} LoRAs needs the Swift Flux2 persistent server"
+                + (f": {warm_fallback}" if warm_fallback else " (set ZIMG_USE_FLUX2_SERVER=1)"))
+            if warm_fallback:
+                error.warm_fallback = warm_fallback
             raise error
+        lora_path = Path(str(native_loras[0].get('filePath') or '')).expanduser()
+        if not lora_path.is_file():
+            raise RuntimeError(f"LoRA is missing: {lora_path.name}")
+        lora_args = ['--lora', str(lora_path),
+                     '--lora-scale', str(float(native_loras[0].get('scale', 1.0)))]
     cmd = [
         str(config.SWIFT_FLUX2_BIN),
         'i2i',
@@ -263,6 +278,7 @@ def _klein3_native_edit_once(prompt, reference_images, out, *, width, height, st
         # --images a --images b. A single flag followed by several paths
         # makes every path after the first an unexpected argument.
         *[arg for p in reference_images for arg in ('--images', str(p))],
+        *lora_args,
         '--model', 'klein-9b',
         '--transformer-quant', 'bf16',
         '--text-quant', '8bit',

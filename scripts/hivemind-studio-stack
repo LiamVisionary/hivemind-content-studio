@@ -27,6 +27,7 @@ MOBILE="$STUDIO_ROOT/packages/comfyui-mobile"
 KREA2_IDENTITY_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-krea2-identity"
 SEEDVR2_TRT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-seedvr2-trt"
 PRIVATE_MEDIA_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-private-media"
+PROGRESS_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-progress"
 OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
 CONTENT_STUDIO="$STUDIO_ROOT"
 TAILSCALE_CLI="/Applications/Tailscale.app/Contents/MacOS/tailscale"
@@ -444,6 +445,16 @@ start_children() {
     ln -sfn "$PRIVATE_MEDIA_NODE" "$COMFY/custom_nodes/hivemind-private-media"
   else
     log "cannot install private media loader: custom node path is not a symlink"
+    return 1
+  fi
+  # Serves this lane's sampler counters at /hivemind/progress, the same path a
+  # rented lane answers. Without it a local generation's bar is a time estimate
+  # and nothing more — ComfyUI publishes its step counts over the websocket
+  # only, to the client that submitted, and our runner never holds that socket.
+  if [ -L "$COMFY/custom_nodes/hivemind-progress" ] || [ ! -e "$COMFY/custom_nodes/hivemind-progress" ]; then
+    ln -sfn "$PROGRESS_NODE" "$COMFY/custom_nodes/hivemind-progress"
+  else
+    log "cannot install the progress readout: custom node path is not a symlink"
     return 1
   fi
   fi

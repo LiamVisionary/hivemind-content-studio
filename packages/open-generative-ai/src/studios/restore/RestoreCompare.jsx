@@ -12,17 +12,23 @@
 // property of the frame rather than of the layout — the same trick the image
 // CompareViewer uses, and it survives the players being different sizes while
 // the browser is still working out the restored clip's dimensions.
+//
+// This is the STAGE now, not a card in a scrolling column: it fills the frame
+// it is given and draws no chrome of its own. The four-way mode control moved
+// out to the stage's floating action column (RestoreStage.jsx) — a segmented
+// control across the top of the picture is exactly the bar the redesign took
+// off every other route — and the sentence that used to sit under the frame
+// explaining that the two clips stay in step is that door's tooltip.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '../../ui/icons.jsx';
-import { Segmented, cx } from '../../ui/kit.jsx';
-import { COMPARE_MODES } from '../../lib/videoRestore.js';
+import { cx } from '../../ui/kit.jsx';
 
 // A third of a frame at 24fps. Below this, correcting the follower would be
 // more visible than the drift it fixes.
 const DRIFT_TOLERANCE_SECONDS = 0.014;
 
 export function RestoreCompare({
-  originalUrl, restoredUrl, mode, onModeChange,
+  originalUrl, restoredUrl, mode,
   originalLabel = 'Original', restoredLabel = 'Restored',
   onTimeUpdate, className = '',
 }) {
@@ -32,8 +38,6 @@ export function RestoreCompare({
   const [playing, setPlaying] = useState(false);
   const draggingRef = useRef(false);
   const frameRef = useRef(null);
-
-  const both = () => [originalRef.current, restoredRef.current].filter(Boolean);
 
   // The restored clip leads, because it is the one being judged; the original
   // is the reference and is the one allowed to jump.
@@ -98,27 +102,22 @@ export function RestoreCompare({
     setSplit(Math.max(0, Math.min(1, x / Math.max(1, frame.width))));
   }, []);
 
-  const missing = !restoredUrl;
+  // Nothing at all yet. A clip that is LOADED but not yet restored is not this
+  // case: the stage is the whole window now, so answering a freshly loaded clip
+  // with a sentence in the middle of an empty frame would hide the very thing
+  // that was just loaded. The original is shown instead, with the sentence as a
+  // corner note, and the view is forced to it until there is something to
+  // compare against.
+  const missing = !restoredUrl && !originalUrl;
+  const view = restoredUrl ? mode : 'original';
   return (
-    <div className={cx('flex min-h-0 flex-1 flex-col gap-3', className)}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <Segmented
-          size="sm"
-          options={COMPARE_MODES.map((item) => ({ value: item.id, label: item.label }))}
-          value={mode}
-          onChange={onModeChange}
-        />
-        {mode === 'wipe' ? (
-          <span className="text-[11px] text-ink3">Drag the divider — {originalLabel} left, {restoredLabel} right</span>
-        ) : null}
-      </div>
-
-      <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-line1 bg-bg0">
+    <div className={cx('relative h-full w-full overflow-hidden bg-bg0', className)}>
+      <div className="absolute inset-0">
         {missing ? (
           <div className="flex h-full items-center justify-center px-6 text-center text-sm text-ink3">
             Nothing restored yet — render a preview to see the difference.
           </div>
-        ) : mode === 'split' ? (
+        ) : view === 'split' ? (
           <div className="grid h-full grid-cols-2 gap-px bg-line1">
             <figure className="relative m-0 flex min-h-0 items-center justify-center bg-bg0">
               <video ref={originalRef} src={originalUrl} muted playsInline className="max-h-full max-w-full" />
@@ -139,28 +138,45 @@ export function RestoreCompare({
             onTouchEnd={() => { draggingRef.current = false; }}
           >
             {/* The original sits underneath in every stacked mode, so the wipe
-                only has to clip the restored copy on top of it. */}
+                only has to clip the restored copy on top of it. It takes the
+                transport when it is the one being watched: the restored copy
+                owns the controls in every other view, and `invisible` does not
+                make a hidden player's bar reachable — which left the Original
+                view a still frame with no way to play it. */}
             <video
               ref={originalRef}
               src={originalUrl}
               muted
+              controls={view === 'original'}
+              controlsList="nodownload"
               playsInline
-              className={cx('absolute inset-0 h-full w-full object-contain', mode === 'restored' && 'invisible')}
+              className={cx('absolute inset-0 h-full w-full object-contain', view === 'restored' && 'invisible')}
             />
-            <div
-              className={cx('absolute inset-0', mode === 'original' && 'invisible')}
-              style={mode === 'wipe' ? { clipPath: `inset(0 0 0 ${split * 100}%)` } : undefined}
-            >
-              <video
-                ref={restoredRef}
-                src={restoredUrl}
-                controls={mode !== 'wipe'}
-                controlsList="nodownload"
-                playsInline
-                className="absolute inset-0 h-full w-full object-contain"
-              />
-            </div>
-            {mode === 'wipe' ? (
+            {/* Never mounted with an empty src: a <video src=""> resolves to the
+                page's own URL and errors. */}
+            {restoredUrl ? (
+              <div
+                className={cx('absolute inset-0', view === 'original' && 'invisible')}
+                style={view === 'wipe' ? { clipPath: `inset(0 0 0 ${split * 100}%)` } : undefined}
+              >
+                <video
+                  ref={restoredRef}
+                  src={restoredUrl}
+                  controls={view !== 'wipe'}
+                  controlsList="nodownload"
+                  playsInline
+                  className="absolute inset-0 h-full w-full object-contain"
+                />
+              </div>
+            ) : null}
+            {/* The sentence that used to fill the frame, as a corner note over
+                the clip it is about. */}
+            {restoredUrl ? null : (
+              <span className="absolute left-2 top-2 rounded bg-scrim px-2 py-0.5 text-[11px] text-ink2">
+                Nothing restored yet — render a test to see the difference
+              </span>
+            )}
+            {view === 'wipe' ? (
               <>
                 <div
                   className="absolute inset-y-0 z-10 w-0.5 bg-honey"
@@ -198,11 +214,6 @@ export function RestoreCompare({
           </div>
         )}
       </div>
-      {both().length === 2 && !missing ? (
-        <p className="text-[11px] text-ink3">
-          Both clips follow the restored one — scrub it and the original keeps up, so you are always comparing the same frame.
-        </p>
-      ) : null}
     </div>
   );
 }

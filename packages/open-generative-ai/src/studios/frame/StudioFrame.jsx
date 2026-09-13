@@ -12,7 +12,9 @@
 // every inset below is measured from the route's own left edge):
 //
 //   stage      inset 0 <rail> <composer> 0, the picture centred inside it
-//   rail       right 0, top 0, bottom 0, width 96 (image) / 108 (video)
+//   rail       a floating pill inset from the top-right corner, 12px narrower
+//              than the band it reserves (96 image / 108 video) and only as
+//              tall as its contents, capped at the frame height less its insets
 //   composer   floating, bottom 22, centred over the stage, max-width 880
 //   drawer     left 16, top 16, bottom 16, width 320 — it PUSHES the stage and
 //              composer right rather than covering them (>= lg; below that it
@@ -73,6 +75,9 @@ export function StudioFrame({
   tabs = null,
 }) {
   const composerRef = useRef(null);
+  // The drawer's own panel, so the Escape guard below can tell it apart from a
+  // dialog genuinely layered over it.
+  const drawerRef = useRef(null);
   const [composerH, setComposerH] = useState(112);
 
   // ResizeObserver rather than a layout effect on the prompt value: the panel
@@ -91,11 +96,20 @@ export function StudioFrame({
 
   // Escape shuts Advanced — but only when nothing is layered above it, or the
   // key would close the drawer out from under an open dialog or popover.
+  //
+  // "Nothing layered above it" has to exclude THE DRAWER, which is itself a
+  // `[role="dialog"]` (see the aside below). The blanket querySelector matched
+  // the drawer's own panel the moment it opened, so this effect has never once
+  // reached `onDrawerClose` — Escape closed Advanced in none of the studios
+  // that mount this frame. A dialog nested INSIDE the drawer still wins the
+  // key, which is the rule this was written for.
   useEffect(() => {
     if (!drawerOpen || !onDrawerClose) return undefined;
     const onKey = (event) => {
       if (event.key !== 'Escape') return;
-      if (document.querySelector('[role="dialog"]')) return;
+      const layered = Array.from(document.querySelectorAll('[role="dialog"]'))
+        .some((node) => node !== drawerRef.current);
+      if (layered) return;
       onDrawerClose();
     };
     window.addEventListener('keydown', onKey);
@@ -145,8 +159,17 @@ export function StudioFrame({
         className="absolute inset-y-0 left-0 grid place-items-center transition-[left] duration-300 ease-swift lg:left-[var(--frame-left)]"
         style={{ right: 'var(--frame-rail-w)' }}
       >
+        {/* min-h-0 is load-bearing, not tidiness. This div is a GRID ITEM, so
+            its automatic minimum size is its CONTENT size — which overrides the
+            h-full above the moment the stage holds a real picture. Measured at
+            1000x710 with a 1024^2 result: the box grew to 1135px inside its
+            672px parent, `max-h-full` on the stage resolved to `none` against
+            that now-indefinite height, and the picture sized itself off the
+            WIDTH instead — 876x876, overflowing the window and running under
+            the composer. It stayed hidden while the stage's <img> was broken,
+            because a broken image contributes no intrinsic size to grow it. */}
         <div
-          className="grid h-full w-full place-items-center px-4"
+          className="grid h-full min-h-0 w-full place-items-center px-4"
           style={{
             paddingTop: tabs ? STAGE_TABS_RESERVE : 16,
             paddingBottom: `calc(var(--frame-composer-h) + ${STAGE_COMPOSER_GAP}px)`,
@@ -188,10 +211,22 @@ export function StudioFrame({
       ) : null}
 
       {/* ---- right rail ------------------------------------------------ */}
+      {/* A floating pill, not a bordered column. The hairline down the left of
+          a full-height strip drew a wall across the window and the strip's own
+          empty half stayed on screen under one result. The rail is the same
+          material as the composer and Advanced — rounded, blurred, ringed —
+          inset from the edge and only as tall as what it holds, so it reads as
+          one more thing floating over the stage rather than a second panel.
+          The reserved band (--frame-rail-w) is unchanged: the stage and the
+          composer still clear the full width, and the pill sits inside it. */}
       {rail ? (
         <aside
-          className="absolute inset-y-0 right-0 z-10 hidden flex-col items-center gap-2 overflow-y-auto border-l border-line1/60 bg-bg0/60 px-2 pb-6 pt-4 sm:flex"
-          style={{ width: 'var(--frame-rail-w)' }}
+          className={cx(
+            'absolute right-3 top-3 z-10 hidden max-h-[calc(100%-1.5rem)] flex-col items-center gap-2',
+            'overflow-y-auto rounded-[18px] bg-bg0/85 px-2 py-3 backdrop-blur-xl sm:flex',
+            'shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.07)]',
+          )}
+          style={{ width: 'calc(var(--frame-rail-w) - 12px)' }}
         >
           {rail}
         </aside>
@@ -226,6 +261,7 @@ export function StudioFrame({
             onClick={onDrawerClose}
           />
           <aside
+            ref={drawerRef}
             role="dialog"
             aria-label={drawerTitle}
             className={cx(

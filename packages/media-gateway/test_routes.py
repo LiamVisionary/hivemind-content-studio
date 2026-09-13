@@ -92,6 +92,8 @@ EXPECTED = [
     ('POST', '/api/loras/select', 'post_api_loras_select'),
     ('POST', '/api/civitai/download', 'post_api_civitai_download'),
     ('POST', '/api/civitai/cancel-download/9271', 'post_api_civitai_cancel_download'),
+    ('GET', '/api/direction-reference', 'get_api_direction_reference'),
+
     ('POST', '/comfy/prompt', 'post_comfy'),
     ('POST', '/mobile/queue', 'post_comfy'),
     ('POST', '/generate', 'post_generate'),

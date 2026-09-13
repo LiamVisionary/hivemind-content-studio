@@ -2,7 +2,7 @@
 // media, credentials, or provider payloads). Baseline for the phase-2 agent.
 // Summary tiles, per-provider routing evidence, and recent attempts, all from
 // the /api/telemetry/generations shape via hubData formatters.
-import { Card, EmptyState, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx';
+import { Card, EmptyState, LoadingState, Pill, SectionLabel } from '../../ui/kit.jsx';
 import { formatTelemetryBytes, formatTelemetryDuration, humanize, providerLabel, telemetryAttemptDetail, telemetryAttemptOrigin, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
@@ -39,7 +39,7 @@ export function TelemetryPanel() {
             hint={t('activity.offlineHint')}
           />
         ) : !telemetry ? (
-          <div className="grid flex-1 place-items-center py-16"><Spinner size={22} className="text-ink2" /></div>
+          <LoadingState label={t('app.loading')} />
         ) : (
           <div className="flex flex-col gap-6">
             <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">

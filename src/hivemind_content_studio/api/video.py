@@ -425,6 +425,7 @@ def register(app, ctx) -> None:
         record = await asyncio.to_thread(
             cp.run_media_studio_video_record, job_id,
             requester_pub=str(entry.get("requester_pub") or ""),
+                    owner_pub=str(entry.get("owner_pub") or ""),
         )
         entry["record_misses"] = 0 if record else int(entry.get("record_misses") or 0) + 1
 
@@ -531,6 +532,7 @@ def register(app, ctx) -> None:
                 # only by its own requester, so the key is part of the job's
                 # identity here, not a per-request detail.
                 requester_pub=str(entry.get("requester_pub") or ""),
+                    owner_pub=str(entry.get("owner_pub") or ""),
             )
             # A cancel that landed while the finisher was blocked in the thread
             # is terminal — don't resurrect the entry as done or error.
@@ -595,6 +597,7 @@ def register(app, ctx) -> None:
             "lora_base": lora_base_for_workflow(body.workflow_id) if loras else "",
         }
         try:
+            owner_pub_now = cp.media_studio_owner_spki()
             queued = await asyncio.to_thread(
                 cp.run_media_studio_video_start,
                 image_path=staged.image,
@@ -633,6 +636,10 @@ def register(app, ctx) -> None:
                 steps=body.steps,
                 loras=loras,
                 requester_pub=_requester_pub(request),
+                # Whose vault seals this job's output. Resolved HERE, in the
+                # request, rather than left to the provider to look it up again
+                # from wherever start_video ends up running.
+                owner_pub=owner_pub_now,
             )
         except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
             client_mistake = isinstance(exc, (FileNotFoundError, ValueError))
@@ -686,6 +693,13 @@ def register(app, ctx) -> None:
             # after this request is gone, and a keyed job only answers to the
             # requester that started it.
             "requester_pub": _requester_pub(request),
+            # And whose VAULT must be able to open the result. Same reason as
+            # the line above, and it has to be captured HERE: the finisher runs
+            # as a background task with no request in scope, so asking the
+            # provider from there answers nothing and the gateway falls back to
+            # whichever account is is_owner — which sealed a workspace-2 user's
+            # clips to workspace 1 and made them permanently unopenable.
+            "owner_pub": owner_pub_now,
             # Whose clip this will be. The finisher claims the OUTPUT NAME with
             # it when the name is finally known; the job-id claim above is not
             # enough on its own (see _finalize_media_studio_video).
@@ -749,6 +763,7 @@ def register(app, ctx) -> None:
                 state = await asyncio.to_thread(
                     cp.run_media_studio_video_check, job_id,
                     requester_pub=str(entry.get("requester_pub") or ""),
+                    owner_pub=str(entry.get("owner_pub") or ""),
                 )
             except Exception:
                 check_raised = True
@@ -824,6 +839,7 @@ def register(app, ctx) -> None:
             # keyed job for anyone else.
             result = cp.run_media_studio_video_cancel(
                 job_id, requester_pub=str((entry or {}).get("requester_pub") or ""),
+                owner_pub=str((entry or {}).get("owner_pub") or ""),
             )
             # A bool is what older builds of cancel_video returned.
             outcome = result if isinstance(result, dict) else {

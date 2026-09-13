@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -397,6 +398,319 @@ class ZImageAppTests(unittest.TestCase):
             with patch.object(app.jobs, 'active_jobs', lambda: []), \
                  patch.object(app.net, 'urlopen', lambda *a, **k: _Answer({'queue_running': [], 'queue_pending': []})):
                 self.assertTrue(app.media._nothing_can_be_reading_staged_inputs())
+
+    # --- an output is read back before it is sealed ---------------------------
+    #
+    # ComfyUI writes a plaintext PNG and run_z_image_turbo.py fetches it over
+    # HTTP the moment the history entry appears. With no grace at all the sweep
+    # could seal and delete that file in the sub-second gap before the fetch,
+    # and the generation failed with a 404 after the model had already run
+    # (measured 2026-09-11: the envelope existed 207 ms after the write). The
+    # same pass also stole outputs from `encrypt_outputs`, which is the only
+    # path that knows the job's own owner and agent recipients.
+
+    def _plaintext_output(self, root, name, age):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'pixels')
+        when = time.time() - age
+        os.utime(path, (when, when))
+        return path
+
+    def _sweep_outputs(self, app, root, idle, **kwargs):
+        sealed = []
+        with patch.object(app.config, 'OUT_DIR', root.parent / 'z_image_outputs'), \
+             patch.object(app.config, 'COMFY_OUTPUT_DIR', root), \
+             patch.object(app.config, 'DEBUG_OUTPUT_DIR', root / '.debug'), \
+             patch.object(app.media, '_nothing_can_be_reading_staged_inputs', lambda: idle), \
+             patch.object(app.media, 'encrypt_output_file', lambda p, **kw: sealed.append(Path(p)) or Path(p)):
+            app.media.encrypt_existing_outputs_once(max_age_seconds=0, **kwargs)
+        return sealed
+
+    def test_a_running_job_keeps_the_output_it_is_reading_back(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            fresh = self._plaintext_output(root, 'z_image_turbo_00026_.png', 0.2)
+            self.assertEqual(self._sweep_outputs(app, root, idle=False), [])
+            self.assertTrue(fresh.exists(), 'the runner still has to read this back over HTTP')
+
+    def test_an_output_is_sealed_the_moment_nothing_can_be_reading_it(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            fresh = self._plaintext_output(root, 'z_image_turbo_00026_.png', 0.2)
+            self.assertEqual(self._sweep_outputs(app, root, idle=True), [fresh])
+
+    def test_plaintext_nobody_came_back_for_is_sealed_even_while_busy(self):
+        # A crashed runner, or a render driven straight from ComfyUI's own UI,
+        # must not stay readable because some unrelated job is running.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            orphan = self._plaintext_output(
+                root, 'z_image_turbo_00026_.png', app.media.OUTPUT_PLAINTEXT_MAX_AGE_SECONDS + 60)
+            self.assertEqual(self._sweep_outputs(app, root, idle=False), [orphan])
+
+    # --- the bar reads real sampler steps, not a guess -----------------------
+    #
+    # ComfyUI counts sampler steps exactly, but publishes them over the
+    # websocket only, to the client id that submitted — and run_z_image_turbo.py
+    # submits over HTTP and never holds that socket. So a 23s render ran against
+    # a 10s estimate and the bar sat at its cap for the second half. The
+    # hivemind-progress node serves those counters at /hivemind/progress and
+    # this is what carries them into the job record.
+
+    def _progress_answer(self, payload, status=200):
+        class _Answer:
+            def __init__(self):
+                self._payload = json.dumps(payload).encode('utf-8')
+
+            def read(self):
+                return self._payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+        if status != 200:
+            raise AssertionError('use a raising stub for non-200')
+        return _Answer()
+
+    def test_real_sampler_counters_reach_the_job_record(self):
+        app = load_app()
+        stop = threading.Event()
+        app.jobs.jobs['j1'] = {'id': 'j1', 'status': 'running'}
+        def answer(*args, **kwargs):
+            return self._progress_answer({'prompt_id': 'p1', 'node_id': '3', 'value': 6, 'max': 8})
+        with patch.object(app.net, 'urlopen', answer), \
+             patch.object(app.lanes, 'comfy_lane_request', lambda lane, path: path):
+            threading.Thread(
+                target=app.graphs.poll_local_comfy_progress,
+                args=('j1', 'default', 'p1', stop), kwargs={'poll_seconds': 0.01},
+                daemon=True,
+            ).start()
+            deadline = time.time() + 3
+            while time.time() < deadline and 'progress' not in app.jobs.jobs['j1']:
+                time.sleep(0.01)
+            stop.set()
+        record = app.jobs.jobs['j1']
+        self.assertEqual(record['current_step'], 6)
+        self.assertEqual(record['total_steps'], 8)
+        # The SAMPLER's own fraction, unscaled: where that belongs on a bar is
+        # the client's call, and only the client knows where its bar had reached.
+        self.assertEqual(record['progress'], 75.0)
+        self.assertEqual(record['progress_phase'], 'sampling')
+
+    def test_a_lane_without_the_progress_node_just_keeps_the_estimate(self):
+        app = load_app()
+        stop = threading.Event()
+        app.jobs.jobs['j2'] = {'id': 'j2', 'status': 'running'}
+
+        def refuse(*args, **kwargs):
+            raise OSError('404 no counters for this prompt')
+
+        with patch.object(app.net, 'urlopen', refuse), \
+             patch.object(app.lanes, 'comfy_lane_request', lambda lane, path: path):
+            thread = threading.Thread(
+                target=app.graphs.poll_local_comfy_progress,
+                args=('j2', 'default', 'p2', stop), kwargs={'poll_seconds': 0.01},
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.1)
+            stop.set()
+            thread.join(timeout=2)
+        self.assertNotIn('progress', app.jobs.jobs['j2'])
+
+    def test_a_finished_job_is_never_reopened_by_a_late_counter(self):
+        app = load_app()
+        stop = threading.Event()
+        app.jobs.jobs['j3'] = {'id': 'j3', 'status': 'success'}
+        def answer(*args, **kwargs):
+            return self._progress_answer({'prompt_id': 'p3', 'value': 8, 'max': 8})
+        with patch.object(app.net, 'urlopen', answer), \
+             patch.object(app.lanes, 'comfy_lane_request', lambda lane, path: path):
+            thread = threading.Thread(
+                target=app.graphs.poll_local_comfy_progress,
+                args=('j3', 'default', 'p3', stop), kwargs={'poll_seconds': 0.01},
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.1)
+            stop.set()
+            thread.join(timeout=2)
+        self.assertNotIn('progress', app.jobs.jobs['j3'])
+
+    def test_without_a_prompt_id_there_is_nothing_to_ask_about(self):
+        app = load_app()
+        called = []
+        with patch.object(app.net, 'urlopen', lambda *a, **k: called.append(1)):
+            app.graphs.poll_local_comfy_progress('j4', 'default', '', threading.Event())
+        self.assertEqual(called, [])
+
+    def test_the_runner_hands_over_its_prompt_id_while_it_is_still_running(self):
+        """The whole point of reading the runner's first line.
+
+        `subprocess.run` only returns at the end, so the prompt id — the only
+        way to ask the lane about THIS generation's steps — used to arrive too
+        late to be worth anything. Reading one flushed line first is what makes
+        the progress mirror possible at all, and it must not break the stdout
+        parsing that finds the outputs."""
+        app = load_app()
+        with TemporaryDirectory() as td:
+            out = Path(td) / 'pic.png'
+            out.write_bytes(b'pixels')
+            runner = Path(td) / 'fake_runner.py'
+            runner.write_text(
+                '#!/usr/bin/env python3\n'
+                'import json, sys, time\n'
+                'print(json.dumps({"submitted": "prompt-42", "seed": 1, "loras": []}), flush=True)\n'
+                'time.sleep(0.2)\n'
+                'print(json.dumps({"status": "success", "outputs": [%r]}))\n' % str(out)
+            )
+            runner.chmod(0o755)
+            started = []
+            recorded = []
+            app.jobs.jobs['jr'] = {'id': 'jr', 'status': 'queued'}
+            with patch.object(app.config, 'RUNNER', runner), \
+                 patch.object(app.config, 'COMFY', Path(td)), \
+                 patch.object(app.graphs, 'poll_local_comfy_progress',
+                              lambda job_id, lane, prompt_id, stop, **kw: started.append((job_id, prompt_id))), \
+                 patch.object(app.media, 'encrypt_outputs', lambda paths, job_id=None: [str(p) for p in paths]), \
+                 patch.object(app.runners._history, 'append_history', recorded.append):
+                app.runners.run_generation('jr', 'a prompt')
+
+            self.assertEqual(started, [('jr', 'prompt-42')], 'the mirror never learned the prompt id')
+            record = app.jobs.jobs['jr']
+            self.assertEqual(record['status'], 'success', record.get('error'))
+            # The first line was consumed for the prompt id and must still be
+            # part of the stdout the output parsing reads.
+            self.assertEqual([Path(p).name for p in record['outputs']], ['pic.png'])
+            self.assertEqual(len(recorded), 1)
+
+    # --- one question, one answer: whose key seals this? ---------------------
+    #
+    # 2026-09-12: three places decided this independently and disagreed the
+    # moment the machine held two workspaces. A user working in account 2 got
+    # their video sealed to account 1 and read "Can't decrypt - Sealed for a
+    # different key" over their own clip. The precedence now lives in exactly
+    # one function, and these are it.
+
+    def test_the_key_the_request_presented_is_the_one_that_seals(self):
+        app = load_app()
+        caller = 'C' * 392
+        with patch.object(app.media, 'vault_public_key_spki', lambda: 'M' * 392):
+            spki, source = app.media.seal_recipient(caller, media_name='clip.mp4')
+        self.assertEqual(spki, caller)
+        self.assertEqual(source, app.media.SEAL_SOURCE_CALLER)
+
+    def test_falling_back_to_the_machine_owner_is_never_silent(self):
+        # Sanctioned for a headless agent run that presents nothing — and a
+        # loud line every time, because for a browser-initiated job this is
+        # the moment the output becomes unopenable in the workspace that
+        # asked for it.
+        app = load_app()
+        app.media._machine_seal_warned.clear()
+        machine = 'M' * 392
+        with patch.object(app.media, 'vault_public_key_spki', lambda: machine):
+            with patch('sys.stderr', new_callable=io.StringIO) as err:
+                spki, source = app.media.seal_recipient('', media_name='clip.mp4')
+        self.assertEqual(spki, machine)
+        self.assertEqual(source, app.media.SEAL_SOURCE_MACHINE)
+        self.assertIn('X-E2E-Owner-Pub', err.getvalue())
+        self.assertIn('clip.mp4', err.getvalue())
+
+    def test_a_malformed_caller_key_is_not_treated_as_a_key(self):
+        app = load_app()
+        app.media._machine_seal_warned.clear()
+        machine = 'M' * 392
+        with patch.object(app.media, 'vault_public_key_spki', lambda: machine):
+            spki, source = app.media.seal_recipient('not-a-key', media_name='x.png')
+        self.assertEqual((spki, source), (machine, app.media.SEAL_SOURCE_MACHINE))
+
+    def test_no_vault_anywhere_means_no_recipient_at_all(self):
+        # The caller's cue to fall back to legacy at-rest encryption rather
+        # than leaving plaintext on disk.
+        app = load_app()
+        with patch.object(app.media, 'vault_public_key_spki', lambda: None):
+            spki, _source = app.media.seal_recipient('', media_name='x.png')
+        self.assertIsNone(spki)
+
+    def test_a_natively_intercepted_job_still_registers_its_seal_recipients(self):
+        """The 202 hook cannot see these, and that is the whole bug.
+
+        A prompt posted to /comfy/api/prompt that the gateway runs natively gets
+        a Comfy-shaped 200 carrying `prompt_id`, not a 202 carrying `id`, so
+        send_json's registration never fired. The job then had no owner key and
+        the seal fell back to whichever account is is_owner — a workspace-2
+        user's LTX clips came back "Can't decrypt - Sealed for a different key"
+        (2026-09-12). Every native intercept must register explicitly.
+        """
+        app = load_app()
+        source = (BASE / 'gateway/http.py').read_text(encoding='utf-8')
+        # Each native queue call is followed by the registration.
+        for queue in ('queue_native_mlx_ltx_job', 'queue_native_mlx_biglove_job'):
+            index = source.index(queue)
+            following = source[index:index + 400]
+            self.assertIn('register_native_job_seal_recipients(job_id)', following,
+                          f'{queue} mints a job id without registering its seal recipients')
+        # And the helper takes BOTH keys off the request, not from the machine.
+        helper = source[source.index('def register_native_job_seal_recipients'):][:1400]
+        self.assertIn('REQUESTER_PUB_HEADER', helper)
+        self.assertIn('OWNER_PUB_HEADER', helper)
+        self.assertTrue(hasattr(app.media, 'register_owner_seal_recipient'))
+
+    def test_the_job_that_made_a_file_may_seal_it_while_its_own_guard_is_held(self):
+        """The bug that made every LTX clip unopenable in its own workspace.
+
+        A runner marks its output active for the whole render and then seals it
+        INSIDE that window (native_mlx.py: mirror_output_to_comfy_output sits in
+        the try, mark_output_inactive in the finally). The active guard rejected
+        that seal, so the one call carrying the job's own recipients silently
+        no-oped and the SWEEPER sealed the file seconds later with none — to
+        this machine's default vault. Proven live 2026-09-12: "sealing
+        ..._f933ce989953_233f.mp4: owner fp e066c756... (machine-default), agent
+        fp none", four seconds after the job reported success. Images were never
+        affected because they never take this guard.
+        """
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            root.mkdir(parents=True)
+            made = root / 'clip.mp4'
+            made.write_bytes(b'pixels')
+            with patch.object(app.config, 'OUT_DIR', root.parent / 'out'), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', root), \
+                 patch.object(app.config, 'DEBUG_OUTPUT_DIR', root / '.debug'):
+                app.media.mark_output_active(made)
+                try:
+                    # The sweeper must still keep its hands off a live file...
+                    self.assertFalse(app.media.is_encryptable_output(made))
+                    # ...while the job that made it can seal it.
+                    self.assertTrue(app.media.is_encryptable_output(made, ignore_active=True))
+                finally:
+                    app.media.mark_output_inactive(made)
+
+    def test_the_runner_seal_carries_its_recipients_past_the_guard(self):
+        app = load_app()
+        source = (BASE / 'gateway/jobs.py').read_text(encoding='utf-8')
+        call = source[source.index('def mirror_output_to_comfy_output'):][:900]
+        self.assertIn('ignore_active=True', call,
+                      'the runner seal honours its own guard again and loses its recipients')
+        self.assertIn('owner_spki=_media.owner_seal_recipient_for(job_id)', call)
+
+    def test_the_startup_migration_does_not_wait_for_a_lane_that_is_not_up(self):
+        # Before the server listens there is no readback of ours to protect, and
+        # an unreachable lane reads as busy — which would leave the last run's
+        # plaintext sitting there until the ceiling.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            fresh = self._plaintext_output(root, 'z_image_turbo_00026_.png', 0.2)
+            self.assertEqual(
+                self._sweep_outputs(app, root, idle=False, defer_to_readers=False), [fresh])
 
     def test_every_prefix_the_pipeline_stages_can_also_be_deleted_on_demand(self):
         # The prefix tuple is both the sweeper's budget and the delete route's
@@ -5852,10 +6166,16 @@ class RemoteComfyLaneTests(unittest.TestCase):
                 progress = app.promptroutes._record_lane_progress(pid, 'rental')
                 route = app.promptroutes.comfy_prompt_route(pid)
 
-        # Half the steps, scaled into the share sampling owns — never 1.0,
-        # because decode + mux + fetch-back still follow the last step.
-        self.assertAlmostEqual(progress, 0.5 * app.promptroutes.REMOTE_SAMPLER_PROGRESS_SHARE)
-        self.assertAlmostEqual(route['progress'], 0.5 * app.promptroutes.REMOTE_SAMPLER_PROGRESS_SHARE)
+        # Half the steps, scaled into the share sampling owns — never the full
+        # bar, because decode + mux + fetch-back still follow the last step.
+        # Reported as a PERCENT: one `progress` key on /api/job has to mean one
+        # thing, and every other producer of it writes 0-100. While this lane
+        # alone wrote a fraction, media_studio._job_progress could not read both
+        # and turned a local 5% into a finished bar.
+        expected = 0.5 * app.promptroutes.REMOTE_SAMPLER_PROGRESS_SHARE * 100
+        self.assertAlmostEqual(progress, expected)
+        self.assertAlmostEqual(route['progress'], expected)
+        self.assertLess(route['progress'], 100)
         self.assertEqual((route['progress_step'], route['progress_total']), (5, 10))
         # Status must stay 'submitted': respawn_remote_comfy_watchers re-arms on
         # it, so promoting to 'running' here would orphan the job on restart.
@@ -6239,6 +6559,66 @@ class RemoteComfyLaneTests(unittest.TestCase):
         self.assertIn('view flaked', route['error'])
         self.assertEqual(len(scrubs), 1)
         self.assertTrue(scrubs[0][1]['inputs_only'])
+
+
+class NativeKleinLoraTests(unittest.TestCase):
+    """A LoRA the caller asked for has to reach the engine or be refused.
+
+    The warm Swift server takes an array of them; the CLI fallback takes one
+    (--lora, or a --lora-config-path JSON that is a single object). The CLI
+    command used to be built with neither, so with ZIMG_USE_FLUX2_SERVER unset
+    — its default, and this machine's state — a Klein edit that requested LoRAs
+    ran on the bare model and reported success.
+    """
+
+    def _argv(self, native_loras):
+        app = load_app()
+        captured = {}
+
+        class FakeProc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = [str(arg) for arg in cmd]
+            Path(cmd[cmd.index("--output") + 1]).write_bytes(b"x" * 2000)
+            return FakeProc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.png"
+            with patch.object(app.native_mlx.subprocess, "run", side_effect=fake_run):
+                app.native_mlx._klein3_native_edit_once(
+                    "a test", [Path(tmp) / "ref.png"], out,
+                    width=1024, height=1024, steps=4, guidance=1.0, seed=1,
+                    native_loras=native_loras,
+                )
+        return captured["cmd"]
+
+    def test_no_lora_asks_for_none(self):
+        self.assertNotIn("--lora", self._argv(None))
+
+    def test_one_lora_reaches_the_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lora = Path(tmp) / "style.safetensors"
+            lora.write_bytes(b"x")
+            argv = self._argv([{"filePath": str(lora), "scale": 1.25}])
+        index = argv.index("--lora")
+        self.assertEqual(argv[index + 1], str(lora))
+        self.assertEqual(argv[index + 3], "1.25")
+
+    def test_stacking_more_than_one_is_refused_not_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lora = Path(tmp) / "style.safetensors"
+            lora.write_bytes(b"x")
+            with self.assertRaises(RuntimeError) as caught:
+                self._argv([{"filePath": str(lora), "scale": 1.0}] * 2)
+        self.assertIn("persistent server", str(caught.exception))
+
+    def test_a_missing_lora_is_named(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self._argv([{"filePath": "/nowhere/ghost.safetensors", "scale": 1.0}])
+        self.assertIn("ghost.safetensors", str(caught.exception))
 
 
 class BigLoveKlein3ResolutionTests(unittest.TestCase):
@@ -7518,3 +7898,128 @@ class WorkflowDependencyTests(unittest.TestCase):
         self.assertEqual(started, [("node:PackANode", "child", "default")])
         self.assertEqual([job["id"] for job in payload["started"]], ["job1"])
         self.assertEqual(payload["refused"], [{"id": "node:CoreOnlyNode", "reason": "Update ComfyUI"}])
+
+
+class CivitaiFeedResilienceTests(unittest.TestCase):
+    """Civitai's /images feed 503s transiently, and the studio has to survive it.
+
+    The reported symptom was the whole inspiration tab replaced by "HTTP Error
+    503: Service Unavailable" on a route switch, working again on reload.
+    Nothing here is about making Civitai reliable — it is not ours — these
+    pin the three things the studio controls: what a page failure costs, what
+    the browser is told, and how hard we lean on the endpoint while asking.
+    """
+
+    def test_a_failed_page_keeps_the_results_already_collected(self):
+        app = load_app()
+        # Page one is a normal thin page (the filter yield is ~40%, so filling
+        # 24 takes more than one); page two is the 503 that used to throw the
+        # whole search away.
+        page_one = {
+            'items': [{'id': i, 'meta': {'prompt': f'a very reusable prompt {i}'}} for i in range(20)],
+            'metadata': {'nextCursor': 'cursor-2'},
+        }
+        calls = []
+
+        def flaky(path, params=None, **kwargs):
+            calls.append(dict(params or {}))
+            if len(calls) == 1:
+                return page_one
+            raise app.models.HTTPError('https://civitai.com', 503, 'Service Unavailable', {}, None)
+
+        with patch.object(app.models, 'civitai_json', side_effect=flaky):
+            result = app.models.civitai_search_images({'limit': '24'})
+
+        self.assertEqual(len(result['items']), 20, 'page one survived page two failing')
+        # The sentence, not the status line, and it names who was busy.
+        self.assertIn('Civitai', result['metadata']['partial'])
+        self.assertNotIn('HTTP Error', result['metadata']['partial'])
+        # Resuming has to retry the page that failed, not skip past it.
+        self.assertEqual(result['metadata']['nextCursor'], 'cursor-2')
+
+    def test_an_empty_hand_still_raises(self):
+        """Partial results are worth keeping; zero results are just a failure.
+
+        Swallowing this one would turn "Civitai is down" into "Civitai has
+        nothing", which is the one thing a loading surface must never say.
+        """
+        app = load_app()
+
+        def dead(path, params=None, **kwargs):
+            raise app.models.HTTPError('https://civitai.com', 503, 'Service Unavailable', {}, None)
+
+        with patch.object(app.models, 'civitai_json', side_effect=dead):
+            with self.assertRaises(app.models.HTTPError):
+                app.models.civitai_search_images({'limit': '24'})
+
+    def test_upstream_failures_are_sentences_not_status_lines(self):
+        app = load_app()
+        busy = app.models.civitai_error_message(
+            app.models.HTTPError('https://civitai.com', 503, 'Service Unavailable', {}, None))
+        self.assertIn('Civitai', busy)
+        self.assertIn('again', busy)
+        self.assertNotIn('HTTP Error', busy)
+
+        limited = app.models.civitai_error_message(
+            app.models.HTTPError('https://civitai.com', 429, 'Too Many Requests', {}, None))
+        self.assertIn('rate-limiting', limited)
+
+        refused = app.models.civitai_error_message(
+            app.models.HTTPError('https://civitai.com', 401, 'Unauthorized', {}, None))
+        self.assertIn('key', refused)
+
+        offline = app.models.civitai_error_message(app.models.URLError('no route to host'))
+        self.assertIn('Civitai', offline)
+
+    def test_retry_after_is_honoured_and_the_ladder_is_jittered(self):
+        """Two calls rejected in the same wobble must not wake up together."""
+        app = load_app()
+
+        class Headers(dict):
+            def get(self, key, default=None):
+                return dict.get(self, key, default)
+
+        rate_limited = app.models.HTTPError(
+            'https://civitai.com', 429, 'Too Many Requests', Headers({'Retry-After': '4'}), None)
+        self.assertEqual(app.models.civitai_retry_after(rate_limited, 1), 4.0)
+
+        # An HTTP-date is legal and rare: it falls through to the ladder rather
+        # than raising on the path whose whole job is recovery.
+        dated = app.models.HTTPError(
+            'https://civitai.com', 429, 'Too Many Requests', Headers({'Retry-After': 'Wed, 10 Sep 2026 12:00:00 GMT'}), None)
+        self.assertGreater(app.models.civitai_retry_after(dated, 1), 0)
+
+        plain = app.models.HTTPError('https://civitai.com', 503, 'Service Unavailable', Headers(), None)
+        delays = {app.models.civitai_retry_after(plain, 2) for _ in range(20)}
+        self.assertGreater(len(delays), 1, 'a deterministic ladder re-collides on the next attempt')
+        self.assertTrue(all(0 < d < 3.0 * 1.31 for d in delays))
+
+    def test_the_base_model_scrape_runs_once_when_two_callers_arrive_together(self):
+        """Opening the finder asks for the filter vocabulary twice at once.
+
+        The images handler wants it for its own response while the browser
+        fetches it directly, and cold that is six /models pages at limit=100
+        EACH — twelve heavy calls landing on Civitai in the same second as the
+        images search they decorate. Whoever loses the race waits and reuses.
+        """
+        app = load_app()
+        app.models.CIVITAI_BASE_MODELS_CACHE.update({'at': 0, 'items': None})
+        scrapes = []
+
+        def slow_models(path, params=None, **kwargs):
+            scrapes.append(params.get('types'))
+            time.sleep(0.02)
+            return {'items': [{'modelVersions': [{'baseModel': 'SDXL 1.0'}]}]}
+
+        results = []
+        with patch.object(app.models, 'civitai_json', side_effect=slow_models):
+            threads = [app.jobs.threading.Thread(target=lambda: results.append(app.models.civitai_base_model_options()))
+                       for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+        self.assertEqual(len(scrapes), 6, 'one scrape of six model types, not one per caller')
+        self.assertEqual(len(results), 4)
+        self.assertTrue(all(r == results[0] for r in results), 'every caller got the same answer')

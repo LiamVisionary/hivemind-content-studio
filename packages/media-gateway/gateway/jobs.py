@@ -382,6 +382,10 @@ def mirror_output_to_comfy_output(path, job_id=None):
             src,
             agent_spki=_media.agent_seal_recipient_for(job_id),
             owner_spki=_media.owner_seal_recipient_for(job_id),
+            # This IS the job that made the file, calling once the render has
+            # finished — the active guard is its own, and honouring it here
+            # threw away the recipients and left the seal to the sweeper.
+            ignore_active=True,
         )
     config.COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     dst = (config.COMFY_OUTPUT_DIR / util.safe_name(src.name)).resolve()

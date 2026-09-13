@@ -555,7 +555,14 @@ def _record_lane_progress(prompt_id, lane):
     # so reporting the sampler's own 10/10 as 1.0 would park the bar at "done"
     # for longer than it took to sample. Scale into the share sampling actually
     # owns and let the client's time-based smoothing carry the remainder.
-    progress = max(0.0, min(1.0, value / maximum)) * REMOTE_SAMPLER_PROGRESS_SHARE
+    #
+    # Reported as a PERCENT, like every other producer of this field
+    # (graphs.poll_local_comfy_progress, graphs.poll_swift_flux2_progress, every
+    # phase marker in native_mlx.py). This alone used to be a fraction, so one
+    # `progress` key on /api/job meant two different things depending on the
+    # lane and no reader could be right for both: media_studio._job_progress
+    # clamped to [0,1] and turned a local 5% into 100%.
+    progress = max(0.0, min(1.0, value / maximum)) * REMOTE_SAMPLER_PROGRESS_SHARE * 100
     # Deliberately NOT touching status: respawn_remote_comfy_watchers re-arms
     # on status == "submitted", so a progress update that promoted the prompt
     # to "running" would orphan it across a gateway restart.

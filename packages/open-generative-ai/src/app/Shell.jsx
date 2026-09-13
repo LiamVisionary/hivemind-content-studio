@@ -10,7 +10,8 @@ import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
 import { t, tf } from '../lib/i18n.js';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
-import { Button, CollapsibleSection, IconButton, Kbd, Spinner, cx, openSection } from '../ui/kit.jsx';
+import { Button, CollapsibleSection, IconButton, Kbd, Spinner, cx, openSection, useHint } from '../ui/kit.jsx';
+import { AccountRow } from './AccountRow.jsx';
 import { getNavBadges, subscribeNavBadges } from './navBadges.js';
 import { APP_NAME, NAV_ITEMS, NAV_SECTIONS, OFF_NAV_PAGE_TITLES } from './navConfig.jsx';
 import { APP_VERSION, shortCommit, versionLabel } from '../lib/appVersion.js';
@@ -21,8 +22,8 @@ import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 // The Hivemind prompt library's trigger used to live up here. It only ever
 // inserted into a studio's prompt, so it now lives where that prompt is — the
 // composer's `more` door in the Image and Video studios (see
-// studios/frame/ExploreDockItem.jsx). Nothing anchors to it; the dock only
-// checks [data-explore-trigger] to know not to dismiss itself on its own button.
+// studios/frame/PromptLibraryItem.jsx), and it opens over that press rather than
+// in this bar's corner.
 
 // The verdict is a button, not a coloured dot: a user who reads "Not running"
 // needs the sentence and the command in the same place, plus a way to ask again
@@ -37,8 +38,9 @@ import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 // Signed in (cookie) but this tab never received the per-tab passphrase — a
 // second browser tab, typically. Every sealed tile then says "unlock", so the
 // control to do it has to exist somewhere: here, next to Lock.
-function VaultUnlockButton({ signedIn }) {
+function VaultUnlockButton({ signedIn, railed }) {
   const [locked, setLocked] = useState(false);
+  const hint = useHint('right');
   useEffect(() => {
     if (!signedIn || !isHivemindStudioEnabled()) return undefined;
     let alive = true;
@@ -47,19 +49,23 @@ function VaultUnlockButton({ signedIn }) {
   }, [signedIn]);
   if (!locked) return null;
   return (
-    <button
-      type="button"
-      onClick={requestVaultUnlock}
-      title={t('app.unlockVaultTitle')}
-      aria-label={t('app.unlockVault')}
-      className="grid h-ctl-md w-9 shrink-0 place-items-center rounded-md border border-honey/50 bg-honey-tint text-honey transition-colors hover:border-honey"
-    >
-      <Icon name="unlock" size={15} />
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={requestVaultUnlock}
+        title={railed ? undefined : t('app.unlockVaultTitle')}
+        aria-label={t('app.unlockVault')}
+        {...(railed ? hint.bind({ onClick: requestVaultUnlock }) : null)}
+        className="grid h-ctl-md w-9 shrink-0 place-items-center rounded-md border border-honey/50 bg-honey-tint text-honey transition-colors hover:border-honey"
+      >
+        <Icon name="unlock" size={15} />
+      </button>
+      {railed ? hint.render(t('app.unlockVaultTitle')) : null}
+    </>
   );
 }
 
-function LockButton() {
+function LockButton({ railed }) {
   const unlocked = useOwnerSession();
   const lock = async () => {
     window.dispatchEvent(new Event('hivemind-owner-lock-broadcast'));
@@ -75,9 +81,9 @@ function LockButton() {
   };
   return (
     <>
-      <VaultUnlockButton signedIn={unlocked} />
+      <VaultUnlockButton signedIn={unlocked} railed={railed} />
       {unlocked ? (
-        <IconButton icon="lock" label={t('app.lockStudio')} onClick={lock} />
+        <IconButton icon="lock" label={t('app.lockStudio')} hint={railed ? 'right' : ''} onClick={lock} />
       ) : null}
     </>
   );
@@ -137,36 +143,45 @@ function useSidebarRail() {
 const readNavBadges = () => getNavBadges();
 const useNavBadges = () => useSyncExternalStore(subscribeNavBadges, readNavBadges, readNavBadges);
 
+// Railed, the row is a bare glyph, so the label has to arrive on hover — see
+// `useHint`, and the note above it on why this is never the browser's `title`.
+// It sits to the RIGHT of the icon: the rail is a stack, and a bubble above
+// each row would cover the row above it.
 function NavEntry({ item, active, collapsed, count = 0, onNavigate }) {
   const label = item.label();
+  const hint = useHint('right');
+  const press = () => onNavigate(item.page);
   return (
-    <button
-      type="button"
-      onClick={() => onNavigate(item.page)}
-      aria-current={active ? 'page' : undefined}
-      title={collapsed ? label : undefined}
-      aria-label={collapsed ? label : undefined}
-      className={cx(
-        'group relative flex h-9 w-full items-center rounded-md text-[13px] font-medium transition-colors duration-150',
-        collapsed ? 'justify-center px-0' : 'gap-2.5 px-2.5',
-        active ? 'bg-honey-tint text-ink1' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
-      )}
-    >
-      <span
+    <>
+      <button
+        type="button"
+        onClick={press}
+        aria-current={active ? 'page' : undefined}
+        aria-label={collapsed ? label : undefined}
+        {...(collapsed ? hint.bind({ onClick: press }) : null)}
         className={cx(
-          'absolute top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-honey transition-opacity duration-150',
-          collapsed ? 'left-0' : 'left-[-10px]',
-          active ? 'opacity-100' : 'opacity-0',
+          'group relative flex h-9 w-full items-center rounded-md text-[13px] font-medium transition-colors duration-150',
+          collapsed ? 'justify-center px-0' : 'gap-2.5 px-2.5',
+          active ? 'bg-honey-tint text-ink1' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
         )}
-      />
-      <Icon name={item.icon} size={16} className={active ? 'text-honey' : 'text-ink3 group-hover:text-ink2'} />
-      {collapsed ? null : <span className="truncate">{label}</span>}
-      {count > 0 ? (
-        collapsed
-          ? <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-honey" />
-          : <span className="ml-auto shrink-0 rounded-full bg-honey-tint px-1.5 font-mono text-[10px] font-semibold text-honey">{count}</span>
-      ) : null}
-    </button>
+      >
+        <span
+          className={cx(
+            'absolute top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-honey transition-opacity duration-150',
+            collapsed ? 'left-0' : 'left-[-10px]',
+            active ? 'opacity-100' : 'opacity-0',
+          )}
+        />
+        <Icon name={item.icon} size={16} className={active ? 'text-honey' : 'text-ink3 group-hover:text-ink2'} />
+        {collapsed ? null : <span className="truncate">{label}</span>}
+        {count > 0 ? (
+          collapsed
+            ? <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-honey" />
+            : <span className="ml-auto shrink-0 rounded-full bg-honey-tint px-1.5 font-mono text-[10px] font-semibold text-honey">{count}</span>
+        ) : null}
+      </button>
+      {collapsed ? hint.render(count > 0 ? `${label} · ${count}` : label) : null}
+    </>
   );
 }
 
@@ -176,25 +191,39 @@ function NavEntry({ item, active, collapsed, count = 0, onNavigate }) {
 function SidebarSearch({ onOpen, railed }) {
   const mac = typeof navigator !== 'undefined' && navigator.platform?.startsWith('Mac');
   const label = t('app.paletteTitle');
+  const hint = useHint('right');
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      title={label}
-      aria-label={label}
-      className={cx(
-        'flex h-8 items-center rounded-md border border-line1 bg-bg2 text-ink3 transition-colors hover:border-line2 hover:text-ink2',
-        railed ? 'mx-2 justify-center px-0' : 'mx-3 gap-2 px-2.5',
-      )}
-    >
-      <Icon name="search" size={14} className="shrink-0" />
-      {railed ? null : (
-        <>
-          <span className="min-w-0 flex-1 truncate text-left text-[12.5px]">{t('app.paletteLabel')}</span>
-          <Kbd>{mac ? '⌘K' : 'Ctrl K'}</Kbd>
-        </>
-      )}
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={onOpen}
+        title={railed ? undefined : label}
+        aria-label={label}
+        {...(railed ? hint.bind({ onClick: onOpen }) : null)}
+        className={cx(
+          'group flex items-center rounded-md transition-colors',
+          railed
+            // On the rail it is one more glyph in the stack, so it wears the nav
+            // row's shape — no box of its own, which read as a stray field.
+            ? 'mx-2 h-9 justify-center px-0 text-ink2 hover:bg-bg2 hover:text-ink1'
+            : 'mx-3 h-8 gap-2 border border-line1 bg-bg2 px-2.5 text-ink3 hover:border-line2 hover:text-ink2',
+        )}
+      >
+        <Icon
+          name="search"
+          size={railed ? 16 : 14}
+          className={cx('shrink-0', railed && 'text-ink3 group-hover:text-ink2')}
+        />
+        {railed ? null : (
+          <>
+            <span className="min-w-0 flex-1 truncate text-left text-[12.5px]">{t('app.paletteLabel')}</span>
+            <Kbd>{mac ? '⌘K' : 'Ctrl K'}</Kbd>
+          </>
+        )}
+      </button>
+      {/* The rail hides the ⌘K badge with the words, so the bubble carries both. */}
+      {railed ? hint.render(`${label} · ${mac ? '⌘K' : 'Ctrl K'}`) : null}
+    </>
   );
 }
 
@@ -213,6 +242,9 @@ function SidebarVersion({ onNavigate, railed }) {
   const [update, setUpdate] = useState(null);
   const [installing, setInstalling] = useState(false);
   const [failed, setFailed] = useState('');
+  const versionHint = useHint('right');
+  const updateHint = useHint('right');
+  const openAbout = () => onNavigate('about');
   useEffect(() => {
     let cancelled = false;
     // Unauthenticated by design, and tiny. A failure here is not worth a word on
@@ -260,9 +292,10 @@ function SidebarVersion({ onNavigate, railed }) {
     <div className={cx('flex min-w-0 flex-col gap-1', railed && 'items-center')}>
       <button
         type="button"
-        onClick={() => onNavigate('about')}
-        title={title}
+        onClick={openAbout}
+        title={railed ? undefined : title}
         aria-label={title}
+        {...(railed ? versionHint.bind({ onClick: openAbout }) : null)}
         className={cx(
           'truncate px-1 font-mono text-[10.5px] text-ink3 transition-colors hover:text-ink2 hover:underline',
           railed ? 'text-center' : 'text-left',
@@ -270,14 +303,16 @@ function SidebarVersion({ onNavigate, railed }) {
       >
         {railed ? `v${APP_VERSION}` : label}
       </button>
+      {railed ? versionHint.render(title) : null}
       {update ? (
         <>
           <button
             type="button"
             onClick={install}
             disabled={installing}
-            title={tf('app.updateTitle', update.version)}
+            title={railed ? undefined : tf('app.updateTitle', update.version)}
             aria-label={tf('app.updateTitle', update.version)}
+            {...(railed ? updateHint.bind({ onClick: install }) : null)}
             className={cx(
               'flex items-center gap-1.5 rounded-md border border-honey/40 bg-honey-tint text-[11px] font-semibold text-honey transition-colors hover:border-honey disabled:opacity-60',
               railed ? 'h-7 w-7 justify-center' : 'h-7 px-2',
@@ -286,6 +321,11 @@ function SidebarVersion({ onNavigate, railed }) {
             {installing ? <Spinner size={12} /> : <Icon name="download" size={13} className="shrink-0" />}
             {railed ? null : <span className="truncate">{tf('app.updateReady', update.version)}</span>}
           </button>
+          {/* The rail has no room for the reason line below, so a refused
+              install says why in the bubble rather than nowhere at all. */}
+          {railed
+            ? updateHint.render(failed ? t(`app.update.${failed}`) : tf('app.updateTitle', update.version))
+            : null}
           {/* The reason, once, in the key table's words — never the shell's own
               error text. 'unsigned-channel' is the one worth reading: this build
               carries no updater key, so the release has to be fetched by hand. */}
@@ -343,10 +383,12 @@ function NavGroup({ group, page, collapsed, hint, countFor, onNavigate }) {
   );
 }
 
-export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, children }) {
+export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, onOpenAccount, onOpenCredits, children }) {
   const activeItem = NAV_ITEMS.find((i) => i.page === page);
   const [railed, setRailed] = useSidebarRail();
   const badges = useNavBadges();
+  const brandHint = useHint('right');
+  const goHome = () => onNavigate('image');
 
   useEffect(() => {
     const label = activeItem ? activeItem.label() : OFF_NAV_PAGE_TITLES[page]?.();
@@ -386,12 +428,14 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
         <div className={cx('mb-1 mt-3 flex items-center', railed ? 'flex-col gap-1 px-2' : 'gap-1 px-3')}>
           <button
             type="button"
-            onClick={() => onNavigate('image')}
+            onClick={goHome}
             className={cx(
               'flex min-w-0 items-center rounded-md py-2 text-left transition-colors hover:bg-bg2',
               railed ? 'justify-center px-0' : 'flex-1 gap-2.5 px-2',
             )}
-            title={APP_NAME}
+            title={railed ? undefined : APP_NAME}
+            aria-label={APP_NAME}
+            {...(railed ? brandHint.bind({ onClick: goHome }) : null)}
           >
             <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-honey-tint text-honey">
               <Icon name="logo" size={20} />
@@ -403,10 +447,12 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
               </span>
             )}
           </button>
+          {railed ? brandHint.render(APP_NAME) : null}
           <IconButton
             icon="panelLeft"
             label={railed ? t('app.widenSidebar') : t('app.collapseSidebar')}
             active={railed}
+            hint={railed ? 'right' : ''}
             onClick={() => setRailed(!railed)}
           />
         </div>
@@ -438,14 +484,28 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
         {/* The language toggle stood here. This build ships one language
             (LANGS_ENABLED in lib/i18n.js); the control returns with the key
             table, in Settings only. The rail collapse took its place. */}
-        {/* Two rows, and everything the topbar used to hold on its right side.
-            Top: the account-and-machine controls — settings, Lock (or Unlock
-            vault while this tab is sealed), and whether the studio is answering.
-            Bottom: the build, and the update when there is one. */}
+        {/* Three rows now, and everything the topbar used to hold on its right
+            side. Top: WHO — the account, the balance, and what is left of
+            today's free allowance. It sits above the machine controls because
+            it is about the person rather than the install, and because a meter
+            nobody sees is a meter that only speaks when a generation is already
+            refused. Middle: the account-and-machine controls — settings, Lock
+            (or Unlock vault while this tab is sealed). Bottom: the build, and
+            the update when there is one. */}
         <div className={cx('flex flex-col gap-1.5 border-t border-line1 p-3', railed && 'items-center')}>
+          <AccountRow railed={railed} onOpenAccount={onOpenAccount} onOpenCredits={onOpenCredits} />
           <div className={cx('flex items-center gap-1', railed && 'flex-wrap justify-center')}>
-            <IconButton icon="settings" label={`${t('common.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
-            <LockButton />
+            {/* The only door to Settings in the sidebar — the Advanced tier
+                held a second row to the same page, one frame away from this
+                gear. It carries the active state that row used to carry. */}
+            <IconButton
+              icon="settings"
+              label={`${t('common.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`}
+              active={page === 'settings'}
+              hint={railed ? 'right' : ''}
+              onClick={onOpenSettings}
+            />
+            <LockButton railed={railed} />
           </div>
           <SidebarVersion onNavigate={onNavigate} railed={railed} />
         </div>
@@ -521,12 +581,19 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
                     </div>
                   ))}
                   {/* Below lg there is no sidebar, so its footer rides here —
-                      the same four doors, in the same order. */}
+                      the same doors, in the same order. The account leads, as it
+                      does in the sidebar: it is the row about the person. */}
                   <div className="my-1 h-px bg-line1" />
+                  <MenuItem icon="persona" onClick={() => { onOpenAccount?.(); close(); }}>
+                    {t('account.title')}
+                  </MenuItem>
+                  <MenuItem icon="coin" onClick={() => { onOpenCredits?.(); close(); }}>
+                    {t('credits.title')}
+                  </MenuItem>
                   <MenuItem icon="search" onClick={() => { onOpenPalette?.(); close(); }}>
                     {t('app.paletteLabel')}
                   </MenuItem>
-                  <MenuItem icon="settings" onClick={() => { onOpenSettings(); close(); }}>
+                  <MenuItem icon="settings" selected={page === 'settings'} onClick={() => { onOpenSettings(); close(); }}>
                     {t('common.settings')}
                   </MenuItem>
                   <MenuItem icon="info" onClick={() => { onNavigate('about'); close(); }}>

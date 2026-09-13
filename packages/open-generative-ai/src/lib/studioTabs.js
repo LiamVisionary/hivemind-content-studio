@@ -19,6 +19,8 @@
 // restores the strip every tab has a null seed and the two stopped being the
 // same question.
 
+import { dropDrafts, readDraft, writeDraft } from './draftVault.js';
+
 /* ---------------- tab list ---------------- */
 
 // Tab ids are monotonic and never reused so a closed tab's api ref can't be
@@ -86,11 +88,22 @@ export function consumeSeed(state, id) {
 // started: its job would sit in the registry with no owner, so the studio would
 // look idle while the machine kept working (see pendingJobs.js).
 //
-// Only the ids are written. A seed is a CLONE SNAPSHOT — it holds the source
-// tab's references and is consumed on first render — and a restored tab is no
-// longer a copy of anything on screen, so it boots from persisted preferences
-// like the original tab does. What comes back is the strip and the runs, not a
-// per-tab configuration the studio never persisted in the first place.
+// Each tab's own SETTINGS travel with its id, so a reload brings back the strip
+// as it stood rather than N copies of the studio-wide preferences. Before this,
+// only ids were written and every restored tab re-read the same one blob — so
+// three tabs set up three different ways came back identical.
+//
+// What is deliberately NOT written here is text a person typed. Prompts, the
+// negative prompt, the stand-in words and the shot timeline go to the draft
+// vault instead (lib/draftVault.js), encrypted under a key this browser cannot
+// export and never sends anywhere. This store is sessionStorage, which is
+// plaintext, so it carries the machine-readable configuration and the output
+// the tab is showing, and nothing that reads back as writing.
+//
+// The two halves are rejoined on the way in, so a restored tab boots with its
+// own words. That is the whole trick: the split is a storage detail, and a tab
+// that comes back is the tab that left. See stripPrivateSnapshotFields (what
+// sessionStorage may keep) and takePrivateSnapshotFields (what it may not).
 const TAB_STATE_PREFIX = 'studio.tabs.';
 const TAB_INSTANCE_KEY = 'studio.tabs.instance';
 // A corrupt or hostile blob here MOUNTS STUDIOS, one per entry, so the restore
@@ -99,20 +112,212 @@ const MAX_RESTORED_TABS = 24;
 
 const tabStateKey = (studioType) => `${TAB_STATE_PREFIX}${String(studioType || 'studio')}`;
 
-export function saveTabState(studioType, state) {
+// Text a person wrote never reaches sessionStorage. Everything listed here is
+// already persisted encrypted in the composer and comes back on hydrate; what is
+// left in a snapshot is model/params/geometry, which is what the studio-wide
+// preferences have always kept in plaintext too.
+export const PRIVATE_SNAPSHOT_FIELDS = {
+  image: ['prompt', 'negativePrompt'],
+  // cast + standIns already ride the encrypted composer draft (rememberCast);
+  // shotTimeline holds a line of prompt per shot.
+  video: ['standIns', 'shotTimeline', 'cast'],
+};
+
+// The same secrets as PRIVATE_SNAPSHOT_FIELDS, written as paths so the ones
+// buried inside `setup`, a Map of per-model tuning, or the result tile can be
+// LIFTED OUT and put back rather than only blanked. `*` walks every entry of an
+// object or a Map. Kept beside the strip list on purpose: a field added to one
+// and not the other is a leak or a loss, and they read as one rule here.
+const PRIVATE_SNAPSHOT_PATHS = {
+  image: [
+    ['prompt'],
+    ['negativePrompt'],
+    ['result', 'prompt'],
+    ['modelSettingsById', '*', 'negativePrompt'],
+    ['persistedImagePreferences', 'modelSettings'],
+  ],
+  video: [
+    ['standIns'],
+    ['shotTimeline'],
+    ['cast'],
+    ['setup', 'prompt'],
+    ['result', 'prompt'],
+  ],
+};
+
+// Always returns a MIRROR of the path ({a:{b:value}}), never a bare leaf, so
+// the merge below can walk the payload and the snapshot in lockstep.
+function takePath(source, path) {
+  const [head, ...rest] = path;
+  if (head === '*') {
+    const entries = source instanceof Map ? [...source] : Object.entries(source || {});
+    const out = {};
+    for (const [key, entry] of entries) {
+      const taken = takePath(entry, rest);
+      if (taken !== undefined) out[key] = taken;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  const value = source instanceof Map ? source.get(head) : source?.[head];
+  if (value === undefined || value === null || value === '') return undefined;
+  if (!rest.length) return { [head]: value };
+  const nested = takePath(value, rest);
+  return nested === undefined ? undefined : { [head]: nested };
+}
+
+function applyPath(target, source, path) {
+  if (!target || typeof target !== 'object' || !source || typeof source !== 'object') return;
+  const [head, ...rest] = path;
+  if (head === '*') {
+    for (const key of Object.keys(source)) {
+      // Only into entries the restored snapshot still has: a model whose tuning
+      // was dropped since must not be resurrected by its old negative prompt.
+      const child = target instanceof Map ? target.get(key) : target[key];
+      if (child === undefined) continue;
+      applyPath(child, source[key], rest);
+    }
+    return;
+  }
+  const value = source[head];
+  if (value === undefined) return;
+  if (!rest.length) {
+    if (target instanceof Map) target.set(head, value);
+    else target[head] = value;
+    return;
+  }
+  applyPath(target instanceof Map ? target.get(head) : target[head], value, rest);
+}
+
+function deepAssign(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)
+      && target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
+      deepAssign(target[key], value);
+    } else {
+      target[key] = value;
+    }
+  }
+  return target;
+}
+
+/**
+ * Everything stripPrivateSnapshotFields takes away, on its own — the half of a
+ * tab's snapshot that goes to the encrypted draft vault instead of to
+ * sessionStorage. Plain JSON: the Map keys come back as object keys.
+ */
+export function takePrivateSnapshotFields(studioType, snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return {};
+  const out = {};
+  for (const path of PRIVATE_SNAPSHOT_PATHS[String(studioType)] || []) {
+    const taken = takePath(snapshot, path);
+    if (taken !== undefined) deepAssign(out, taken);
+  }
+  return out;
+}
+
+/** Put a decrypted draft back into the snapshot it was taken out of. */
+export function mergePrivateSnapshotFields(studioType, snapshot, draft) {
+  if (!snapshot || typeof snapshot !== 'object' || !draft || typeof draft !== 'object') return snapshot;
+  for (const path of PRIVATE_SNAPSHOT_PATHS[String(studioType)] || []) {
+    applyPath(snapshot, draft, path);
+  }
+  return snapshot;
+}
+
+/** Where one tab's typed text is filed in the draft vault. */
+export function draftScope(studioType, tabId) {
+  return `${String(studioType || 'studio')}:${Number(tabId) || 0}`;
+}
+
+export function stripPrivateSnapshotFields(studioType, snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const out = cloneTabValue(snapshot);
+  for (const key of PRIVATE_SNAPSHOT_FIELDS[String(studioType)] || []) delete out[key];
+  // The video studio keeps its prompt INSIDE the setup object, which is
+  // otherwise the whole configuration and has to survive.
+  if (out.setup && typeof out.setup === 'object' && 'prompt' in out.setup) out.setup = { ...out.setup, prompt: '' };
+  // Per-model tuning caches carry their own negative prompt.
+  if (out.modelSettingsById instanceof Map) {
+    out.modelSettingsById = new Map([...out.modelSettingsById].map(([key, entry]) => [
+      key,
+      entry && typeof entry === 'object' ? { ...entry, negativePrompt: '' } : entry,
+    ]));
+  }
+  if (out.persistedImagePreferences?.modelSettings) {
+    out.persistedImagePreferences = { ...out.persistedImagePreferences, modelSettings: undefined };
+  }
+  // The result a tab is showing: its URL and how it was made, never its words.
+  if (out.result && typeof out.result === 'object') {
+    const { prompt: _dropped, ...rest } = out.result;
+    out.result = rest;
+  }
+  return out;
+}
+
+// Maps and Sets do not survive JSON. The studio engines keep two of them
+// (loraSelectionsByModel, modelSettingsById), so they are tagged on the way out
+// and rebuilt on the way in — the same job cloneTabValue does for a duplicate,
+// which stays in memory and needs none of this.
+function toStorable(value) {
+  if (value instanceof Map) return { __map: [...value].map(([k, v]) => [k, toStorable(v)]) };
+  if (value instanceof Set) return { __set: [...value].map(toStorable) };
+  if (Array.isArray(value)) return value.map(toStorable);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, toStorable(v)]));
+  }
+  return value;
+}
+
+function fromStorable(value) {
+  if (Array.isArray(value)) return value.map(fromStorable);
+  if (value && typeof value === 'object') {
+    if (Array.isArray(value.__map)) return new Map(value.__map.map(([k, v]) => [k, fromStorable(v)]));
+    if (Array.isArray(value.__set)) return new Set(value.__set.map(fromStorable));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, fromStorable(v)]));
+  }
+  return value;
+}
+
+export function saveTabState(studioType, state, snapshots = null) {
+  // The words first, and to the other store: a tab whose snapshot is captured
+  // here files its typed text in the draft vault under its own id, so every
+  // OPEN tab keeps its own — not just whichever one was in front when the
+  // single studio-wide draft was last written.
+  for (const tab of state?.tabs || []) {
+    if (!snapshots?.[tab.id]) continue;
+    writeDraft(draftScope(studioType, tab.id), takePrivateSnapshotFields(studioType, snapshots[tab.id]));
+  }
   try {
     sessionStorage.setItem(tabStateKey(studioType), JSON.stringify({
-      tabs: (state?.tabs || []).map((tab) => ({ id: tab.id })),
+      tabs: (state?.tabs || []).map((tab) => {
+        const snapshot = snapshots?.[tab.id]
+          ? stripPrivateSnapshotFields(studioType, snapshots[tab.id])
+          : null;
+        return snapshot ? { id: tab.id, snapshot: toStorable(snapshot) } : { id: tab.id };
+      }),
       activeId: state?.activeId,
       nextId: state?.nextId,
     }));
   } catch { /* storage disabled or full — the strip just doesn't survive */ }
 }
 
+/**
+ * Forget the drafts of tabs that are no longer open in this studio.
+ *
+ * Closing a tab is a deliberate "I am done with this", so its words go with it
+ * rather than waiting to be aged out. Scoped to ONE studio's prefix: the image
+ * strip knows nothing about which video tabs are open.
+ */
+export function pruneClosedTabDrafts(studioType, state) {
+  const prefix = `${String(studioType || 'studio')}:`;
+  const open = new Set((state?.tabs || []).map((tab) => draftScope(studioType, tab.id)));
+  dropDrafts((scope) => !scope.startsWith(prefix) || open.has(scope));
+}
+
 // Validated field by field rather than trusted: ids must be distinct positive
 // integers, and `nextId` must sit past every one of them, or a tab opened after
 // the restore would reuse a live tab's id — and with it that tab's pending job.
-export function readTabState(raw) {
+export function readTabState(raw, studioType = '') {
   const ids = Array.isArray(raw?.tabs)
     ? raw.tabs.map((tab) => Number(tab?.id)).filter((id) => Number.isSafeInteger(id) && id > 0)
     : [];
@@ -120,8 +325,29 @@ export function readTabState(raw) {
   if (!unique.length) return newTabState();
   const maxId = Math.max(...unique);
   const wantedNext = Number(raw?.nextId);
+  // A restored tab boots from its OWN settings when it has them, and from the
+  // studio-wide preferences when it does not (an older strip, or a tab that was
+  // never fronted and so never published a snapshot).
+  // Each tab's words are rejoined with its settings here, from the decrypted
+  // draft cache — which is why hydrateDrafts() is awaited before React mounts
+  // (main.jsx). A draft that is missing (another browser, cleared site data, a
+  // key this browser cannot hold) simply leaves the prompt empty; the rest of
+  // the tab still comes back.
+  const saved = new Map(
+    (Array.isArray(raw?.tabs) ? raw.tabs : [])
+      .filter((tab) => tab && typeof tab.snapshot === 'object' && tab.snapshot)
+      .map((tab) => [
+        Number(tab.id),
+        mergePrivateSnapshotFields(
+          studioType, fromStorable(tab.snapshot), readDraft(draftScope(studioType, tab.id)),
+        ),
+      ]),
+  );
   return {
-    tabs: unique.map((id) => ({ id, seed: null })),
+    tabs: unique.map((id) => ({
+      id,
+      seed: saved.has(id) ? { boot: 'restore', snapshot: saved.get(id) } : null,
+    })),
     activeId: unique.includes(Number(raw?.activeId)) ? Number(raw.activeId) : unique[0],
     nextId: Number.isSafeInteger(wantedNext) && wantedNext > maxId ? wantedNext : maxId + 1,
   };
@@ -129,7 +355,7 @@ export function readTabState(raw) {
 
 export function loadTabState(studioType) {
   try {
-    return readTabState(JSON.parse(sessionStorage.getItem(tabStateKey(studioType)) || 'null'));
+    return readTabState(JSON.parse(sessionStorage.getItem(tabStateKey(studioType)) || 'null'), studioType);
   } catch {
     return newTabState();
   }

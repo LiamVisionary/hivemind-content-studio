@@ -203,6 +203,10 @@ class LocalInferenceClient {
             // a thin page reads as "Civitai had little with a prompt", not as a
             // broken filter.
             scanned: Number(data?.scanned) || 0,
+            // Non-empty when Civitai cut the paging short mid-search. The
+            // results above are real and fewer than asked for, and the grid
+            // says which of those two it is looking at.
+            partial: typeof data?.partial === 'string' ? data.partial : '',
         };
     }
 
@@ -321,6 +325,14 @@ class LocalInferenceClient {
             return window.localAI.wan2gp.generate(params);
         }
         return window.localAI.generate(params);
+    }
+
+    // The reference image a Klein direction edit will send to its LoRA, as a
+    // URL. Empty when the host has no renderer to ask — the picker still works,
+    // it just cannot show the sphere.
+    directionReferenceUrl(params) {
+        if (!isLocalAIAvailable() || typeof window.localAI.directionReferenceUrl !== 'function') return '';
+        return window.localAI.directionReferenceUrl(params) || '';
     }
 
     // Post-generation upscale (fast R-ESRGAN, or max = ESRGAN + diffusion refine).

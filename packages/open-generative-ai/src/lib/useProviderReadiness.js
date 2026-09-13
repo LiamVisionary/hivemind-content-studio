@@ -67,6 +67,15 @@ export function useProviderReadiness({ onMuapiKey = null, onKey = null } = {}) {
       await runFailureRemedy({ action: 'key', key: action.key }, { onMuapiKey });
       return;
     }
+    // "Check again" is the readiness sweep itself — the one thing that can
+    // change the answer for a service that simply did not reply. Routing it
+    // through runFailureRemedy would land on an onRetry nobody passed, which
+    // is a button that does nothing.
+    if (action.kind === 'refresh') {
+      setBusyAction('refresh');
+      try { await refreshReadiness(); } finally { setBusyAction(''); }
+      return;
+    }
     if (action.kind !== 'oauth') {
       // Anything a future readiness state adds still lands somewhere real
       // rather than on a button that does nothing.

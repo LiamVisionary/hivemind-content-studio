@@ -236,3 +236,188 @@ test('the app-instance id is stable across mounts, so a resumed run keeps its la
     assert.equal(studioInstanceId(), first);
     assert.equal(studioLaneId('video', first, 2), studioLaneId('video', studioInstanceId(), 2));
 });
+
+/* ---------------- each tab keeps its OWN settings ---------------- */
+//
+// Reported 2026-09-12: reloading the app put every tab back on the studio-wide
+// preferences, so three tabs set up three different ways came back identical —
+// and the video studio in particular always reopened on whatever model the last
+// write happened to leave in localStorage rather than the one that tab was on.
+// Only tab IDS were ever written. Now each tab's own configuration travels with
+// its id, and a restored tab boots from that instead.
+
+import {
+    mergePrivateSnapshotFields, stripPrivateSnapshotFields, takePrivateSnapshotFields,
+} from '../src/lib/studioTabs.js';
+
+test('a reloaded tab boots from its own settings, not the studio-wide ones', () => {
+    installSessionStorage();
+    const state = { tabs: [{ id: 1 }, { id: 2 }], activeId: 2, nextId: 3 };
+    saveTabState('video', state, {
+        1: { setup: { modelId: 'ltx23-ic-lora', duration: 5 } },
+        2: { setup: { modelId: 'wan-2.2', duration: 3 } },
+    });
+
+    const restored = loadTabState('video');
+    assert.equal(restored.tabs.length, 2);
+    assert.equal(restored.tabs[0].seed.boot, 'restore');
+    assert.equal(restored.tabs[0].seed.snapshot.setup.modelId, 'ltx23-ic-lora');
+    assert.equal(restored.tabs[1].seed.snapshot.setup.modelId, 'wan-2.2');
+});
+
+test('a tab with no snapshot still falls back to the studio-wide preferences', () => {
+    // An older strip, or a restored tab nobody ever fronted, so it never
+    // published one. A null seed is what boots from persisted prefs.
+    installSessionStorage();
+    saveTabState('image', { tabs: [{ id: 1 }], activeId: 1, nextId: 2 });
+    assert.equal(loadTabState('image').tabs[0].seed, null);
+});
+
+test('nothing a person typed is written to sessionStorage', () => {
+    // The rule this store has to keep: prompts live encrypted in the composer.
+    const store = installSessionStorage();
+    saveTabState('video', { tabs: [{ id: 1 }], activeId: 1, nextId: 2 }, {
+        1: {
+            setup: { prompt: 'a medium shot captures a...', modelId: 'ltx' },
+            standIns: ['the dog'], cast: [{ name: 'Ada' }], shotTimeline: [{ line: 'she turns' }],
+        },
+    });
+    const raw = store.get('studio.tabs.video');
+    for (const secret of ['medium shot', 'the dog', 'Ada', 'she turns']) {
+        assert.doesNotMatch(raw, new RegExp(secret), `"${secret}" reached sessionStorage`);
+    }
+    // …and the configuration around it still survived.
+    assert.equal(loadTabState('video').tabs[0].seed.snapshot.setup.modelId, 'ltx');
+});
+
+test('the image prompt and negative prompt are stripped too', () => {
+    const stripped = stripPrivateSnapshotFields('image', {
+        prompt: 'a dog runs to his owner',
+        negativePrompt: 'blurry',
+        selectedAr: '1:1',
+        modelSettingsById: new Map([['krea2', { steps: 8, negativePrompt: 'ugly' }]]),
+        result: { url: '/image/x.png', prompt: 'a dog runs to his owner', model: 'local:z' },
+    });
+    assert.equal(stripped.prompt, undefined);
+    assert.equal(stripped.negativePrompt, undefined);
+    assert.equal(stripped.modelSettingsById.get('krea2').negativePrompt, '');
+    assert.equal(stripped.modelSettingsById.get('krea2').steps, 8, 'the tuning itself survives');
+    assert.equal(stripped.selectedAr, '1:1');
+    // The result keeps what it needs to render and loses what it does not.
+    assert.equal(stripped.result.url, '/image/x.png');
+    assert.equal(stripped.result.prompt, undefined);
+});
+
+test('what sessionStorage loses, the draft vault carries — and the two rejoin', () => {
+    // The split is a storage detail: a tab that comes back is the tab that left.
+    // sessionStorage keeps the configuration, the encrypted vault keeps the
+    // words, and readTabState hands the studio one whole snapshot again.
+    const snapshot = {
+        prompt: 'a dog runs to his owner',
+        negativePrompt: 'blurry',
+        selectedAr: '1:1',
+        modelSettingsById: new Map([['krea2', { steps: 8, negativePrompt: 'ugly' }]]),
+        result: { url: '/image/x.png', prompt: 'a dog runs to his owner' },
+    };
+    const draft = takePrivateSnapshotFields('image', snapshot);
+    assert.equal(draft.prompt, 'a dog runs to his owner');
+    assert.equal(draft.negativePrompt, 'blurry');
+    assert.equal(draft.modelSettingsById.krea2.negativePrompt, 'ugly');
+    assert.equal(draft.result.prompt, 'a dog runs to his owner');
+    assert.equal(draft.selectedAr, undefined, 'a plain setting was taken as if it were private');
+
+    const rejoined = mergePrivateSnapshotFields('image', stripPrivateSnapshotFields('image', snapshot), draft);
+    assert.equal(rejoined.prompt, 'a dog runs to his owner');
+    assert.equal(rejoined.negativePrompt, 'blurry');
+    assert.equal(rejoined.modelSettingsById.get('krea2').negativePrompt, 'ugly');
+    assert.equal(rejoined.modelSettingsById.get('krea2').steps, 8, 'the tuning around it was lost');
+    assert.equal(rejoined.result.prompt, 'a dog runs to his owner');
+    assert.equal(rejoined.selectedAr, '1:1');
+});
+
+test('the video prompt, cast and timeline make the same round trip', () => {
+    const snapshot = {
+        setup: { prompt: 'a medium shot captures a...', modelId: 'ltx' },
+        standIns: ['the dog'], cast: [{ name: 'Ada' }], shotTimeline: [{ line: 'she turns' }],
+    };
+    const draft = takePrivateSnapshotFields('video', snapshot);
+    const rejoined = mergePrivateSnapshotFields('video', stripPrivateSnapshotFields('video', snapshot), draft);
+    assert.equal(rejoined.setup.prompt, 'a medium shot captures a...');
+    assert.equal(rejoined.setup.modelId, 'ltx');
+    assert.deepEqual(rejoined.standIns, ['the dog']);
+    assert.deepEqual(rejoined.cast, [{ name: 'Ada' }]);
+    assert.deepEqual(rejoined.shotTimeline, [{ line: 'she turns' }]);
+});
+
+test('a draft never resurrects a per-model entry the snapshot has dropped', () => {
+    // The tuning cache is rebuilt from the catalog; a negative prompt left over
+    // from a model that is no longer there must not put the model back.
+    const merged = mergePrivateSnapshotFields('image', {
+        modelSettingsById: new Map([['krea2', { steps: 8, negativePrompt: '' }]]),
+    }, { modelSettingsById: { krea2: { negativePrompt: 'ugly' }, retired: { negativePrompt: 'gone' } } });
+    assert.equal(merged.modelSettingsById.get('krea2').negativePrompt, 'ugly');
+    assert.equal(merged.modelSettingsById.has('retired'), false);
+});
+
+test('a tab with no draft still comes back with its settings', () => {
+    const merged = mergePrivateSnapshotFields('image', { selectedAr: '16:9', prompt: '' }, null);
+    assert.equal(merged.selectedAr, '16:9');
+    assert.equal(merged.prompt, '');
+});
+
+test('Maps and Sets survive the round trip through storage', () => {
+    // The engines keep two Maps; JSON drops them silently, which would restore a
+    // tab with its LoRA selections quietly emptied.
+    installSessionStorage();
+    saveTabState('image', { tabs: [{ id: 1 }], activeId: 1, nextId: 2 }, {
+        1: { loraSelectionsByModel: new Map([['krea2', [{ id: 'a', strength: 0.8 }]]]) },
+    });
+    const back = loadTabState('image').tabs[0].seed.snapshot.loraSelectionsByModel;
+    assert.ok(back instanceof Map, 'came back as a plain object, not a Map');
+    assert.equal(back.get('krea2')[0].strength, 0.8);
+});
+
+test('the last result travels so a restored tab is not staring at nothing', () => {
+    installSessionStorage();
+    saveTabState('video', { tabs: [{ id: 7 }], activeId: 7, nextId: 8 }, {
+        7: { setup: { modelId: 'ltx' }, result: { url: '/image/clip.mp4', model: 'ltx23' } },
+    });
+    const seed = loadTabState('video').tabs[0].seed;
+    assert.equal(seed.snapshot.result.url, '/image/clip.mp4');
+    assert.equal(seed.snapshot.result.model, 'ltx23');
+});
+
+/* ---------------- what a new tab and a duplicate open with ---------------- */
+//
+// The spec, 2026-09-12: "new tabs must use their respective route's persistence
+// (e.g. a new tab in the image studio must use the image studio's last used
+// model/workflow), unless duplicating a tab in which case it must duplicate the
+// complete settings of the tab duplicated including last generation preview".
+// A new tab used to boot on CATALOG DEFAULTS, so pressing + threw away the local
+// model you had just chosen. These pin the three boot modes against the source.
+
+import { readFileSync } from 'node:fs';
+
+// Deliberately textual: the branch under test lives inside createEngine, which
+// runs once per MOUNT from a seed. Rendering a studio to observe it means
+// standing up the cloud catalog, the local-model discovery and the vault for
+// each of the three boot modes — and the thing being pinned is a one-line
+// precedence decision, which reads more honestly as the line itself.
+for (const studio of ['ImageStudio', 'VideoStudio']) {
+    test(`${studio}: a new tab inherits the studio's last-used settings`, () => {
+        const source = readFileSync(new URL(`../src/studios/${studio}.jsx`, import.meta.url), 'utf8');
+        assert.match(
+            source,
+            /if \(boot === 'persisted' \|\| boot === 'fresh'\) \{/,
+            'a new tab is booting on catalog defaults again',
+        );
+    });
+
+    test(`${studio}: a duplicate and a restored tab both adopt a snapshot`, () => {
+        const source = readFileSync(new URL(`../src/studios/${studio}.jsx`, import.meta.url), 'utf8');
+        assert.match(source, /boot === 'clone' \|\| boot === 'restore'/);
+        // …and the result comes with it, rather than opening on an empty stage.
+        assert.match(source, /const \{ result, \.\.\.config \} = snapshot;/);
+        assert.match(source, /result:\s/, 'snapshot() no longer publishes the last result');
+    });
+}

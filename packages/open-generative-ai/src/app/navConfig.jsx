@@ -52,9 +52,6 @@ export const NAV_SECTIONS = [
       { page: 'passbook', icon: 'key', label: () => t('nav.passbook') },
       { page: 'canvas', icon: 'nodes', label: () => t('nav.canvas') },
       { page: 'mcp-cli', icon: 'terminal', label: () => t('nav.mcpcli') },
-      // Still opened by ⌘, — it is a page now rather than a dialog, because a
-      // packaged app's machine-level settings do not fit in a modal.
-      { page: 'settings', icon: 'settings', label: () => t('common.settings') },
       // Version, licence, source and third-party notices. AGPL §5(d) asks an
       // interactive program to show these; the topbar version chip is the other
       // door to the same page.
@@ -94,7 +91,19 @@ export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'lipsync', 're
 // the PREVIOUS page's title in the tab. Same strings the views themselves use.
 export const OFF_NAV_PAGE_TITLES = {
   telemetry: () => t('nav.activity'),
+  // Settings had a row in Advanced as well as the gear at the sidebar's foot,
+  // which is two doors to one page in the same frame. The gear stays (with ⌘,
+  // and the mobile More menu); the row is gone, so the page names itself here.
+  settings: () => t('common.settings'),
 };
+
+// What ⌘K can reach: every nav row, plus Settings — the palette is the map of
+// the app, and a page with no row of its own is exactly the one a person is
+// most likely to search for rather than find.
+export const PALETTE_ITEMS = [
+  ...NAV_ITEMS,
+  { page: 'settings', icon: 'settings', label: () => t('common.settings') },
+];
 
 export const HUB_PAGES = {
   planner: 'create',

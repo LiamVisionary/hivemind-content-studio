@@ -326,8 +326,8 @@ def test_the_key_at_rest_does_not_depend_on_a_macos_keychain(no_app) -> None:
 
 
 def test_credits_are_bought_where_the_balance_lives(no_app, monkeypatch) -> None:
-    """With the app running the balance is the machine's, so a second one bought
-    here would split it. Without the app there is nowhere else to buy."""
+    """A checkout must never OPEN a second balance beside the app's. Topping the
+    app's own one up is not that, and is what the credits sheet does all day."""
     seen: list = []
     result = hivemindos_models.start_top_up(amount_usd=5, opener=gateway_opener({
         "/api/paid-agents/": {"ok": True, "checkoutUrl": "https://pay.example/session", "creditToken": "tok"},
@@ -338,9 +338,28 @@ def test_credits_are_bought_where_the_balance_lives(no_app, monkeypatch) -> None
     assert hivemindos_models.credit_token() == "tok"
     assert seen[0]["body"]["amountUsd"] == 5
 
+    # The app comes up. A key now resolves, so the checkout presents it and the
+    # gateway credits THAT account — one balance, bought from either side.
     monkeypatch.setattr(hivemindos_models, "app_is_running", lambda **_: True)
+    seen.clear()
+    again = hivemindos_models.start_top_up(amount_usd=10, opener=gateway_opener({
+        "/api/paid-agents/": {"ok": True, "checkoutUrl": "https://pay.example/second"},
+    }, seen=seen))
+    assert again["openedNewAccount"] is False
+    assert seen[0]["headers"]["X-hivemindos-credit-token"] == "tok"
+
+
+def test_with_the_app_running_and_no_key_the_checkout_defers_to_it(no_app, monkeypatch) -> None:
+    """The case the refusal was always about: with nothing to present, the
+    gateway would mint an account and the owner would end up holding two."""
+    monkeypatch.setattr(hivemindos_models, "app_is_running", lambda **_: True)
+    monkeypatch.setattr(hivemindos_models, "app_credit_token", lambda: "")
+
+    def never(request, timeout=None):
+        raise AssertionError("a second balance must not be opened beside the app's")
+
     with pytest.raises(hivemindos_models.HivemindosModelsError) as excinfo:
-        hivemindos_models.start_top_up()
+        hivemindos_models.start_top_up(opener=never)
     assert excinfo.value.remedy == "open-hivemindos"
 
 

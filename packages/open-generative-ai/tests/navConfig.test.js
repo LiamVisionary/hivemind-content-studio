@@ -82,7 +82,7 @@ test('the tiers hold exactly the pages they are meant to', async () => {
 
     assert.deepEqual(create.items.map((i) => i.page), ['image', 'video', 'story', 'restore']);
     assert.deepEqual(produce.items.map((i) => i.page), ['planner', 'history', 'runs', 'inspo', 'models']);
-    assert.deepEqual(advanced.items.map((i) => i.page), ['machines', 'providers', 'passbook', 'canvas', 'mcp-cli', 'settings', 'about']);
+    assert.deepEqual(advanced.items.map((i) => i.page), ['machines', 'providers', 'passbook', 'canvas', 'mcp-cli', 'about']);
     assert.deepEqual(create.labs.items.map((i) => i.page), ['sprite', 'lipsync']);
 
     // Both folds are collapsed by default and remember what you did with them.
@@ -138,6 +138,10 @@ test('the pages that were renamed kept their keys', async () => {
     assert.equal(labelOf('machines'), 'Rented GPUs');
     // Telemetry left the nav but not the router.
     assert.equal(labelOf('telemetry'), undefined);
+    // So did Settings, on 2026-09-11: the sidebar's footer gear and ⌘, are its
+    // doors, and a row in Advanced was a second one in the same frame. It keeps
+    // its key, its title and its place in ⌘K.
+    assert.equal(labelOf('settings'), undefined);
     for (const page of ['runs', 'history', 'machines', 'telemetry', 'mcp-cli', 'cinema']) {
         assert.ok(isKnownPage(page), `?page=${page} stopped resolving`);
     }
@@ -147,6 +151,30 @@ test('the pages that were renamed kept their keys', async () => {
 // Activity is a valid page reachable by URL and from inside Productions but is
 // deliberately not a nav row, and the title effect only knew nav rows — so the
 // tab kept whatever page you came FROM.
+test('Settings has no nav row but stays reachable', async () => {
+  const { NAV_ITEMS, PALETTE_ITEMS, OFF_NAV_PAGE_TITLES, isKnownPage } = await importSrc('src/app/navConfig.jsx');
+  assert.equal(NAV_ITEMS.some((item) => item.page === 'settings'), false, 'Settings is back in the nav');
+  assert.equal(isKnownPage('settings'), true, '?page=settings and ⌘, still have to resolve');
+  assert.equal(typeof OFF_NAV_PAGE_TITLES.settings, 'function', 'the Settings tab title has no source');
+  // ⌘K is the map of the app, and a page with no row of its own is the one most
+  // likely to be searched for rather than found.
+  assert.ok(PALETTE_ITEMS.some((item) => item.page === 'settings'), '⌘K lost Settings');
+
+  // The sidebar itself, with the Advanced fold forced open — a collapsed fold
+  // renders no rows at all, so an absence assertion against it proves nothing.
+  const { importComponent, renderComponent } = require('./helpers/render.js');
+  const openSection = await importComponent('src/ui/kit.jsx', 'openSection');
+  openSection('nav.advanced');
+  const markup = await renderComponent('src/app/Shell.jsx', 'Shell', {
+    page: 'settings', onNavigate() {}, onOpenSettings() {}, onOpenPalette() {}, onOpenAccount() {}, onOpenCredits() {},
+  });
+  assert.match(markup, />Rented GPUs</, 'the Advanced fold did not open — the next assertion would be vacuous');
+  assert.doesNotMatch(markup, />Settings</, 'the Advanced tier still has a Settings row');
+  // The gear at the sidebar's foot is the door now, and it carries the active
+  // state the row used to carry.
+  assert.match(markup, /aria-label="Settings \(⌘,\)"[^>]*bg-honey-tint/, 'the Settings gear does not light up on its own page');
+});
+
 test('every routable page has a title source, in the nav or beside it', async () => {
   const { HUB_PAGES, NAV_ITEMS, OFF_NAV_PAGE_TITLES, STUDIO_PAGES } = await import('../src/app/navConfig.jsx');
   const named = new Set([...NAV_ITEMS.map((item) => item.page), ...Object.keys(OFF_NAV_PAGE_TITLES)]);

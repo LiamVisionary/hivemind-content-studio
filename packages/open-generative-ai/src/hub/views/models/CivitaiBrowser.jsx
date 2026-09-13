@@ -20,7 +20,7 @@ import {
   civitaiSearchParams, formatBytes, formatCount, isCivitaiResultInstalled, mergeCivitaiResults,
 } from '../../../lib/modelLibrary.js';
 import { Icon } from '../../../ui/icons.jsx';
-import { Button, EmptyState, NativeSelect, Pill, ProgressBar, Spinner, TextInput, cx } from '../../../ui/kit.jsx';
+import { Button, CardGridSkeleton, EmptyState, NativeSelect, Pill, ProgressBar, Spinner, TextInput, cx } from '../../../ui/kit.jsx';
 import { t, tf } from '../../../lib/i18n.js';
 
 // The FILTERS are remembered; the query is not. A search box is something a
@@ -377,15 +377,26 @@ export function CivitaiBrowser({ onInstalled, baseModelOptions }) {
               </div>
             ) : null}
           </>
-        ) : state.status !== 'loading' ? (
+        ) : state.status === 'loading' ? (
+          // Same rule as the inspiration finder next door: a page waiting for
+          // Civitai claims the space the results will claim, instead of leaving
+          // a body that reads as "nothing found".
+          <CardGridSkeleton count={12} minWidth={190} label={t('discover.searching')} />
+        ) : (
           <EmptyState
             icon="search"
             title={state.status === 'error' ? t('discover.searchFailed') : t('discover.nothingYet')}
             hint={state.status === 'error'
               ? state.message
               : t('discover.searchByName')}
+            // A failed search had no way out — the one rule this app does not
+            // bend (DESIGN.md §4). Civitai's 503s are transient, so the way out
+            // is literally "ask again".
+            action={state.status === 'error'
+              ? <Button icon="refresh" onClick={() => void search(query, filters)}>{t('common.retry')}</Button>
+              : null}
           />
-        ) : null}
+        )}
       </div>
     </div>
   );

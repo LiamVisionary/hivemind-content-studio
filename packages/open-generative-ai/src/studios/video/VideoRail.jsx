@@ -33,8 +33,7 @@
 // This file renders and forwards; it decides nothing. Every action is a handler
 // the studio already owns, so the arming path, the quiet full-cut build, the
 // replace confirm and the delete-with-file lookup all keep working as they are.
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useMediaPoster } from '../../hooks/hooks.js';
 import { t } from '../../lib/i18n.js';
@@ -43,7 +42,7 @@ import { Icon } from '../../ui/icons.jsx';
 import { MenuItem } from '../../ui/Menu.jsx';
 import { Spinner, cx } from '../../ui/kit.jsx';
 import {
-  RailAdd, RailCard, RailDivider, RailEmpty, RailHeading, RailOverflow,
+  RailAdd, RailCard, RailDivider, RailEmpty, RailHeading, RailMenu, RailMenuSubject, RailOverflow,
 } from '../frame/ResultsRail.jsx';
 import { TIMELINE_SEGMENT_DRAG_TYPE } from './TimelineStrip.jsx';
 
@@ -390,95 +389,6 @@ const EarlierCard = memo(function EarlierCard({ entry, selected, label, onOpen, 
 });
 
 /**
- * The shell every card's actions open into.
- *
- * Portaled to <body> and fixed-positioned rather than anchored inside the card:
- * the frame's rail is overflow-y-auto, and a popover rendered inside it is
- * clipped at the 108px edge and scrolls away with the column. Coordinates are
- * measured after mount, placed to the LEFT of the rail, and clamped to the
- * viewport — the same idiom kit.jsx's HintBubble uses.
- */
-function RailMenu({ anchor, label, onClose, children }) {
-  const panelRef = useRef(null);
-  const [pos, setPos] = useState(null);
-
-  useLayoutEffect(() => {
-    const node = panelRef.current;
-    if (!anchor || !node) return undefined;
-    const place = () => {
-      const target = anchor.getBoundingClientRect();
-      const panel = node.getBoundingClientRect();
-      const margin = 8;
-      const leftOfRail = target.left - panel.width - margin;
-      const next = {
-        left: leftOfRail >= margin
-          ? leftOfRail
-          : Math.max(margin, Math.min(target.right + margin, window.innerWidth - panel.width - margin)),
-        top: Math.min(
-          Math.max(target.top, margin),
-          Math.max(margin, window.innerHeight - panel.height - margin),
-        ),
-      };
-      setPos((prev) => (prev && prev.left === next.left && prev.top === next.top ? prev : next));
-    };
-    place();
-    // Fixed coordinates do not follow the anchor: scrolling the rail under an
-    // open menu would leave it stranded where the card used to be.
-    window.addEventListener('scroll', place, true);
-    window.addEventListener('resize', place);
-    return () => {
-      window.removeEventListener('scroll', place, true);
-      window.removeEventListener('resize', place);
-    };
-  }, [anchor]);
-
-  useEffect(() => {
-    const onDown = (event) => {
-      if (panelRef.current?.contains(event.target)) return;
-      // A press on the card itself is that card's own business — it toggles.
-      if (anchor?.contains?.(event.target)) return;
-      onClose();
-    };
-    // Capture, and stop there: the frame's drawer also listens for Escape on
-    // window, and the topmost transient layer is the one that owns the key.
-    const onKey = (event) => {
-      if (event.key !== 'Escape') return;
-      event.stopPropagation();
-      onClose();
-    };
-    document.addEventListener('pointerdown', onDown, true);
-    window.addEventListener('keydown', onKey, true);
-    return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      window.removeEventListener('keydown', onKey, true);
-    };
-  }, [anchor, onClose]);
-
-  return createPortal(
-    <div
-      ref={panelRef}
-      role="menu"
-      aria-label={label}
-      style={{ position: 'fixed', left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? 'visible' : 'hidden' }}
-      className="hive-scale-in z-[90] w-60 rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop"
-    >
-      {children}
-    </div>,
-    document.body,
-  );
-}
-
-/** The prompt-and-model header a 72px card cannot carry. */
-function MenuSubject({ text, model }) {
-  return (
-    <div className="px-2.5 pb-2 pt-1">
-      <p className="line-clamp-2 text-[12px] leading-snug text-ink2">{text || '—'}</p>
-      {model ? <p className="truncate font-mono text-[10px] text-ink3">{model}</p> : null}
-    </div>
-  );
-}
-
-/**
  * VideoRail — the Video studio's `rail` slot for StudioFrame (railWidth 108).
  *
  * The frame owns the column itself (the scrolling aside, its gap and padding),
@@ -720,12 +630,18 @@ export function VideoRail({
           <RailAdd
             width={CARD_W}
             aspect={CARD_ASPECT}
-            label={timelineOn
+            // The label follows what is IN the sequence, not whether the scene
+            // has been opened: with a shot already sitting there, "arrange clips
+            // into one scene" describes something the person has evidently
+            // started, and the button that follows it has to add the next one.
+            label={timelineOn || segments.length
               ? 'Add the next shot — or drop a clip here'
               : 'Arrange clips into one scene: generate shot by shot, drag clips in, preview the full cut'}
             onClick={() => {
               if (dragHappenedRef.current) return;
-              if (timelineOn) onAdd?.();
+              // One action either way. onAdd opens the scene when it is closed,
+              // so pressing this always puts a slot on screen.
+              if (timelineOn || segments.length) onAdd?.();
               else onOpenTimeline?.();
             }}
           />
@@ -763,7 +679,7 @@ export function VideoRail({
 
       {menuSegment ? (
         <RailMenu anchor={menu.anchor} label="Shot actions" onClose={closeMenu}>
-          <MenuSubject
+          <RailMenuSubject
             text={promptFor?.(menuSegment) || ''}
             model={menuSegment.model || ''}
           />
@@ -811,7 +727,7 @@ export function VideoRail({
         <RailMenu anchor={menu.anchor} label="Clip actions" onClose={closeMenu}>
           {/* Where the tile's hover gradient went. A prompt marked private is
               never printed here either. */}
-          <MenuSubject
+          <RailMenuSubject
             text={menuClip.prompt_private ? 'Private prompt (hidden)' : (menuClip.prompt || '')}
             model={menuClip.model || ''}
           />

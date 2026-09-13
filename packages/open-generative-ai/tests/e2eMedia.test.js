@@ -171,3 +171,65 @@ test('the seal verdict is decided by whether the vault was open, not assumed', (
         + 'sealed to someone else when their vault was simply not open',
     );
 });
+
+// The stage and the viewer over it, resolving the same fresh output at once.
+//
+// Reported 2026-09-11: a local generation opened in the viewer and looked right,
+// and the stage behind it was a broken-image icon as soon as the viewer closed.
+// Both mounted against the same URL within a frame, both missed the cache, and
+// both decrypted it — the second object URL to land replaced the first, and
+// replacing used to revoke. Sharing the in-flight decrypt fixes the cause; the
+// holder-aware drop in mediaCacheBudget.test.js covers the symptom.
+test('E2E media: two components resolving one URL share a single decrypt', async () => {
+    const blobs = stubStudioBrowser();
+    const revoked = [];
+    global.URL = {
+        createObjectURL: (blob) => { blobs.push(blob); return `blob:mock/${blobs.length - 1}`; },
+        revokeObjectURL: (src) => revoked.push(src),
+    };
+    const session = await import('../src/lib/vaultSession.js');
+    session.resetVaultSession();
+    const vault = { identity: null };
+    global.fetch = async (url, options = {}) => {
+        const method = options.method || 'GET';
+        if (url === '/api/vault/identity' && method === 'GET') return { ok: true, json: async () => ({ ok: true, exists: !!vault.identity, identity: vault.identity }) };
+        if (url === '/api/vault/identity' && method === 'PUT') { vault.identity = JSON.parse(options.body).identity; return { ok: true, status: 200, json: async () => ({ ok: true }) }; }
+        throw new Error(`unexpected ${url}`);
+    };
+    assert.equal(await session.ensureVaultReady(), true);
+    const pub = vault.identity.public_key;
+    const envelope = await sealWithPython(pub, Buffer.from('a dog runs to his owner'.repeat(32)));
+
+    let fetches = 0;
+    global.fetch = async (url) => {
+        if (url === '/image/fresh.png') {
+            fetches += 1;
+            return {
+                ok: true,
+                headers: { get: (h) => (h === 'X-E2E-Media' ? '1' : h === 'Content-Type' ? 'application/vnd.hivemind.e2e+json' : null) },
+                json: async () => envelope,
+                body: { cancel() {} },
+            };
+        }
+        throw new Error(`unexpected ${url}`);
+    };
+    const media = await import(`../src/lib/e2eMedia.js?case=${Date.now()}-shared`);
+
+    // Both mount before either decrypt finishes — the real ordering on screen.
+    media.retainResolvedMedia('/image/fresh.png');
+    media.retainResolvedMedia('/image/fresh.png');
+    const [stage, viewer] = await Promise.all([
+        media.resolveMediaSrc('/image/fresh.png'),
+        media.resolveMediaSrc('/image/fresh.png'),
+    ]);
+
+    assert.match(stage, /^blob:mock\//);
+    assert.equal(stage, viewer, 'both components must point at the same object URL');
+    assert.equal(fetches, 1, 'the envelope is fetched and decrypted once, not once per component');
+    assert.equal(revoked.includes(stage), false, 'nothing revoked the URL either of them is showing');
+
+    // Closing the viewer leaves the stage's picture alone.
+    media.releaseResolvedMedia('/image/fresh.png');
+    assert.equal(media.peekResolvedMediaSrc('/image/fresh.png'), stage);
+    assert.equal(revoked.includes(stage), false);
+});

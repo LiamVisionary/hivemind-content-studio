@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { APP_VERSION, shortCommit, versionLabel } from '../../lib/appVersion.js';
 import { describeFailure } from '../../lib/describeFailure.js';
 import {
-  Button, Card, CollapsibleSection, FailureCallout, Pill, SectionLabel, Spinner,
+  Button, Card, CollapsibleSection, FailureCallout, LoadingState, Pill, SectionLabel, Spinner,
 } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { t, tf } from '../../lib/i18n.js';
@@ -328,7 +328,7 @@ export function AboutView({ active }) {
             {total ? <span className="ml-2 font-normal text-ink3">{total}</span> : null}
           </SectionLabel>
           {loading && !about ? (
-            <div className="grid place-items-center py-10"><Spinner size={20} className="text-ink2" /></div>
+            <LoadingState label={t('app.loading')} className="min-h-[220px] py-10" />
           ) : about?.notices?.available === false ? (
             // A build that shipped without running the notices generator. The
             // page still carries the licence and the source; this says exactly

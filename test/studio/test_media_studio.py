@@ -238,11 +238,14 @@ def test_in_flight_remote_job_takes_status_and_progress_from_the_private_record(
     monkeypatch.setattr(media_studio, "_client", lambda descriptor, *_pub: type("C", (), {"call_tool": lambda *a, **k: None})())
     monkeypatch.setattr(
         media_studio, "_private_json",
-        lambda descriptor, path, *_pub: {"id": "p1", "status": "running", "progress": 0.45, "backend": "comfy-remote"},
+        lambda descriptor, path, *_pub: {"id": "p1", "status": "running", "progress": 45.0, "backend": "comfy-remote"},
     )
 
     state = media_studio.check_video("p1")
     assert state["status"] == "running"
+    # The record speaks PERCENT — every producer of this field does — and the
+    # studio's bar wants a fraction. This used to clamp instead of divide, which
+    # turned any reading of 1% or more into a full bar on its first poll.
     assert state["progress"] == 0.45
     assert state["failed"] is False
 
@@ -256,15 +259,38 @@ def test_step_counters_surface_only_when_the_backend_measures_them(monkeypatch) 
 
     monkeypatch.setattr(
         media_studio, "_private_json",
-        lambda descriptor, path, *_pub: {"status": "running", "progress": 0.36, "progress_step": 6, "progress_total": 15},
+        lambda descriptor, path, *_pub: {"status": "running", "progress": 36.0, "progress_step": 6, "progress_total": 15},
     )
     measured = media_studio.check_video("p3")
     assert (measured["progress_step"], measured["progress_total"]) == (6, 15)
+    assert measured["progress"] == 0.36
 
     # A backend without counters must not invent them: the label would imply a
     # precision the time-based bar does not have.
     monkeypatch.setattr(media_studio, "_private_json", lambda descriptor, path, *_pub: {"status": "running"})
     assert "progress_step" not in media_studio.check_video("p4")
+
+
+def test_one_percent_into_a_render_is_not_a_finished_bar(monkeypatch) -> None:
+    """The units bug, reported 2026-09-12 on an LTX 2.3 IC-LoRA run.
+
+    Every gateway producer writes `progress` as a percent, and this read it as a
+    fraction and clamped: 5% into a 2:41 render came back as 1.0, and because the
+    studio's bar is monotonic it then sat at its cap for the whole job. One bad
+    reading is enough, which is why the range is checked at both ends here.
+    """
+    from hivemind_content_studio import media_studio
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor, *_pub: type("C", (), {"call_tool": lambda *a, **k: None})())
+    monkeypatch.setattr(media_studio, "_result_json", lambda _call: {"ok": False, "status": 404})
+
+    for percent, expected in ((1.0, 0.01), (5.3, 0.053), (12.5, 0.125), (90.0, 0.9), (100, 1.0)):
+        monkeypatch.setattr(
+            media_studio, "_private_json",
+            lambda descriptor, path, *_pub, _p=percent: {"status": "running", "progress": _p},
+        )
+        assert media_studio.check_video("p")["progress"] == pytest.approx(expected), percent
 
 
 def test_a_job_waiting_for_the_gpu_reports_how_many_are_ahead_of_it(monkeypatch) -> None:

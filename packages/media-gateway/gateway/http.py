@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse, urlencode, unquote
 from urllib.request import Request
 from urllib.error import HTTPError
 
-from gateway import config, dependencies as _dependencies, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, private_inputs, promptroutes, restore, routes, runners, util, workflow_index
+from gateway import config, dependencies as _dependencies, direction_reference as _direction_reference, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, private_inputs, promptroutes, restore, routes, runners, util, workflow_index
 
 
 class _MultipartPart:
@@ -363,6 +363,7 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     workflow = graphs._mobile_prompt_workflow_from_body(body)
                     job_id = native_mlx.queue_native_mlx_ltx_job(native_ltx, workflow)
+                    self.register_native_job_seal_recipients(job_id)
                     return self.send_json({
                         "prompt_id": job_id,
                         "number": 0,
@@ -385,6 +386,7 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     workflow = graphs._mobile_prompt_workflow_from_body(body)
                     job_id = native_mlx.queue_native_mlx_biglove_job(native['prompt'], native['image_path'], native.get('options') or {}, workflow)
+                    self.register_native_job_seal_recipients(job_id)
                     return self.send_json({
                         "prompt_id": job_id,
                         "number": 0,
@@ -858,8 +860,11 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             # Civitai 503s under load often enough to matter (seen on a
             # plain baseModels query, fine on retry), so the finder gets the
-            # reason and offers a retry rather than an empty grid.
-            return self.send_json({"error": str(e)}, 502)
+            # reason and offers a retry rather than an empty grid. The reason
+            # is a sentence, not `str(HTTPError)` — the finder used to print
+            # "HTTP Error 503: Service Unavailable" at somebody who has no way
+            # to know that names Civitai and means "try again".
+            return self.send_json({"error": _models.civitai_error_message(e)}, 502)
 
     def get_api_civitai_search(self, parsed, qs):
         params = {k: qs.get(k, [None])[0] for k in ['query','tag','username','sort','period','supportsGeneration','fromPlatform','earlyAccess','primaryFileOnly','cursor','page','limit']}
@@ -879,7 +884,8 @@ class Handler(BaseHTTPRequestHandler):
             data = _models.civitai_search_models(params)
             return self.send_json({"items": [_models.summarize_civitai_item(i) for i in data.get('items', [])], "metadata": data.get('metadata', {}), "baseModels": _models.current_base_models(), "baseModelOptions": _models.civitai_base_model_options(), "installed": _models.scan_civitai_downloads()})
         except Exception as e:
-            return self.send_json({"error": str(e)}, 502)
+            # Same upstream, same rule as the images feed above: a sentence.
+            return self.send_json({"error": _models.civitai_error_message(e)}, 502)
 
     def get_api_civitai_download(self, parsed, qs):
         jid = parsed.path.rsplit("/", 1)[-1]
@@ -917,6 +923,40 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": str(exc), "operational": True}, 502)
         report["jobs"] = _dependencies.install_jobs(workflow_id)
         return self.send_json(report)
+
+    def get_api_direction_reference(self, parsed, qs):
+        """The reference image a Klein direction edit will send to the LoRA.
+
+        The studio draws its own picker, but it cannot draw the sun sphere —
+        that is a lit 3D render — so the dialog shows this instead. Same
+        renderer the run uses, so what the dialog shows is the picture that
+        goes to the model rather than an impression of it.
+        """
+        kind = (qs.get("kind") or [""])[0].strip().lower()
+        try:
+            if kind == "sun":
+                png = _direction_reference.render_sun_sphere_png(
+                    (qs.get("rotation") or ["0"])[0],
+                    (qs.get("elevation") or ["45"])[0],
+                    (qs.get("intensity") or ["1.5"])[0],
+                )
+            elif kind == "eyes":
+                png = _direction_reference.render_eyes_dot_png(
+                    (qs.get("x") or ["0.5"])[0], (qs.get("y") or ["0.5"])[0])
+            else:
+                return self.send_json({"error": "kind must be 'eyes' or 'sun'"}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+        self.send_response(200)
+        self.cors_headers()
+        self.send_header("Content-Type", "image/png")
+        # Deterministic for a given pick, so a drag that returns to an angle
+        # it already visited costs nothing.
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.maybe_auth_cookie()
+        self.send_header("Content-Length", str(len(png)))
+        self.end_headers()
+        self.wfile.write(png)
 
     def get_api_workflow_dependency_jobs(self, parsed, qs):
         workflow_id = (qs.get("workflow_id") or [""])[0].strip() or None
@@ -1146,6 +1186,41 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_api_history(self, parsed, qs):
         return self.send_json({"history": [history.public_record(r) for r in jobs.all_records(200)]})
+
+    def register_native_job_seal_recipients(self, job_id):
+        """Both seal recipients for a job minted OUTSIDE the 202 hook.
+
+        send_json registers them when a route answers 202 with an `id` — that
+        covers every /api/generate-shaped route at once. The native intercepts
+        below are the exception: they answer a Comfy-shaped 200 carrying
+        `prompt_id`, because the caller posted to /comfy/api/prompt and expects
+        Comfy's reply. So the hook never saw them, the job carried no owner key,
+        and the seal fell back to whichever account is `is_owner` — which is how
+        a workspace-2 user's LTX clips came back "Can't decrypt — Sealed for a
+        different key" (2026-09-12). Any future route that mints a job id
+        without a 202 has to do this too.
+        """
+        if not job_id:
+            return
+        try:
+            owner_header = self.headers.get(promptroutes.OWNER_PUB_HEADER)
+            requester_header = self.headers.get(promptroutes.REQUESTER_PUB_HEADER)
+            agent_stored = media.register_agent_seal_recipient(job_id, requester_header)
+            owner_stored = media.register_owner_seal_recipient(job_id, owner_header)
+            # "arrived" and "stored" are different failures, and the difference
+            # is the whole diagnosis: a header can arrive and still be dropped
+            # by normalisation, which is invisible if you only log presence.
+            def _state(sent, stored):
+                if stored:
+                    return "stored"
+                return "REJECTED (arrived but failed validation)" if sent else "ABSENT"
+            print(
+                f"[e2e-media] native job {job_id}: owner {_state(owner_header, owner_stored)}, "
+                f"agent {_state(requester_header, agent_stored)}",
+                file=sys.stderr, flush=True,
+            )
+        except Exception as exc:
+            print(f"[agent-seal] native register failed: {exc}", file=sys.stderr)
 
     def get_api_job(self, parsed, qs):
         jid = parsed.path.rsplit("/", 1)[-1]
@@ -1738,6 +1813,12 @@ class Handler(BaseHTTPRequestHandler):
                                 'frame_profile', 'route', 'adherence'):
                         if key in data:
                             options[key] = data.get(key)
+                    # The Klein direction lanes steer on a rendered reference
+                    # image rather than on words: where the eyes look, or where
+                    # the sun is. The pick rides here and graphs._apply_direction_lane
+                    # turns it back into the pixels the LoRA reads.
+                    if isinstance(data.get('direction'), dict):
+                        options['direction'] = data.get('direction')
                     try:
                         options['reference_image_paths'] = [
                             str(path) for path in media.collect_reference_image_paths(data, uploaded_image)

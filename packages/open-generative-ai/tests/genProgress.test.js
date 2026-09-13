@@ -79,6 +79,67 @@ test('the smooth bar stays monotonic and never reaches 1 on time alone', async (
     assert.equal(computeSmoothProgress({ elapsedSec: 1, estimateSec: 30, prevDisplay: 0.5 }), 0.5);
 });
 
+// --- real sampler steps take the bar over from the estimate ------------------
+//
+// The bug these pin: a 1024x1024 8-step Z-Image run took 23s against a
+// first-ever estimate of 10s, so the bar hit its 98.5% cap at the halfway mark
+// and sat there. ComfyUI's own bar was exact the whole time — it counts sampler
+// steps — and now the studio reads those same counters.
+
+test('a short estimate can no longer outrun the real step counter', async () => {
+    const { computeSmoothProgress, SAMPLER_BAND_END } = await import('../src/lib/genProgress.js');
+
+    // Step 1 of 8 lands 4.6s into a run the estimate said would take 10s.
+    const anchor = { display: 0.46, real: 1 / 8 };
+    const at = (elapsedSec, real, prevDisplay) => computeSmoothProgress({
+        elapsedSec, estimateSec: 10, realFraction: real, realAnchor: anchor, prevDisplay,
+    });
+
+    // Time alone would be at the cap by 10s; the counter holds it to its step.
+    const half = at(10, 4 / 8, 0.46);
+    assert.ok(half > 0.46 && half < 0.75, `half-sampled bar was ${half}`);
+    assert.ok(at(20, 6 / 8, half) < 0.9, 'six of eight steps is not nearly done');
+    // The last step puts it at the band end, not at 100%: decode and save follow.
+    // (Elapsed still inside the estimate here, so only the counter is speaking.)
+    assert.equal(at(9, 1, 0.8), SAMPLER_BAND_END);
+});
+
+test('the bar neither jumps back to step one nor freezes waiting for it', async () => {
+    const { computeSmoothProgress } = await import('../src/lib/genProgress.js');
+
+    // Model load ran 27% of a measured render before any counter existed, so the
+    // estimate had already carried the bar well past 1/8 by the time step 1 hit.
+    const anchor = { display: 0.46, real: 1 / 8 };
+    const first = computeSmoothProgress({
+        elapsedSec: 4.6, estimateSec: 10, realFraction: 1 / 8, realAnchor: anchor, prevDisplay: 0.46,
+    });
+    assert.equal(first, 0.46, 'anchoring must not rewind the bar');
+    const second = computeSmoothProgress({
+        elapsedSec: 6, estimateSec: 10, realFraction: 2 / 8, realAnchor: anchor, prevDisplay: first,
+    });
+    assert.ok(second > first, 'the next step must move it');
+});
+
+test('once sampling is done, elapsed time finishes the bar off', async () => {
+    const { computeSmoothProgress, SAMPLER_BAND_END } = await import('../src/lib/genProgress.js');
+
+    // The decode/save/fetch-back tail reports nothing, so the bar must not park
+    // at the band end until the picture lands.
+    const anchor = { display: 0.1, real: 0.1 };
+    const parked = computeSmoothProgress({
+        elapsedSec: 60, estimateSec: 50, realFraction: 1, realAnchor: anchor, prevDisplay: SAMPLER_BAND_END,
+    });
+    assert.equal(parked, 0.985);
+});
+
+test('without counters the bar is exactly what it always was', async () => {
+    const { computeSmoothProgress } = await import('../src/lib/genProgress.js');
+
+    // The video studio and every cloud lane pass no anchor: unchanged behaviour.
+    assert.equal(computeSmoothProgress({ elapsedSec: 15, estimateSec: 30, realFraction: 0.35 }), 0.5);
+    assert.equal(computeSmoothProgress({ elapsedSec: 3, estimateSec: 30, realFraction: 0.35 }), 0.35);
+});
+
 // --- how the image studio turns its settings into a key + work units --------
 
 const KREA2 = { defaultSteps: 10, defaultWidth: 1024, samplers: ['euler_ancestral', 'deis_3m'] };

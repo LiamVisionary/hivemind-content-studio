@@ -1,12 +1,17 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
+  clearLegacyUnlockNeeded,
   clearWorkflowEncryptionKey,
+  getVaultKeyHandles,
   getWorkflowEncryptionUnlockExpiresAt,
+  isLegacyUnlockNeeded,
   isWorkflowEncryptionUnlocked,
+  setVaultKeyHandles,
   setWorkflowEncryptionKey,
   subscribeWorkflowEncryptionStatus,
 } from '@/utils/workflowEncryption';
+import type { VaultKeyHandles } from '@/utils/workflowEncryption';
 import { isTrustedOwnerParentEvent } from '@/utils/trustedOwnerParent';
 
 function formatUnlockExpiry(expiresAt: number | null): string {
@@ -21,15 +26,36 @@ function formatUnlockExpiry(expiresAt: number | null): string {
   return `for ${remainingMinutes} minutes`;
 }
 
+function isVaultKeyHandles(value: unknown): value is VaultKeyHandles {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return record.masterKey instanceof CryptoKey && record.privateKey instanceof CryptoKey;
+}
+
+/**
+ * Canvas's private-content unlock — an offer, never a wall.
+ *
+ * The studio shell hands this frame the open owner vault (non-extractable
+ * CryptoKeys over postMessage), so in the normal case nothing is rendered but
+ * the unlocked badge and the passphrase is never asked for. The form below is
+ * the fallback for the two cases the vault cannot cover: a standalone tab with
+ * no shell to hand anything over, and content sealed under the OLD
+ * PBKDF2-over-passphrase scheme, which is stamped into images already on disk
+ * and so can never be re-keyed. It is raised by a dismissible prompt when such
+ * content is actually opened, rather than blocking the app on the chance.
+ */
 export function WorkflowUnlockGate() {
   const [unlocked, setUnlocked] = useState(() => isWorkflowEncryptionUnlocked());
   const [expiresAt, setExpiresAt] = useState(() => getWorkflowEncryptionUnlockExpiresAt());
+  const [legacyNeeded, setLegacyNeeded] = useState(() => isLegacyUnlockNeeded());
+  const [formOpen, setFormOpen] = useState(false);
   const [passphrase, setPassphrase] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => subscribeWorkflowEncryptionStatus(() => {
     setUnlocked(isWorkflowEncryptionUnlocked());
     setExpiresAt(getWorkflowEncryptionUnlockExpiresAt());
+    setLegacyNeeded(isLegacyUnlockNeeded());
   }), []);
 
   useEffect(() => {
@@ -41,10 +67,15 @@ export function WorkflowUnlockGate() {
         setExpiresAt(null);
         return;
       }
-      if (event.data?.type !== 'hivemind-owner-unlock' || typeof event.data.passphrase !== 'string') return;
+      if (event.data?.type !== 'hivemind-owner-unlock') return;
       try {
-        setWorkflowEncryptionKey(event.data.passphrase);
-        setUnlocked(true);
+        // Either half may be absent: a freshly signed-in browser still has the
+        // passphrase and may not have finished opening the vault; every browser
+        // after that has the vault and no passphrase at all. Take what came.
+        if (isVaultKeyHandles(event.data.vaultKeys)) setVaultKeyHandles(event.data.vaultKeys);
+        if (typeof event.data.passphrase === 'string') setWorkflowEncryptionKey(event.data.passphrase);
+        if (!isVaultKeyHandles(event.data.vaultKeys) && typeof event.data.passphrase !== 'string') return;
+        setUnlocked(isWorkflowEncryptionUnlocked());
         setExpiresAt(getWorkflowEncryptionUnlockExpiresAt());
         setError(null);
       } catch (err) {
@@ -73,6 +104,8 @@ export function WorkflowUnlockGate() {
       setWorkflowEncryptionKey(passphrase);
       setPassphrase('');
       setError(null);
+      setFormOpen(false);
+      clearLegacyUnlockNeeded();
       setUnlocked(true);
       setExpiresAt(getWorkflowEncryptionUnlockExpiresAt());
     } catch (err) {
@@ -80,19 +113,45 @@ export function WorkflowUnlockGate() {
     }
   };
 
-  if (unlocked) {
+  // Whether the badge should offer to forget anything. A vault handed over by
+  // the shell is the shell's to lock, not this frame's: dropping it here would
+  // read as "locked" while the studio around it stayed open, and the very next
+  // message would hand it straight back.
+  const vaultHeld = Boolean(getVaultKeyHandles());
+
+  if (unlocked && !formOpen) {
     return (
       <button
         type="button"
         onClick={() => {
+          if (vaultHeld) return;
           clearWorkflowEncryptionKey();
           setUnlocked(false);
           setExpiresAt(null);
         }}
-        className="fixed right-3 top-[calc(var(--top-bar-offset,69px)+8px)] z-[2600] rounded-full border border-[#f6b21b]/40 bg-[#f6b21b]/15 px-3 py-1.5 text-xs font-semibold text-[#ffc94a] shadow-lg backdrop-blur"
-        title="Forget the in-browser workflow unlock key for this browser"
+        disabled={vaultHeld}
+        className="fixed right-3 top-[calc(var(--top-bar-offset,69px)+8px)] z-[2600] rounded-full border border-[#f6b21b]/40 bg-[#f6b21b]/15 px-3 py-1.5 text-xs font-semibold text-[#ffc94a] shadow-lg backdrop-blur disabled:cursor-default"
+        title={vaultHeld
+          ? 'Unlocked by your Hivemind Content Studio session — lock the studio to lock this'
+          : 'Forget the in-browser workflow unlock key for this browser'}
       >
-        Private workflows unlocked · {formatUnlockExpiry(expiresAt)}
+        {vaultHeld ? 'Private workflows unlocked' : `Private workflows unlocked · ${formatUnlockExpiry(expiresAt)}`}
+      </button>
+    );
+  }
+
+  // Locked, and nothing has actually needed a key yet — stay out of the way.
+  if (!formOpen && !legacyNeeded) return null;
+
+  if (!formOpen) {
+    return (
+      <button
+        type="button"
+        onClick={() => setFormOpen(true)}
+        className="fixed right-3 top-[calc(var(--top-bar-offset,69px)+8px)] z-[2600] rounded-full border border-white/15 bg-[#17171b]/90 px-3 py-1.5 text-xs font-semibold text-[#a3a3ac] shadow-lg backdrop-blur transition hover:border-[#f6b21b]/40 hover:text-[#ffc94a]"
+        title="Some older private items were saved under your passphrase rather than your vault"
+      >
+        Unlock older private items
       </button>
     );
   }
@@ -107,9 +166,9 @@ export function WorkflowUnlockGate() {
           <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#f6b21b]">
             User-only unlock
           </div>
-          <h1 className="text-xl font-semibold tracking-tight text-[#f2f2f3]">Unlock private workflows</h1>
+          <h1 className="text-xl font-semibold tracking-tight text-[#f2f2f3]">Unlock older private items</h1>
           <p className="mt-3 text-sm leading-6 text-[#a3a3ac]">
-            Enter the same passphrase you use in Hivemind Content Studio. Canvas will remember this browser unlock for 24 hours, then forget it automatically. The passphrase is still never sent to the backend or derived from the URL token.
+            Items saved before this browser started using your vault were sealed with the passphrase you use in Hivemind Content Studio. They are encrypted into the saved files themselves, so they can only be reopened with it. Everything saved from now on opens with your vault and will not ask again. The passphrase is still never sent to the backend or derived from the URL token.
           </p>
         </div>
 
@@ -138,10 +197,18 @@ export function WorkflowUnlockGate() {
           className="mt-5 w-full rounded-[10px] bg-[#f6b21b] px-4 py-3 text-base font-semibold text-[#1a1205] transition hover:bg-[#ffc94a] disabled:cursor-not-allowed disabled:opacity-40"
           disabled={!passphrase.trim()}
         >
-          Unlock Canvas for 24 hours
+          Unlock older items for 24 hours
         </button>
 
-        <p className="mt-4 text-xs leading-5 text-[#6b6b74]">
+        <button
+          type="button"
+          onClick={() => { setFormOpen(false); setError(null); setPassphrase(''); }}
+          className="mt-2 w-full rounded-[10px] px-4 py-2.5 text-sm font-medium text-[#a3a3ac] transition hover:text-[#f2f2f3]"
+        >
+          Not now
+        </button>
+
+        <p className="mt-3 text-xs leading-5 text-[#6b6b74]">
           Reloading the page keeps the unlock until the 24-hour TTL expires. Tapping the unlocked badge forgets it immediately.
         </p>
       </form>

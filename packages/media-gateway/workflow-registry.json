@@ -1,6 +1,46 @@
 {
   "workflows": [
     {
+      "id": "flux2-klein-9b",
+      "media_type": "image",
+      "routing_only": true,
+      "title": "Flux.2 Klein 9B",
+      "description": "Shared weights declaration for the Flux.2 Klein 9B lanes. Not selectable on its own.",
+      "family": "flux-2-klein",
+      "compatible_base_models": [
+        "Flux.2 Klein 9B"
+      ],
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "flux-2-klein-9b.safetensors",
+          "required": true,
+          "bytes": 18157185168,
+          "sha256": "0975d6b77b5f510b99547d6724a208e36527df654e8f6134f59ece3f9f30da58",
+          "note": "Flux.2 Klein 9B is gated: accept Black Forest Labs' licence at huggingface.co/black-forest-labs/FLUX.2-klein-9B, then put flux-2-klein-9b.safetensors in ComfyUI/models/diffusion_models. It is the same file the native MLX engine loads for klein9b-bf16, so one download serves both lanes."
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "qwen_3_8b_fp8mixed.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors",
+          "required": true
+        },
+        {
+          "folder": "vae",
+          "relativePath": "flux2-vae.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/vae/flux2-vae.safetensors",
+          "required": true
+        }
+      ]
+    },
+    {
       "id": "z-image-turbo",
       "media_type": "image",
       "title": "Z-Image Turbo LoRA Optimizer",
@@ -190,6 +230,104 @@
         "local"
       ],
       "featured": true
+    },
+    {
+      "id": "flux2-klein-eyes-direction",
+      "inherits": "flux2-klein-9b",
+      "inherit_model_dependencies": true,
+      "media_type": "image",
+      "title": "Klein Eyes Direction",
+      "description": "Point a subject's gaze anywhere with Eric Venti's Eyes Direction LoRA for Flux.2 Klein 9B. The studio renders the red-dot reference the LoRA reads, so the gaze is picked on the picture rather than described in words. Works on anything eye-shaped in any style; it was not trained on animals.",
+      "family": "flux-2-klein",
+      "builder": "comfy-api-image",
+      "backend": "comfy-api-image",
+      "workflow_file": "flux2-klein-eyes-direction.api.json",
+      "supports_loras": false,
+      "default": false,
+      "requires": {
+        "prompt": false,
+        "image": true
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "seed",
+        "steps",
+        "direction"
+      ],
+      "max_reference_images": 1,
+      "defaults": {
+        "steps": 4,
+        "seed": -1
+      },
+      "model_dependencies": [
+        {
+          "folder": "loras",
+          "relativePath": "Eyes_direction_Lora_Flux2Klein_9B_v1.safetensors",
+          "url": "https://huggingface.co/eric-venti-seeds/Eyes_Direction_Lora_Flux2Klein9B/resolve/main/Eyes_direction_Lora_Flux2Klein_9B_v1.safetensors",
+          "required": true,
+          "bytes": 82866888,
+          "sha256": "c15422126ac1664dd03d788b6d822d67dbdd80fa8777781f57127558654641e5"
+        }
+      ],
+      "tags": [
+        "image-edit",
+        "direction",
+        "gaze",
+        "local"
+      ],
+      "featured": false
+    },
+    {
+      "id": "flux2-klein-sun-direction",
+      "inherits": "flux2-klein-9b",
+      "inherit_model_dependencies": true,
+      "media_type": "image",
+      "title": "Klein Sun Direction",
+      "description": "Move the sun with Eric Venti's Sun Direction LoRA for Flux.2 Klein 9B. The studio renders the lit reference sphere the LoRA reads, and flattens the picture's existing light on a first pass the way his workflow does. It was trained on exteriors only.",
+      "family": "flux-2-klein",
+      "builder": "comfy-api-image",
+      "backend": "comfy-api-image",
+      "workflow_file": "flux2-klein-sun-direction.api.json",
+      "supports_loras": false,
+      "default": false,
+      "requires": {
+        "prompt": false,
+        "image": true
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "seed",
+        "steps",
+        "direction"
+      ],
+      "max_reference_images": 1,
+      "defaults": {
+        "steps": 4,
+        "seed": -1
+      },
+      "model_dependencies": [
+        {
+          "folder": "loras",
+          "relativePath": "Sun_direction_LoRA_Flux_2_Klein_9b_v1.safetensors",
+          "url": "https://huggingface.co/eric-venti-seeds/Sun-Direction-Lora-Flux2Klein9B/resolve/main/Sun_direction_LoRA_Flux_2_Klein_9b_v1.safetensors",
+          "required": true,
+          "bytes": 331379712,
+          "sha256": "e2c027cf06066fa3e1799de14a063e1f20e2bdf438c73f5c46a509ce95f9e5e9"
+        }
+      ],
+      "tags": [
+        "image-edit",
+        "direction",
+        "lighting",
+        "local"
+      ],
+      "featured": false
     },
     {
       "id": "ltx23-regular-fp8",
@@ -795,6 +933,7 @@
       "id": "ltx23-ic-ingredients-lora",
       "media_type": "video",
       "title": "LTX 2.3 IC-LoRA Ingredients",
+      "text_to_video_workflow": "ltx23-regular-fp8",
       "description": "Lightricks' official Ingredients IC-LoRA for generating a coherent shot from characters, props, wardrobe, and locations. Supply one finished reference sheet or up to 12 independent references that the server assembles into a black, unlabeled conditioning-only sheet. Apple Silicon uses the native MLX IC-LoRA reference-latent lane; Windows and CUDA use the equivalent ComfyUI IC guide graph.",
       "family": "ltx-2.3",
       "builder": "comfy-api",
@@ -983,6 +1122,7 @@
       "id": "ltx23-eros-ic-ingredients-lora",
       "inherits": "ltx23-ic-ingredients-lora",
       "title": "LTX 2.3 Eros IC-LoRA Ingredients",
+      "text_to_video_workflow": "ltx23-eros-v14-comfy",
       "description": "The same official Ingredients IC-LoRA reference-sheet workflow as the regular lane, using the 10Eros v1 dev-family checkpoint instead. Apple Silicon uses the native MLX Eros q8 dev IC-LoRA lane; Windows and CUDA use the equivalent Eros FP8 ComfyUI graph. Reference assembly, timeline anchors, prompt contract, audio, frame bucket, LoRA strengths, and generation controls remain inherited from the regular workflow.",
       "benchmark_seconds": null,
       "native_mlx": {
@@ -1155,25 +1295,33 @@
           "name": "ComfyUI-MiniMax-H3-Turbo",
           "repo": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo",
           "commit": "55fee864dd7b2976b1c4ce3c3d5f7968f181409f",
-          "class_types": ["MiniMaxH3TurboLoRA"]
+          "class_types": [
+            "MiniMaxH3TurboLoRA"
+          ]
         },
         {
           "name": "ComfyUI-Spectrum-MiniMax-H3",
           "repo": "https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3",
           "commit": "9395bf98fc60a04c5f588de7b2bb33516a0b622f",
-          "class_types": ["SpectrumApplyMiniMaxH3"]
+          "class_types": [
+            "SpectrumApplyMiniMaxH3"
+          ]
         },
         {
           "name": "comfyui-kjnodes",
           "repo": "https://github.com/kijai/ComfyUI-KJNodes",
           "commit": "35e5956193769d18a13136cdedb73a36a05c73e6",
-          "class_types": ["PathchSageAttentionKJ"]
+          "class_types": [
+            "PathchSageAttentionKJ"
+          ]
         },
         {
           "name": "ComfyUI-SolAttn_triton",
           "repo": "https://github.com/kijai/ComfyUI-SolAttn_triton",
           "commit": "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc",
-          "class_types": ["SolAttnPatch"]
+          "class_types": [
+            "SolAttnPatch"
+          ]
         }
       ],
       "model_dependencies": [
@@ -1680,31 +1828,41 @@
           "name": "ComfyUI-Spectrum-MiniMax-H3",
           "repo": "https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3",
           "commit": "9395bf98fc60a04c5f588de7b2bb33516a0b622f",
-          "class_types": ["SpectrumApplyMiniMaxH3"]
+          "class_types": [
+            "SpectrumApplyMiniMaxH3"
+          ]
         },
         {
           "name": "comfyui-kjnodes",
           "repo": "https://github.com/kijai/ComfyUI-KJNodes",
           "commit": "35e5956193769d18a13136cdedb73a36a05c73e6",
-          "class_types": ["PathchSageAttentionKJ"]
+          "class_types": [
+            "PathchSageAttentionKJ"
+          ]
         },
         {
           "name": "ComfyUI-SolAttn_triton",
           "repo": "https://github.com/kijai/ComfyUI-SolAttn_triton",
           "commit": "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc",
-          "class_types": ["SolAttnPatch"]
+          "class_types": [
+            "SolAttnPatch"
+          ]
         },
         {
           "name": "ComfyUI-H3-Motion-Context",
           "repo": "https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context",
           "commit": "c140ae99b8c38f782ebd8564c267b42aacade6a4",
-          "class_types": ["MiniMaxH3MotionContext"]
+          "class_types": [
+            "MiniMaxH3MotionContext"
+          ]
         },
         {
           "name": "Comfyui_Minimax_h3_latent_Upscaler",
           "repo": "https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler",
           "commit": "",
-          "class_types": ["MiniMaxH3LatentUpscaler"]
+          "class_types": [
+            "MiniMaxH3LatentUpscaler"
+          ]
         }
       ],
       "model_dependencies": [
@@ -1932,6 +2090,60 @@
         "height": 1024,
         "steps": 8
       },
+      "hardware": {
+        "accelerator": "cuda",
+        "reason": "MiniMax H3 Image runs H3's own weights: its nvfp4 text encoder only runs on Blackwell (RTX 5090 class), so this machine's ComfyUI cannot run it. Run it on a rented machine \u2014 the same box the H3 video lanes use already carries these files."
+      },
+      "custom_node_dependencies": [
+        {
+          "name": "ComfyUI-MiniMax-H3-Studio",
+          "repo": "https://github.com/thaakeno/ComfyUI-MiniMax-H3-Studio",
+          "commit": "a6a392f9c71b255dd530750ed9fc1f6455db2b80",
+          "class_types": [
+            "H3StudioLoader",
+            "H3StudioDirector",
+            "H3StudioCondition",
+            "H3StudioDecode",
+            "H3StudioFrameSelector",
+            "H3StudioSaveImage",
+            "H3StudioContextSamplingPreset"
+          ]
+        }
+      ],
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+          "url": "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+          "required": true,
+          "bytes": 12540858008,
+          "sha256": "01aa7b92c007c599890461c325f9b7e3c96fb06c36f242f95b62f7f20e538dec"
+        },
+        {
+          "folder": "diffusion_models",
+          "relativePath": "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
+          "url": "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
+          "required": true,
+          "bytes": 11770657048,
+          "sha256": "de2c6c29c4ee702b45e48e40daae3834aeee58ab681c732d9152589a87c89910"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_fp16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+          "required": true,
+          "bytes": 5207808496,
+          "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+        }
+      ],
       "aspect_ratios": [
         "1:1",
         "4:5",

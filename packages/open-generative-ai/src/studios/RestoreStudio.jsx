@@ -19,30 +19,44 @@
 // this component is a view onto a project rather than the thing driving it: it
 // polls, it can stop, and it can resume — and a reload during a two-hour render
 // loses nothing.
+//
+// THE SHAPE ON SCREEN is the Image and Video studios' frame (studios/frame/),
+// not StudioLayout: the comparison owns the window, past projects are the right
+// rail, every dial is one press away behind Advanced, and the clip and the two
+// presses float in one composer over the picture. Nothing was dropped in the
+// move — the upload bar and the chunk progress became the stage's own lower-edge
+// readout, the Finish panel became the drawer's last section, and the project
+// rows became rail cards with their Open / Resume / Delete in one menu. This
+// render mounts four surfaces: restore/RestoreStage.jsx (the comparison),
+// restore/RestoreRail.jsx (the projects), restore/RestoreComposer.jsx (the clip,
+// the sentence and the presses) and restore/RestoreSettings.jsx (the drawer).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
 import { Icon } from '../ui/icons.jsx';
 import { toastFailure } from '../ui/failureToast.jsx';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
-import {
-  Button, Card, EmptyState, FailureCallout, Pill, ProgressBar, Slider, StudioLayout, cx,
-} from '../ui/kit.jsx';
+import { Card, FailureCallout } from '../ui/kit.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { useMediaSrc } from '../hooks/hooks.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
+import { runTargetsFromRows } from '../lib/runTargets.js';
 import {
   CLOUD_LANE, FINISH_DEFAULTS, RESTORE_DEFAULTS,
-  approvedSpendUsd, chunkOutputUrls, deleteRestoreProject, describeEta, describeRestoreFailure,
-  describeRetention, estimatePrice, fetchRestorePlan, fetchRestoreProject, fetchRestoreProjects,
-  finishRestore, measureClip, planRestore, rentalForLane, restoreCapabilities, restoreFailureLine,
-  sourceTooLargeAdvice, startRestore, stopRestore, uploadRestoreSource,
+  approvedSpendUsd, chunkOutputUrls, deleteRestoreProject, describeEta, describePrice,
+  describeRestoreFailure, describeRetention, estimatePrice, fetchRestorePlan, fetchRestoreProject,
+  fetchRestoreProjects, finishRestore, laneReadinessFor, measureClip, planRestore, rentalForLane,
+  restoreCapabilities, restoreFailureLine, restoreRunTargets, sourceTooLargeAdvice, startRestore,
+  stopRestore, uploadRestoreSource,
 } from '../lib/videoRestore.js';
-import { RestoreCompare } from './restore/RestoreCompare.jsx';
+import { DrawerBody } from './frame/AdvancedDrawer.jsx';
+import { StudioFrame } from './frame/StudioFrame.jsx';
+import { RestoreComposer } from './restore/RestoreComposer.jsx';
 import { RestoreFinish } from './restore/RestoreFinish.jsx';
-import { RestoreProjects } from './restore/RestoreProjects.jsx';
+import { RestoreRail } from './restore/RestoreRail.jsx';
 import { RestoreSettings } from './restore/RestoreSettings.jsx';
+import { RestoreStage, RestoreStageActions } from './restore/RestoreStage.jsx';
 
 const POLL_MS = 4000;
 // Long enough to judge temporal stability, short enough to be one chunk.
@@ -94,6 +108,9 @@ export function RestoreStudio({ active = true }) {
   const [uploadPct, setUploadPct] = useState(null);
   const [joinedUrl, setJoinedUrl] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
+  // Advanced is shut on arrival: the four decisions that matter are in the
+  // sentence under the clip, and the other thirteen are one press away.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const objectUrlRef = useRef('');
   const pollRef = useRef(null);
 
@@ -449,172 +466,229 @@ export function RestoreStudio({ active = true }) {
   // rather than only in the service log, which is where it used to live.
   const retentionLine = describeRetention(capabilities);
 
-  const panel = (
-    <RestoreSettings
-      lanes={lanes}
-      selectedLane={lane}
-      onSelectLane={setLane}
-      price={price}
-      cloudQuote={cloudQuote}
+  // The last second a two-second test can START at. Zero when the clip is
+  // shorter than the test, which is also what hides the marker: a choice with
+  // one legal value is not a choice.
+  const previewMax = source
+    ? Math.max(0, Math.floor((source.frames / source.fps) - PREVIEW_SECONDS))
+    : 0;
+
+  // Take the clip off the stage without touching anything on disk. The project
+  // list is untouched — this only empties the composer and the comparison, so
+  // the next clip starts from a clean plan rather than from the last one's.
+  const clearClip = useCallback(() => {
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = '';
+    }
+    setFile(null);
+    setSource(null);
+    setOriginalUrl('');
+    setProject(null);
+    setJoinedUrl('');
+    setPreviewAt(0);
+  }, []);
+
+  // Dropping a clip on the composer loads it — the same door the row's own
+  // label opens. StudioFrame's ComposerFloat stamps `data-studio-composer` when
+  // this contract is present, which is also what keeps the drop off the
+  // window-level settings-restore zone.
+  const composerDrop = {
+    accepts: (dataTransfer) => Array.from(dataTransfer?.types || []).includes('Files'),
+    hint: () => 'Drop to load this clip',
+    busy: busy === 'measuring',
+    onDrop: (dataTransfer) => {
+      const picked = Array.from(dataTransfer?.files || [])
+        .find((item) => String(item.type || '').startsWith('video/'));
+      if (picked) void attach(picked);
+      else toast.error('That file could not be read as video.');
+    },
+  };
+
+  // --- the frame's four surfaces ------------------------------------------------
+
+  // The gateway's lanes as run targets, computed ONCE and handed to both the
+  // drawer's card and the sentence's token. Two surfaces asking the same
+  // question from two lists is how they come to disagree about which machine is
+  // selected — the Image studio hoists aspect, style and batch for the same
+  // reason.
+  const targets = useMemo(
+    () => runTargetsFromRows(restoreRunTargets(lanes), { kind: 'video' }),
+    [lanes],
+  );
+  const runOn = {
+    targets,
+    value: targets.find((target) => target.id === lane) || null,
+    onChange: (target) => setLane(target.id),
+    // A lane that cannot run the job says why, and — where the owner can do
+    // something about it — carries the door.
+    readinessFor: laneReadinessFor(lanes),
+    onFixReadiness: (remedy) => void runFailureRemedy(remedy, {
+      onRetry: () => { void reloadCapabilities(); },
+    }),
+  };
+
+  const drawer = (
+    <DrawerBody>
+      <RestoreSettings
+        lanes={lanes}
+        runOn={runOn}
+        selectedLane={lane}
+        price={price}
+        cloudQuote={cloudQuote}
+        settings={settings}
+        onChange={setSettings}
+        plan={plan}
+        source={file ? source : null}
+        busy={Boolean(busy) || Boolean(running)}
+      />
+      {/* Only once a render exists: there is nothing to finish before there are
+          chunks, and five dials that cannot be applied are five dead controls. */}
+      {project ? (
+        <RestoreFinish
+          finish={finish}
+          onChange={setFinish}
+          onApply={applyFinish}
+          busy={busy === 'finish' || joining}
+          disabled={running}
+          assemblesHere={assemblesHere}
+        />
+      ) : null}
+    </DrawerBody>
+  );
+
+  /* ---------------- the composer's two presses ---------------- */
+
+  const chunkCount = plan?.chunks?.length || 0;
+  const doneChunks = project?.progress?.chunks_done ?? Object.keys(project?.chunks || {}).length;
+  const canStart = Boolean(file && source && !running);
+  const startBlocked = Boolean(busy) || Boolean(tooLarge) || !lane;
+
+  let primary;
+  if (running) {
+    primary = {
+      label: 'Restoring…',
+      loading: true,
+      disabled: true,
+      onClick: () => {},
+      title: 'Every finished chunk is already saved — stopping costs the chunk in flight and nothing else.',
+    };
+  } else if (needsJoin) {
+    primary = {
+      label: `Join ${Object.keys(project.chunks || {}).length} chunks and finish`,
+      loading: joining,
+      disabled: Boolean(busy),
+      onClick: joinAndFinish,
+      title: 'Joins the sealed chunks in this tab, where the key is, then sends the master back for its finishing pass',
+    };
+  } else if (canStart) {
+    primary = {
+      label: `Restore${chunkCount ? ` ${chunkCount} chunks` : ''}${hostedPrice(cloudQuote)}`,
+      loading: busy === 'render',
+      disabled: startBlocked,
+      onClick: () => start({}),
+      title: tooLarge || 'Renders the whole clip, one chunk at a time — you can close this tab',
+    };
+  } else if (project && project.status !== 'complete') {
+    primary = {
+      label: `Resume from chunk ${doneChunks + 1}`,
+      loading: busy === 'render',
+      disabled: Boolean(busy),
+      onClick: () => start({ projectId: project.id }),
+      title: "Continues from the first chunk with no file, under this project's original settings",
+    };
+  } else {
+    primary = {
+      label: 'Restore',
+      disabled: true,
+      onClick: () => {},
+      title: 'Load a clip first.',
+    };
+  }
+
+  // The cheap way to find out whether this model helps this footage: one chunk,
+  // from wherever the marker is. Offered only when a whole render is offered,
+  // because it is the same press with a smaller plan.
+  const alternate = canStart ? {
+    label: `Test ${PREVIEW_SECONDS}s${hostedPrice(previewQuote)}`,
+    loading: busy === 'preview',
+    disabled: startBlocked,
+    onClick: () => start({ preview: true }),
+    title: tooLarge || 'One chunk, from wherever the marker is — the cheap way to find out whether this model helps this footage',
+  } : null;
+
+  // The bill, in the mono readout beside the press. The hosted lane's figure is
+  // already ON the button (it is the only press that moves money by itself) and
+  // the rented lane says "billed by the hour" in the sentence, so this carries
+  // the one number neither of those has: the RATE, which until now appeared
+  // only in the panel.
+  const billLabel = lane === CLOUD_LANE
+    ? ''
+    : (laneInfo?.paid ? (rental?.usd_per_hour ? `$${rental.usd_per_hour}/hr` : '') : (laneInfo ? 'free' : ''));
+
+  /* ---------------- what the stage's lower edge reads ---------------- */
+
+  const uploading = uploadPct !== null;
+  const stagePhase = uploading ? 'Uploading' : (running ? 'Restoring' : '');
+  const stageSubject = uploading
+    ? 'the clip'
+    : (progress ? `${progress.chunks_done} of ${progress.chunks_total} chunks` : '');
+  // Invoices, not an estimate: the gateway records what each chunk really cost
+  // as it finishes, which is what makes this safe to show while a render runs.
+  // It answers "what happens if I stop now", so it rides beside the ETA.
+  const spentLabel = spentUsd > 0
+    ? `${spentUsd < 1 ? `${Math.round(spentUsd * 100)}¢` : `$${spentUsd.toFixed(2)}`} charged${project?.spend?.approved_usd ? ` of $${Number(project.spend.approved_usd).toFixed(2)}` : ''}`
+    : '';
+
+  const composer = (
+    <RestoreComposer
+      clipName={file ? file.name : (project ? `${project.width}x${project.height}${project.preview ? ' preview' : ''}` : '')}
+      // The measured clip, under its name. A REOPENED project has no file — the
+      // browser never had one — so the line says the shape it came FROM, which
+      // is the only reading that makes sense under a name that is the output.
+      clipDetail={source
+        ? `${file ? '' : 'from a '}${source.width}x${source.height}${file ? '' : ' clip'} · ${source.frames} frames · ${Number(source.fps).toFixed(2)}fps${source.hasAudio ? ' · sound' : ''}`
+        : ''}
+      onPickClip={(picked) => void attach(picked)}
+      onDetachClip={file || project ? clearClip : null}
+      clipDisabled={Boolean(busy) || Boolean(running)}
       settings={settings}
-      onChange={setSettings}
+      onChangeSettings={setSettings}
       plan={plan}
-      source={file ? source : null}
-      busy={Boolean(busy) || Boolean(running)}
-      onRemedy={(remedy) => void runFailureRemedy(remedy, { onRetry: () => { void reloadCapabilities(); } })}
+      previewSeconds={PREVIEW_SECONDS}
+      previewAt={previewAt}
+      previewMax={previewMax}
+      onPreviewAt={setPreviewAt}
+      runOn={runOn}
+      advancedOpen={advancedOpen}
+      onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
+      primary={primary}
+      alternate={alternate}
+      onStop={running ? stop : null}
+      billLabel={billLabel}
+      billTitle={describePrice(price) || ''}
+      projects={projects}
+      activeProjectId={project?.id || ''}
+      onOpenProject={open}
     />
   );
 
-  const composer = (
-    <div className="flex flex-wrap items-center gap-2 p-3">
-      <label className={cx(
-        'inline-flex cursor-pointer items-center gap-2 rounded-lg border border-line1 bg-bg2 px-3 py-2 text-sm font-medium text-ink1 hover:bg-bg3',
-        (busy || running) && 'pointer-events-none opacity-40',
-      )}>
-        <Icon name="upload" size={14} />
-        {file ? file.name : 'Load a clip'}
-        <input
-          type="file"
-          accept="video/*"
-          className="hidden"
-          onChange={(event) => { void attach(event.target.files?.[0]); event.target.value = ''; }}
-        />
-      </label>
-
-      {file && source && !running ? (
-        <>
-          <Button
-            icon="eye"
-            onClick={() => start({ preview: true })}
-            loading={busy === 'preview'}
-            disabled={Boolean(busy) || !file || Boolean(tooLarge)}
-            title="One chunk, from wherever the marker is — the cheap way to find out whether this model helps this footage"
-          >
-            Test {PREVIEW_SECONDS}s{hostedPrice(previewQuote)}
-          </Button>
-          <Button
-            variant="primary"
-            icon="wand"
-            onClick={() => start({})}
-            loading={busy === 'render'}
-            disabled={Boolean(busy) || !file || Boolean(tooLarge)}
-          >
-            Restore {plan?.chunks?.length ? `${plan.chunks.length} chunks` : ''}{hostedPrice(cloudQuote)}
-          </Button>
-        </>
-      ) : null}
-
-      {running ? (
-        <Button icon="stop" variant="danger" onClick={stop}>Stop</Button>
-      ) : null}
-
-      {project && !file && !running && project.status !== 'complete' ? (
-        <Button icon="play" onClick={() => start({ projectId: project.id })} loading={busy === 'render'}>
-          Resume from chunk {(project.progress?.chunks_done ?? Object.keys(project.chunks || {}).length) + 1}
-        </Button>
-      ) : null}
-
-      {needsJoin ? (
-        <Button variant="primary" icon="layers" onClick={joinAndFinish} loading={joining}>
-          Join {Object.keys(project.chunks || {}).length} chunks and finish
-        </Button>
-      ) : null}
-
-      {masterUrl && !running ? (
-        <Button
-          icon="download"
-          onClick={() => downloadMedia(masterUrl, project.master)}
-        >
-          Download
-        </Button>
-      ) : null}
-    </div>
-  );
-
   return (
-    <StudioLayout panel={panel} panelTitle="Restore" composer={composer}>
-      <div className="flex min-h-0 flex-1 flex-col gap-4 p-4">
-        {!source && !project ? (
-          <EmptyState
-            icon="film"
-            title="Restore and upscale video, on your own machine"
-            hint="SeedVR2 re-generates footage at a higher resolution and removes the compression mush on the way. Load a clip to see the plan; render a two-second test before committing to the whole thing."
-          />
-        ) : (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <StudioFrame
+        railWidth={108}
+        drop={composerDrop}
+        composer={composer}
+        drawerTitle="Advanced"
+        drawerOpen={advancedOpen}
+        onDrawerClose={() => setAdvancedOpen(false)}
+        drawer={drawer}
+        notices={(
           <>
-            {source && file && !project ? (
-              <Card className="flex flex-wrap items-center gap-3 p-3">
-                <Icon name="info" size={14} className="text-ink3" />
-                <span className="text-xs text-ink2">
-                  Preview from
-                </span>
-                <div className="min-w-[160px] flex-1">
-                  <Slider
-                    value={previewAt}
-                    min={0}
-                    max={Math.max(0, Math.floor((source.frames / source.fps) - PREVIEW_SECONDS))}
-                    step={0.5}
-                    onChange={setPreviewAt}
-                    format={(value) => `${value.toFixed(1)}s`}
-                  />
-                </div>
-                <span className="text-[11px] text-ink3">
-                  Pick a shot with motion and detail — a static frame tells you very little.
-                </span>
-              </Card>
-            ) : null}
-
-            {/* The ceiling, stated on the card BEFORE the wait rather than as a
-                refusal after it — and with the fix in the same sentence, which
-                is the whole rule. */}
-            {tooLarge ? (
-              <FailureCallout title={tooLarge} />
-            ) : null}
-
-            {uploadPct !== null ? (
-              <Card className="flex flex-col gap-2 p-3">
-                <div className="flex items-center gap-2">
-                  <Pill tone="honey" dot>Uploading</Pill>
-                  <span className="text-xs text-ink2">{Math.round(uploadPct * 100)}% of the clip sent</span>
-                </div>
-                <ProgressBar value={uploadPct} />
-                <p className="text-[11px] leading-snug text-ink3">
-                  Streamed straight to the machine that will render it — nothing is copied into this tab, so
-                  the size of the film is not the size of this page.
-                </p>
-              </Card>
-            ) : null}
-
-            {progress && running ? (
-              <Card className="flex flex-col gap-2 p-3">
-                <div className="flex items-center gap-2">
-                  <Pill tone="honey" dot>Restoring</Pill>
-                  <span className="text-xs text-ink2">
-                    {progress.chunks_done} of {progress.chunks_total} chunks
-                  </span>
-                  <span className="ml-auto text-[11px] text-ink3">{describeEta(progress)}</span>
-                </div>
-                <ProgressBar value={progress.fraction} />
-                {/* On the hosted lane, what has ACTUALLY been charged so far —
-                    the sum of the invoices for the chunks that finished, not a
-                    share of the estimate. It is the number that answers "what
-                    happens if I stop now", which is the question the sentence
-                    below is otherwise only half answering. */}
-                {spentUsd > 0 ? (
-                  <span className="text-[11px] text-ink2">
-                    {spentUsd < 1 ? `${Math.round(spentUsd * 100)}¢` : `$${spentUsd.toFixed(2)}`} charged so far
-                    {project?.spend?.approved_usd
-                      ? ` of the $${Number(project.spend.approved_usd).toFixed(2)} you approved`
-                      : ''}
-                  </span>
-                ) : null}
-                <p className="text-[11px] leading-snug text-ink3">
-                  Each finished chunk is saved before the next one starts, so stopping — or closing this tab —
-                  costs you the chunk in flight and nothing else.
-                  {retentionLine ? ` ${retentionLine}` : ''}
-                </p>
-              </Card>
-            ) : null}
+            {/* The ceiling, stated BEFORE the wait rather than as a refusal
+                after it — and with the fix in the same sentence, which is the
+                whole rule. */}
+            {tooLarge ? <FailureCallout title={tooLarge} /> : null}
 
             {needsJoin ? (
               <Card className="flex flex-col gap-2 border-warn/40 p-3">
@@ -644,43 +718,53 @@ export function RestoreStudio({ active = true }) {
                 retryDisabled={Boolean(busy)}
               />
             ) : null}
-
-            {/* The comparison IS the screen. Inside a scrolling column `flex-1`
-                stretches to nothing, so the height is stated: a restore judged
-                in a 130px band is a restore nobody can judge. */}
-            <RestoreCompare
-              className="min-h-[46vh]"
-              originalUrl={originalUrl}
-              restoredUrl={restoredUrl}
-              mode={mode}
-              onModeChange={setMode}
-              restoredLabel={project?.plan?.preview ? 'Preview' : 'Restored'}
-            />
           </>
         )}
-
-        <div className="grid gap-4 lg:grid-cols-2">
-          {project ? (
-            <RestoreFinish
-              finish={finish}
-              onChange={setFinish}
-              onApply={applyFinish}
-              busy={busy === 'finish' || joining}
-              disabled={!project || running}
-              assemblesHere={assemblesHere}
-            />
-          ) : <div />}
-          <RestoreProjects
+        stageActions={originalUrl || restoredUrl ? (
+          <RestoreStageActions
+            mode={mode}
+            onModeChange={setMode}
+            canCompare={Boolean(restoredUrl && originalUrl)}
+            onDownload={masterUrl && !running ? () => downloadMedia(masterUrl, project.master) : null}
+          />
+        ) : null}
+        stage={(
+          <RestoreStage
+            source={source}
+            originalUrl={originalUrl}
+            restoredUrl={restoredUrl}
+            mode={mode}
+            restoredLabel={project?.plan?.preview ? 'Preview' : 'Restored'}
+            busy={Boolean(running) || uploading}
+            phase={stagePhase}
+            percent={uploading ? uploadPct * 100 : (progress ? progress.fraction * 100 : null)}
+            subject={stageSubject}
+            timing={uploading
+              ? `${Math.round(uploadPct * 100)}%`
+              : [spentLabel, describeEta(progress)].filter(Boolean).join(' · ')}
+            // One sentence, because the readout truncates: this is the one that
+            // decides whether somebody dares close the tab. How long the
+            // intermediates survive is said in full at the foot of the rail,
+            // where it is not competing with a running bar for the same line.
+            note={uploading
+              ? 'Streamed straight to the machine that will render it — nothing is copied into this tab, so the size of the film is not the size of this page.'
+              : 'Each finished chunk is saved before the next one starts, so stopping — or closing this tab — costs you the chunk in flight and nothing else.'}
+            onCancel={running ? stop : null}
+            cancelLabel="Stop"
+          />
+        )}
+        rail={(
+          <RestoreRail
             projects={projects}
-            activeId={project?.id}
+            activeId={project?.id || ''}
             onOpen={open}
             onResume={(summary) => start({ projectId: summary.id })}
             onDelete={setConfirmDelete}
             busy={Boolean(busy) || Boolean(running)}
             retention={retentionLine}
           />
-        </div>
-      </div>
+        )}
+      />
 
       <ConfirmModal
         open={Boolean(confirmDelete)}
@@ -692,6 +776,6 @@ export function RestoreStudio({ active = true }) {
         onConfirm={() => remove(confirmDelete)}
         onClose={() => setConfirmDelete(null)}
       />
-    </StudioLayout>
+    </div>
   );
 }

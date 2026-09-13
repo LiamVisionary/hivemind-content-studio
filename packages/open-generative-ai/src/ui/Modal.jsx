@@ -13,6 +13,10 @@ const SIZES = {
   sm: 'max-w-sm',
   md: 'max-w-lg',
   lg: 'max-w-2xl',
+  // The root font is 14px, so `lg` is 588px and `xl` is 784px — nothing lands
+  // on the ~760px a reading column wants, hence one pinned width rather than a
+  // rem step that means something different here than it does in the docs.
+  wide: 'max-w-[760px]',
   xl: 'max-w-4xl',
 };
 
@@ -22,7 +26,15 @@ function focusables(root) {
   return [...root.querySelectorAll(FOCUSABLE)].filter((el) => el.offsetParent !== null || el === document.activeElement);
 }
 
-export function Modal({ open = true, onClose, title, size = 'md', children, footer, dismissable = true, initialFocus = 'auto' }) {
+export function Modal({
+  open = true, onClose, title,
+  // A control that belongs BESIDE the title rather than in the footer — the
+  // prompt helper's model pill, which is a property of the whole dialog and not
+  // of any one action in it. A sibling of the <h2> rather than part of it, so
+  // the dialog's accessible name stays the title alone.
+  titleAside = null,
+  size = 'md', children, footer, dismissable = true, initialFocus = 'auto',
+}) {
   const panelRef = useRef(null);
   const titleId = useId();
 
@@ -99,17 +111,23 @@ export function Modal({ open = true, onClose, title, size = 'md', children, foot
       >
         {title ? (
           <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line1 px-5 py-3.5">
-            <h2 id={titleId} className="text-sm font-semibold text-ink1">{title}</h2>
-            {dismissable ? (
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Close"
-                className="grid h-7 w-7 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1"
-              >
-                <Icon name="x" size={15} />
-              </button>
-            ) : null}
+            {/* Truncation is for a header that has to SHARE its row. Applied to
+                every dialog it would ellipsize the small confirms, whose title
+                is the only place the thing being deleted is named. */}
+            <h2 id={titleId} className={cx('text-sm font-semibold text-ink1', titleAside && 'min-w-0 truncate')}>{title}</h2>
+            <div className="flex min-w-0 shrink-0 items-center gap-2">
+              {titleAside}
+              {dismissable ? (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  aria-label="Close"
+                  className="grid h-7 w-7 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1"
+                >
+                  <Icon name="x" size={15} />
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>

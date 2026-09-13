@@ -258,9 +258,11 @@ const COVERED = [
     'ui/failureToast.jsx',
     // Every dialog. A modal is where a person is STOPPED and asked something,
     // so its words are the ones that have to be exact.
+    'dialogs/AccountDialog.jsx',
     'dialogs/AuthModal.jsx',
     'dialogs/CivitaiDownloadDialog.jsx',
     'dialogs/ClipPrepDialog.jsx',
+    'dialogs/CreditsDialog.jsx',
     'dialogs/LocalModelManager.jsx',
     'dialogs/PrivacyPanel.jsx',
     'dialogs/PrivacyVaultPanel.jsx',

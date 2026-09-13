@@ -30,6 +30,11 @@ const OOM = /out of memory|outofmemory|cuda error: out of memory|mps backend out
 // A transport that never answered: the browser's own fetch failures, plus what
 // urllib/requests say when nothing is listening on the port.
 const UNREACHABLE = /failed to fetch|load failed|networkerror|network error|connection refused|econnrefused|errno 61|err_connection|socket hang up|etimedout|connection reset/i;
+// A lane that refused the graph because a weight file it names is not there.
+// The gateway writes the sentence (graphs._auto_rejection_reason); this only
+// has to know the shape, so the callout can offer the preflight prompt that
+// installs it — or, for a lane that cannot run the model at all, Machines.
+const MISSING_ON_LANE = /has no [\w.-]+\.(?:safetensors|ckpt|gguf|sft|pt|pth) for /i;
 
 /**
  * Would showing this string as the sentence break rule 2?
@@ -114,6 +119,10 @@ export function describeFailure(error, { transport = '', operation = '', canLowe
         ? { label: t('failure.lowerResolution'), action: 'lower-resolution' }
         : null,
     };
+  }
+
+  if (MISSING_ON_LANE.test(raw)) {
+    return { title: raw, detail: '', remedy: remedyFor('install-dependencies') };
   }
 
   if (UNREACHABLE.test(raw)) {

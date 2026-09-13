@@ -1103,6 +1103,9 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         baseModelOptions: (data.baseModelOptions || []).map(String),
         nextCursor: String((data.metadata || {}).nextCursor || ''),
         scanned: Number((data.metadata || {}).scanned || 0),
+        // Non-empty when Civitai cut the paging short: results DID arrive, and
+        // the grid says so rather than pretending the feed simply ended.
+        partial: String((data.metadata || {}).partial || ''),
       });
     } catch (error) {
       return sendJson(res, upstreamStatus(error), { error: error.message });
@@ -1211,6 +1214,31 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       });
     } catch {
       return sendText(res, 404, 'not found');
+    }
+  }
+  // The rendered control a Klein direction edit sends to its LoRA. The picker
+  // dialog shows this so the person choosing sees the reference itself rather
+  // than a drawing of it — the sun sphere in particular is a lit 3D render the
+  // browser has no way to reproduce.
+  if (pathname === '/local-ai/direction-reference' && req.method === 'GET') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    const forward = new URLSearchParams();
+    for (const key of ['kind', 'x', 'y', 'rotation', 'elevation', 'intensity']) {
+      const value = String(query.get(key) || '').trim();
+      if (value && /^-?[A-Za-z0-9.]{1,24}$/.test(value)) forward.set(key, value);
+    }
+    if (!forward.get('kind')) return sendJson(res, 400, { error: 'kind required' });
+    try {
+      const render = await requestBuffer(`${ZIMAGE_URL}/api/direction-reference?${forward}`, {
+        Authorization: `Bearer ${token}`,
+      });
+      return send(res, 200, render.buffer, {
+        'Content-Type': render.contentType,
+        'Cache-Control': 'private, max-age=3600',
+      });
+    } catch (error) {
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   if (pathname.startsWith('/local-ai/lora-preview/')) {

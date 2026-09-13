@@ -322,9 +322,21 @@ export function normalizedRequesterPub(value) {
   return SPKI_B64URL_RE.test(text) ? text : '';
 }
 
-export function runWithRequester(pub, fn) {
+// Both of the caller's keys, for the life of one inbound request. The owner key
+// rides here for the same reason the requester key does: a browser generating
+// through this sidecar must have its media sealed to THAT WORKSPACE's vault, and
+// this process's configured owner key belongs to whichever account happens to be
+// is_owner on the machine. With two workspaces open those are different keys, and
+// the studio's video renders were being sealed to the wrong one — the owner saw
+// "Can't decrypt - sealed for a different key" over their own clips.
+export function runWithRequester(pub, fn, ownerPub = '', overHttp = false) {
   const normalized = normalizedRequesterPub(pub);
-  return normalized ? requesterContext.run({ pub: normalized }, fn) : fn();
+  const owner = normalizedRequesterPub(ownerPub);
+  // `overHttp` is established even when BOTH keys are missing, because the
+  // absence is the information: see ownerPublicKey().
+  return normalized || owner || overHttp
+    ? requesterContext.run({ pub: normalized, ownerPub: owner, http: overHttp }, fn)
+    : fn();
 }
 
 // ── private generation ───────────────────────────────────────────────────────
@@ -351,6 +363,17 @@ export function ownerPublicKey() {
   // it can only ENCRYPT to the owner. Resolved from env, then a file, then the
   // conventional sibling of the agent key file that the stack already points
   // at. See scripts/export_owner_pub.py for how the file is produced.
+  // The CALLER's key first — the same ordering requesterPublicKey() uses, and
+  // for the same reason. The env/file below is the headless fallback, for an
+  // agent-initiated call that presents nothing.
+  const scoped = requesterContext.getStore();
+  if (scoped?.ownerPub) return scoped.ownerPub;
+  // An HTTP caller that sent no owner key gets NO owner key. The env/file below
+  // belongs to whichever account is is_owner on this machine, and substituting
+  // it for a caller's is not a fallback — it is sealing someone's media to a
+  // vault they cannot open, silently, while every log says "present". Returning
+  // nothing here makes the gateway say so out loud instead.
+  if (scoped?.http) return '';
   if (process.env.MEDIA_STUDIO_OWNER_PUB) return process.env.MEDIA_STUDIO_OWNER_PUB.trim();
   const explicit = process.env.MEDIA_STUDIO_OWNER_PUB_FILE;
   const agentPubFile = process.env.MEDIA_STUDIO_E2E_PUB_FILE;
@@ -527,6 +550,13 @@ function publicWorkflow(workflow) {
     ...(workflow.prompt_helper ? { prompt_helper: workflow.prompt_helper } : {}),
     ...(workflow.prompt_contract ? { prompt_contract: workflow.prompt_contract } : {}),
     ...(workflow.ingredient_inputs ? { ingredient_inputs: workflow.ingredient_inputs } : {}),
+    // The lane this family runs when the conditioning this graph exists for is
+    // absent. An IC-LoRA graph conditions on a reference sheet — without one it
+    // has nothing to read, so a prompt-only run belongs on the family's plain
+    // text-to-video lane rather than being refused. Declared per workflow, not
+    // guessed from the family, because "plain" is a checkpoint decision: the
+    // Eros ingredient lanes must not fall back onto the regular build.
+    ...(workflow.text_to_video_workflow ? { text_to_video_workflow: String(workflow.text_to_video_workflow) } : {}),
     ...(Array.isArray(workflow.aspect_ratios) ? { aspect_ratios: workflow.aspect_ratios } : {}),
     // Capacity facts, published so the studio can refuse an impossible run in
     // the picker instead of letting it fail at submit. Both are needed to work
@@ -4459,21 +4489,28 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
   const headers = { Accept: 'application/json' };
   const authToken = backendToken();
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  const ownerPub = ownerPublicKey();
   if (isPrivateCall()) {
     // Private: the owner's vault is the ONLY recipient. No requester key, so
     // the gateway writes no agent copy and this process cannot open the result.
-    const ownerPub = ownerPublicKey();
     if (!ownerPub) {
       throw new Error(
         'private generation needs the workspace owner key and none is configured: '
         + 'set MEDIA_STUDIO_OWNER_PUB_FILE (see scripts/export_owner_pub.py)',
       );
     }
-    headers['X-E2E-Owner-Pub'] = ownerPub;
   } else {
     const requesterPub = requesterPublicKey();
     if (requesterPub) headers['X-E2E-Requester-Pub'] = requesterPub;
   }
+  // Name the owner vault on EVERY call that has one, not just a private one.
+  // A workspace-public generation is sealed to the vault AND the agent key (see
+  // the note above sealContext), so the vault half was always meant to be a
+  // recipient — the header was simply never sent outside the private branch,
+  // leaving the gateway to GUESS which vault from `is_owner`. With two
+  // workspaces on the machine it guesses wrong, and a workspace-2 user's clips
+  // came back "Can't decrypt — Sealed for a different key" (2026-09-12).
+  if (ownerPub) headers['X-E2E-Owner-Pub'] = ownerPub;
   const init = {
     method,
     headers,
@@ -5410,6 +5447,8 @@ export function createMcpHttpApp({ host = '127.0.0.1' } = {}) {
       await runWithRequester(
         req.headers['x-e2e-requester-pub'],
         () => transport.handleRequest(req, res, req.body),
+        req.headers['x-e2e-owner-pub'],
+        true, // over HTTP: a caller is present, so its silence is meaningful
       );
       res.on('close', () => {
         transport.close();

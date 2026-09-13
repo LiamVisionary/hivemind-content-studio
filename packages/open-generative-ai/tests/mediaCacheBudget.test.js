@@ -127,3 +127,31 @@ test('media cache: the shipped budget is 256 MB', async () => {
     assert.equal(media.DEFAULT_MEDIA_CACHE_BUDGET_BYTES, 256 * 1024 * 1024);
     assert.equal(media.resolvedMediaCacheStats().budget, 256 * 1024 * 1024);
 });
+
+// --- replacing an entry a mounted component is showing -----------------------
+//
+// Reported 2026-09-11: a finished local generation opened in the viewer and
+// looked fine, and the stage behind it was a broken-image icon the moment the
+// viewer was closed. Both were pointing at the same fresh output, both resolved
+// it at once, and the second decrypt to land revoked the first one's object URL
+// out from under a live <img>. Eviction has always respected holders; REPLACING
+// did not.
+
+test('media cache: replacing a held entry never revokes the URL on screen', async () => {
+    const revoked = stubBrowser();
+    const media = await loadMedia('replace-held');
+    media.setResolvedMediaBudget(media.DEFAULT_MEDIA_CACHE_BUDGET_BYTES);
+
+    // The stage mounts and shows the picture.
+    media.retainResolvedMedia('/image/fresh.png');
+    media.primeResolvedMedia('/image/fresh.png', picture(1000));
+    const onScreen = media.peekResolvedMediaSrc('/image/fresh.png');
+
+    // The viewer's own decrypt of the same output lands a moment later.
+    media.primeResolvedMedia('/image/fresh.png', 'blob:mock/second');
+
+    assert.equal(revoked.includes(onScreen), false, 'the stage was still pointing at it');
+    // Once the last consumer lets go, the superseded URL is not leaked either.
+    media.releaseResolvedMedia('/image/fresh.png');
+    assert.equal(revoked.includes(onScreen), true, 'and it is reclaimed when nothing holds it');
+});

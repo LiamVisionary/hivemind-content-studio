@@ -39,6 +39,11 @@ if (bridgeEnabled && !window.localAI) {
     getBinaryStatus: () => call('getBinaryStatus'),
     downloadBinary: () => call('downloadBinary'),
     listModels: () => call('listModels'),
+    // Deliberately absent from the postMessage surface: this returns a URL the
+    // page loads directly, and in the embedded bridge the renderer lives on the
+    // host's origin, not ours. The picker drops its reference thumbnail rather
+    // than showing a broken one (see DirectionDialog).
+    directionReferenceUrl: () => '',
     listLoras: (modelId, baseModels) => call('listLoras', modelId, baseModels),
     generatePrompt: (params) => call('generatePrompt', params),
     startCivitaiDownload: (url, options) => call('startCivitaiDownload', url, options),

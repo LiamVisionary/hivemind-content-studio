@@ -34,7 +34,9 @@ import { localRow, muapiKeyMissing, muapiRow, runVideo, studioRow } from '../lib
 import { describeFailure } from '../lib/describeFailure.js';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
 import { WorkflowDependencyPrompt } from '../components/WorkflowDependencyPrompt.jsx';
-import { checkWorkflowDependencies, dependenciesBlockGeneration } from '../lib/workflowDependencies.js';
+import {
+  checkWorkflowDependencies, dependenciesBlockGeneration, formatDependencyBytes, targetsWithRunnableLanes,
+} from '../lib/workflowDependencies.js';
 import { toastFailure } from '../ui/failureToast.jsx';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { fitShotTimeline } from '../lib/shotTimeline.js';
@@ -58,7 +60,8 @@ import { allocateCast } from '../lib/castPrompt.js';
 import { liveStandIns } from '../lib/subjectTemplate.js';
 import { publishSendTarget } from '../lib/studioTargets.js';
 import { videoSourceDescriptors } from './video/videoSendTargets.js';
-import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
+import { VIDEO_TAB_FIELDS, cloneTabValue, draftScope, snapshotTabFields } from '../lib/studioTabs.js';
+import { readDraft, writeDraft } from '../lib/draftVault.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { peekMediaDuration } from '../lib/mediaDuration.js';
@@ -102,6 +105,7 @@ import {
   pollHivemindVideoJob,
   previewHivemindIngredientSheet,
   referenceWorkflowForHivemindModel,
+  textToVideoWorkflowForHivemindModel,
   inpaintWorkflowForHivemindModel,
   selectableHivemindModelId,
   saveStudioGenerationHistory,
@@ -206,7 +210,11 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   // A 'fresh'/'clone' tab deliberately skips the saved preferences: a new tab must
   // open on the defaults, and a duplicate carries its source's settings instead.
   let persisted = null;
-  if (boot === 'persisted') {
+  // 'fresh' reads them too. A new tab is a new tab in the SAME studio, so it
+  // opens on the model and settings that studio was last used with — only the
+  // prompt starts empty. It used to boot on catalog defaults, which meant
+  // pressing + threw away the local model you had just chosen.
+  if (boot === 'persisted' || boot === 'fresh') {
     try {
       persisted = normalizeVideoPreferences(JSON.parse(localStorage.getItem(VIDEO_PREFERENCES_KEY) || 'null'));
     } catch { /* corrupted prefs — boot with defaults */ }
@@ -262,6 +270,18 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     dependencyReport: null,
     dependencyPromptOpen: false,
     dependencyCheckRequest: 0,
+    // Whether a PERSON put the tab on the current lane. Only their pick is
+    // worth a modal; a lane a route or a restored preference arrived on is
+    // answered by moving to one that runs. One-shot — the effect reads it and
+    // clears it, so the next re-check is not mistaken for a second pick.
+    dependencyChosen: false,
+    // Where Cancel goes back to: the model (and pin) this tab was on before
+    // the pick that hit a wall. Never leave someone on a model whose Generate
+    // can only refuse because they backed out of setting it up.
+    dependencyRevert: null,
+    // The lane the studio moved OFF, and what it moved to — the composer
+    // notice, with the door back. Dismissible; not an error.
+    dependencyMoved: null,
     loraOpen: false,
     // Advanced (the frame's left drawer). View state, deliberately not
     // persisted — see toggleAdvanced in the render.
@@ -396,7 +416,18 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   // A duplicate overlays the source tab's configuration on top of the defaults.
   // The snapshot was already deep-copied at capture; copying again keeps a tab
   // duplicated twice from sharing objects with its sibling.
-  if (boot === 'clone' && snapshot) Object.assign(engine, cloneTabValue(snapshot));
+  // A duplicate AND a tab coming back from a reload both overlay a snapshot on
+  // the defaults. They differ only in where it came from: a live sibling, or
+  // sessionStorage (which carries no prompt text — that returns from the
+  // encrypted composer on hydrate).
+  if ((boot === 'clone' || boot === 'restore') && snapshot) {
+    const { result, ...config } = snapshot;
+    Object.assign(engine, cloneTabValue(config));
+    if (result?.url) {
+      engine.resultUrl = result.url;
+      engine.resultModel = result.model || null;
+    }
+  }
   return engine;
 }
 
@@ -463,6 +494,11 @@ export function VideoStudio({
     // both land after mount, and in no fixed order — so mark the handoff
     // unfinished and let finishRentedHandoff close it out on their arrival.
     reconcileRentedModelRef.current = true;
+    // "Use in Studio" is a person asking for THAT box. If its lane is short
+    // of something, the prompt says what and points at re-provisioning —
+    // quietly moving them off the machine they just attached would undo the
+    // handoff they pressed.
+    s.dependencyChosen = true;
     setLocalMode(true);
     finishRentedHandoff();
   };
@@ -556,6 +592,11 @@ export function VideoStudio({
 
   const rootRef = useRef(null);
   const promptRef = useRef(null);
+  // The run-target join as of the last render, for the preflight's fallback
+  // (runnableFallbackTarget). A ref because the preflight is a round trip and
+  // the list it has to choose from is the CURRENT one, not the one the effect
+  // closed over before discovery landed.
+  const runTargetsRef = useRef({ targets: [], machines: null, readiness: {} });
   // The stage's <video>. VideoStage assigns it and VideoStageActions' Expand
   // reads it, so the two halves of one clip share one element.
   const stageVideoRef = useRef(null);
@@ -1056,6 +1097,20 @@ export function VideoStudio({
   const selectRegularModel = (m) => commit(selectRegularModelTransition(s.setup, m, s.catalogs));
   const selectHiveModel = (m) => commit(selectHivemindWorkflowTransition(s.setup, m, s.catalogs));
 
+  // What this tab is running right now, in the shape chooseRunTarget takes —
+  // the model, the place, and the pin that was in force with it.
+  const currentSelectionSnapshot = () => ({
+    target: { id: s.setup.modelId, place: s.setup.localMode ? PLACE_THIS_MAC : '' },
+    pin: s.setup.rentedMachineId || '',
+    automatic: Boolean(s.setup.runOnAutomatic),
+  });
+
+  const restoreSelection = (snapshot) => {
+    if (!snapshot?.target?.id) return;
+    if ((s.setup.rentedMachineId || '') !== snapshot.pin) s.setup = { ...s.setup, rentedMachineId: snapshot.pin };
+    chooseRunTarget(snapshot.target, { automatic: snapshot.automatic, chosen: false });
+  };
+
   /**
    * The one place a run target becomes a selection.
    *
@@ -1064,11 +1119,22 @@ export function VideoStudio({
    * three existing transitions still do the work; this only says which one, and
    * folds the source flags into the SAME commit so the model and the place can
    * never disagree for a render.
+   *
+   * `chosen` is whether a PERSON pressed this. The preflight reads it to
+   * decide between the install prompt and moving on quietly, and it is false
+   * for exactly two callers: the preflight's own fallback, and the revert
+   * behind Cancel. Both are the studio answering, not being asked.
    */
-  const chooseRunTarget = (target, { automatic = false } = {}) => {
+  const chooseRunTarget = (target, { automatic = false, chosen = true } = {}) => {
     if (!target) return;
     const entry = allVideoModels(s.catalogs).find((m) => m.id === target.id);
     if (!entry) return;
+    if (chosen) {
+      s.dependencyChosen = true;
+      s.dependencyRevert = currentSelectionSnapshot();
+      // Their own pick answers the notice, whichever way it goes.
+      s.dependencyMoved = null;
+    }
     const base = {
       ...s.setup,
       localMode: target.place === PLACE_THIS_MAC,
@@ -1084,6 +1150,12 @@ export function VideoStudio({
   const pinMachine = (rentalId) => {
     const next = rentalId || '';
     if ((s.setup.rentedMachineId || '') === next) return;
+    // The other half of the preflight's subject. Pinning a box that cannot
+    // run the selected model is a person's choice like picking the model is,
+    // so it gets the prompt — and Cancel puts the pin back.
+    s.dependencyChosen = true;
+    s.dependencyRevert = currentSelectionSnapshot();
+    s.dependencyMoved = null;
     commit({ ...s.setup, rentedMachineId: next });
   };
 
@@ -1115,7 +1187,26 @@ export function VideoStudio({
   // Composer drafts (prompt, negative prompt) are a single owner-vault section, so
   // only the front tab writes to it — a background tab would otherwise overwrite the
   // draft the next reload restores.
+  // This tab's own words, to the encrypted draft vault, AS THEY ARE TYPED.
+  // The strip's snapshot poll also files them, but it runs every six seconds
+  // and `pagehide` cannot await an encrypt — so a prompt typed and immediately
+  // reloaded came back as the one before it. Every tab writes its own, front
+  // or not; the vault debounces. Shaped like the snapshot it will be merged
+  // back into, which is why the prompt goes under `setup`.
+  const rememberOwnDraft = (patch) => {
+    const scope = draftScope('video', tabIdRef.current);
+    const current = readDraft(scope) || {};
+    const next = { ...current };
+    let touched = false;
+    if ('prompt' in patch) { next.setup = { ...(current.setup || {}), prompt: patch.prompt }; touched = true; }
+    for (const key of ['cast', 'standIns', 'shotTimeline']) {
+      if (key in patch) { next[key] = patch[key]; touched = true; }
+    }
+    if (touched) writeDraft(scope, next);
+  };
+
   const updateComposerDraft = (patch) => {
+    rememberOwnDraft(patch);
     if (tabActiveRef.current) updateComposerSection('video', patch);
   };
 
@@ -1879,9 +1970,17 @@ export function VideoStudio({
       s.progressReal = 1;
       stopGenerationProgress();
       void playCompletionPing();
-      // The manual timeline captures every finished generation: into the
-      // selected slot when it is empty, as a new segment after it otherwise.
-      if (s.timelineOn) captureTimelineResult(url, model);
+      // Every finished generation lands in the SEQUENCE: into the selected slot
+      // when it is empty, as a new segment after it otherwise.
+      //
+      // Not gated on s.timelineOn any more. The rail shows the SEQUENCE panel
+      // whether or not the scene is open, so a clip that was not captured left
+      // a panel reading "Nothing yet" right after a render finished — which
+      // reads as the sequence being broken rather than as a feature nobody had
+      // switched on. Opening the scene still turns on the arranging and
+      // Auto-continue behaviour; it is no longer what decides whether your own
+      // shots are remembered.
+      captureTimelineResult(url, model);
     }
     bump();
   };
@@ -2453,6 +2552,14 @@ export function VideoStudio({
   };
 
   const timelineAdd = () => {
+    // Opening the scene is implied by asking for the next shot. It used to be a
+    // separate press, and once a finished render started landing in the strip
+    // before the scene was opened, that first press seeded nothing and added
+    // nothing — it flipped a flag and looked broken.
+    if (!s.timelineOn) {
+      s.timelineOn = true;
+      seedTimelineSegments();
+    }
     const next = addTimelineSegment(s.timelineSegments);
     s.timelineSegments = next.segments;
     s.timelineSelectedId = next.selectedId;
@@ -2474,7 +2581,9 @@ export function VideoStudio({
     // The fresh clip is what plays now, not a stale full cut.
     s.timelineShowCombined = false;
     persistTimeline();
-    scheduleTimelineBuild();
+    // Only build the joined cut for a scene somebody has actually opened —
+    // there is nothing to preview otherwise, and the join is not free.
+    if (s.timelineOn) scheduleTimelineBuild();
   };
 
   /* ---- Auto-continue: the next shot picks up from the previous clip ---- */
@@ -2959,6 +3068,13 @@ export function VideoStudio({
       sheets: s.sharedIngredientSheets,
     });
     const hasIngredientReferences = isHivemindLocal && Boolean(model?.supportsIngredientImages) && activeItems.length > 0;
+    // An ingredients lane with nothing attached: the IC-LoRA graph has no sheet
+    // to condition on, so this run goes to the family's plain text-to-video lane
+    // instead of being refused. Null when the registry names no such lane.
+    const ingredientsOffTarget = isHivemindLocal && Boolean(model?.supportsIngredientImages)
+      && !hasIngredientReferences && !setup.imageUrl
+      ? textToVideoWorkflowForHivemindModel(setup.modelId)
+      : null;
 
     // ── Validation (aborts stay aborts; alert() → toast.error()) ──────────────
     // Head swap needs BOTH media; the readiness line under the Task strip was
@@ -2981,10 +3097,12 @@ export function VideoStudio({
     } else if (isExtendMode) {
       if (!s.lastGenerationId) { toast.error('No Seedance 2.0 generation found to extend. Generate a video first.'); return; }
     } else if (setup.imageMode) {
-      // LTX 2.3 supports text-to-video: for a plain Hivemind LTX model (not an
-      // ingredient/reference-sheet model), a prompt alone is a valid request —
-      // the start frame is optional.
-      const hiveTextToVideo = isHivemindLocal && !model?.supportsIngredientImages;
+      // LTX 2.3 supports text-to-video: for a Hivemind LTX model a prompt alone
+      // is a valid request — the start frame is optional. An ingredients lane
+      // counts too, as long as the registry names a plain lane to run it on
+      // (ingredientsOffTarget): its IC-LoRA is conditioning, not the model.
+      const hiveTextToVideo = isHivemindLocal
+        && (!model?.supportsIngredientImages || Boolean(ingredientsOffTarget));
       if (!setup.imageUrl && !hasIngredientReferences) {
         if (hiveTextToVideo) {
           if (!prompt) { toast.error('Please enter a prompt to generate a video.'); return; }
@@ -2995,7 +3113,7 @@ export function VideoStudio({
           return;
         }
       }
-      if (model?.supportsIngredientImages && !prompt) { toast.error('Please describe the shot to generate from these references.'); return; }
+      if (hasIngredientReferences && !prompt) { toast.error('Please describe the shot to generate from these references.'); return; }
     } else if (!prompt) {
       toast.error('Please enter a prompt to generate a video.');
       return;
@@ -3105,6 +3223,14 @@ export function VideoStudio({
             ...(finishedSheet?.description?.trim() ? { referenceDescription: finishedSheet.description.trim() } : {}),
           } : {}),
         };
+        // Ingredients turned off (or never attached): run the family's plain
+        // text-to-video lane. The IC-LoRA graph builds a reference latent from a
+        // sheet and has no path without one, so sending it here would fail on
+        // the card; the model the user picked stays selected either way, exactly
+        // as the reference and inpaint routings below do.
+        if (ingredientsOffTarget && ingredientsOffTarget.workflowId !== localParams.workflow_id) {
+          localParams.workflow_id = ingredientsOffTarget.workflowId;
+        }
         // One decision, taken in videoTasks.js. No branch here re-reads which
         // uploads exist to guess what kind of job this is.
         const plan = videoRequestPlan(setup);
@@ -3631,9 +3757,20 @@ export function VideoStudio({
       const sheetsWithDescriptions = withVideoIngredientDescriptions(
         s.sharedIngredientSheets, saved.ingredientDescriptions,
       );
-      const savedPrompt = saved.prompt;
+      // A RELOAD already brought this tab's words back on its boot seed,
+      // decrypted from the draft vault (lib/studioTabs.js). This is the COLD
+      // START: a reopened browser has no tab strip, so tab 1 asks the vault
+      // itself. Its own draft outranks the composer's studio-wide one.
+      const ownDraft = readDraft(draftScope('video', tabIdRef.current)) || {};
+      const savedPrompt = ownDraft.setup?.prompt || saved.prompt;
       const savedNegative = saved.negativePrompt;
       const next = { ...s.setup };
+      // Who is in the shot and which words are still stand-ins are prompt text
+      // too, and they are only ever in the vault.
+      for (const field of ['cast', 'standIns', 'shotTimeline']) {
+        const restored = ownDraft[field];
+        if (Array.isArray(restored) && restored.length && !s[field]?.length) s[field] = restored;
+      }
       let changed = false;
       // Descriptions are not part of `setup`, so they get their own flag: they
       // must not drag the setup/cast restore below through a re-derive.
@@ -3961,6 +4098,11 @@ export function VideoStudio({
         // The live prefs, not the last-persisted ones — a background tab stops
         // persisting, so s.persistedVideoPreferences can be stale here.
         persistedVideoPreferences: currentVideoPreferences(),
+        // The clip on the canvas. A duplicate opens showing what its source was
+        // showing, and a reload brings it back — the tab is not "the same setup"
+        // if the thing you were looking at is gone. Run state (history, timers,
+        // progress) still does NOT travel; this is one URL and how it was made.
+        result: s.resultUrl ? { url: s.resultUrl, model: s.resultModel || '' } : null,
       }),
       isBusy: () => Boolean(s.generating || generationQueueRef.current.pending),
       // Cheap enough to call on the strip's poll (snapshot() deep-copies the
@@ -4046,14 +4188,63 @@ export function VideoStudio({
   const dependencyModel = currentModel(s.setup, s.catalogs);
   const dependencyWorkflowId = dependencyModel?.provider === 'hivemind-media-studio' ? String(dependencyModel.workflowId || '') : '';
   const dependencyRunOn = s.setup.rentedMachineId || '';
-  const openDependencyPrompt = async ({ force = false } = {}) => {
+
+  /**
+   * Where to send this tab when its lane refuses.
+   *
+   * The Automatic ladder, applied to the list with every lane already known
+   * to refuse on this pin struck out of it — so the answer is a model that
+   * runs here, and failing that HivemindOS credits, which is the whole point:
+   * a machine that cannot run the selected workflow can nearly always still
+   * run something.
+   */
+  const laneOfTarget = (target) => String(resolveVideoModel(target?.id, s.catalogs)?.workflowId || '');
+  const runnableFallbackTarget = () => {
+    const { targets, machines, readiness } = runTargetsRef.current;
+    const candidates = targetsWithRunnableLanes(targets, { runOn: dependencyRunOn, laneOf: laneOfTarget });
+    return pickRunTarget('video', { catalog: candidates, machines, readiness }).target;
+  };
+
+  /**
+   * @param {object} options
+   * @param {boolean} [options.force] open the prompt whatever the report says
+   *   (the `install-dependencies` remedy, and the notice's own "Set up" button)
+   * @param {boolean} [options.chosen] a person picked this lane in this tab.
+   *   A refusal is then an answer to something they did, and the prompt is
+   *   right. Nobody picked the lane a route arrives on, so a refusal there is
+   *   answered by picking somewhere else instead of by a modal over an empty
+   *   studio.
+   */
+  const openDependencyPrompt = async ({ force = false, chosen = false } = {}) => {
     if (!dependencyWorkflowId) return;
     const request = ++s.dependencyCheckRequest;
+    const blockedId = dependencyWorkflowId;
     try {
-      const report = await checkWorkflowDependencies(localAI, { workflowId: dependencyWorkflowId, runOn: dependencyRunOn, force });
+      const report = await checkWorkflowDependencies(localAI, { workflowId: blockedId, runOn: dependencyRunOn, force });
       if (request !== s.dependencyCheckRequest) return;
       s.dependencyReport = report;
-      s.dependencyPromptOpen = force || dependenciesBlockGeneration(report);
+      if (!dependenciesBlockGeneration(report)) {
+        s.dependencyPromptOpen = force;
+        s.dependencyRevert = null;
+        bump();
+        return;
+      }
+      const fallback = force || chosen ? null : runnableFallbackTarget();
+      if (fallback) {
+        // Not an error and not a stop: the tab keeps working, on something
+        // else, and says so where the model is chosen.
+        s.dependencyPromptOpen = false;
+        chooseRunTarget(fallback, { chosen: false, automatic: s.setup.runOnAutomatic });
+        s.dependencyMoved = { from: report.title || blockedId, to: fallback.label, workflowId: blockedId, report };
+        bump();
+        return;
+      }
+      // Nothing else runs either. Then the prompt IS the way forward — it
+      // installs what can be installed and points at Machines when it cannot.
+      // Any earlier "moved to X" line goes with it: the tab is standing on
+      // the lane that line called blocked, so it is no longer true.
+      s.dependencyMoved = null;
+      s.dependencyPromptOpen = true;
       bump();
     } catch {
       // A lane that cannot be asked is not a lane that is missing things;
@@ -4061,10 +4252,49 @@ export function VideoStudio({
     }
   };
   useEffect(() => {
-    if (!dependencyWorkflowId) { s.dependencyReport = null; s.dependencyPromptOpen = false; return; }
-    void openDependencyPrompt();
+    // Cleared on every pass, including this one: a pick that landed on a lane
+    // with no preflight (a cloud model) must not leave the flag standing for
+    // whatever the studio chooses next.
+    if (!dependencyWorkflowId) {
+      s.dependencyChosen = false;
+      s.dependencyReport = null;
+      s.dependencyPromptOpen = false;
+      return;
+    }
+    const chosen = s.dependencyChosen;
+    s.dependencyChosen = false;
+    void openDependencyPrompt({ chosen });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dependencyWorkflowId, dependencyRunOn]);
+
+  // What the notice says behind "What it needs": the card the workflow wants,
+  // or the download it is short of. Both are already sentences the gateway or
+  // the table wrote — neither is a raw refusal.
+  const dependencyMovedDetail = (report) => (report?.hardware?.supported === false
+    ? String(report.hardware.reason || '')
+    : tf('deps.movedItems', report?.missing?.length || 0, formatDependencyBytes(report?.missing_bytes)));
+
+  // The door back: put the tab on the lane it was moved off, which the effect
+  // answers with the install prompt because this time a person asked for it.
+  const setUpMovedLane = () => {
+    const moved = s.dependencyMoved;
+    s.dependencyMoved = null;
+    if (!moved) { bump(); return; }
+    const listed = runTargetsRef.current.targets.find((row) => laneOfTarget(row) === moved.workflowId);
+    if (listed) chooseRunTarget(listed);
+    else bump();
+  };
+
+  // Backing out of setting a lane up must not leave the tab standing on it:
+  // its Generate could only refuse. Cancel goes back to whatever was running
+  // before the pick — and to the pin that was in force with it.
+  const closeDependencyPrompt = () => {
+    s.dependencyPromptOpen = false;
+    const revert = s.dependencyRevert;
+    s.dependencyRevert = null;
+    if (revert && dependenciesBlockGeneration(s.dependencyReport)) restoreSelection(revert);
+    else bump();
+  };
 
   // Load LoRAs when the active LoRA workflow changes and the section is open.
   const loraWorkflowId = currentVideoLoraModel()?.workflowId || '';
@@ -4163,8 +4393,6 @@ export function VideoStudio({
   /* ---------------- derived render state ---------------- */
 
   const visibility = deriveControlVisibility(s.setup, s.catalogs);
-  const promptUi = derivePromptUi(s.setup, s.catalogs);
-  const extendBanner = deriveExtendBanner(s.setup, s.catalogs);
   const advancedInputs = getAdvancedVideoInputs(model);
   const loraModel = currentVideoLoraModel();
   const ingredientModel = currentIngredientModel(s.setup, s.catalogs);
@@ -4189,6 +4417,7 @@ export function VideoStudio({
     machines: runOnState.machines,
     readiness: runOnState.readiness,
   });
+  runTargetsRef.current = { targets: videoTargets.targets, machines: runOnState.machines, readiness: runOnState.readiness };
   const runOn = {
     targets: videoTargets.targets,
     unreachable: videoTargets.unreachable,
@@ -4228,6 +4457,20 @@ export function VideoStudio({
       sheets: s.sharedIngredientSheets,
     }).length
     : 0;
+  // The plain lane this run would go to, resolved once: the composer banner and
+  // the ingredients panel must name the same one, and generate() must send to
+  // it. Null while a sheet is armed or a start frame is attached — then the run
+  // is the IC graph's own, which is what those inputs are for.
+  const ingredientsFallback = ingredientModel && !activeIngredients && !s.setup.imageUrl
+    ? textToVideoWorkflowForHivemindModel(s.setup.modelId)
+    : null;
+  // These two are declared here rather than up with the other derived state
+  // because both read which ingredient sheet is armed, and that is studio state
+  // rather than setup state.
+  const promptUi = derivePromptUi(s.setup, s.catalogs, { ingredientsActive: activeIngredients > 0 });
+  const extendBanner = deriveExtendBanner(s.setup, s.catalogs, {
+    ingredientsFallbackLabel: ingredientsFallback?.name || '',
+  });
   // The Advanced tier now holds the seed, the refinement switch and the quality
   // tier as well as the adapters, so the closed header names every one of them
   // that is armed. A locked seed or a doubled render time is state that steers
@@ -4262,6 +4505,9 @@ export function VideoStudio({
       previewSignature={ingredientSignature}
       uploadMessage={s.ingredientUploadMessage}
       activeCount={activeIngredients}
+      // What a run with no sheet actually does. Without this the panel's "Off"
+      // state read as a blocked generation, because that is what it used to be.
+      textToVideoLabel={ingredientsFallback?.name || ''}
       onAddViews={addIngredientViews}
       onAddSheets={addIngredientSheets}
       onClear={clearIngredients}
@@ -5117,14 +5363,31 @@ export function VideoStudio({
                 />
               );
             })() : null}
+            {/* The studio moved itself off a lane that cannot run here. Said
+                where the model is chosen, in the composer's own colour rather
+                than in red: nothing failed, and there is a way back on the
+                row. Navigating to this studio used to open the install modal
+                over an empty stage instead. */}
+            {s.dependencyMoved ? (
+              <FailureCallout
+                tone="notice"
+                title={tf('deps.movedTitle', s.dependencyMoved.from, s.dependencyMoved.to)}
+                detail={dependencyMovedDetail(s.dependencyMoved.report)}
+                detailsLabel="What it needs"
+                remedy={{ label: tf('deps.setUpAnyway', s.dependencyMoved.from) }}
+                onRemedy={() => setUpMovedLane()}
+                onDismiss={() => { s.dependencyMoved = null; bump(); }}
+                dismissLabel="Dismiss"
+              />
+            ) : null}
             {s.dependencyPromptOpen && s.dependencyReport && dependencyWorkflowId ? (
               <WorkflowDependencyPrompt
                 report={s.dependencyReport}
                 workflowId={dependencyWorkflowId}
                 runOn={dependencyRunOn}
-                onReport={(report) => { s.dependencyReport = report; bump(); }}
+                onReport={(report) => { s.dependencyReport = report; if (report?.ok) s.dependencyRevert = null; bump(); }}
                 onRemedy={(remedy) => void runFailureRemedy(remedy, {})}
-                onClose={() => { s.dependencyPromptOpen = false; bump(); }}
+                onClose={closeDependencyPrompt}
               />
             ) : null}
           </>
@@ -5371,6 +5634,14 @@ export function VideoStudio({
         continuingFromPrompt={chainArmed
           ? (s.contextStore.recall(s.setup.motionContextUrl)?.prompt || '')
           : ''}
+        // Which shot is being continued, for the helper's banner. The index
+        // lives beside the armed url in the composer's setup and the dialog
+        // cannot derive it from the url alone.
+        continuingFromShot={chainArmed ? chainShot : 0}
+        // The banner is where someone NOTICES the chain is armed, so it is also
+        // where they should be able to drop it — the same handler both composer
+        // chips use, and not the Auto-continue toggle's wider disarm.
+        onStopContinuing={clearMotionContext}
         durationSeconds={Number(s.setup.duration) || null}
         // UGC inverts several of the per-model defaults — speech becomes
         // required rather than optional, polish becomes the failure mode — so

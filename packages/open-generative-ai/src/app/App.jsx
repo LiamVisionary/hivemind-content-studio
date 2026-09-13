@@ -10,17 +10,21 @@
 // - stale-chunk recovery reloads once when a rebuilt dist 404s a lazy import
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast, Toaster } from 'react-hot-toast';
-import { ExploreDock } from '../bridges/ExploreDock.jsx';
+import { HivemindPromptBridge } from '../bridges/HivemindPromptBridge.jsx';
+import { AccountDialog } from '../dialogs/AccountDialog.jsx';
+import { CreditsDialog } from '../dialogs/CreditsDialog.jsx';
 import { MEDIA_DOWNLOAD_BLOCKED_EVENT } from '../lib/downloadMedia.js';
 import { cloudCatalogReady } from '../lib/cloudCatalog.js';
 import { isFirstRunSetup } from '../lib/firstRun.js';
+import { loadWithRetry, recoverFromStaleChunks } from '../lib/lazyChunk.js';
 import { seedMuapiKeyLocation } from '../lib/muapiKey.js';
 import { getPendingJobs } from '../lib/pendingJobs.js';
 import { ensureVaultReady } from '../lib/vaultSession.js';
 import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
 import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
-import { Spinner } from '../ui/kit.jsx';
+import { LoadingState } from '../ui/kit.jsx';
+import { t } from '../lib/i18n.js';
 import { CommandPalette } from './CommandPalette.jsx';
 import { ErrorBoundary } from './ErrorBoundary.jsx';
 import { HUB_PAGES, PAGE_ALIASES, SHORTCUT_ITEMS, isKnownPage } from './navConfig.jsx';
@@ -50,26 +54,6 @@ const STUDIO_LOADERS = {
   restore: () => import('../studios/RestoreStudio.jsx').then((m) => m.RestoreStudio),
 };
 
-// A rebuilt dist replaces hashed chunks; sessions opened before the rebuild 404 on
-// lazy imports. One forced reload fetches fresh index.html; the timestamp guard
-// stops reload loops when the server is really broken.
-const CHUNK_RELOAD_KEY = 'studio.chunkReloadedAt';
-function recoverFromStaleChunks(error) {
-  const message = String(error?.message || error || '');
-  if (!/dynamically imported module|Importing a module script failed/i.test(message)) return;
-  let lastReload = 0;
-  try { lastReload = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY)) || 0; } catch { /* non-critical */ }
-  if (Date.now() - lastReload < 60_000) return;
-  try { sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now())); } catch { /* non-critical */ }
-  window.location.reload();
-}
-
-// One immediate retry absorbs transient failures during dist rebuilds.
-async function loadWithRetry(loader) {
-  try { return await loader(); }
-  catch { return loader(); }
-}
-
 function initialPage() {
   const requested = new URLSearchParams(window.location.search).get('page');
   return isKnownPage(requested) ? requested : 'image';
@@ -97,6 +81,12 @@ export function App() {
   const [studioComps, setStudioComps] = useState({}); // page -> resolved Component, kept mounted
   const [HubComp, setHubComp] = useState(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // The two account sheets are dialogs rather than pages: they are opened from
+  // a row that is on screen on EVERY page, and turning that press into a
+  // navigation would throw away whatever studio the person was in the middle
+  // of. `'account' | 'credits' | ''` — one at a time, and Add credits inside
+  // the account sheet swaps rather than stacks.
+  const [accountSheet, setAccountSheet] = useState('');
   const navTokenRef = useRef(0);
   const pageRef = useRef(null);
   const loadedStudiosRef = useRef({}); // synchronous mirror of studioComps for navigate()
@@ -110,6 +100,19 @@ export function App() {
     if (alias) requestComposerMenu(alias.page, alias.menu);
     if (target === pageRef.current) return; // active-tab re-press: keep the live view
     const token = ++navTokenRef.current;
+
+    // Every route change in the app funnels through here, so this is the one
+    // place that can say WHO asked. Kept in memory (no console noise, nothing
+    // persisted): read `window.__navLog` after a page changes on its own and
+    // the stack names the caller. Added 2026-09-12 after a render finished and
+    // the app moved itself to the Library — every navigate dispatch in the tree
+    // is a click handler, nothing calls history.back(), and the video studio
+    // dispatches none at all, so the next occurrence has to identify itself.
+    try {
+      const log = (window.__navLog = window.__navLog || []);
+      log.push({ at: new Date().toISOString(), from: pageRef.current, to: target, fromHistory, stack: new Error().stack });
+      if (log.length > 40) log.shift();
+    } catch { /* diagnostics must never break a route change */ }
 
     // Keep the URL shareable without reloads; written up front so a stale-chunk
     // recovery reload lands on the requested page. The first route replaces
@@ -204,6 +207,16 @@ export function App() {
     return () => window.removeEventListener('navigate', onNavigate);
   }, [navigate]);
 
+  // Same inbound API for the credits sheet. It is a sheet rather than a page,
+  // so it cannot be reached through 'navigate', and the hub views are not in
+  // Shell's prop chain — without this a hub page wanting "Add credits" has to
+  // grow its own checkout, which is how one balance becomes two.
+  useEffect(() => {
+    const onOpenCredits = () => setAccountSheet('credits');
+    window.addEventListener('open-credits', onOpenCredits);
+    return () => window.removeEventListener('open-credits', onOpenCredits);
+  }, []);
+
   // Initial route, then Back/Forward: the URL is the source of truth.
   useEffect(() => {
     navigate(initialPage());
@@ -293,12 +306,12 @@ export function App() {
         onNavigate={navigate}
         onOpenSettings={() => navigate('settings')}
         onOpenPalette={() => setPaletteOpen(true)}
+        onOpenAccount={() => setAccountSheet('account')}
+        onOpenCredits={() => setAccountSheet('credits')}
       >
         {/* First studio chunk still loading: a centred spinner instead of a black area. */}
         {page === null ? (
-          <div className="grid min-h-0 flex-1 place-items-center" aria-busy="true">
-            <Spinner size={22} className="text-ink3" />
-          </div>
+          <LoadingState label={t('app.loading')} />
         ) : null}
         {/* Studio layer — each visited studio mounts once and is display-toggled,
             so in-flight generations survive tab switches. Only the visible studio
@@ -330,9 +343,23 @@ export function App() {
         onNavigate={navigate}
       />
 
+      {accountSheet === 'account' ? (
+        <ErrorBoundary label="Your account">
+          <AccountDialog
+            onClose={() => setAccountSheet('')}
+            onOpenCredits={() => setAccountSheet('credits')}
+          />
+        </ErrorBoundary>
+      ) : null}
+      {accountSheet === 'credits' ? (
+        <ErrorBoundary label="Credits">
+          <CreditsDialog onClose={() => setAccountSheet('')} />
+        </ErrorBoundary>
+      ) : null}
+
       <VaultRecoveryModal />
       <VaultUnlockModal />
-      <ExploreDock />
+      <HivemindPromptBridge />
       <OutputRestoreDropZone />
       <Toaster
         position="bottom-right"

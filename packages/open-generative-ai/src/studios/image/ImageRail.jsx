@@ -18,8 +18,7 @@
 // the studio already owns (galleryActionsRef → open/download/reuse/upscale), so
 // the memo contract, the seal-keyed download name and the reference cap all
 // keep working exactly as they did.
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { t } from '../../lib/i18n.js';
@@ -27,8 +26,11 @@ import { HIVEMIND_OUTPUT_DRAG_TYPE } from '../../lib/referenceDrop.js';
 import { Icon } from '../../ui/icons.jsx';
 import { MenuItem } from '../../ui/Menu.jsx';
 import { Pill, Spinner, cx } from '../../ui/kit.jsx';
-import { RailCard, RailEmpty, RailHeading, RailOverflow } from '../frame/ResultsRail.jsx';
+import {
+  RailCard, RailEmpty, RailHeading, RailMenu, RailMenuSubject, RailOverflow,
+} from '../frame/ResultsRail.jsx';
 import { formatTook } from './GalleryAndViewer.jsx';
+import { UpscaleOverlay } from './UpscaleOverlay.jsx';
 
 // The design's rail: 96px wide, 48px cards. The card width is fixed and the
 // HEIGHT is the entry's own aspect, which is what makes the column readable at
@@ -99,7 +101,7 @@ function writeOutputDrag(event, url) {
  * renders re-decrypt every thumbnail in the rail.
  */
 const ImageRailCard = memo(function ImageRailCard({
-  entry, selected, onOpen, onMenu,
+  entry, selected, upscaling, onOpen, onMenu,
 }) {
   const src = useMediaSrc(entry.url);
   const holderRef = useRef(null);
@@ -170,6 +172,13 @@ const ImageRailCard = memo(function ImageRailCard({
         {entry?.saved === false ? (
           <span className="pointer-events-none absolute left-1 top-1 h-1.5 w-1.5 rounded-full bg-warn shadow-[0_0_0_2px_rgba(0,0,0,0.55)]" />
         ) : null}
+        {/* The same rim the stage and the viewer wear while this picture is
+            being upscaled, minus the badge — 48px has no room for a sentence,
+            and the surface that IS showing the picture says it in full. A
+            thinner ring at this size. */}
+        {upscaling ? (
+          <UpscaleOverlay label={false} className="rounded-[8px] [--spectral-rim-w:2px]" />
+        ) : null}
       </RailCard>
       {/* The menu's visible door. A nested <button> inside RailCard's button
           would be invalid, so it is a sibling floated over the card's corner.
@@ -196,88 +205,22 @@ const ImageRailCard = memo(function ImageRailCard({
 /**
  * The per-result actions, as one context menu.
  *
- * Portaled to <body> and fixed-positioned rather than anchored inside the card:
- * the frame's rail is overflow-y-auto, and a popover rendered inside it is
- * clipped at the 96px edge and scrolls away with the column. Coordinates are
- * measured after mount, placed to the LEFT of the rail, and clamped to the
- * viewport — the same idiom kit.jsx's HintBubble uses.
+ * The popover itself is the frame's RailMenu — the placement maths (portaled,
+ * fixed, left of the rail, clamped to the viewport) is the same problem in all
+ * three rails and is solved once there. What is here is only WHAT the Image
+ * studio puts inside it.
  */
-function RailActionsMenu({ entry, anchor, canReuse, onClose, onOpen, onDownload, onReuse, onUpscale }) {
-  const panelRef = useRef(null);
-  const [pos, setPos] = useState(null);
-
-  useLayoutEffect(() => {
-    const node = panelRef.current;
-    if (!anchor || !node) return undefined;
-    const place = () => {
-      const target = anchor.getBoundingClientRect();
-      const panel = node.getBoundingClientRect();
-      const margin = 8;
-      const leftOfRail = target.left - panel.width - margin;
-      const next = {
-        left: leftOfRail >= margin
-          ? leftOfRail
-          : Math.max(margin, Math.min(target.right + margin, window.innerWidth - panel.width - margin)),
-        top: Math.min(
-          Math.max(target.top, margin),
-          Math.max(margin, window.innerHeight - panel.height - margin),
-        ),
-      };
-      setPos((prev) => (prev && prev.left === next.left && prev.top === next.top ? prev : next));
-    };
-    place();
-    // Fixed coordinates do not follow the anchor: scrolling the rail under an
-    // open menu would leave it stranded where the card used to be.
-    window.addEventListener('scroll', place, true);
-    window.addEventListener('resize', place);
-    return () => {
-      window.removeEventListener('scroll', place, true);
-      window.removeEventListener('resize', place);
-    };
-  }, [anchor]);
-
-  useEffect(() => {
-    const onDown = (event) => {
-      if (panelRef.current?.contains(event.target)) return;
-      // A press on the card itself is that card's own business — it toggles.
-      if (anchor?.contains?.(event.target)) return;
-      onClose();
-    };
-    // Capture, and stop there: the frame's drawer also listens for Escape on
-    // window, and the topmost transient layer is the one that owns the key —
-    // the same rule the dialogs use ("act only if I am the last one open").
-    const onKey = (event) => {
-      if (event.key !== 'Escape') return;
-      event.stopPropagation();
-      onClose();
-    };
-    document.addEventListener('pointerdown', onDown, true);
-    window.addEventListener('keydown', onKey, true);
-    return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      window.removeEventListener('keydown', onKey, true);
-    };
-  }, [anchor, onClose]);
-
+function RailActionsMenu({ entry, anchor, canReuse, upscaleBusy = false, onClose, onOpen, onDownload, onReuse, onUpscale }) {
   const run = (action, ...args) => {
     onClose();
     action?.(entry, ...args);
   };
 
-  return createPortal(
-    <div
-      ref={panelRef}
-      role="menu"
-      aria-label="Result actions"
-      style={{ position: 'fixed', left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? 'visible' : 'hidden' }}
-      className="hive-scale-in z-[90] w-56 rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop"
-    >
+  return (
+    <RailMenu anchor={anchor} label="Result actions" width="w-56" onClose={onClose}>
       {/* Where the card's hover gradient went: the prompt and the model that
           made this one, which no longer fit on a 48px tile. */}
-      <div className="px-2.5 pb-2 pt-1">
-        <p className="line-clamp-2 text-[12px] leading-snug text-ink2">{entry.prompt || '—'}</p>
-        {entry.model ? <p className="truncate font-mono text-[10px] text-ink3">{entry.model}</p> : null}
-      </div>
+      <RailMenuSubject text={entry.prompt} model={entry.model} />
       <MenuItem icon="eye" onClick={() => run(onOpen)}>View</MenuItem>
       {/* The filename is model-prefixed and keyed on entry.id, never the index:
           the vault seal keys off the id, and an index shifts as runs arrive. */}
@@ -285,7 +228,9 @@ function RailActionsMenu({ entry, anchor, canReuse, onClose, onOpen, onDownload,
       {onUpscale ? (
         // Fast (R-ESRGAN) only from a card, as before — the max-quality variant
         // costs minutes and lives in the viewer, next to the picture it judges.
-        <MenuItem icon="wand" onClick={() => run(onUpscale, 'fast')}>Upscale (hi-res)</MenuItem>
+        <MenuItem icon="wand" disabled={upscaleBusy} onClick={() => run(onUpscale, 'fast')}>
+          {upscaleBusy ? 'Upscaling…' : 'Upscale (hi-res)'}
+        </MenuItem>
       ) : null}
       {canReuse ? (
         <MenuItem icon="plus" onClick={() => run(onReuse)}>Reuse as reference image</MenuItem>
@@ -295,8 +240,7 @@ function RailActionsMenu({ entry, anchor, canReuse, onClose, onOpen, onDownload,
           <Pill tone="warn">{UNSAVED_RESULT_LABEL}</Pill>
         </div>
       ) : null}
-    </div>,
-    document.body,
+    </RailMenu>
   );
 }
 
@@ -308,6 +252,7 @@ function RailActionsMenu({ entry, anchor, canReuse, onClose, onOpen, onDownload,
  *
  * @param {array}  entries      s.history, newest first
  * @param {string} selectedUrl  s.viewerUrl — '' when nothing is open in the viewer
+ * @param {Set}    upscalingUrls  source urls with an upscale in flight
  * @param {bool}   generating   s.generating
  * @param {bool}   canReuse     refsSupported (currentModelSupportsImage())
  * @param {number} limit        cards before the "+N" collapse
@@ -321,6 +266,7 @@ function RailActionsMenu({ entry, anchor, canReuse, onClose, onOpen, onDownload,
 export function ImageRail({
   entries = [],
   selectedUrl = '',
+  upscalingUrls = null,
   generating = false,
   canReuse = false,
   limit = RAIL_LIMIT,
@@ -382,6 +328,9 @@ export function ImageRail({
           // Unchanged from the grid: the viewer's entry when one is open,
           // otherwise the newest — which is what the stage is showing.
           selected={selectedUrl ? selectedUrl === entry.url : idx === 0}
+          // A boolean, not the set: the card is memoised, and a fresh Set every
+          // render would re-decrypt every thumbnail in the rail.
+          upscaling={Boolean(upscalingUrls?.has(entry.url))}
           onOpen={onOpen}
           onMenu={openMenu}
         />
@@ -400,6 +349,7 @@ export function ImageRail({
           entry={menu.entry}
           anchor={menu.anchor}
           canReuse={canReuse}
+          upscaleBusy={Boolean(upscalingUrls?.has(menu.entry.url))}
           onClose={closeMenu}
           onOpen={onOpen}
           onDownload={onDownload}

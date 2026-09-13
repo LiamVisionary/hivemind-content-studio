@@ -82,6 +82,9 @@ ROUTES = (
     # the inline installers (gateway/dependencies.py).
     Route("GET", "get_api_workflow_dependencies", exact=("/api/workflows/dependencies",)),
     Route("GET", "get_api_workflow_dependency_jobs", exact=("/api/workflows/dependencies/jobs",)),
+    # The rendered control a Klein direction edit sends to its LoRA, so the
+    # picker can show the reference rather than a drawing of it.
+    Route("GET", "get_api_direction_reference", exact=("/api/direction-reference",)),
     Route("GET", "get_api_workflow_dependency_job", prefixes=("/api/workflows/dependencies/jobs/",)),
     Route("GET", "get_api_comfy_prompt_by_client", prefixes=("/api/comfy/prompt-by-client/",)),
     # Serves a private output when the name is one of ours, and otherwise

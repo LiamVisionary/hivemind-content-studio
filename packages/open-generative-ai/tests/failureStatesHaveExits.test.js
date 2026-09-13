@@ -255,10 +255,10 @@ test('PassBook never reports a failed request as a missing component', () => {
 // all (in a browser they fell through to the browser's own tab switching).
 // One list now, and this is what holds them to it.
 test('every shortcut the palette advertises is one the app actually binds', async () => {
-    const { NAV_ITEMS, SHORTCUT_ITEMS } = await load('src/app/navConfig.jsx');
+    const { PALETTE_ITEMS, SHORTCUT_ITEMS } = await load('src/app/navConfig.jsx');
     const { buildPaletteEntries } = await load('src/lib/commandPalette.js');
 
-    const advertised = buildPaletteEntries({ navItems: NAV_ITEMS })
+    const advertised = buildPaletteEntries({ navItems: PALETTE_ITEMS })
         .filter((entry) => entry.kind === 'page' && entry.hint)
         .map((entry) => entry.payload.page);
     assert.deepEqual(advertised, SHORTCUT_ITEMS.map((item) => item.page),

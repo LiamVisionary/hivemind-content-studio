@@ -36,8 +36,9 @@ hour and everything you run in it is included. It is a poor deal for one clip:
 an hour's minimum for a four-minute job, plus provisioning, plus remembering to
 destroy it. The hosted lane is the other shape — nothing is running between
 renders, the price is quoted before anything is sent, and each chunk is charged
-as it finishes. The panel's badge says which is which (`Per hour` / `Per render`)
-because getting that choice backwards is what costs money.
+as it finishes. The badge on the row says which is which (`Per hour` /
+`Per render`) because getting that choice backwards is what costs money, and the
+composer's sentence repeats the bill beside the machine's name.
 
 **Why the hosted lane keeps the dissolve and the rented one does not.** It is
 not a feature decision; it is who may read a finished chunk. A rented lane's
@@ -83,7 +84,7 @@ a project is a separate, confirmed action.
 
 "Soften flat detail" is `smartblur` with a negative luma threshold: it blurs
 flat areas and leaves edges alone, so skin texture and sensor grain go while
-eyelashes stay. It is **not** face-aware, and the panel says so.
+eyelashes stay. It is **not** face-aware, and the hint under the slider says so.
 
 ## Where the files live
 
@@ -529,7 +530,7 @@ rather than reimplementing it, so the paid rail cannot drift into different
 pixels than the free one. `test/studio/test_serverless_restore_handler.py`
 asserts the two are byte-identical.
 
-The plan maths exists twice because the panel has to say "14 chunks,
+The plan maths exists twice because the studio has to say "14 chunks,
 2560x1440" while the file is still in the picker, before anything is uploaded.
 `test/studio/test_restore_plan_parity.py` runs the same cases through both
 copies and compares them chunk for chunk — two copies of an arithmetic is one

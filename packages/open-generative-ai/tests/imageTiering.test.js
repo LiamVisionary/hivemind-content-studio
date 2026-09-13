@@ -294,7 +294,10 @@ test('the composer renders its sentence, its doors and one way to improve a prom
 // round doors had no room for were recorded in `more` rather than dropped.
 test('the improve-my-prompt doors stayed merged into one menu', () => {
     const composer = read(COMPOSER);
-    const tools = composer.slice(composer.indexOf('const tools = ('), composer.indexOf('\n  return ('));
+    // Anchored on the return that FOLLOWS the doors, not the file's first one:
+    // ImageComposer.jsx also declares UploadOnlyComposer above the component.
+    const toolsAt = composer.indexOf('const tools = (');
+    const tools = composer.slice(toolsAt, composer.indexOf('\n  return (', toolsAt));
     assert.ok(tools.length > 0, 'the action row still declares its doors');
     // Attach keeps its own trigger rather than riding in a popover: it is more
     // than a door (the attached thumbnails, its own file input, and the
@@ -311,14 +314,21 @@ test('the improve-my-prompt doors stayed merged into one menu', () => {
     assert.match(tools, /\{\.\.\.startersChip\}/);
     assert.match(composer, /label: t\('composer\.starters'\)/);
     // The three separate "make my prompt better" doors are one menu now: one
-    // door, and the three routes as items behind it.
-    const improve = tools.slice(tools.indexOf('{/* Improve:'), tools.indexOf('{/* Starters:'));
+    // door, and the three routes as items behind it. That door left the action
+    // row in 2026-09-12 for the prompt box's own corner — it acts on the words
+    // in the box, like the clear badge it now sits beside — so it is declared
+    // above the row rather than in it, and handed to ComposerPrompt.
+    const improve = composer.slice(composer.indexOf('const improveDoor = ('), composer.indexOf("  /* ---------------- the action row's doors"));
     assert.ok(improve.length > 0, 'the Improve door is still declared');
+    assert.doesNotMatch(tools, /composer\.improve/, 'and no longer among the action row\'s doors');
+    assert.match(composer, /corner=\{improveDoor\}/, 'the box draws it, at the clear badge\'s size');
+    assert.match(improve, /<ComposerPromptAction/, 'so it is 22px, not the row\'s 32');
+    assert.match(improve, /align="end"/, 'and its panel opens back over the composer, not off it');
     assert.match(improve, /label=\{t\('composer\.improve'\)\}/);
     assert.match(improve, /Refine with the prompt helper/);
     assert.match(improve, /helper \? \(/, "and the model's own helper, when it ships one");
     assert.match(improve, /Add style tags/);
-    assert.equal((tools.match(/label=\{t\('composer\.improve'\)\}/g) || []).length, 1, 'one improve door, not three');
+    assert.equal((composer.match(/label=\{t\('composer\.improve'\)\}/g) || []).length, 1, 'one improve door, not three');
     assert.doesNotMatch(composer, /<UgcMenu/);
     assert.doesNotMatch(composer, /<ReferenceRolesMenu[\s\S]{0,80}\/>\s*<Menu/);
     // Quick starters and UGC are sections of the Starters menu.

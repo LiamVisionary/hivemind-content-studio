@@ -55,6 +55,7 @@ export function IngredientsPanel({
   previewSignature,
   uploadMessage,
   activeCount,
+  textToVideoLabel,
   onAddViews,
   onAddSheets,
   onClear,
@@ -112,6 +113,18 @@ export function IngredientsPanel({
           <Pill tone="neutral" dot>Off — tap a sheet to use it</Pill>
         ) : null}
       </div>
+
+      {/* Ingredients are conditioning, not the model: with none attached the
+          shot still renders, on the family's plain text-to-video lane. Saying so
+          here is the difference between an optional panel and one that looks
+          like it is holding the Generate button hostage. */}
+      {!activeCount && textToVideoLabel ? (
+        <div className="text-[11px] leading-relaxed text-ink3">
+          {'Optional. With none selected this generates from the prompt alone, on '}
+          <span className="text-ink2">{textToVideoLabel}</span>
+          {'.'}
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button

@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import sys
 import secrets
 import time
 import urllib.error
@@ -304,6 +305,10 @@ def start_video(
     steps: int | None = None,
     loras: list[dict[str, Any]] | None = None,
     requester_pub: str = "",
+    # Resolved by the CALLER, in its request, and carried: the provider behind
+    # current_owner_spki() reads the account in scope, and the one thing that
+    # must never depend on scope surviving a hop is who can open the result.
+    owner_pub: str = "",
 ) -> dict[str, Any]:
     """Validate + upload the inputs and enqueue the generation, returning as
     soon as the gateway hands back a job id. High-resolution runs can take tens
@@ -462,7 +467,7 @@ def start_video(
         frames = _request_frame_count(
             _workflow_frame_grid(descriptor, workflow_id), duration, frame_rate,
         )
-        client = _client(descriptor, requester_pub)
+        client = _client(descriptor, requester_pub, owner_pub)
         arguments: dict[str, Any] = {
             **({"workflow_id": workflow_id} if workflow_id else {}),
             **({"studio_lane": studio_lane.strip()[:512]} if studio_lane.strip() else {}),
@@ -623,24 +628,38 @@ def _job_step_counts(payload: Any) -> tuple[int | None, int | None]:
 
 
 def _job_progress(payload: Any) -> float | None:
+    """A fraction 0..1 from a job record whose `progress` is a PERCENT.
+
+    The media gateway writes 0-100 everywhere it reports progress at all —
+    `graphs.poll_local_comfy_progress`, `graphs.poll_swift_flux2_progress`,
+    every phase marker in `native_mlx.py`. This clamped into [0, 1] instead of
+    dividing, so the FIRST reading of any run arrived as 1.0: 5% into an LTX
+    render, 12% into a Z-Image one, the studio's bar jumped to its cap and sat
+    there for the rest of the job. Reported on an LTX 2.3 IC-LoRA run showing
+    99% at six seconds with 2:35 still to go.
+    """
     candidates = (payload, payload.get("job"), payload.get("result")) if isinstance(payload, dict) else ()
     for candidate in candidates:
-        if isinstance(candidate, dict) and isinstance(candidate.get("progress"), (int, float)):
-            return max(0.0, min(1.0, float(candidate["progress"])))
+        if not isinstance(candidate, dict):
+            continue
+        value = candidate.get("progress")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        return max(0.0, min(1.0, float(value) / 100.0))
     return None
 
 
 _TERMINAL_STATUS_RE = re.compile(r"\b(success|succeeded|complete|completed|error|failed|cancelled|canceled|running|queued)\b")
 
 
-def check_video(job_id: str, *, requester_pub: str = "") -> dict[str, Any]:
+def check_video(job_id: str, *, requester_pub: str = "", owner_pub: str = "") -> dict[str, Any]:
     """One non-blocking status poll for a started job.
 
     The key must be the SAME one the job was started with: the gateway scopes
     reads on a keyed job to its requester, so polling as anyone else answers as
     though the job did not exist."""
     descriptor = _required_descriptor()
-    client = _client(descriptor, requester_pub)
+    client = _client(descriptor, requester_pub, owner_pub)
     payload = _result_json(client.call_tool(descriptor.job_tool, {"id": job_id, "include_urls": True}))
 
     cached: dict[str, Any] = {}
@@ -737,6 +756,7 @@ def finish_video(
     # 96 GB card can take longer still.
     max_polls: int = 1800,
     requester_pub: str = "",
+    owner_pub: str = "",
 ) -> dict[str, Any]:
     """Wait for a started job to complete, then download + QA the result and
     delete the uploaded inputs from the gateway."""
@@ -744,7 +764,7 @@ def finish_video(
     try:
         video_url = ""
         for index in range(max_polls):
-            state = check_video(job_id, requester_pub=requester_pub)
+            state = check_video(job_id, requester_pub=requester_pub, owner_pub=owner_pub)
             if state["failed"]:
                 raise RuntimeError(state["error"] or "Media Studio reported a failed generation")
             if state["video_url"]:
@@ -800,7 +820,7 @@ def finish_video(
                 _delete_uploaded_image(descriptor, uploaded_name)
 
 
-def cancel_video(job_id: str, *, requester_pub: str = "") -> dict[str, Any]:
+def cancel_video(job_id: str, *, requester_pub: str = "", owner_pub: str = "") -> dict[str, Any]:
     """Ask the backend to stop a running video job, and report how far that got.
 
     Two different facts come back, and conflating them is what made cancelling
@@ -1143,30 +1163,63 @@ def set_owner_spki_provider(provider) -> None:
     _owner_spki_provider = provider
 
 
-def _owner_headers() -> dict[str, str]:
+def current_owner_spki() -> str:
+    """The signed-in account's vault public key, resolved through the provider.
+
+    Callable only inside a request — the provider reads the account in scope.
+    A background task must therefore CAPTURE this at start and carry it, the
+    way the job entry already carries `requester_pub`; asking again from a
+    finisher answers "" and the gateway falls back to whichever account is
+    is_owner on the machine, which is how a workspace-2 user's video came back
+    sealed to workspace 1 (2026-09-12).
+    """
+    provider = _owner_spki_provider
+    if provider is None:
+        return ""
+    try:
+        return normalized_requester_pub(provider() or "")
+    except Exception:
+        return ""
+
+
+def _owner_headers(owner_pub: str = "") -> dict[str, str]:
     """`X-E2E-Owner-Pub` for the account in scope, or nothing.
 
     Never raises and never blocks a generation: an account with no vault yet, or
     a caller outside a request, simply gets no header and the old single-recipient
     behaviour — which is worse, but is not a reason to refuse to generate.
     """
-    provider = _owner_spki_provider
-    if provider is None:
-        return {}
-    try:
-        pub = normalized_requester_pub(provider() or "")
-    except Exception:
-        return {}
+    # An explicitly carried key wins: it is the one the request that STARTED
+    # this job resolved, and it is the only thing a background finisher has.
+    pub = normalized_requester_pub(owner_pub or "") or current_owner_spki()
+    if not pub:
+        # Whose vault seals the output is decided here. Silence at this point is
+        # how a workspace's clips end up sealed to a different account, so it is
+        # said out loud rather than shrugged off.
+        # Name the caller. "Something left without a key" is not actionable;
+        # "start_video left without a key" versus "the background finisher did"
+        # are different bugs with different fixes, and reading the wrong one
+        # cost an afternoon.
+        import traceback
+        callers = " <- ".join(
+            frame.name for frame in reversed(traceback.extract_stack(limit=6)[:-1])
+        )
+        print(
+            "[e2e-media] media-studio call is leaving with NO X-E2E-Owner-Pub "
+            f"(caller: {callers}): no key was carried and no account is in "
+            "scope. The gateway will fall back to this machine's default vault.",
+            file=sys.stderr, flush=True,
+        )
     return {"X-E2E-Owner-Pub": pub} if pub else {}
 
 
-def _client(descriptor: MediaStudioDescriptor, requester_pub: str = "") -> McpHttpClient:
+def _client(descriptor: MediaStudioDescriptor, requester_pub: str = "", owner_pub: str = "") -> McpHttpClient:
     token = _token(descriptor)
     if descriptor.auth_env_key and not token:
         raise RuntimeError(f"Missing {descriptor.auth_env_key} for Media Studio")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     headers.update(_requester_headers(requester_pub))
-    headers.update(_owner_headers())
+    headers.update(_owner_headers(owner_pub))
     return McpHttpClient(descriptor.mcp_url, headers=headers)
 
 

@@ -29,6 +29,7 @@ import { Button, Pill } from '../../ui/kit.jsx';
 import { StageDownloadAction } from '../frame/DownloadAction.jsx';
 import { Stage, StageAction, StageEmpty, StageProgress } from '../frame/Stage.jsx';
 import { activatesCard, formatTook } from './GalleryAndViewer.jsx';
+import { UpscaleOverlay } from './UpscaleOverlay.jsx';
 
 // Aspect strings are recorded as 'W:H' — sometimes a ratio ('9:16'), sometimes
 // the actual pixels ('1024:1024', ImageStudio.jsx:1748). Both parse the same
@@ -145,9 +146,12 @@ export function ImageStageActions({
   onCompare,
   onExpandCanvas,
   onInpaint,
+  onPointEyes,
+  onMoveSun,
   onAngles,
   onSequence,
   onUpscale,
+  upscaleBusy = false,
   onUseAsVideoFrame,
   videoFrameBusy = false,
   onPostToCivitai,
@@ -192,8 +196,10 @@ export function ImageStageActions({
                 seconds; max adds a diffusion refine and can take minutes. */}
             {onUpscale ? (
               <>
-                <MenuItem icon="wand" onClick={() => { close(); onUpscale(entry, 'fast'); }}>Upscale</MenuItem>
-                <MenuItem icon="sparkles" onClick={() => { close(); onUpscale(entry, 'max'); }}>Upscale (max quality)</MenuItem>
+                <MenuItem icon="wand" disabled={upscaleBusy} onClick={() => { close(); onUpscale(entry, 'fast'); }}>
+                  {upscaleBusy ? 'Upscaling…' : 'Upscale'}
+                </MenuItem>
+                <MenuItem icon="sparkles" disabled={upscaleBusy} onClick={() => { close(); onUpscale(entry, 'max'); }}>Upscale (max quality)</MenuItem>
               </>
             ) : null}
             {/* Compare exists only for entries paired with an input: upscales,
@@ -208,6 +214,14 @@ export function ImageStageActions({
             ) : null}
             {onInpaint ? (
               <MenuItem icon="layers" onClick={() => { close(); onInpaint(entry); }}>Edit area</MenuItem>
+            ) : null}
+            {/* Direction edits: the pick is made on the picture, so these open a
+                picker rather than running anything. */}
+            {onPointEyes ? (
+              <MenuItem icon="eye" onClick={() => { close(); onPointEyes(entry); }}>{t('direction.eyesTitle')}</MenuItem>
+            ) : null}
+            {onMoveSun ? (
+              <MenuItem icon="sun" onClick={() => { close(); onMoveSun(entry); }}>{t('direction.sunTitle')}</MenuItem>
             ) : null}
             {/* Viewpoint variants and staged edit chains — the Klein/Qwen edit
                 dialects, not the krea2 one. */}
@@ -254,6 +268,8 @@ export function ImageStage({
   entry = null,
   aspect = '',
   historyCount = 0,
+  // Replaces the "describe it below" line for a model that reads no prompt.
+  emptyHint = '',
   generating = false,
   progressStore = null,
   progressHeading = '',
@@ -271,9 +287,13 @@ export function ImageStage({
   onCompare,
   onExpandCanvas,
   onInpaint,
+  onPointEyes,
+  onMoveSun,
   onAngles,
   onSequence,
   onUpscale,
+  // { mode, startedAt } while an upscale of the entry on show is running.
+  upscaling = null,
   onUseAsVideoFrame,
   videoFrameBusy = false,
   onPostToCivitai,
@@ -292,7 +312,7 @@ export function ImageStage({
       <StageEmpty
         icon="image"
         title="Nothing here yet"
-        hint="Describe the image below and press Generate. Everything you have made before is in the Library."
+        hint={emptyHint || 'Describe the image below and press Generate. Everything you have made before is in the Library.'}
         action={(
           <Button
             size="sm"
@@ -323,7 +343,14 @@ export function ImageStage({
   ) : (entry ? <StageMeta entry={entry} /> : null);
 
   return (
-    <div className="relative grid h-full w-full place-items-center">
+    // min-h-0/min-w-0: this is a GRID ITEM, so its automatic minimum size is its
+    // content — and its content ends up being the picture's NATURAL size, which
+    // the <img> propagates all the way up through the stage. A 1536px output in
+    // a window with 888px of room therefore drew a 1536px stage that ran off the
+    // bottom of the screen, while the SAME stage mid-render (no picture in it
+    // yet, nothing intrinsic to grow on) sat correctly at 888. That mismatch is
+    // what made a finished render jump: measured 888 -> 1536 at 2000x1146.
+    <div className="relative grid h-full min-h-0 w-full min-w-0 place-items-center">
       <Stage aspect={resultAspect} busy={generating} overlay={overlay}>
         {entry ? (
           // Clicking the picture opens the viewer, the way clicking a gallery
@@ -333,7 +360,7 @@ export function ImageStage({
           // reference well or the Video studio, and it is byte-identical to the
           // gallery tile's and the viewer's.
           <div
-            className="h-full w-full cursor-pointer"
+            className="relative h-full w-full cursor-pointer"
             role="button"
             tabIndex={0}
             aria-label="Open full size"
@@ -356,6 +383,11 @@ export function ImageStage({
               onLoad={onImageLoad}
               className="h-full w-full object-contain"
             />
+            {/* The stage holds the picture's OWN aspect, so this box is the
+                picture — the rim takes the frame's corner radius with it. */}
+            {upscaling ? (
+              <UpscaleOverlay mode={upscaling.mode} startedAt={upscaling.startedAt} className="rounded-[12px]" />
+            ) : null}
           </div>
         ) : null}
       </Stage>
@@ -376,9 +408,12 @@ export function ImageStage({
             onCompare={onCompare}
             onExpandCanvas={onExpandCanvas}
             onInpaint={onInpaint}
+            onPointEyes={onPointEyes}
+            onMoveSun={onMoveSun}
             onAngles={onAngles}
             onSequence={onSequence}
             onUpscale={onUpscale}
+            upscaleBusy={Boolean(upscaling)}
             onUseAsVideoFrame={onUseAsVideoFrame}
             videoFrameBusy={videoFrameBusy}
             onPostToCivitai={onPostToCivitai}
