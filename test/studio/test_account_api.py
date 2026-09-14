@@ -524,21 +524,106 @@ def test_only_the_owner_workspace_may_rewrite_the_machines_credentials(client):
     assert client.get("/api/passbook").status_code != 403
 
 
-def test_only_the_owner_workspace_may_spend_the_owners_credit(client):
-    """`/api/hivemindos/models/*` writes reach the owner's balance: connecting
-    swaps whose account the studio bills, and a top-up charges their card."""
+def _gateway_that_names_accounts(monkeypatch, tmp_path: Path) -> None:
+    """A gateway that answers the account row for ANY key, naming the account
+    after the key — so which account a workspace is on can be read off its
+    row. The machine-wide store is pointed at the tmp dir too, or the owner's
+    key would be written into the developer's real data folder."""
+    from hivemind_content_studio import hivemindos_models
+
+    def gateway(path, *, headers=None, **_):
+        token = str((headers or {}).get("X-HivemindOS-Credit-Token") or "")
+        if path.endswith("/credits/balance"):
+            return {"ok": True, "accountId": f"acct-{token[-4:]}", "balanceCredits": 5}
+        if path == "/api/mini-app-account":
+            return {"ok": True, "authenticated": True}
+        if path.startswith("/api/free-models/"):
+            return {"ok": True, "model": {"allowance": {"dailyRequests": 1, "dailyTokens": 1}}}
+        raise AssertionError(f"the fixture has no answer for {path}")
+
+    monkeypatch.setattr(hivemindos_models, "_gateway_request", gateway)
+    monkeypatch.setattr(hivemindos_models, "_store_path", lambda: tmp_path / "hivemindos-models.json")
+
+
+TOKEN_A = "hmos_credit_" + "a" * 30
+TOKEN_B = "hmos_credit_" + "b" * 30
+
+
+def test_each_workspace_holds_its_own_hivemindos_account(client, monkeypatch, tmp_path):
+    """Reported: whichever workspace was signed in, the account row showed the
+    same name. Every workspace now names, backs up and spends its own."""
+    _gateway_that_names_accounts(monkeypatch, tmp_path)
     second = _add_workspace(client, "Second", "second-pass")
+
     _sign_in(client, second, "second-pass")
+    # No account yet, and a name of its own rather than the owner's.
+    before = client.get("/api/hivemindos/account").json()["identity"]
+    assert before["connected"] is False
+    # Connecting is the second workspace's to do — no owner gate — and the
+    # key lands under ITS subtree.
+    assert client.post("/api/hivemindos/models/connect", json={"token": TOKEN_B}).status_code == 200
+    mine = client.get("/api/hivemindos/account").json()["identity"]
+    assert mine["connected"] is True and mine["accountId"] == "acct-bbbb"
+    assert (tmp_path / "accounts" / str(second) / "hivemindos-account.json").is_file()
+    assert client.post("/api/hivemindos/account/handle", json={"handle": "Second Bee"}).status_code == 200
 
-    assert client.post("/api/hivemindos/models/connect", json={"token": "not-mine"}).status_code == 403
-    assert client.post("/api/hivemindos/models/merge-credits", json={"tokens": ["a"]}).status_code == 403
-    assert client.post("/api/hivemindos/models/top-up", json={"amountUsd": 10.0}).status_code == 403
-
-    # The owner is not held by the same gate — it refuses for its own reasons
-    # (the conftest points HivemindOS at a port nothing serves), never 403.
     client.post("/api/accounts/sign-out")
     _sign_in(client, 1, OWNER_PASSWORD)
-    assert client.post("/api/hivemindos/models/connect", json={"token": "owner-token"}).status_code != 403
+    owner = client.get("/api/hivemindos/account").json()["identity"]
+    assert owner["connected"] is False
+    assert owner["handle"] not in {mine["handle"], "Second Bee"}
+    assert owner["handle"] != before["handle"]
+    assert client.post("/api/hivemindos/models/connect", json={"token": TOKEN_A}).status_code == 200
+    assert client.get("/api/hivemindos/account").json()["identity"]["accountId"] == "acct-aaaa"
+    assert "hivemindos-account.json" not in {entry.name for entry in (tmp_path / "accounts" / "1").iterdir()}
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    again = client.get("/api/hivemindos/account").json()["identity"]
+    assert again["accountId"] == "acct-bbbb" and again["handle"] == "Second Bee"
+
+
+def test_a_share_lets_a_sibling_spend_the_owners_credits_over_http(client, monkeypatch, tmp_path):
+    _gateway_that_names_accounts(monkeypatch, tmp_path)
+    second = _add_workspace(client, "Second", "second-pass")
+
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.post("/api/hivemindos/models/connect", json={"token": TOKEN_A}).status_code == 200
+    sheet = client.get("/api/hivemindos/account").json()["sharing"]
+    assert sheet["canShare"] is True and sheet["sharedFrom"] is None
+    assert [(entry["id"], entry["name"], entry["shared"]) for entry in sheet["workspaces"]] == [(second, "Second", False)]
+    # A stranger is refused; the chosen sibling is written.
+    assert client.post("/api/hivemindos/account/share", json={"workspaces": [9999]}).status_code == 400
+    shared = client.post("/api/hivemindos/account/share", json={"workspaces": [second]})
+    assert shared.status_code == 200, shared.text
+    assert shared.json()["sharing"]["workspaces"][0]["shared"] is True
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    row = client.get("/api/hivemindos/account").json()
+    assert row["credits"]["configured"] is True and row["credits"]["source"] == "shared"
+    assert row["sharing"]["sharedFrom"] == {"id": 1, "name": "Owner", "isOwner": True}
+    # Spending is all a share grants: the account is still not this workspace's.
+    assert row["identity"]["connected"] is False
+    assert client.post("/api/hivemindos/account/recovery-key").status_code == 400
+    # …and with nothing of its own there is nothing for it to share onward.
+    assert client.post("/api/hivemindos/account/share", json={"everyone": True}).status_code == 400
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.post("/api/hivemindos/account/share", json={"workspaces": []}).status_code == 200
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    assert client.get("/api/hivemindos/account").json()["credits"]["configured"] is False
+
+
+def test_the_owners_doors_stay_the_owners(client):
+    """What reaches the owner's app — its account key through the link, its
+    wallet — is not a sibling's to press, whatever is shared."""
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, second, "second-pass")
+    assert client.post("/api/hivemindos/models/link-request").status_code == 403
+    assert client.post("/api/hivemindos/account/wallet-pay", json={"amountUsd": 10.0}).status_code == 403
 
 
 # ── first run ────────────────────────────────────────────────────────────────

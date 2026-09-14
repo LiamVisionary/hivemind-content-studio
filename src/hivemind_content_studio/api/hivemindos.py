@@ -5,14 +5,20 @@ the account row's own routes — who this person is, what is left of the free
 allowance, and the four ways credits get onto the balance (card, USDC, a
 monthly plan, and the HivemindOS app's wallet).
 
-The gate on each one is the difference between reading and spending.
-``require_owner`` — any signed-in workspace — reads: a collaborator may see the
-name, the balance and the meter, because those are what the sidebar shows on
-every page. ``require_owner_account`` — the OWNER workspace — is on everything
-that moves money or moves the account: checkout, deposit, subscription, email
-link, the recovery key. That is the same line ``hivemindos_models`` already
-draws, and for the same reason: a workspace exists because the owner approved
-it, and that approval covers generating, not the owner's card.
+Every workspace holds its OWN HivemindOS account (2026-09-14; see
+``hivemindos_models.account_scope``). So the gate on these routes is
+``require_owner`` — any signed-in workspace — for everything that reads or
+moves THAT workspace's account: its balance, its name, its email, its recovery
+key, its plans, its deposits, its checkout. A collaborator topping up here is
+putting money onto an account that is theirs, not the owner's; the store a
+route writes is resolved from the session, so a sibling's key is never in
+reach. Two routes stay on ``require_owner_account`` — the OWNER workspace —
+because what they reach is the owner's: the app-mediated link hands out the
+desktop app's key (the owner's account), and the wallet rail asks the owner's
+app to spend the owner's wallet.
+
+A workspace may lend its credits to siblings (``/account/share``); that is a
+right to SPEND, and none of the routes above reads a shared key.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from .models import (
     AccountEmailStartBody,
     AccountEmailVerifyBody,
     AccountHandleBody,
+    AccountShareBody,
     AccountSubscriptionBody,
     AccountSubscriptionCancelBody,
     AccountWalletClaimBody,
@@ -46,7 +53,7 @@ def register(app, ctx) -> None:
     require_owner = ctx.require_owner
     require_owner_account = ctx.require_owner_account
 
-    @router.post("/api/hivemindos/models/connect", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/models/connect", dependencies=[Depends(require_owner)])
     def hivemindos_models_connect(body: HivemindosConnectBody) -> dict:
         """Point this studio at the owner's HivemindOS account.
 
@@ -74,9 +81,13 @@ def register(app, ctx) -> None:
         would resolve on the wrong machine."""
         return _host_name(host) in _LOOPBACK_NAMES
 
-    @router.post("/api/hivemindos/models/link-request", dependencies=[Depends(require_owner)])
+    @router.post("/api/hivemindos/models/link-request", dependencies=[Depends(require_owner_account)])
     def hivemindos_models_link_request(request: Request) -> dict:
         """Start an app-mediated link and return the deep link that carries it.
+
+        Owner only: what the app hands back is ITS key, which is the owner's
+        account, and the app's prompt cannot say which workspace asked. A
+        sibling that should spend the owner's credits is given them by a share.
 
         The callback is built from the address this request arrived on, so the
         app answers the studio the owner is actually looking at rather than a
@@ -119,7 +130,7 @@ def register(app, ctx) -> None:
         """What the browser polls while the owner is over in the app."""
         return {"ok": True, "state": hivemindos_models.link_state(nonce)}
 
-    @router.post("/api/hivemindos/models/merge-credits", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/models/merge-credits", dependencies=[Depends(require_owner)])
     def hivemindos_models_merge(body: HivemindosMergeBody) -> dict:
         """Fold a second HivemindOS balance into the connected one."""
         try:
@@ -129,15 +140,16 @@ def register(app, ctx) -> None:
                 "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
             }) from exc
 
-    @router.post("/api/hivemindos/models/top-up", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/models/top-up", dependencies=[Depends(require_owner)])
     def hivemindos_models_top_up(body: HivemindosTopUpBody) -> dict:
-        """Start a card checkout for HivemindOS credits, for a studio with no app.
+        """Start a card checkout for HivemindOS credits, onto THIS workspace's account.
 
         Nothing is charged here: the gateway returns its own checkout page and
-        the owner enters the card there. The credit token that comes back is
-        stored on this machine, encrypted, so the next paid ask can spend it.
-        With the HivemindOS app running this refuses instead — credits added
-        there stay one shared balance, and buying a second one would split it.
+        the card is entered there. The credit token that comes back is stored
+        for this workspace, encrypted, so the next paid ask can spend it. For
+        the owner with the HivemindOS app running and no key of their own this
+        refuses instead — credits added there stay one shared balance, and
+        buying a second one would split it.
         """
         try:
             return {"ok": True, **hivemindos_models.start_top_up(amount_usd=body.amountUsd)}
@@ -165,7 +177,7 @@ def register(app, ctx) -> None:
         """
         return {"ok": True, **hivemindos_account.overview(fresh=fresh)}
 
-    @router.post("/api/hivemindos/account/handle", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/handle", dependencies=[Depends(require_owner)])
     def hivemindos_account_handle(body: AccountHandleBody) -> dict:
         """Rename this account on this machine, or clear the name back to the
         derived one."""
@@ -174,7 +186,20 @@ def register(app, ctx) -> None:
         except hivemindos_models.HivemindosModelsError as exc:
             raise _fail(exc) from exc
 
-    @router.post("/api/hivemindos/account/email/link/start", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/share", dependencies=[Depends(require_owner)])
+    def hivemindos_account_share(body: AccountShareBody) -> dict:
+        """Let chosen siblings — or every workspace, including ones added later
+        — spend this workspace's credits. Any workspace may share what it holds;
+        the policy is written on the sharer's side and read at spend time, so
+        turning it off is immediate and no key ever changes hands."""
+        try:
+            return {"ok": True, "sharing": hivemindos_account.set_share(
+                everyone=body.everyone, workspaces=body.workspaces,
+            )}
+        except hivemindos_models.HivemindosModelsError as exc:
+            raise _fail(exc) from exc
+
+    @router.post("/api/hivemindos/account/email/link/start", dependencies=[Depends(require_owner)])
     def hivemindos_account_email_link_start(body: AccountEmailStartBody) -> dict:
         """Send a code that attaches this address to the account held here."""
         try:
@@ -182,7 +207,7 @@ def register(app, ctx) -> None:
         except hivemindos_models.HivemindosModelsError as exc:
             raise _fail(exc) from exc
 
-    @router.post("/api/hivemindos/account/email/link/verify", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/email/link/verify", dependencies=[Depends(require_owner)])
     def hivemindos_account_email_link_verify(body: AccountEmailVerifyBody) -> dict:
         """Finish attaching it. The account is recoverable from here on."""
         try:
@@ -190,7 +215,7 @@ def register(app, ctx) -> None:
         except hivemindos_models.HivemindosModelsError as exc:
             raise _fail(exc) from exc
 
-    @router.post("/api/hivemindos/account/email/signin/start", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/email/signin/start", dependencies=[Depends(require_owner)])
     def hivemindos_account_email_signin_start(body: AccountEmailStartBody) -> dict:
         """Send a code to an address that already has an account."""
         try:
@@ -198,7 +223,7 @@ def register(app, ctx) -> None:
         except hivemindos_models.HivemindosModelsError as exc:
             raise _fail(exc) from exc
 
-    @router.post("/api/hivemindos/account/email/signin/verify", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/email/signin/verify", dependencies=[Depends(require_owner)])
     def hivemindos_account_email_signin_verify(body: AccountEmailVerifyBody) -> dict:
         """Take that account back on this machine, folding in what was here."""
         try:
@@ -206,7 +231,7 @@ def register(app, ctx) -> None:
         except hivemindos_models.HivemindosModelsError as exc:
             raise _fail(exc) from exc
 
-    @router.post("/api/hivemindos/account/recovery-key", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/recovery-key", dependencies=[Depends(require_owner)])
     def hivemindos_account_recovery_key() -> dict:
         """Hand back the account key, once, for someone who wants no email on file.
 
@@ -224,7 +249,7 @@ def register(app, ctx) -> None:
         """The monthly plans, and which one is running."""
         return {"ok": True, **hivemindos_account.subscription()}
 
-    @router.post("/api/hivemindos/account/subscription", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/subscription", dependencies=[Depends(require_owner)])
     def hivemindos_account_subscribe(request: Request, body: AccountSubscriptionBody) -> dict:
         """Start a plan. The card is entered on the gateway's own page."""
         try:
@@ -234,7 +259,7 @@ def register(app, ctx) -> None:
         except hivemindos_models.HivemindosModelsError as exc:
             raise _fail(exc) from exc
 
-    @router.post("/api/hivemindos/account/subscription/cancel", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/subscription/cancel", dependencies=[Depends(require_owner)])
     def hivemindos_account_unsubscribe(body: AccountSubscriptionCancelBody) -> dict:
         """Stop it. Credits already granted stay."""
         try:
@@ -258,7 +283,7 @@ def register(app, ctx) -> None:
         """Which chain and which token a USDC deposit uses."""
         return {"ok": True, **hivemindos_account.deposit_config()}
 
-    @router.post("/api/hivemindos/account/deposit/quote", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/deposit/quote", dependencies=[Depends(require_owner)])
     def hivemindos_account_deposit_quote(body: AccountDepositQuoteBody) -> dict:
         """Reserve an address and an exact amount for one transfer."""
         try:
@@ -266,7 +291,7 @@ def register(app, ctx) -> None:
         except hivemindos_models.HivemindosModelsError as exc:
             raise _fail(exc) from exc
 
-    @router.post("/api/hivemindos/account/deposit/settle", dependencies=[Depends(require_owner_account)])
+    @router.post("/api/hivemindos/account/deposit/settle", dependencies=[Depends(require_owner)])
     def hivemindos_account_deposit_settle(body: AccountDepositSettleBody) -> dict:
         """Claim a transfer that has landed, by its hash."""
         try:

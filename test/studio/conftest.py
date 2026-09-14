@@ -109,6 +109,22 @@ def _no_test_stamps_the_machines_access_ledger():
 
 
 @pytest.fixture(autouse=True)
+def _no_workspace_scope_leaks_between_apps() -> None:
+    """Each test starts with no HivemindOS account scope installed.
+
+    `build_context` installs a process-global provider that closes over ITS
+    app's session ContextVar and accounts store — the same shape as the
+    media-studio owner-key provider. Left in place, the next test's module-
+    level calls would resolve to a workspace directory in a tmp dir pytest has
+    already deleted. Cleared before and after, so a test that wants a scope
+    installs its own.
+    """
+    hivemindos_models.set_account_scope_provider(None, None)
+    yield
+    hivemindos_models.set_account_scope_provider(None, None)
+
+
+@pytest.fixture(autouse=True)
 def _forget_credential_refusals(monkeypatch) -> None:
     """Each test starts with `request_credential`'s refusal memory empty.
 

@@ -183,13 +183,17 @@ function creditsLine(credits, known) {
 /** The second line of the row, and the one that has to stay honest through
  *  every state: a studio that cannot answer must not be drawn as an account
  *  with no credits, which is what the first version of this did. */
-function sublineFor({ known, failed, identity }) {
+function sublineFor({ known, failed, identity, sharing }) {
   // A failed read with something remembered is a STALE reading, and saying so
   // is the honest option — blanking a name we still have helps nobody. A failed
   // read with nothing remembered says nothing at all, because there is nothing.
   if (failed) return identity ? t('account.staleReading') : '';
   if (!known) return '';
-  if (!identity?.connected) return t('account.noAccountYet');
+  // No account of its own — but a sibling may be lending it credits, and then
+  // the balance one row down is real and the line has to say whose it is.
+  if (!identity?.connected) {
+    return sharing?.sharedFrom ? tf('account.usingShared', sharing.sharedFrom.name) : t('account.noAccountYet');
+  }
   // The row's subline is 10.5px and truncates, so it gets the short form; the
   // sheet, which has the width for it, says what signing in actually does.
   return identity.emailLinked
@@ -276,7 +280,7 @@ export function AccountRow({ railed = false, onOpenAccount, onOpenCredits }) {
                 {nameLine}
               </span>
               <span className="block truncate text-[10.5px] leading-tight text-ink3">
-                {sublineFor({ known, failed, identity })}
+                {sublineFor({ known, failed, identity, sharing: overview?.sharing })}
               </span>
             </>
           ) : (

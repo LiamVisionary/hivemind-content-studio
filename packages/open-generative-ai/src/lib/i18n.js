@@ -448,6 +448,9 @@ export const STRINGS = {
     'account.ecosystemHint': 'These are HivemindOS credits. The same balance spends in the HivemindOS desktop and mobile apps, and in every other app on your account.',
     'account.fromApp': 'Using the HivemindOS app’s account on this machine.',
     'account.staleReading': 'Could not refresh — showing the last reading',
+    // No account of its own, but a sibling workspace is lending it credits:
+    // the balance one row down is real, and the line says whose.
+    'account.usingShared': (name) => `Using ${name}’s credits`,
 
     // Credits sheet
     'credits.title': 'Credits',
@@ -508,6 +511,29 @@ export const STRINGS = {
     'credits.copied': 'Copied.',
     'credits.checkoutOpened': 'Checkout opened in a new tab. Come back when it is done.',
     'credits.checkoutBlocked': 'The checkout could not open. Allow pop-ups for this page, or copy the link.',
+    'credits.walletOtherWorkspace': 'The HivemindOS wallet belongs to the owner’s workspace. Pay by card or USDC here.',
+
+    // Sharing credits with other workspaces. Every workspace holds its own
+    // account; the one thing it may hand a sibling is the right to SPEND its
+    // credits, and these are the words for saying who.
+    'credits.share': 'Share credits',
+    'credits.shareTitle': 'Share credits with other workspaces',
+    'credits.shareRowHint': 'Let other workspaces on this Mac spend this balance.',
+    'credits.shareHint': 'A workspace you pick spends this balance on paid models as if it were its own. It never sees the key, and cannot rename the account, attach an email or reveal the recovery key.',
+    'credits.shareNone': 'Only this workspace spends these credits.',
+    'credits.shareAll': 'Shared with every workspace on this Mac.',
+    'credits.shareWith': (names) => `Shared with ${names}.`,
+    'credits.sharedFrom': (name) => `Shared by ${name}`,
+    'credits.sharedFromHint': (name) => `These are ${name}’s credits, lent to this workspace. Paid models spend them; the account stays theirs.`,
+    'credits.shareEveryone': 'Always share with all workspaces',
+    'credits.shareEveryoneHint': 'Includes workspaces added later.',
+    'credits.shareOwnerBadge': 'Owner workspace',
+    'credits.shareCardOn': (name) => `${name} can spend these credits — press to stop`,
+    'credits.shareCardOff': (name) => `${name} cannot spend these credits — press to allow`,
+    'credits.shareCount': (count, total) => `${count} of ${total} workspaces can spend these credits`,
+    'credits.shareNobodyYet': 'There are no other workspaces on this Mac yet. Add one under Settings → Privacy & vault.',
+    'credits.shareSave': 'Save sharing',
+    'credits.shareSaved': 'Sharing updated.',
 
     // Auth Modal
     'auth.title': 'Connect your cloud account',

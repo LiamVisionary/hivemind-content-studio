@@ -11,6 +11,7 @@ and its own media roots:
     <state>/accounts/<id>/vault.sqlite3
                          /prompt-history.sqlite3
                          /canvas-history.sqlite3
+                         /hivemindos-account.json   (not for the owner: see below)
                          /uploads/media-studio-references/
                          /generated/media-studio/
 
@@ -92,6 +93,15 @@ class AccountPaths:
             references_root=root / "uploads" / "media-studio-references",
             outputs_root=root / "generated" / "media-studio",
         )
+
+    @property
+    def hivemindos_account_store(self) -> Path:
+        """This workspace's HivemindOS account — its credit key and its chosen
+        name (hivemindos_models.py). Under the subtree so a deleted workspace
+        takes its key with it. The OWNER never reads this path: its account
+        is the machine-wide store, because machine callers resolve to the
+        owner and must find the same key they always did."""
+        return self.root / "hivemindos-account.json"
 
     def ensure(self) -> "AccountPaths":
         self.references_root.mkdir(parents=True, exist_ok=True)

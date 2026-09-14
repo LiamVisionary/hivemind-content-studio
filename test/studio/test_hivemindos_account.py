@@ -468,3 +468,233 @@ def test_with_no_app_there_is_no_wallet_to_ask(no_app) -> None:
 def test_a_wallet_payment_is_bounded_before_it_is_asked_for(no_app, shared_with_the_app) -> None:
     with pytest.raises(hivemindos_models.HivemindosModelsError):
         hivemindos_account.start_wallet_payment(5000, "http://127.0.0.1:8765/cb")
+
+
+# ------------------------------------------------------ one account each
+#
+# The complaint that led here: two workspaces, one machine with the desktop
+# app on it, and both signed-in people were shown the same account — the
+# same name, the same balance — because the account store was machine-wide
+# and every workspace fell through to the app's vault key. The library and
+# the settings were scoped; the account was not.
+
+def _workspace(tmp_path, account_id: int, name: str, *, is_owner: bool = False):
+    return hivemindos_models.AccountScope(
+        account_id=account_id, name=name, is_owner=is_owner,
+        store_path=tmp_path / "accounts" / str(account_id) / "hivemindos-account.json",
+    )
+
+
+@pytest.fixture
+def two_workspaces(no_app, tmp_path):
+    """An owner and a guest, with the owner in scope unless a test says
+    otherwise (`hivemindos_models.scoped_to`). The directory is a live list so
+    a test can add a third workspace after a share was written."""
+    owner = _workspace(tmp_path, 1, "Owner", is_owner=True)
+    guest = _workspace(tmp_path, 2, "Guest")
+    directory = [owner, guest]
+    hivemindos_models.set_account_scope_provider(lambda: owner, lambda: list(directory))
+    yield {"owner": owner, "guest": guest, "directory": directory}
+    hivemindos_models.set_account_scope_provider(None, None)
+
+
+def test_two_workspaces_with_no_account_yet_are_two_names(two_workspaces) -> None:
+    owner = hivemindos_account.identity()
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        guest = hivemindos_account.identity()
+    assert owner["handle"] != guest["handle"]
+    assert owner["avatar"] != guest["avatar"]
+    # The owner's seed is the one this studio always used, so an upgrade
+    # renames nobody who was here before workspaces got their own accounts.
+    assert owner["handle"] == hivemindos_account.derive_handle(hivemindos_models.device_id())
+
+
+def test_a_key_connected_in_one_workspace_is_not_the_others(two_workspaces, tmp_path) -> None:
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        hivemindos_models.save_credit_token(TOKEN)
+        assert hivemindos_models.credit_token() == TOKEN
+        assert hivemindos_models.credit_source() == "connected"
+    # The owner's store — the machine-wide one — never saw it…
+    assert hivemindos_models.credit_token() == ""
+    assert "creditToken" not in hivemindos_models._read_store()
+    # …because it went under the guest's own subtree, where a deleted
+    # workspace takes it along.
+    assert (tmp_path / "accounts" / "2" / "hivemindos-account.json").is_file()
+
+
+def test_the_apps_vault_key_is_the_owners_alone(two_workspaces, monkeypatch) -> None:
+    """The desktop app's key IS the owner's account. Handing it to every
+    workspace is exactly how two people came to be one name."""
+    monkeypatch.setattr(hivemindos_models, "app_credit_token", lambda: TOKEN)
+    assert hivemindos_models.credit_token() == TOKEN
+    assert hivemindos_models.credit_source() == "app"
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        assert hivemindos_models.credit_token() == ""
+        assert hivemindos_models.credit_source() == ""
+        assert hivemindos_account.identity()["connected"] is False
+
+
+def test_a_chosen_name_belongs_to_one_workspace(two_workspaces, monkeypatch) -> None:
+    monkeypatch.setattr(hivemindos_account, "account_id", lambda **_: "")
+    monkeypatch.setattr(hivemindos_account, "account_status", lambda **_: {"reachable": True})
+    hivemindos_account.set_handle("The Owner")
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        assert hivemindos_account.identity()["handle"] != "The Owner"
+        assert hivemindos_account.identity()["handleIsCustom"] is False
+
+
+# ------------------------------------------------------------ sharing
+#
+# The one thing a workspace may hand another: the right to spend its credits.
+
+def test_a_share_lets_a_sibling_spend_and_nothing_else(two_workspaces) -> None:
+    owner, guest = two_workspaces["owner"], two_workspaces["guest"]
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_account.set_share(everyone=False, workspaces=[guest.account_id])
+
+    with hivemindos_models.scoped_to(guest):
+        # Spending: the owner's key, and the row says whose.
+        assert hivemindos_models.credit_token() == TOKEN
+        assert hivemindos_models.credit_source() == "shared"
+        grant = hivemindos_models.credit_grant()
+        assert grant.sharer.account_id == owner.account_id
+        shared = hivemindos_account.sharing_state()["sharedFrom"]
+        assert shared == {"id": 1, "name": "Owner", "isOwner": True}
+        # Everything about the ACCOUNT is still the guest's own — which is none.
+        assert hivemindos_models.own_credit_token() == ""
+        assert hivemindos_account.identity()["connected"] is False
+        with pytest.raises(hivemindos_models.HivemindosModelsError) as refused:
+            hivemindos_account.recovery_key()
+        assert refused.value.remedy == "connect-account"
+    # And the owner's sheet knows who it reaches.
+    state = hivemindos_account.sharing_state()
+    assert state["sharedFrom"] is None
+    assert [(entry["id"], entry["shared"]) for entry in state["workspaces"]] == [(2, True)]
+
+
+def test_sharing_with_everyone_reaches_a_workspace_added_later(two_workspaces, tmp_path) -> None:
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_account.set_share(everyone=True, workspaces=[])
+    third = _workspace(tmp_path, 3, "Later")
+    two_workspaces["directory"].append(third)
+    with hivemindos_models.scoped_to(third):
+        assert hivemindos_models.credit_token() == TOKEN
+        assert hivemindos_models.credit_source() == "shared"
+
+
+def test_a_workspaces_own_key_beats_a_share(two_workspaces) -> None:
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_account.set_share(everyone=True, workspaces=[])
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        hivemindos_models.save_credit_token(OTHER_TOKEN)
+        assert hivemindos_models.credit_token() == OTHER_TOKEN
+        assert hivemindos_models.credit_source() == "connected"
+        assert hivemindos_account.sharing_state()["sharedFrom"] is None
+
+
+def test_ending_a_share_ends_it_at_once(two_workspaces) -> None:
+    """The policy is read from the sharer's side at spend time; nothing was
+    copied, so there is nothing left behind to keep spending."""
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_account.set_share(everyone=False, workspaces=[2])
+    hivemindos_account.set_share(everyone=False, workspaces=[])
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        assert hivemindos_models.credit_token() == ""
+    assert "creditShare" not in hivemindos_models._read_store()
+
+
+def test_a_share_needs_something_to_share_and_cannot_name_itself(two_workspaces) -> None:
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        with pytest.raises(hivemindos_models.HivemindosModelsError) as refused:
+            hivemindos_account.set_share(everyone=True, workspaces=[])
+        assert refused.value.remedy == "connect-account"
+        # Clearing is always allowed: a workspace that lost its key must still
+        # be able to stop lending it.
+        assert hivemindos_account.set_share(everyone=False, workspaces=[])["all"] is False
+    hivemindos_models.save_credit_token(TOKEN)
+    # Naming yourself is dropped rather than refused; a stranger is refused.
+    assert hivemindos_models.set_credit_share(everyone=False, workspaces=[1, 2])["with"] == [2]
+    with pytest.raises(hivemindos_models.HivemindosModelsError):
+        hivemindos_models.set_credit_share(everyone=False, workspaces=[9])
+
+
+def test_the_owner_is_spent_first_when_two_siblings_share(two_workspaces, tmp_path) -> None:
+    """Which balance a twice-shared workspace spends must not depend on the
+    order the directory happened to list them."""
+    third = _workspace(tmp_path, 3, "Third")
+    two_workspaces["directory"].insert(0, third)
+    with hivemindos_models.scoped_to(third):
+        hivemindos_models.save_credit_token(OTHER_TOKEN)
+        hivemindos_account.set_share(everyone=True, workspaces=[])
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_account.set_share(everyone=True, workspaces=[])
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        assert hivemindos_models.credit_grant().sharer.account_id == 1
+
+
+def test_a_shared_workspace_follows_the_owners_route_only_while_spending_the_owners_credits(
+    two_workspaces, monkeypatch,
+) -> None:
+    """The app on this machine is the OWNER's: its catalog, its pooled balance.
+    A sibling reaches it only as a way of spending what the owner shared."""
+    monkeypatch.setattr(hivemindos_models, "app_is_running", lambda **_: True)
+    monkeypatch.setattr(hivemindos_models, "app_credit_token", lambda: TOKEN)
+    guest = two_workspaces["guest"]
+    assert hivemindos_models.resolve_route() == hivemindos_models.ROUTE_APP
+    with hivemindos_models.scoped_to(guest):
+        assert hivemindos_models.resolve_route() == hivemindos_models.ROUTE_DIRECT
+    hivemindos_account.set_share(everyone=True, workspaces=[])
+    with hivemindos_models.scoped_to(guest):
+        assert hivemindos_models.resolve_route() == hivemindos_models.ROUTE_APP
+        # An account of its own puts it back on its own account, directly.
+        hivemindos_models.save_credit_token(OTHER_TOKEN)
+        assert hivemindos_models.resolve_route() == hivemindos_models.ROUTE_DIRECT
+
+
+def test_the_wallet_rail_is_the_owners(two_workspaces, monkeypatch) -> None:
+    monkeypatch.setattr(hivemindos_models, "app_is_running", lambda **_: True)
+    monkeypatch.setattr(hivemindos_models, "app_credit_token", lambda: TOKEN)
+    hivemindos_account.set_share(everyone=True, workspaces=[])
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        assert hivemindos_account.wallet_pay_blocked_reason() == "other-workspace"
+
+
+def test_the_overview_is_cached_per_workspace(two_workspaces) -> None:
+    """One cache handed the second person to sign in the first person's row for
+    twelve seconds."""
+    opener = gateway_opener({"/api/free-models/": CEILINGS_ONLY})
+    owner = hivemindos_account.overview(opener=opener)
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        guest = hivemindos_account.overview(opener=opener)
+    assert owner["identity"]["handle"] != guest["identity"]["handle"]
+    assert hivemindos_account.overview(opener=opener) is owner
+
+
+def test_the_overviews_parallel_reads_keep_the_workspace(two_workspaces) -> None:
+    """The four reads run on pool threads, which start with no context. The
+    first cut lost the workspace there: a guest who had just connected a key
+    was told "not connected", because each read fell back to the owner."""
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        hivemindos_models.save_credit_token(TOKEN)
+        row = hivemindos_account.overview(opener=gateway_opener({
+            "/api/paid-agents/": {"ok": True, "balanceCredits": 7, "accountId": "acct-guest"},
+            "/api/mini-app-account": {"ok": True, "authenticated": True},
+            "/api/free-models/": CEILINGS_ONLY,
+        }))
+    assert row["identity"]["connected"] is True
+    assert row["identity"]["accountId"] == "acct-guest"
+    assert row["credits"]["configured"] is True
+
+
+def test_a_link_finished_by_the_app_lands_in_the_workspace_that_started_it(two_workspaces) -> None:
+    """The app's callback carries no session. The nonce remembers who asked,
+    so the key it hands back is filed where the person is — not wherever a
+    machine caller happens to resolve."""
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        request = hivemindos_models.start_link("http://127.0.0.1:8765/cb")
+    hivemindos_models.complete_link(request["nonce"], TOKEN, opener=gateway_opener({
+        "/api/paid-agents/": {"ok": True, "balanceCredits": 3},
+    }))
+    assert hivemindos_models.credit_token() == ""
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        assert hivemindos_models.credit_token() == TOKEN

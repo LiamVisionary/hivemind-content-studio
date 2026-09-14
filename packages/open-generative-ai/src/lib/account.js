@@ -40,6 +40,13 @@ export function renameAccount(handle, { signal = null } = {}) {
   return api('/api/hivemindos/account/handle', { handle }, { signal });
 }
 
+/** Who may spend this workspace's credits: every sibling, or the listed ids.
+ *  Written on the sharer's side and read by a sibling at spend time, so the
+ *  key never reaches another workspace and ending a share is immediate. */
+export function setCreditShare({ everyone = false, workspaces = [] } = {}, { signal = null } = {}) {
+  return api('/api/hivemindos/account/share', { everyone, workspaces }, { signal });
+}
+
 export function subscriptionState({ signal = null } = {}) {
   return api('/api/hivemindos/account/subscription', null, { signal });
 }

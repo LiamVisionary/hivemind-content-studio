@@ -47,8 +47,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Iterator
 
 from .config import load_config
 from .hivemindos_hosted_media import DEFAULT_HIVEMINDOS_URL, _dashboard_token
@@ -227,29 +230,152 @@ def _connects(host: str, port: int, timeout: float = 1.0) -> bool:
 
 
 def resolve_route(*, connector: Callable[[str, int], bool] | None = None) -> str:
+    """Which side serves this call: the app when it is running, else direct.
+
+    For a workspace that is not the owner's the app is the owner's — its
+    catalog is the owner's, its balance is the owner's pool — so that
+    workspace is routed through it only while it is SPENDING the owner's
+    shared credits, and goes direct with its own key (or none) otherwise.
+    """
+    scope = account_scope()
+    if scope is not None and not scope.is_owner:
+        grant = credit_grant(scope)
+        if grant is None or grant.sharer is None or not grant.sharer.is_owner:
+            return ROUTE_DIRECT
     return ROUTE_APP if app_is_running(connector=connector) else ROUTE_DIRECT
+
+
+# ------------------------------------------------------------- whose account
+#
+# Every workspace on this machine holds its OWN HivemindOS account: its own
+# credit key and its own chosen name, in its own subtree
+# (`<state>/accounts/<id>/hivemindos-account.json`, see account_scope.py). The
+# one exception is the owner, whose account is the machine-wide store this
+# module always had — the same file that holds the device id and the free
+# tier's records — because the owner IS the machine's person: a machine caller
+# (the MCP, an agent on a machine token, a background thread with no request
+# in scope) resolves to the owner, exactly as an unclaimed run does.
+#
+# Before this, the store was machine-wide for everyone, and with the desktop
+# app installed every workspace fell through to ITS vault key, so two people
+# signing into two workspaces were shown one account with one name. The
+# library and the settings were scoped; the account was not.
+#
+# The scope is a provider the control app installs at boot (the same shape as
+# `media_studio.set_owner_spki_provider`), never a default: with none installed
+# — the CLI, a test — everything reads the machine-wide store as before.
+
+@dataclass(frozen=True)
+class AccountScope:
+    """One workspace, as this module needs to know it."""
+
+    account_id: int
+    name: str
+    is_owner: bool
+    store_path: Path
+    colour: str = ""
+
+
+_scope_provider: Callable[[], AccountScope | None] | None = None
+_directory_provider: Callable[[], list[AccountScope]] | None = None
+# A scope carried across a hop that has no request — the app's link callback
+# finishing a link a workspace started. Set only by `scoped_to`.
+_scope_override: ContextVar[AccountScope | None] = ContextVar("hivemindos_account_scope", default=None)
+
+
+def set_account_scope_provider(
+    scope: Callable[[], AccountScope | None] | None,
+    directory: Callable[[], list[AccountScope]] | None = None,
+) -> None:
+    """Install how the running app answers "which workspace is asking" and
+    "which workspaces exist". Both, because sharing needs the second."""
+    global _scope_provider, _directory_provider
+    _scope_provider = scope
+    _directory_provider = directory
+
+
+def account_scope() -> AccountScope | None:
+    """The workspace this call is for, or None for the machine as a whole."""
+    override = _scope_override.get()
+    if override is not None:
+        return override
+    return _scope_provider() if _scope_provider is not None else None
+
+
+def workspace_directory() -> list[AccountScope]:
+    """Every workspace on this machine, or [] when nothing can say."""
+    if _directory_provider is None:
+        return []
+    try:
+        return list(_directory_provider())
+    except Exception:  # noqa: BLE001 - a directory that cannot be read shares nothing
+        return []
+
+
+@contextmanager
+def scoped_to(scope: AccountScope | None) -> Iterator[None]:
+    """Run a block as `scope`, wherever the request context has gone."""
+    token = _scope_override.set(scope)
+    try:
+        yield
+    finally:
+        _scope_override.reset(token)
 
 
 # ---------------------------------------------------------------- credentials
 
 def _store_path() -> Path:
+    """The machine-wide store: the device id, the free tier's records, and the
+    owner's own account."""
     return load_config().data_dir / "hivemindos-models.json"
 
 
-def _read_store() -> dict[str, Any]:
+_CURRENT = object()
+
+
+def _resolve_scope(scope: Any) -> AccountScope | None:
+    return account_scope() if scope is _CURRENT else scope
+
+
+def _account_store_path(scope: Any = _CURRENT) -> Path:
+    """Where the account of `scope` (default: the one asking) keeps its key
+    and its name. The owner's, and the machine's, is the store above."""
+    resolved = _resolve_scope(scope)
+    if resolved is None or resolved.is_owner:
+        return _store_path()
+    return resolved.store_path
+
+
+def _read_json(path: Path) -> dict[str, Any]:
     try:
-        return json.loads(_store_path().read_text(encoding="utf-8"))
+        loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
-def _write_store(values: dict[str, Any]) -> None:
-    path = _store_path()
+def _write_json(path: Path, values: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(values, indent=1), encoding="utf-8")
     # A bearer token for money lives in here. Owner-only on disk, on top of the
     # encryption, so a stray backup or a shared machine cannot read it.
     os.chmod(path, 0o600)
+
+
+def _read_store() -> dict[str, Any]:
+    return _read_json(_store_path())
+
+
+def _write_store(values: dict[str, Any]) -> None:
+    _write_json(_store_path(), values)
+
+
+def _read_account_store(scope: Any = _CURRENT) -> dict[str, Any]:
+    return _read_json(_account_store_path(scope))
+
+
+def _write_account_store(values: dict[str, Any], scope: Any = _CURRENT) -> None:
+    _write_json(_account_store_path(scope), values)
 
 
 def device_id() -> str:
@@ -368,25 +494,35 @@ def _b64url(value: str) -> bytes:
     return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
 
 
-def credit_source() -> str:
-    """Which key the direct route would spend: the owner's pasted one, the app's,
-    or none. The picker says this out loud — a credential adopted silently from
-    another app is exactly the kind of thing that should be visible."""
-    if _stored_credit_token():
+def _may_use_app_key(scope: AccountScope | None) -> bool:
+    """The app's vault key is the OWNER's account. Only the owner's workspace
+    (and the machine, which is the owner) adopts it; every other workspace
+    would otherwise be shown the owner's name over the owner's balance, which
+    is the bug this scoping exists to end."""
+    return scope is None or scope.is_owner
+
+
+def own_credit_source(scope: Any = _CURRENT) -> str:
+    """Which key THIS workspace holds: one pasted or signed in ("connected"),
+    the app's ("app", owner only), or none. The picker says this out loud — a
+    credential adopted silently from another app is exactly the kind of thing
+    that should be visible."""
+    resolved = _resolve_scope(scope)
+    if _stored_credit_token(resolved):
         return "connected"
-    if app_credit_token():
+    if _may_use_app_key(resolved) and app_credit_token():
         return "app"
     return ""
 
 
-def _stored_credit_token() -> str:
-    """The key this studio was given by hand, if any.
+def _stored_credit_token(scope: Any = _CURRENT) -> str:
+    """The key this workspace was given by hand, if any.
 
     Any token the gateway accepts works — the account's own, or a passkey-minted
     session token from the HivemindOS account page — because both resolve to the
     same credit account, which is the whole point.
     """
-    sealed = str(_read_store().get("creditToken") or "").strip()
+    sealed = str(_read_account_store(scope).get("creditToken") or "").strip()
     if not sealed:
         return ""
     try:
@@ -395,25 +531,137 @@ def _stored_credit_token() -> str:
         return ""
 
 
-def credit_token() -> str:
-    """The key the direct route spends, from wherever it is.
+def own_credit_token(scope: Any = _CURRENT) -> str:
+    """The key this workspace HOLDS — the one its account row names, the one
+    its email and recovery key are about, the one a share hands out.
 
-    A key the owner connected by hand wins over the app's, because connecting one
+    A key connected by hand wins over the app's, because connecting one
     deliberately is a choice and the app's is a convenience.
     """
-    return _stored_credit_token() or app_credit_token()
+    resolved = _resolve_scope(scope)
+    return _stored_credit_token(resolved) or (app_credit_token() if _may_use_app_key(resolved) else "")
 
 
-def save_credit_token(token: str) -> None:
-    store = _read_store()
+@dataclass(frozen=True)
+class CreditGrant:
+    """Whose key a workspace SPENDS: its own, or one shared with it."""
+
+    token: str
+    source: str  # "connected" | "app" | "shared"
+    sharer: AccountScope | None = None
+
+
+def credit_grant(scope: Any = _CURRENT) -> CreditGrant | None:
+    """The key this workspace spends, and where it came from.
+
+    Its own always wins: a workspace that has connected or bought an account is
+    on that account, whatever anyone shares with it. With none of its own it
+    spends the first sibling that shares with it — the owner before anyone
+    else, then by id — and the row says whose.
+    """
+    resolved = _resolve_scope(scope)
+    own = own_credit_token(resolved)
+    if own:
+        return CreditGrant(token=own, source=own_credit_source(resolved))
+    for sharer in sharers_for(resolved):
+        token = own_credit_token(sharer)
+        if token:
+            return CreditGrant(token=token, source="shared", sharer=sharer)
+    return None
+
+
+def credit_source() -> str:
+    """Where the key being spent comes from, or '' when there is none."""
+    grant = credit_grant()
+    return grant.source if grant else ""
+
+
+def credit_token() -> str:
+    """The key the direct route spends, from wherever it is — this
+    workspace's own, or a sibling's shared with it."""
+    grant = credit_grant()
+    return grant.token if grant else ""
+
+
+def save_credit_token(token: str, scope: Any = _CURRENT) -> None:
+    """Keep a key as THIS workspace's own. Never a sibling's store: a share is
+    read from the sharer's side at spend time, not copied."""
+    store = _read_account_store(scope)
     store["creditToken"] = _cipher().encrypt(token.strip())
-    _write_store(store)
+    _write_account_store(store, scope)
 
 
-def forget_credit_token() -> None:
-    store = _read_store()
+def forget_credit_token(scope: Any = _CURRENT) -> None:
+    store = _read_account_store(scope)
     store.pop("creditToken", None)
-    _write_store(store)
+    _write_account_store(store, scope)
+
+
+# ------------------------------------------------------------------- sharing
+#
+# A workspace may let chosen siblings spend its credits, or every sibling —
+# including ones added later. The policy lives on the SHARER's side, in its
+# own account store, and a beneficiary reads it at spend time; nothing is
+# copied into the beneficiary's store, so ending a share ends it at once, and
+# a beneficiary never holds the key at all. What a share grants is spending:
+# the sharer's name, email, recovery key and plans stay the sharer's, because
+# every route that touches those reads the workspace's OWN key.
+
+CREDIT_SHARE_KEY = "creditShare"
+
+
+def credit_share(scope: Any = _CURRENT) -> dict[str, Any]:
+    """Who this workspace shares its credits with: `{"all": bool, "with": [ids]}`."""
+    raw = _read_account_store(scope).get(CREDIT_SHARE_KEY)
+    record = raw if isinstance(raw, dict) else {}
+    chosen: list[int] = []
+    for value in record.get("with") or []:
+        try:
+            chosen.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return {"all": bool(record.get("all")), "with": sorted(set(chosen))}
+
+
+def set_credit_share(*, everyone: bool, workspaces: Iterable[int], scope: Any = _CURRENT) -> dict[str, Any]:
+    """Write the policy. Ids are checked against the workspaces that exist,
+    and a workspace cannot share with itself; nothing else is a refusal — an
+    empty choice is simply "nobody"."""
+    resolved = _resolve_scope(scope)
+    known = {entry.account_id for entry in workspace_directory()}
+    chosen: set[int] = set()
+    for value in workspaces:
+        try:
+            candidate = int(value)
+        except (TypeError, ValueError):
+            raise HivemindosModelsError("Choose workspaces from the list.") from None
+        if resolved is not None and candidate == resolved.account_id:
+            continue
+        if known and candidate not in known:
+            raise HivemindosModelsError("One of those workspaces no longer exists.")
+        chosen.add(candidate)
+    store = _read_account_store(resolved)
+    policy = {"all": bool(everyone), "with": sorted(chosen)}
+    if policy["all"] or policy["with"]:
+        store[CREDIT_SHARE_KEY] = policy
+    else:
+        store.pop(CREDIT_SHARE_KEY, None)
+    _write_account_store(store, resolved)
+    return policy
+
+
+def sharers_for(scope: AccountScope | None) -> list[AccountScope]:
+    """Every OTHER workspace whose share names `scope` — the owner first, then
+    by id, so which balance a twice-shared workspace spends is not a matter of
+    listing order."""
+    if scope is None:
+        return []
+    found = [
+        other for other in workspace_directory()
+        if other.account_id != scope.account_id
+        and (lambda share: share["all"] or scope.account_id in share["with"])(credit_share(other))
+    ]
+    return sorted(found, key=lambda entry: (not entry.is_owner, entry.account_id))
 
 
 # ------------------------------------------------- the free tier's own meter
@@ -488,12 +736,10 @@ def free_allowance_record() -> dict[str, Any]:
 
 
 def store_value(key: str) -> Any:
-    """A plain (unencrypted) value this module's store holds for its siblings.
-
-    `hivemindos_account` keeps the chosen display name here rather than opening
-    a second file beside this one: same owner, same 0600 store, same lifetime as
-    the account it names. Only for values that are NOT credentials — the account
-    key has its own encrypted slot above.
+    """A plain (unencrypted) MACHINE-wide value this module's store holds for
+    its siblings: the free tier's records, which are about this device and not
+    about anyone's account. Only for values that are NOT credentials — the
+    account key has its own encrypted slot above.
     """
     return _read_store().get(key)
 
@@ -506,6 +752,22 @@ def set_store_value(key: str, value: Any) -> None:
     else:
         store[key] = value
     _write_store(store)
+
+
+def account_store_value(key: str, scope: Any = _CURRENT) -> Any:
+    """A plain value that belongs to ONE workspace's account — the chosen
+    display name — kept beside that workspace's key rather than in a second
+    file: same owner, same 0600 store, same lifetime as the account it names."""
+    return _read_account_store(scope).get(key)
+
+
+def set_account_store_value(key: str, value: Any, scope: Any = _CURRENT) -> None:
+    store = _read_account_store(scope)
+    if value is None:
+        store.pop(key, None)
+    else:
+        store[key] = value
+    _write_account_store(store, scope)
 
 
 # What a HivemindOS account token looks like. Checked here so a typo is refused
@@ -922,15 +1184,19 @@ def start_top_up(*, amount_usd: float = 5.0, return_url: str = "",
     Nothing is charged by this call: the card is entered on the gateway's own
     page, by the owner.
     """
-    existing = credit_token()
+    # The workspace's OWN key, never one shared with it: a top-up is money
+    # onto an account, and a beneficiary's card goes onto a new account of
+    # theirs, not onto the sharer's.
+    existing = own_credit_token()
     # With the app running this used to refuse outright, on the reasoning that a
     # checkout here would open a SECOND balance beside the app's. That is only
-    # true when no key resolves: `credit_token` falls back to the app's own vault
-    # key on this machine, and presenting it tops up the very balance the app
-    # spends. So the refusal now applies to the case it was actually about —
-    # no key at all, where the gateway would mint one — and the credits sheet
-    # works with the app open, which is when most people have it open.
-    if not existing and resolve_route() == ROUTE_APP:
+    # true when no key resolves: `own_credit_token` falls back to the app's own
+    # vault key on this machine for the owner, and presenting it tops up the
+    # very balance the app spends. So the refusal now applies to the case it
+    # was actually about — the owner with no key at all, where the gateway
+    # would mint one — and the credits sheet works with the app open, which is
+    # when most people have it open.
+    if not existing and _may_use_app_key(account_scope()) and resolve_route() == ROUTE_APP:
         raise HivemindosModelsError(
             "Add credits in the HivemindOS app, so this studio and the app keep sharing one balance.",
             remedy="open-hivemindos",
@@ -978,7 +1244,10 @@ def start_top_up(*, amount_usd: float = 5.0, return_url: str = "",
 # restart cancels every pending link rather than leaving one openable later.
 
 LINK_TTL_SECONDS = 300.0
-_link_requests: dict[str, float] = {}
+# nonce -> (started, the workspace that asked). The callback arrives from the
+# desktop app with no session, so the key it hands back would otherwise land
+# in whatever scope a machine caller resolves to; the request remembers.
+_link_requests: dict[str, tuple[float, AccountScope | None]] = {}
 _link_results: dict[str, str] = {}
 
 
@@ -986,7 +1255,7 @@ def start_link(callback_url: str) -> dict[str, str]:
     """Mint a one-time link request and the deep link that carries it."""
     _expire_links()
     nonce = secrets.token_urlsafe(32)
-    _link_requests[nonce] = time.monotonic()
+    _link_requests[nonce] = (time.monotonic(), account_scope())
     query = urllib.parse.urlencode({
         "nonce": nonce,
         "callback": callback_url,
@@ -1003,7 +1272,9 @@ def complete_link(nonce: str, token: str, *, opener: Callable[..., Any] = urllib
         # the caller is not the owner's browser, and telling an unknown local
         # process which of those it hit is telling it how to try again.
         raise HivemindosModelsError("That link request is not open.", remedy="connect-account")
-    result = connect_account(token, opener=opener)
+    _started, scope = _link_requests[nonce]
+    with scoped_to(scope):
+        result = connect_account(token, opener=opener)
     _link_requests.pop(nonce, None)
     _link_results[nonce] = "linked"
     return result
@@ -1019,7 +1290,7 @@ def link_state(nonce: str) -> str:
 
 def _expire_links() -> None:
     now = time.monotonic()
-    for nonce, started in list(_link_requests.items()):
+    for nonce, (started, _scope) in list(_link_requests.items()):
         if now - started > LINK_TTL_SECONDS:
             _link_requests.pop(nonce, None)
     # Results are kept only long enough for the browser's next poll.

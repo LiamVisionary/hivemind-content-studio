@@ -34,6 +34,7 @@ import { announceAccountChanged, useAccountOverview } from '../app/AccountRow.js
 import { Icon } from '../ui/icons.jsx';
 import { Button, Field, SectionLabel, Skeleton, TextInput, cx } from '../ui/kit.jsx';
 import { ConfirmModal, Modal } from '../ui/Modal.jsx';
+import { ShareCreditsDialog } from './ShareCreditsDialog.jsx';
 
 /** Open a hosted checkout, and say which of the three things happened. A
  *  blocked pop-up is the common one and it is silent — the sheet has to notice
@@ -241,6 +242,50 @@ function BalanceCard({ loaded, credits, drafts }) {
   );
 }
 
+/* ---------------- sharing ---------------- */
+
+/**
+ * One line on whose credits these are. Pure, so the four states can be
+ * asserted without a render: spending a sibling's; lent to everyone; lent to
+ * named siblings; lent to nobody. A workspace alone on its Mac gets no line —
+ * there is nobody to share with and nothing to say.
+ */
+export function shareLine(sharing) {
+  if (!sharing) return '';
+  if (sharing.sharedFrom) return tf('credits.sharedFrom', sharing.sharedFrom.name);
+  const workspaces = sharing.workspaces || [];
+  if (!workspaces.length) return '';
+  if (sharing.all) return t('credits.shareAll');
+  const names = workspaces.filter((workspace) => workspace.shared).map((workspace) => workspace.name);
+  return names.length ? tf('credits.shareWith', names.join(', ')) : t('credits.shareNone');
+}
+
+/** Under the balance: whose credits these are, and the door to lend them.
+ *  Absent when there is nothing to say — a workspace with no account of its
+ *  own and nobody lending to it, or one alone on this Mac. */
+function SharingRow({ sharing, onShare }) {
+  const line = shareLine(sharing);
+  if (!line) return null;
+  const lent = Boolean(sharing?.sharedFrom);
+  if (!lent && !sharing?.canShare) return null;
+  return (
+    <div className="flex items-center gap-3 rounded-[10px] border border-line1 bg-bg2 px-[13px] py-[11px]">
+      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-[7px] bg-bg3 text-ink2">
+        <Icon name="share" size={14} />
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="text-[12.5px] font-semibold text-ink1">{line}</span>
+        <span className="text-[11px] leading-[1.45] text-ink3">
+          {lent ? tf('credits.sharedFromHint', sharing.sharedFrom.name) : t('credits.shareRowHint')}
+        </span>
+      </span>
+      {lent ? null : (
+        <Button variant="neutral" size="sm" icon="share" onClick={onShare}>{t('credits.share')}</Button>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- USDC ---------------- */
 
 function UsdcPayer({ payer, onPayer, failure }) {
@@ -374,9 +419,11 @@ export function CreditsDialog({ onClose }) {
   const [confirming, setConfirming] = useState(false);
 
   const [catalog, setCatalog] = useState(null);
+  const [sharingOpen, setSharingOpen] = useState(false);
   const stopWallet = useRef(null);
 
   const credits = overview?.credits;
+  const sharing = overview?.sharing;
 
   useEffect(() => {
     let alive = true;
@@ -425,11 +472,13 @@ export function CreditsDialog({ onClose }) {
     return () => window.clearInterval(timer);
   }, [quote]);
 
-  // Two ways the wallet rail cannot work, both knowable before the press and
-  // neither repaired by trying: there is no app on this machine to ask, or the
-  // app pools a different balance from the one this studio spends — in which
-  // case paying from it would top up the wrong account.
+  // Three ways the wallet rail cannot work, all knowable before the press and
+  // none repaired by trying: this is not the owner's workspace (the wallet is
+  // the owner's, in the owner's app), there is no app on this machine to ask,
+  // or the app pools a different balance from the one this studio spends — in
+  // which case paying from it would top up the wrong account.
   const walletReason = {
+    'other-workspace': t('credits.walletOtherWorkspace'),
     'no-app': t('credits.walletLocalOnly'),
     'different-account': t('credits.walletOtherAccount'),
   }[overview?.walletPayBlocked] || '';
@@ -630,6 +679,7 @@ export function CreditsDialog({ onClose }) {
       >
         <div className="flex flex-col gap-[18px]">
           <BalanceCard loaded={loaded} credits={credits} drafts={drafts} />
+          {loaded ? <SharingRow sharing={sharing} onShare={() => setSharingOpen(true)} /> : null}
 
           <div className="flex flex-col gap-3">
             <ModeTabs mode={mode} onMode={setMode} betterRate={betterRate} />
@@ -722,6 +772,14 @@ export function CreditsDialog({ onClose }) {
           </div>
         </div>
       </Modal>
+
+      {sharingOpen ? (
+        <ShareCreditsDialog
+          sharing={sharing}
+          onClose={() => setSharingOpen(false)}
+          onSaved={funded}
+        />
+      ) : null}
 
       <ConfirmModal
         open={confirming}

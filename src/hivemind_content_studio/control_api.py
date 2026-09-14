@@ -703,13 +703,19 @@ def build_control_app(
         below. `require_owner` means "some account", which is right for the
         studio's own work: a workspace exists because the owner approved it,
         and that approval carries generating, renting and publishing. It is
-        wrong for the two things that reach PAST the studio — the machine's
-        shared credential store, which every Hive app on this Mac reads, and
-        the owner's HivemindOS balance, which is money. Overwriting
-        OPENAI_API_KEY there breaks apps a collaborator has never heard of, and
-        a top-up spends the owner's card. Reading stays open on
-        `require_owner`: a collaborator may see WHICH keys are configured (never
-        a value) so they can say what is missing. Writing is the owner's.
+        wrong for what reaches PAST the studio to something that is the
+        owner's: the machine's shared credential store, which every Hive app
+        on this Mac reads (overwriting OPENAI_API_KEY there breaks apps a
+        collaborator has never heard of); the desktop app's account key, which
+        the app-mediated link hands out; and the owner's wallet in that app.
+        Reading stays open on `require_owner`: a collaborator may see WHICH
+        keys are configured (never a value) so they can say what is missing.
+
+        The HivemindOS credit routes left this gate on 2026-09-14, when every
+        workspace got its own account: a top-up from a collaborator's
+        workspace now charges an account that is theirs, and the store each
+        route writes follows the session, so the owner's key is out of reach
+        without any gate at all (api/hivemindos.py).
         """
         account = getattr(request.state, "account", None)
         if account is None:

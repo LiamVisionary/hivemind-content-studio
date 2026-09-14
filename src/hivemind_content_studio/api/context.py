@@ -35,6 +35,7 @@ from fastapi.responses import FileResponse, Response
 
 from .. import __version__
 from ..account_scope import (
+    AccountPaths,
     AccountWorkspaces,
     GatewayOutputClaims,
     NoAccountInScope,
@@ -63,7 +64,7 @@ from ..config import ensure_data_format
 from ..generation_telemetry import record_hivemind_generation_metric
 from ..studio_telemetry import StudioGenerationLedger
 from ..machine_privacy import machine_run_receipt
-from .. import media_studio
+from .. import hivemindos_models, media_studio
 from ..media_studio import sanitize_error_detail
 from ..orchestrator import ContentOrchestrator
 from ..private_access import (
@@ -461,6 +462,33 @@ def build_context(
     # to the browser's device key alone, and an evicted browser key means the
     # media can never be opened again by anyone.
     media_studio.set_owner_spki_provider(lambda: _vault_public_key() or "")
+
+    # And whose HivemindOS ACCOUNT a call names and spends. Each workspace has
+    # its own (key, name, backup) under its subtree; the owner keeps the
+    # machine-wide store, which is also what a machine caller with no session
+    # resolves to — the same rule claim_visible applies to an unclaimed run.
+    # Before this every workspace read one store, and with the desktop app on
+    # the machine all of them fell through to its vault key: one account, one
+    # name, whoever signed in.
+    def _hivemindos_scope_for(account: Account) -> hivemindos_models.AccountScope:
+        return hivemindos_models.AccountScope(
+            account_id=account.id,
+            name=account.name,
+            colour=account.colour,
+            is_owner=account.is_owner,
+            store_path=AccountPaths.under(state_dir, account.id).hivemindos_account_store,
+        )
+
+    def _hivemindos_scope() -> hivemindos_models.AccountScope:
+        account = current_account.get()
+        if account is None:
+            account = account_store.get(owner_account.id) or owner_account
+        return _hivemindos_scope_for(account)
+
+    def _hivemindos_directory() -> list[hivemindos_models.AccountScope]:
+        return [_hivemindos_scope_for(entry) for entry in account_store.list_accounts()]
+
+    hivemindos_models.set_account_scope_provider(_hivemindos_scope, _hivemindos_directory)
 
     def record_prompt(
         draft: StudioRunDraft,

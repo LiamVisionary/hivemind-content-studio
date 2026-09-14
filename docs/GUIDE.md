@@ -76,6 +76,15 @@ one list in three groups, because there are exactly three bills:
 | **HivemindOS credits** | One balance of HivemindOS credits — the same one the HivemindOS app spends. |
 | **Your accounts** | Billed by the provider to an account you already pay for. No HivemindOS credits spent. |
 
+Credits belong to the workspace that is signed in. Each workspace on this Mac
+has its own HivemindOS account — its own name, its own balance, its own backup
+email — and the owner's is the one the HivemindOS app spends. To let another
+workspace spend yours, open **Credits** and press **Share**: pick the
+workspaces, or switch on **Always share with all workspaces**, which covers
+ones added later too. A workspace spending shared credits sees whose they are
+on its account row; it can spend them and nothing else — the account, its name
+and its recovery key stay with the workspace that shared.
+
 At the top of the list is **Automatic**, which is where you start. Automatic
 prefers free and local, and the readout carries the reason with it — the *"free,
 stays here"* half of the line is why, not decoration. Picking a row by hand

@@ -27,10 +27,18 @@ an account it is seeded from this install's device id instead — so a fresh
 studio still has a name — and the handle changes once when an account first
 appears, which is the one moment it is honest for it to change. A person who
 renames it keeps their choice from then on.
+
+**All of this is per workspace.** Each workspace on this machine holds its own
+account (``hivemindos_models.account_scope``): its own key, its own name, its
+own backup. Nothing here reads a sibling's — except by a share, which is the
+one thing a workspace may hand another: the right to SPEND its credits
+(``sharing_state``, ``set_share``). A workspace spending shared credits keeps
+its own name and its own (empty) account; the row says whose credits they are.
 """
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
@@ -144,14 +152,14 @@ def set_handle(name: str) -> dict[str, Any]:
     on an identity the other HivemindOS apps could not see."""
     cleaned = " ".join(str(name or "").split())
     if not cleaned:
-        models.set_store_value(HANDLE_KEY, None)
+        models.set_account_store_value(HANDLE_KEY, None)
         invalidate_overview()
         return identity()
     if not _HANDLE_SHAPE.match(cleaned):
         raise HivemindosModelsError(
             "A name can be up to 24 letters, numbers, spaces, dashes or underscores.",
         )
-    models.set_store_value(HANDLE_KEY, cleaned)
+    models.set_account_store_value(HANDLE_KEY, cleaned)
     invalidate_overview()
     return identity()
 
@@ -163,8 +171,12 @@ def account_status(*, opener: Callable[..., Any] = urllib.request.urlopen) -> di
 
     Never raises: the account row renders on a plane, and an unreachable gateway
     means "we cannot say yet", not an empty sidebar.
+
+    The workspace's OWN key, here and in `account_id`: the row names the person
+    at this workspace, and a workspace spending a sibling's shared credits is
+    still not that sibling.
     """
-    token = models.credit_token()
+    token = models.own_credit_token()
     if not token:
         return {"authenticated": False, "reachable": True}
     try:
@@ -189,7 +201,7 @@ def account_status(*, opener: Callable[..., Any] = urllib.request.urlopen) -> di
 
 def account_id(*, opener: Callable[..., Any] = urllib.request.urlopen) -> str:
     """The gateway's id for this balance — the handle's seed once one exists."""
-    token = models.credit_token()
+    token = models.own_credit_token()
     if not token:
         return ""
     try:
@@ -216,8 +228,8 @@ def identity(
     """
     account = account_id(opener=opener) if account is None else account
     status = account_status(opener=opener) if status is None else status
-    seed = account or models.device_id()
-    stored = str(models.store_value(HANDLE_KEY) or "").strip()
+    seed = account or _local_seed()
+    stored = str(models.account_store_value(HANDLE_KEY) or "").strip()
     return {
         "accountId": account,
         "handle": stored or derive_handle(seed),
@@ -227,12 +239,26 @@ def identity(
         "emailMasked": str(status.get("emailMasked") or ""),
         "passkeyCount": int(status.get("passkeyCount") or 0),
         "connected": bool(account),
-        "source": models.credit_source(),
+        "source": models.own_credit_source(),
         # The one fact the disclaimer turns on: is this key the only thing in
         # the world that can reach these credits?
         "backedUp": bool(status.get("emailLinked")),
         "reachable": bool(status.get("reachable", True)),
     }
+
+
+def _local_seed() -> str:
+    """What names a workspace before it has an account.
+
+    The owner keeps the install's device id — the seed this studio always had,
+    so an upgrade renames nobody. Every other workspace gets the device id with
+    its own id folded in: two people with no account yet should not share a
+    name, which is the complaint that led here.
+    """
+    scope = models.account_scope()
+    if scope is None or scope.is_owner:
+        return models.device_id()
+    return f"{models.device_id()}/workspace/{scope.account_id}"
 
 
 # ------------------------------------------------------------ the free meter
@@ -455,15 +481,22 @@ def _tier_label(model: dict[str, Any]) -> str:
 # used to mean three full round-trips of four calls each. Short enough that a
 # balance never looks wrong for long; every mutation clears it outright.
 _OVERVIEW_TTL_SECONDS = 12.0
-_overview_cache: tuple[float, dict[str, Any]] | None = None
+# Keyed by workspace: one cache would hand the second person to sign in the
+# first person's row for up to twelve seconds.
+_overview_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _scope_key() -> str:
+    scope = models.account_scope()
+    return str(scope.account_id) if scope is not None else "machine"
 
 
 def invalidate_overview() -> None:
-    """Forget the cached read. Called by everything that changes the answer —
-    a rename, a sign-in, a settled deposit, a cancelled plan — so the row never
-    shows a person the state they just left."""
-    global _overview_cache
-    _overview_cache = None
+    """Forget the cached reads. Called by everything that changes the answer —
+    a rename, a sign-in, a settled deposit, a cancelled plan, a share — so the
+    row never shows a person the state they just left. All of them, because a
+    share changes a SIBLING's answer too."""
+    _overview_cache.clear()
 
 
 def overview(
@@ -481,9 +514,9 @@ def overview(
     Sequential was never justified: not one of the four depends on another's
     answer. They were written in the order the sentence reads.
     """
-    global _overview_cache
-    if not fresh and _overview_cache is not None:
-        cached_at, cached = _overview_cache
+    key = _scope_key()
+    if not fresh and key in _overview_cache:
+        cached_at, cached = _overview_cache[key]
         if time.monotonic() - cached_at < _OVERVIEW_TTL_SECONDS:
             return cached
 
@@ -497,11 +530,21 @@ def overview(
             return fallback
 
     no_credits = {"configured": False, "credits": None, "label": "Unknown", "source": ""}
+
+    def in_scope(call: Callable[[], Any], fallback: Any):
+        # A pool thread starts with an EMPTY context: it does not know which
+        # workspace asked, and every one of these four reads resolves the
+        # account from that. Without the copy each read fell back to the
+        # owner, and a second workspace's row — its key just connected — came
+        # back "not connected". One copy per call: a Context can be entered
+        # by one thread at a time.
+        return pool.submit(contextvars.copy_context().run, safely, call, fallback)
+
     with ThreadPoolExecutor(max_workers=4) as pool:
-        credits_call = pool.submit(safely, lambda: models.credits(opener=opener), no_credits)
-        account_call = pool.submit(safely, lambda: account_id(opener=opener), "")
-        status_call = pool.submit(safely, lambda: account_status(opener=opener), {"reachable": False})
-        allowance_call = pool.submit(safely, lambda: allowance(opener=opener), None)
+        credits_call = in_scope(lambda: models.credits(opener=opener), no_credits)
+        account_call = in_scope(lambda: account_id(opener=opener), "")
+        status_call = in_scope(lambda: account_status(opener=opener), {"reachable": False})
+        allowance_call = in_scope(lambda: allowance(opener=opener), None)
         credits = credits_call.result()
         account = account_call.result()
         status = status_call.result()
@@ -516,9 +559,70 @@ def overview(
         # with the row's own read so the credits sheet opens already knowing,
         # rather than learning it from a refused press.
         "walletPayBlocked": wallet_pay_blocked_reason(),
+        # Whose credits this workspace spends, and who it lends its own to.
+        "sharing": sharing_state(),
     }
-    _overview_cache = (time.monotonic(), answer)
+    _overview_cache[key] = (time.monotonic(), answer)
     return answer
+
+
+# ----------------------------------------------------- sharing with siblings
+#
+# The one thing a workspace may hand another: the right to spend its credits.
+# The policy is the sharer's (hivemindos_models.credit_share) and a beneficiary
+# reads it at spend time, so ending a share ends it at once. What it does not
+# hand over is the account — a beneficiary's row keeps its own name, its own
+# (empty) account and its own doors, and every route that backs up, renames,
+# reveals or subscribes reads the workspace's OWN key.
+
+def sharing_state() -> dict[str, Any]:
+    """Who these credits are shared with, and whose this workspace spends.
+
+    `workspaces` is every sibling with whether the current policy reaches it,
+    which is what the share sheet's cards are drawn from; `sharedFrom` names
+    the sibling whose credits this workspace is spending, or None.
+    """
+    scope = models.account_scope()
+    share = models.credit_share()
+    grant = models.credit_grant()
+    siblings = [
+        entry for entry in models.workspace_directory()
+        if scope is None or entry.account_id != scope.account_id
+    ]
+    return {
+        "workspaces": [
+            {
+                "id": entry.account_id,
+                "name": entry.name,
+                "colour": entry.colour,
+                "isOwner": entry.is_owner,
+                "shared": share["all"] or entry.account_id in share["with"],
+            }
+            for entry in siblings
+        ],
+        "all": share["all"],
+        "with": share["with"],
+        # A share needs something to share. The owner with the app's key has
+        # it; a workspace with no account of its own does not, and offering
+        # the sheet would end in a refusal.
+        "canShare": bool(models.own_credit_token()),
+        "sharedFrom": (
+            {"id": grant.sharer.account_id, "name": grant.sharer.name, "isOwner": grant.sharer.is_owner}
+            if grant is not None and grant.sharer is not None else None
+        ),
+    }
+
+
+def set_share(*, everyone: bool, workspaces: list[int]) -> dict[str, Any]:
+    """Let these siblings (or all of them) spend this workspace's credits."""
+    if (everyone or workspaces) and not models.own_credit_token():
+        raise HivemindosModelsError(
+            "Connect an account or add credits before sharing them.",
+            remedy="connect-account",
+        )
+    models.set_credit_share(everyone=everyone, workspaces=workspaces)
+    invalidate_overview()
+    return sharing_state()
 
 
 # ------------------------------------------------------- backing the account up
@@ -561,7 +665,7 @@ def _code(raw: str) -> str:
 
 def email_link_start(email: str, *, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
     """Send a code to attach this address to the account this studio holds."""
-    token = models.credit_token()
+    token = models.own_credit_token()
     if not token:
         raise HivemindosModelsError(
             "There is no account to back up yet. Add credits or sign in first.",
@@ -578,7 +682,7 @@ def email_link_start(email: str, *, opener: Callable[..., Any] = urllib.request.
 def email_link_verify(challenge_id: str, code: str, *,
                       opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
     """Finish attaching the address. From here the account is recoverable."""
-    token = models.credit_token()
+    token = models.own_credit_token()
     if not token:
         raise HivemindosModelsError("There is no account to back up yet.", remedy="connect-account")
     models._gateway_request(
@@ -614,7 +718,7 @@ def email_signin_verify(challenge_id: str, code: str, *,
     signing in fold into it — rather than the account the person just proved
     they own being folded into an anonymous local one.
     """
-    previous = models.credit_token()
+    previous = models.own_credit_token()
     payload = models._gateway_request(
         "/api/mini-app-account/email/signin/verify",
         method="POST", body={"challengeId": _challenge(challenge_id), "code": _code(code)},
@@ -654,7 +758,7 @@ def recovery_key() -> dict[str, Any]:
     there is nothing to generate — a second secret would be a second thing to
     lose.
     """
-    token = models.credit_token()
+    token = models.own_credit_token()
     if not token:
         raise HivemindosModelsError(
             "There is no account yet. Add credits or sign in first.",
@@ -690,7 +794,7 @@ def subscription(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict
         for plan in ((plans_payload or {}).get("plans") or [])
         if isinstance(plan, dict) and plan.get("tier") in SUBSCRIPTION_TIERS
     ]
-    token = models.credit_token()
+    token = models.own_credit_token()
     current = None
     if token:
         try:
@@ -720,7 +824,7 @@ def _tier(raw: str) -> str:
 def subscription_checkout(tier: str, *, return_url: str = "",
                           opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
     """Start a monthly plan. The card is entered on the gateway's page, by them."""
-    token = models.credit_token()
+    token = models.own_credit_token()
     payload = models._gateway_request(
         f"/api/paid-agents/{models.gateway_slug()}/credits/subscription/checkout",
         method="POST",
@@ -748,7 +852,7 @@ def subscription_cancel(confirmation: str, *,
     """Stop the monthly plan. Credits already granted are not clawed back."""
     if confirmation != CANCEL_CONFIRMATION:
         raise HivemindosModelsError("Confirm the cancellation first. Nothing has changed.")
-    token = models.credit_token()
+    token = models.own_credit_token()
     if not token:
         raise HivemindosModelsError("No account is connected.", remedy="connect-account")
     models._gateway_request(
@@ -798,7 +902,7 @@ def deposit_quote(payer: str, amount_usd: float, *,
         raise HivemindosModelsError(
             "Enter the Base address you will send from, so the transfer can be matched to you.",
         )
-    token = models.credit_token()
+    token = models.own_credit_token()
     payload = models._gateway_request(
         "/api/payments/base-usdc/quote",
         method="POST", body={"payer": address, "amountUsd": round(float(amount_usd), 2)},
@@ -829,7 +933,7 @@ def deposit_settle(payment_id: str, transaction_hash: str, *,
         raise HivemindosModelsError("Start a deposit before confirming one.")
     if not _TX_SHAPE.match(tx_hash):
         raise HivemindosModelsError("Paste the transaction hash of the transfer you sent.")
-    token = models.credit_token()
+    token = models.own_credit_token()
     payload = models._gateway_request(
         "/api/payments/base-usdc/settle",
         method="POST", body={"paymentId": identifier, "transactionHash": tx_hash},
@@ -878,10 +982,17 @@ _pay_requests: dict[str, dict[str, Any]] = {}
 def wallet_pay_blocked_reason() -> str:
     """Why the wallet rail cannot be used here, or '' when it can.
 
-    Answered BEFORE the button is pressed, because both reasons are knowable in
-    advance and neither is repaired by trying: there is no app to ask, or the
-    app's balance is not the one this studio spends.
+    Answered BEFORE the button is pressed, because all three reasons are
+    knowable in advance and none is repaired by trying: this is not the owner's
+    workspace, there is no app to ask, or the app's balance is not the one this
+    studio spends.
     """
+    scope = models.account_scope()
+    if scope is not None and not scope.is_owner:
+        # The wallet lives in the owner's app, behind the owner's unlock. A
+        # sibling pressing this would put the owner's money in front of the
+        # owner for a balance that is not theirs to fund.
+        return "other-workspace"
     if models.resolve_route() != ROUTE_APP:
         return "no-app"
     if models.credit_source() != "app":

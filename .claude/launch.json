@@ -152,6 +152,15 @@
         "OPENGEN_API_PROXY=http://127.0.0.1:9987 OPENGEN_LOCAL_AI_PROXY=http://127.0.0.1:9987 npm --prefix packages/open-generative-ai run vite:dev -- --port 6473 --strictPort"
       ],
       "port": 6473
+    },
+    {
+      "name": "open-generative-ai-share-fixture",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "OPENGEN_API_PROXY=http://127.0.0.1:9961 npm --prefix packages/open-generative-ai run vite:dev -- --port 6673 --strictPort"
+      ],
+      "port": 6673
     }
   ]
 }

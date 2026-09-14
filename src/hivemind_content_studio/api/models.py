@@ -346,6 +346,13 @@ class AccountHandleBody(BaseModel):
     handle: str = Field(default="", max_length=24)
 
 
+class AccountShareBody(BaseModel):
+    """Who may spend this workspace's credits: every sibling, or the listed ones."""
+
+    everyone: bool = False
+    workspaces: list[int] = Field(default_factory=list, max_length=64)
+
+
 class AccountEmailStartBody(BaseModel):
     """The address a six-digit code is going to."""
 

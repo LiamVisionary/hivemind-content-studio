@@ -216,3 +216,11 @@ def test_claim_ledgers_record_the_first_claimant_and_match_gateway_records(tmp_p
     assert gateway.claimants_for_records(records) == [2, 2, 2, None, None]
     # Persisted: a fresh handle on the same file sees the same claims.
     assert GatewayOutputClaims(tmp_path / "gateway-output-claims.sqlite3").account_for("job:job-a") == 2
+
+
+def test_the_hivemindos_account_lives_in_the_subtree(tmp_path):
+    """A workspace's credit key and chosen name go with its data, so deleting
+    the workspace deletes them — and a rename, keyed on the id, keeps them."""
+    paths = AccountPaths.under(tmp_path, 2)
+    assert paths.hivemindos_account_store == tmp_path / "accounts" / "2" / "hivemindos-account.json"
+    assert paths.hivemindos_account_store.parent == paths.root
