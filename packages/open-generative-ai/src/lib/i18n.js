@@ -400,11 +400,11 @@ export const STRINGS = {
     'account.freeUnknown': 'Free allowance unknown',
     'account.resetsAt': (time) => `Resets at ${time}`,
     'account.tier': (label) => `${label} tier`,
-    'account.rename': 'Change name',
-    'account.renameLabel': 'Display name',
-    'account.renameHint': 'Shown here only. Up to 24 letters, numbers, spaces, dashes or underscores.',
-    'account.renameReset': 'Use the generated name',
-    'account.renamed': 'Name changed.',
+    'account.rename': 'Change username',
+    'account.renameLabel': 'Username',
+    'account.renameHint': 'One name per person across HivemindOS. 3 to 24 letters, numbers, underscores or hyphens.',
+    'account.renameReset': 'Use the original',
+    'account.renamed': 'Username saved.',
     'account.derivedName': 'A name we made up so you did not have to. Change it whenever you like.',
 
     // Account sheet

@@ -128,13 +128,16 @@ class HivemindosModelsError(RuntimeError):
     """A cloud producer call that failed in a way the owner can act on.
 
     ``remedy`` names the action the studio should offer beside the message —
-    never a bare sentence with nothing to press.
+    never a bare sentence with nothing to press. ``status`` is the HTTP status
+    HivemindOS answered with, or 0 when there was no answer: a caller that
+    treats "refused" and "could not ask" differently needs to tell them apart.
     """
 
-    def __init__(self, message: str, *, remedy: str = "", detail: str = "") -> None:
+    def __init__(self, message: str, *, remedy: str = "", detail: str = "", status: int = 0) -> None:
         super().__init__(message)
         self.remedy = remedy
         self.detail = detail
+        self.status = status
 
 
 # The dev build of the app (`tauri.conf.json` devUrl) serves on 5021; the
@@ -943,26 +946,27 @@ def _http_error(exc: urllib.error.HTTPError, *, where: str) -> HivemindosModelsE
         # not something anyone can act on. Say what it means here.
         return HivemindosModelsError(
             "This model is paid, and no HivemindOS account is connected to this studio.",
-            remedy="connect-account", detail=message,
+            remedy="connect-account", detail=message, status=exc.code,
         )
     if exc.code == 401:
         if where == "gateway":
             return HivemindosModelsError(
-                message or "These credits were not accepted.", remedy="top-up",
+                message or "These credits were not accepted.", remedy="top-up", status=exc.code,
             )
         return HivemindosModelsError(
             message or "This studio is not authorised to reach HivemindOS on this machine.",
-            remedy="link-hivemindos",
+            remedy="link-hivemindos", status=exc.code,
         )
     if exc.code in (403, 404) and ("credit" in message.lower() or "wallet" in message.lower()):
-        return HivemindosModelsError(message, remedy="top-up")
+        return HivemindosModelsError(message, remedy="top-up", status=exc.code)
     if exc.code == 429:
         return HivemindosModelsError(
-            message or "The free allowance for today is used up.", remedy="top-up",
+            message or "The free allowance for today is used up.", remedy="top-up", status=exc.code,
         )
     return HivemindosModelsError(
         message or f"HivemindOS returned HTTP {exc.code}.",
         remedy="open-hivemindos" if (exc.code >= 500 and where == "app") else "",
+        status=exc.code,
     )
 
 

@@ -21,12 +21,15 @@ on the gateway:
 Neither needs a HivemindOS desktop account, and both land on the SAME account
 the desktop and mobile apps use, so credits bought here spend there.
 
-The name is derived, not stored on the gateway: the same account produces the
-same handle on every device because the seed is the account id. Before there is
-an account it is seeded from this install's device id instead — so a fresh
-studio still has a name — and the handle changes once when an account first
-appears, which is the one moment it is honest for it to change. A person who
-renames it keeps their choice from then on.
+The name is a hive username: one global registry on the HivemindOS gateway,
+unique across every person and checked there for decency, so the studio and
+the desktop app show one name and no two people share it. An
+account's first name is derived from its id — the same one on every device —
+and the registry claims it on first read, so a default name cannot be taken out
+from under its account. Before there is an account the name is seeded from this
+install's device id instead, so a fresh studio still has one; it changes once
+when an account first appears, which is the one moment it is honest for it to
+change, and only an account can choose a name of its own.
 
 **All of this is per workspace.** Each workspace on this machine holds its own
 account (``hivemindos_models.account_scope``): its own key, its own name, its
@@ -99,15 +102,30 @@ _NOUNS = (
     "Tundra", "Vireo", "Walrus", "Warbler", "Willow", "Wolf", "Wren", "Zephyr",
 )
 
-# What a person may rename themselves to. Deliberately narrow: this string is
-# rendered raw in the sidebar, so nothing that could pass for markup or a
-# control character gets in.
-_HANDLE_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,23}$")
+# What a hive username may look like — the registry's own shape, checked here
+# only to answer a bad one without a round trip. Deliberately narrow: the name
+# is rendered raw in the sidebar, and it is an identity people will type.
+_HANDLE_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,23}$")
+_HANDLE_SHAPE_MESSAGE = (
+    "A name is 3 to 24 letters, numbers, underscores or hyphens, starting with a letter or number."
+)
 
+# A name chosen on this machine before names were global. Claimed for the
+# account the first time the registry can be asked, then cleared.
 HANDLE_KEY = "handle"
+
+USERNAME_PATH = "/api/mini-app-account/username"
 
 
 def _seed_digest(seed: str) -> bytes:
+    # SHARED WITH HIVEMINDOS. The desktop app's navigation rail shows the same
+    # account, and derives its name and face from this exact digest — see
+    # `src/lib/services/hivemindos-account-identity.ts` there, which is a
+    # byte-for-byte port pinned by `scripts/test-hivemindos-account-panel.mjs`
+    # against vectors taken from this function. The prefix below is therefore
+    # the salt of one shared derivation, not a claim about which app owns it:
+    # changing it here renames every account in the app too, so change both
+    # together or neither.
     return hashlib.sha256(f"hivemind-content-studio-handle:{seed}".encode("utf-8")).digest()
 
 
@@ -146,22 +164,97 @@ def derive_avatar(seed: str) -> dict[str, Any]:
     return {"hue": hue, "hue2": hue2, "monogram": "".join(letters[:2])}
 
 
-def set_handle(name: str) -> dict[str, Any]:
-    """Rename this account, on this machine. Cosmetic by design: the gateway has
-    no display name, and inventing one there would make the studio the authority
-    on an identity the other HivemindOS apps could not see."""
-    cleaned = " ".join(str(name or "").split())
-    if not cleaned:
-        models.set_account_store_value(HANDLE_KEY, None)
-        invalidate_overview()
-        return identity()
-    if not _HANDLE_SHAPE.match(cleaned):
+def set_handle(
+    name: str, *, opener: Callable[..., Any] = urllib.request.urlopen,
+) -> dict[str, Any]:
+    """Claim a hive username for this workspace's account, or "" to return to
+    the derived one.
+
+    The registry decides — whether the name is free, and whether it is decent —
+    and says why when it will not have it ("That name is taken."). Only an
+    account can hold a name: a name kept on this machine alone is how two people
+    came to be called the same thing.
+    """
+    token = models.own_credit_token()
+    if not token:
         raise HivemindosModelsError(
-            "A name can be up to 24 letters, numbers, spaces, dashes or underscores.",
+            "There's no account to name yet. Add credits or sign in first.",
+            remedy="connect-account",
         )
-    models.set_account_store_value(HANDLE_KEY, cleaned)
+    cleaned = str(name or "").strip()
+    if cleaned and not _HANDLE_SHAPE.match(cleaned):
+        raise HivemindosModelsError(_HANDLE_SHAPE_MESSAGE)
+    claimed = _username_call(token, body={"username": cleaned}, opener=opener)
+    models.set_account_store_value(HANDLE_KEY, None)
     invalidate_overview()
-    return identity()
+    return identity(opener=opener, hosted=claimed)
+
+
+def hosted_username(
+    *, opener: Callable[..., Any] = urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """This workspace's account's hive username, as the registry holds it.
+
+    None with no account here, or when the registry cannot be asked — and the
+    derived name then stands in, which is the same name the registry hands an
+    account on its first read, so nothing flips once it answers.
+    """
+    token = models.own_credit_token()
+    if not token:
+        return None
+    try:
+        return _username_call(token, opener=opener)
+    except HivemindosModelsError:
+        return None
+
+
+def _username_call(
+    token: str, *, body: dict[str, Any] | None = None, opener: Callable[..., Any],
+) -> dict[str, Any]:
+    try:
+        payload = models._gateway_request(
+            USERNAME_PATH,
+            method="GET" if body is None else "POST",
+            body=body,
+            headers={CREDIT_TOKEN_HEADER: token},
+            opener=opener,
+        )
+    except HivemindosModelsError as exc:
+        # A refused or taken name is the registry's answer to the person typing,
+        # in its own words. Anything else is a failure to ask, and says so.
+        if exc.status in (400, 409):
+            raise
+        raise HivemindosModelsError(
+            "Too many attempts. Wait a few minutes and try again." if exc.status == 429
+            else "Names can't be changed right now. Try again.",
+            remedy="retry",
+        ) from None
+    username = payload.get("username") if isinstance(payload, dict) and payload.get("ok") is True else None
+    if not isinstance(username, str) or not username:
+        raise HivemindosModelsError("Names can't be changed right now. Try again.", remedy="retry")
+    return {"username": username, "custom": payload.get("custom") is True}
+
+
+def _carry_over_chosen_name(
+    stored: str, hosted: dict[str, Any], *, opener: Callable[..., Any],
+) -> dict[str, Any]:
+    """A name chosen on this machine before names were global, offered to the
+    registry once. Spaces were allowed then and are not now, so they become
+    underscores. Refused or taken, the registry's name stands and the local one
+    is forgotten; only a registry that could not be asked keeps it for later."""
+    token = models.own_credit_token()
+    candidate = "_".join(stored.split())
+    if hosted["custom"] or not token or not _HANDLE_SHAPE.match(candidate):
+        models.set_account_store_value(HANDLE_KEY, None)
+        return hosted
+    try:
+        claimed = _username_call(token, body={"username": candidate}, opener=opener)
+    except HivemindosModelsError as exc:
+        if exc.status in (400, 409):
+            models.set_account_store_value(HANDLE_KEY, None)
+        return hosted
+    models.set_account_store_value(HANDLE_KEY, None)
+    return claimed
 
 
 # --------------------------------------------------------------- who they are
@@ -215,25 +308,42 @@ def account_id(*, opener: Callable[..., Any] = urllib.request.urlopen) -> str:
     return str((payload or {}).get("accountId") or "") if isinstance(payload, dict) else ""
 
 
+_UNASKED: Any = object()
+
+
 def identity(
     *,
     opener: Callable[..., Any] = urllib.request.urlopen,
     account: str | None = None,
     status: dict[str, Any] | None = None,
+    hosted: Any = _UNASKED,
 ) -> dict[str, Any]:
     """The account row's left half: a face, a name, and how safe it is.
 
-    `account` and `status` are injectable so `overview` can fetch them
-    alongside the other two reads instead of after them — see the note there.
+    `account`, `status` and `hosted` are injectable so `overview` can fetch them
+    alongside the other reads instead of after them — see the note there.
     """
     account = account_id(opener=opener) if account is None else account
     status = account_status(opener=opener) if status is None else status
     seed = account or _local_seed()
+    if hosted is _UNASKED:
+        hosted = hosted_username(opener=opener) if account else None
+    if not account:
+        hosted = None
     stored = str(models.account_store_value(HANDLE_KEY) or "").strip()
+    if hosted is not None and stored:
+        hosted = _carry_over_chosen_name(stored, hosted, opener=opener)
+        stored = str(models.account_store_value(HANDLE_KEY) or "").strip()
+    if hosted is not None:
+        handle, custom = hosted["username"], bool(hosted["custom"])
+    else:
+        # The registry could not be asked (or there is no account): the name
+        # this seed always produces, or one chosen here before names were global.
+        handle, custom = (stored or derive_handle(seed)), bool(stored)
     return {
         "accountId": account,
-        "handle": stored or derive_handle(seed),
-        "handleIsCustom": bool(stored),
+        "handle": handle,
+        "handleIsCustom": custom,
         "avatar": derive_avatar(seed),
         "emailLinked": bool(status.get("emailLinked")),
         "emailMasked": str(status.get("emailMasked") or ""),
@@ -495,8 +605,59 @@ def invalidate_overview() -> None:
     """Forget the cached reads. Called by everything that changes the answer —
     a rename, a sign-in, a settled deposit, a cancelled plan, a share — so the
     row never shows a person the state they just left. All of them, because a
-    share changes a SIBLING's answer too."""
+    share changes a SIBLING's answer too. A refused account mint is forgotten
+    with them: what changed may be what it was waiting for."""
     _overview_cache.clear()
+    _ensure_failed_until.clear()
+
+
+_ENSURE_RETRY_SECONDS = 60.0
+_ensure_failed_until: dict[str, float] = {}
+_CREDIT_TOKEN_SHAPE = re.compile(r"hmos_credit_[A-Za-z0-9_-]{20,480}")
+
+
+def ensure_account(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    """Everyone has a HivemindOS account: the owner of a studio that holds no
+    key — none of its own, none of the app's — gets a zero-balance account the
+    first time the row is drawn. Nothing to type: the account is what the name,
+    the Honey total and every linked account hang off, and backing it up with
+    an email is what carries it elsewhere.
+
+    Three cases are left alone on purpose:
+      - a guest workspace: its own key always wins over a share, so an account
+        made for it here would silently end any credits a sibling lends it
+        later. It gets its account the way it always did, by connecting one;
+      - a machine the HivemindOS app has run on (its credit vault exists, or it
+        is answering): the app makes the account and this studio adopts it, so
+        the two never split into two accounts on one machine;
+      - a key already held, or shared with this workspace.
+
+    Never raises (the row renders or the sidebar does not), and a gateway that
+    refused is not asked again for a minute rather than on every draw.
+    """
+    if not models._may_use_app_key(models.account_scope()):
+        return {"created": False, "reason": "workspace"}
+    if models.credit_grant() is not None:
+        return {"created": False, "reason": "held"}
+    if (models.app_home() / models.APP_VAULT_KEY_NAME).exists() or models.app_is_running():
+        return {"created": False, "reason": "app"}
+    key = _scope_key()
+    if time.monotonic() < _ensure_failed_until.get(key, 0.0):
+        return {"created": False, "reason": "waiting"}
+    try:
+        payload = models._gateway_request(
+            "/api/mini-app-account/start", method="POST", body={"app": "studio"}, opener=opener,
+        )
+    except Exception:  # noqa: BLE001 - a meter beside a name, never a crash
+        _ensure_failed_until[key] = time.monotonic() + _ENSURE_RETRY_SECONDS
+        return {"created": False, "reason": "unreachable"}
+    token = str(payload.get("creditToken") or "").strip() if isinstance(payload, dict) else ""
+    if not _CREDIT_TOKEN_SHAPE.fullmatch(token):
+        _ensure_failed_until[key] = time.monotonic() + _ENSURE_RETRY_SECONDS
+        return {"created": False, "reason": "malformed"}
+    models.save_credit_token(token)
+    invalidate_overview()
+    return {"created": True, "accountId": str(payload.get("accountId") or "")}
 
 
 def overview(
@@ -504,14 +665,14 @@ def overview(
 ) -> dict[str, Any]:
     """Everything the account row shows, in one request from the browser.
 
-    **Concurrently**, which is the whole point of the rewrite. This is four
-    network calls — the balance, the account, the free meter, and the account
-    id — and run one after another they took 15 seconds on this machine, most
-    of it inside the gateway's free-model status route (it probes Modal for the
-    container state, and a cold one is slow). Run together the total is the
-    slowest single call instead of the sum of all four.
+    **Concurrently**, which is the whole point of the rewrite. This is five
+    network calls — the balance, the account, the free meter, the account id
+    and the hive username — and run one after another the first four alone took
+    15 seconds on this machine, most of it inside the gateway's free-model
+    status route (it probes Modal for the container state, and a cold one is
+    slow). Run together the total is the slowest single call instead of the sum.
 
-    Sequential was never justified: not one of the four depends on another's
+    Sequential was never justified: not one of them depends on another's
     answer. They were written in the order the sentence reads.
     """
     key = _scope_key()
@@ -519,9 +680,12 @@ def overview(
         cached_at, cached = _overview_cache[key]
         if time.monotonic() - cached_at < _OVERVIEW_TTL_SECONDS:
             return cached
+    # A workspace with no account gets one before its row is read, so the row
+    # has a name, a balance and a total to show from the first draw.
+    ensure_account(opener=opener)
 
     def safely(call: Callable[[], Any], fallback: Any) -> Any:
-        # Each of the four already refuses to raise for its own reasons; this is
+        # Each read already refuses to raise for its own reasons; this is
         # the belt to that pair of braces, because ONE of them throwing inside a
         # pool would otherwise take the whole row down.
         try:
@@ -533,25 +697,27 @@ def overview(
 
     def in_scope(call: Callable[[], Any], fallback: Any):
         # A pool thread starts with an EMPTY context: it does not know which
-        # workspace asked, and every one of these four reads resolves the
+        # workspace asked, and every one of these reads resolves the
         # account from that. Without the copy each read fell back to the
         # owner, and a second workspace's row — its key just connected — came
         # back "not connected". One copy per call: a Context can be entered
         # by one thread at a time.
         return pool.submit(contextvars.copy_context().run, safely, call, fallback)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         credits_call = in_scope(lambda: models.credits(opener=opener), no_credits)
         account_call = in_scope(lambda: account_id(opener=opener), "")
         status_call = in_scope(lambda: account_status(opener=opener), {"reachable": False})
         allowance_call = in_scope(lambda: allowance(opener=opener), None)
+        username_call = in_scope(lambda: hosted_username(opener=opener), None)
         credits = credits_call.result()
         account = account_call.result()
         status = status_call.result()
         free = allowance_call.result()
+        hosted = username_call.result()
 
     answer = {
-        "identity": identity(opener=opener, account=account, status=status),
+        "identity": identity(opener=opener, account=account, status=status, hosted=hosted),
         "credits": credits,
         "allowance": free if free is not None else allowance(opener=opener),
         "route": models.resolve_route(),

@@ -179,8 +179,8 @@ def register(app, ctx) -> None:
 
     @router.post("/api/hivemindos/account/handle", dependencies=[Depends(require_owner)])
     def hivemindos_account_handle(body: AccountHandleBody) -> dict:
-        """Rename this account on this machine, or clear the name back to the
-        derived one."""
+        """Claim a hive username for this workspace's account — one global name,
+        unique across HivemindOS — or clear it back to the derived one."""
         try:
             return {"ok": True, "identity": hivemindos_account.set_handle(body.handle)}
         except hivemindos_models.HivemindosModelsError as exc:

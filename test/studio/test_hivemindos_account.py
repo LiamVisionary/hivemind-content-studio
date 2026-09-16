@@ -135,19 +135,166 @@ def test_a_derived_name_reads_like_a_name() -> None:
     assert len(avatar["monogram"]) == 2
 
 
-def test_a_chosen_name_survives_and_an_empty_one_restores_the_derived_one(no_app, monkeypatch) -> None:
-    monkeypatch.setattr(hivemindos_account, "account_id", lambda **_: "acct-7")
-    monkeypatch.setattr(hivemindos_account, "account_status", lambda **_: {"reachable": True})
+def registry_opener(
+    *, accounts: dict[str, str], seen: list | None = None,
+    refuse: dict[str, tuple[int, str]] | None = None, down: bool = False,
+):
+    """The gateway's hive username registry, keeping its contract: an account's
+    derived name is claimed on first read, a name is one account's across case
+    and separators, and a refusal carries the sentence to show."""
+    held: dict[str, dict] = {}
 
-    assert hivemindos_account.set_handle("Studio Bee")["handle"] == "Studio Bee"
-    assert hivemindos_account.identity()["handleIsCustom"] is True
-    assert hivemindos_account.set_handle("")["handle"] == hivemindos_account.derive_handle("acct-7")
+    def key(name: str) -> str:
+        return name.lower().replace("_", "").replace("-", "")
+
+    def answer(request, status: int, payload: dict):
+        body = json.dumps(payload).encode()
+        if status >= 400:
+            raise urllib.error.HTTPError(request.full_url, status, "", {}, io.BytesIO(body))
+        return FakeResponse(body)
+
+    def opener(request, timeout=None):
+        path = request.full_url.split("gateway.example", 1)[-1]
+        token = request.get_header("X-hivemindos-credit-token") or ""
+        body = json.loads(request.data.decode()) if request.data else None
+        if seen is not None:
+            seen.append({"path": path, "method": request.get_method(), "body": body})
+        if path.endswith("/credits/balance"):
+            return answer(request, 200, {"ok": True, "accountId": accounts[token], "balanceCredits": 5})
+        if path == "/api/mini-app-account":
+            return answer(request, 200, {"ok": True, "authenticated": True})
+        if path == hivemindos_account.USERNAME_PATH:
+            if down:
+                return answer(request, 404, {"ok": False, "error": "Not found."})
+            derived = {"username": hivemindos_account.derive_handle(accounts[token]), "custom": False}
+            if body is None:
+                held.setdefault(token, derived)
+                return answer(request, 200, {"ok": True, **held[token]})
+            name = body["username"]
+            if not name:
+                held[token] = derived
+                return answer(request, 200, {"ok": True, **derived})
+            if refuse and key(name) in refuse:
+                status, sentence = refuse[key(name)]
+                return answer(request, status, {"ok": False, "error": sentence})
+            if any(other != token and key(entry["username"]) == key(name) for other, entry in held.items()):
+                return answer(request, 409, {"ok": False, "error": "That name is taken.", "taken": True})
+            held[token] = {"username": name, "custom": True}
+            return answer(request, 200, {"ok": True, **held[token]})
+        raise AssertionError(f"the fixture has no answer for {path}")
+
+    return opener
 
 
-def test_a_name_that_could_pass_for_markup_is_refused(no_app) -> None:
-    """The handle is rendered raw in the sidebar."""
-    with pytest.raises(hivemindos_models.HivemindosModelsError):
-        hivemindos_account.set_handle("<img src=x onerror=alert(1)>")
+def test_a_chosen_name_is_the_accounts_and_an_empty_one_restores_the_derived_one(no_app) -> None:
+    """Hive usernames live in one registry on the gateway, so a name chosen here
+    is the name the desktop app shows too."""
+    hivemindos_models.save_credit_token(TOKEN)
+    seen: list = []
+    registry = registry_opener(accounts={TOKEN: "acct-7"}, seen=seen)
+
+    first = hivemindos_account.identity(opener=registry)
+    assert first["handle"] == hivemindos_account.derive_handle("acct-7")
+    assert first["handleIsCustom"] is False
+
+    chosen = hivemindos_account.set_handle("Studio_Bee", opener=registry)
+    assert (chosen["handle"], chosen["handleIsCustom"]) == ("Studio_Bee", True)
+    assert {"path": hivemindos_account.USERNAME_PATH, "method": "POST", "body": {"username": "Studio_Bee"}} in seen
+    assert hivemindos_account.identity(opener=registry)["handle"] == "Studio_Bee"
+    # Nothing about the name is kept on this machine: it is the account's.
+    assert hivemindos_models.account_store_value(hivemindos_account.HANDLE_KEY) is None
+
+    restored = hivemindos_account.set_handle("", opener=registry)
+    assert (restored["handle"], restored["handleIsCustom"]) == (hivemindos_account.derive_handle("acct-7"), False)
+
+
+def test_a_name_someone_else_holds_is_refused_in_the_registrys_words(no_app) -> None:
+    registry = registry_opener(accounts={TOKEN: "acct-1", OTHER_TOKEN: "acct-2"})
+    hivemindos_models.save_credit_token(OTHER_TOKEN)
+    hivemindos_account.set_handle("QueenBee", opener=registry)
+
+    hivemindos_models.save_credit_token(TOKEN)
+    # Case and separators do not make a second name.
+    with pytest.raises(hivemindos_models.HivemindosModelsError, match="^That name is taken.$"):
+        hivemindos_account.set_handle("queen_bee", opener=registry)
+    assert hivemindos_account.identity(opener=registry)["handle"] == hivemindos_account.derive_handle("acct-1")
+
+
+def test_an_indecent_name_is_refused_in_the_registrys_words(no_app) -> None:
+    hivemindos_models.save_credit_token(TOKEN)
+    registry = registry_opener(
+        accounts={TOKEN: "acct-1"},
+        refuse={"fvckit": (400, "That name isn't allowed. Choose a different one.")},
+    )
+    with pytest.raises(hivemindos_models.HivemindosModelsError, match="^That name isn't allowed. Choose a different one.$"):
+        hivemindos_account.set_handle("Fvck_it", opener=registry)
+
+
+def test_a_name_that_could_pass_for_markup_is_refused_before_anything_is_asked(no_app) -> None:
+    """The handle is rendered raw in the sidebar, and a badly shaped name is the
+    person's typing — answered here, without a round trip."""
+    hivemindos_models.save_credit_token(TOKEN)
+    seen: list = []
+    registry = registry_opener(accounts={TOKEN: "acct-1"}, seen=seen)
+    for name in ("<img src=x onerror=alert(1)>", "Studio Bee", "ab", "x" * 25):
+        with pytest.raises(hivemindos_models.HivemindosModelsError, match="3 to 24 letters"):
+            hivemindos_account.set_handle(name, opener=registry)
+    assert seen == []
+
+
+def test_no_account_means_no_name_to_choose(no_app) -> None:
+    """A name kept on one machine alone is how two people came to share one."""
+    with pytest.raises(hivemindos_models.HivemindosModelsError) as refused:
+        hivemindos_account.set_handle("Studio_Bee")
+    assert refused.value.remedy == "connect-account"
+
+
+def test_a_registry_that_cannot_be_asked_leaves_the_derived_name(no_app) -> None:
+    """The row still names the person, with the name the registry would give;
+    a rename says plainly that it cannot happen now, not a raw HTTP status."""
+    hivemindos_models.save_credit_token(TOKEN)
+    registry = registry_opener(accounts={TOKEN: "acct-7"}, down=True)
+    assert hivemindos_account.identity(opener=registry)["handle"] == hivemindos_account.derive_handle("acct-7")
+    with pytest.raises(hivemindos_models.HivemindosModelsError, match="^Names can't be changed right now. Try again.$") as refused:
+        hivemindos_account.set_handle("Studio_Bee", opener=registry)
+    assert refused.value.remedy == "retry"
+
+
+def test_a_name_chosen_here_before_names_were_global_is_carried_over_once(no_app) -> None:
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_models.set_account_store_value(hivemindos_account.HANDLE_KEY, "Studio Bee")
+    seen: list = []
+    registry = registry_opener(accounts={TOKEN: "acct-7"}, seen=seen)
+
+    carried = hivemindos_account.identity(opener=registry)
+    # Spaces were allowed then and are not now.
+    assert (carried["handle"], carried["handleIsCustom"]) == ("Studio_Bee", True)
+    assert hivemindos_models.account_store_value(hivemindos_account.HANDLE_KEY) is None
+    claims = [call for call in seen if call["method"] == "POST"]
+    assert len(claims) == 1
+    hivemindos_account.identity(opener=registry)
+    assert [call for call in seen if call["method"] == "POST"] == claims, "offered once"
+
+
+def test_a_carried_over_name_someone_else_holds_gives_way_to_the_registry(no_app) -> None:
+    registry = registry_opener(accounts={TOKEN: "acct-1", OTHER_TOKEN: "acct-2"})
+    hivemindos_models.save_credit_token(OTHER_TOKEN)
+    hivemindos_account.set_handle("Studio_Bee", opener=registry)
+
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_models.set_account_store_value(hivemindos_account.HANDLE_KEY, "Studio Bee")
+    mine = hivemindos_account.identity(opener=registry)
+    assert (mine["handle"], mine["handleIsCustom"]) == (hivemindos_account.derive_handle("acct-1"), False)
+    assert hivemindos_models.account_store_value(hivemindos_account.HANDLE_KEY) is None
+
+
+def test_a_carried_over_name_waits_for_a_registry_that_cannot_be_asked(no_app) -> None:
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_models.set_account_store_value(hivemindos_account.HANDLE_KEY, "Studio Bee")
+    identity = hivemindos_account.identity(opener=registry_opener(accounts={TOKEN: "acct-7"}, down=True))
+    # Shown as it always was, and kept for the day the registry answers.
+    assert (identity["handle"], identity["handleIsCustom"]) == ("Studio Bee", True)
+    assert hivemindos_models.account_store_value(hivemindos_account.HANDLE_KEY) == "Studio Bee"
 
 
 # ------------------------------------------------------------ the free meter
@@ -534,13 +681,19 @@ def test_the_apps_vault_key_is_the_owners_alone(two_workspaces, monkeypatch) -> 
         assert hivemindos_account.identity()["connected"] is False
 
 
-def test_a_chosen_name_belongs_to_one_workspace(two_workspaces, monkeypatch) -> None:
-    monkeypatch.setattr(hivemindos_account, "account_id", lambda **_: "")
-    monkeypatch.setattr(hivemindos_account, "account_status", lambda **_: {"reachable": True})
-    hivemindos_account.set_handle("The Owner")
+def test_a_chosen_name_belongs_to_one_workspace(two_workspaces) -> None:
+    """The name is the account's, and each workspace holds its own account — so
+    a sibling with none has neither the owner's name nor a way to take it."""
+    registry = registry_opener(accounts={TOKEN: "acct-owner"})
+    hivemindos_models.save_credit_token(TOKEN)
+    hivemindos_account.set_handle("The_Owner", opener=registry)
     with hivemindos_models.scoped_to(two_workspaces["guest"]):
-        assert hivemindos_account.identity()["handle"] != "The Owner"
-        assert hivemindos_account.identity()["handleIsCustom"] is False
+        guest = hivemindos_account.identity(opener=registry)
+        assert guest["handle"] != "The_Owner"
+        assert guest["handleIsCustom"] is False
+        with pytest.raises(hivemindos_models.HivemindosModelsError) as refused:
+            hivemindos_account.set_handle("The_Owner", opener=registry)
+        assert refused.value.remedy == "connect-account"
 
 
 # ------------------------------------------------------------ sharing
@@ -698,3 +851,73 @@ def test_a_link_finished_by_the_app_lands_in_the_workspace_that_started_it(two_w
     assert hivemindos_models.credit_token() == ""
     with hivemindos_models.scoped_to(two_workspaces["guest"]):
         assert hivemindos_models.credit_token() == TOKEN
+
+
+# ------------------------------------------------- everyone has an account
+
+def test_a_studio_with_no_account_and_no_app_gets_one_on_first_draw(no_app) -> None:
+    seen: list = []
+    created = hivemindos_account.ensure_account(opener=gateway_opener({
+        "/api/mini-app-account/start": {"ok": True, "creditToken": TOKEN, "accountId": "acct-new"},
+    }, seen=seen))
+    assert created == {"created": True, "accountId": "acct-new"}
+    assert hivemindos_models.own_credit_token() == TOKEN, "kept as this studio's own key"
+    assert [entry["path"] for entry in seen] == ["/api/mini-app-account/start"]
+    assert seen[0]["body"] == {"app": "studio"}
+
+    def never(request, timeout=None):
+        raise AssertionError("an account already held is not minted again")
+
+    assert hivemindos_account.ensure_account(opener=never) == {"created": False, "reason": "held"}
+
+
+def test_the_app_makes_the_account_when_it_has_run_on_this_machine(no_app, monkeypatch, tmp_path) -> None:
+    home = tmp_path / "app-home"
+    home.mkdir()
+    (home / hivemindos_models.APP_VAULT_KEY_NAME).write_text("key", encoding="utf-8")
+    monkeypatch.setenv("HIVEMINDOS_HOME", str(home))
+
+    def never(request, timeout=None):
+        raise AssertionError("the studio must not make a second account beside the app's")
+
+    assert hivemindos_account.ensure_account(opener=never) == {"created": False, "reason": "app"}
+    assert hivemindos_models.own_credit_token() == ""
+
+
+def test_a_guest_workspace_is_not_given_an_account_that_would_end_a_share(two_workspaces) -> None:
+    def never(request, timeout=None):
+        raise AssertionError("a guest's own key would always win over a share")
+
+    with hivemindos_models.scoped_to(two_workspaces["guest"]):
+        assert hivemindos_account.ensure_account(opener=never) == {"created": False, "reason": "workspace"}
+        assert hivemindos_models.own_credit_token() == ""
+
+
+def test_a_refused_account_is_not_asked_for_again_within_the_minute(no_app) -> None:
+    calls = {"n": 0}
+
+    def down(request, timeout=None):
+        calls["n"] += 1
+        raise OSError("gateway blinked")
+
+    assert hivemindos_account.ensure_account(opener=down) == {"created": False, "reason": "unreachable"}
+    assert hivemindos_account.ensure_account(opener=down) == {"created": False, "reason": "waiting"}
+    assert calls["n"] == 1
+    malformed = gateway_opener({"/api/mini-app-account/start": {"ok": True, "creditToken": "not-a-key"}})
+    hivemindos_account.invalidate_overview()
+    assert hivemindos_account.ensure_account(opener=malformed) == {"created": False, "reason": "malformed"}
+    assert hivemindos_models.own_credit_token() == ""
+
+
+def test_the_row_is_drawn_for_the_account_made_on_first_draw(no_app) -> None:
+    row = hivemindos_account.overview(opener=gateway_opener({
+        "/api/mini-app-account/start": {"ok": True, "creditToken": TOKEN, "accountId": "acct-new"},
+        "/api/paid-agents/": {"ok": True, "balanceCredits": 0, "accountId": "acct-new"},
+        "/api/mini-app-account/username": {"ok": True, "username": "AmberFox12", "custom": False},
+        "/api/mini-app-account": {"ok": True, "authenticated": True, "emailLinked": False},
+        "/api/free-models/": CEILINGS_ONLY,
+    }))
+    assert row["identity"]["connected"] is True
+    assert row["identity"]["accountId"] == "acct-new"
+    assert row["identity"]["handle"] == "AmberFox12"
+    assert row["identity"]["backedUp"] is False, "the one nudge left: back it up"

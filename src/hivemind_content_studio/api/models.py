@@ -341,7 +341,7 @@ class HivemindosTopUpBody(BaseModel):
 
 
 class AccountHandleBody(BaseModel):
-    """What to call this account on this machine. Empty restores the derived name."""
+    """The hive username to claim for this account. Empty restores the derived name."""
 
     handle: str = Field(default="", max_length=24)
 
