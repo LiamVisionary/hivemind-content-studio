@@ -2,7 +2,7 @@
 
 ## 2026-09-18 — A post finds its own way out (HivemindOS, hosted, or your keys), and a persona that plans its own day
 
-- Status: Committed (this commit), not pushed. Python only, plus one line in the hub's lane-role map. Nothing to restart for the CLI/MCP paths; the control API (`:8765`) picks up the new lane on its next restart.
+- Status: Pushed (20fbc81). Python only, plus one line in the hub's lane-role map. Nothing to restart for the CLI/MCP paths; the control API (`:8765`) picks up the new lane on its next restart.
 - Asked for (Liam, 2026-09-18), after reading an X post about an autonomous AI-persona pipeline: route all posting through HivemindOS **when it is installed**, keep the studio working standalone otherwise, allow a hosted option, and stop the automation at a person's approval.
 - New `posting_rails.py`: one resolver, three rails, chosen for THIS post (its platforms and kind of file) rather than for the machine: a local HivemindOS, the hosted `managed-socials` service, or the owner's own Upload-Post/Postiz keys. Every unavailable rail says what would make it available. `publish prepare --provider` now defaults to `auto`.
 - The HivemindOS rail does not publish. `publishing.handoff_to_hivemindos` queues a review suggestion in HivemindOS Socials (its new `suggest` action, which always forces review); `sync_hivemindos_posts` pulls each post's state and numbers back, marks the draft published, and lands metrics on the run. `execute_publish` refuses a HivemindOS draft and says to hand it off instead.
