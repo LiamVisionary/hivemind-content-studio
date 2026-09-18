@@ -32,6 +32,14 @@ dependencies = [
     "python-multipart==0.0.27",
     "cryptography==46.0.6",
     "pyyaml==6.0.3",
+    # config.toml is read AND written back (app/config/config.py, save_config),
+    # and the stdlib's tomllib only reads. `toml` used to do both, but it was
+    # never listed here — it rode in transitively through streamlit, and the
+    # faceless-webui split below took streamlit out of the base set. Every
+    # fresh sync from then on (CI, the desktop bundle) had no `toml`, and the
+    # engine's config module, which everything imports, failed on line 10.
+    # Reads are tomllib now; this is the writer from the same author.
+    "tomli-w==1.2.0",
     "requests==2.33.1",
     "packaging==24.2",
     "socksio==1.0.0",

@@ -1,10 +1,10 @@
 import json
+import importlib.util
 import unittest
 from unittest.mock import MagicMock, patch
 
 from app.controllers.manager.base_manager import TaskQueueFullError
 from app.controllers.manager.memory_manager import InMemoryTaskManager
-from app.controllers.manager.redis_manager import RedisTaskManager
 from app.models import const
 from app.models.schema import VideoParams
 from app.services import task as task_service
@@ -139,13 +139,20 @@ class TestInMemoryTaskManager(unittest.TestCase):
         fake_thread.start.assert_called_once_with()
 
 
+# `redis` lives in the faceless-webui extra: the bundle-shaped install (base
+# dependencies only, what the Windows smoke job syncs) does not have it, and the
+# in-memory manager above must still collect and run there. The client is a
+# MagicMock, but the patch target is the real package.
+@unittest.skipUnless(
+    importlib.util.find_spec("redis") is not None,
+    "redis is not installed (faceless-webui extra)",
+)
 class TestRedisTaskManager(unittest.TestCase):
     def setUp(self):
+        from app.controllers.manager.redis_manager import RedisTaskManager
+
         self.redis_client = MagicMock()
-        patcher = patch(
-            "app.controllers.manager.redis_manager.redis.Redis.from_url",
-            return_value=self.redis_client,
-        )
+        patcher = patch("redis.Redis.from_url", return_value=self.redis_client)
         self.addCleanup(patcher.stop)
         from_url = patcher.start()
         self.manager = RedisTaskManager(

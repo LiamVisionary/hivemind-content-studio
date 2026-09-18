@@ -7,7 +7,10 @@ at module scope, so the import test here blocks them and walks the engine.
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -16,6 +19,72 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WEBUI_ONLY = ("streamlit", "streamlit_tour", "dashscope", "azure", "redis")
+
+
+def _build_desktop_python():
+    spec = importlib.util.spec_from_file_location(
+        "build_desktop_python", ROOT / "scripts" / "build_desktop_python.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _canonical(name: str) -> str:
+    return name.lower().replace("_", "-")
+
+
+def _extra_only_import_names() -> set[str]:
+    """Every top-level import name that only the faceless-webui extra installs.
+
+    The five names in WEBUI_ONLY are the extra's own entries. What matters for
+    the bundle is the closure: `toml` was never in pyproject at all — streamlit
+    carried it in — and `app/config/config.py` imported it at module scope, so
+    blocking the five said the engine was clean while a fresh base sync could
+    not import its config module. The set is the difference between the two
+    `uv export`s the desktop build script already computes, mapped to import
+    names through the installed metadata (`python-dateutil` imports as
+    `dateutil`) with the dashes-to-underscores guess for anything not installed
+    on this interpreter. Without uv on PATH it is just the five.
+    """
+    if shutil.which("uv") is None:
+        return set()
+    build = _build_desktop_python()
+    desktop, _ = build.parse_requirements(build.export_requirements(build.DESKTOP_EXTRA))
+    faceless, _ = build.parse_requirements(build.export_requirements(build.EXCLUDED_EXTRA))
+    extra_only = {_canonical(name) for name in faceless} - {_canonical(name) for name in desktop}
+
+    by_distribution: dict[str, set[str]] = {}
+    for top_level, distributions in importlib.metadata.packages_distributions().items():
+        for distribution in distributions:
+            by_distribution.setdefault(_canonical(distribution), set()).add(top_level)
+    names: set[str] = set()
+    for distribution in extra_only:
+        names |= by_distribution.get(distribution) or {distribution.replace("-", "_")}
+    return names
+
+
+def _engine_modules() -> list[str]:
+    """Every module under app/, by file — not by pkgutil.
+
+    `pkgutil.walk_packages` only descends into directories that have an
+    `__init__.py`; app/controllers, app/utils and app/services/utils have none,
+    so the walk that this test used to do reported 27 modules and never saw
+    `app.controllers.manager.redis_manager` importing `redis` at module scope.
+    """
+    names = []
+    for path in sorted((ROOT / "app").rglob("*.py")):
+        parts = path.relative_to(ROOT).with_suffix("").parts
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        name = ".".join(parts)
+        if "webui" in name:
+            continue
+        names.append(name)
+    assert "app.controllers.manager.redis_manager" in names
+    assert "app.config.config" in names
+    return names
 
 
 def _pyproject() -> dict:
@@ -33,39 +102,44 @@ def test_webui_only_packages_are_not_in_the_bundled_dependency_list() -> None:
 
 
 def test_the_engine_imports_with_every_faceless_webui_package_blocked() -> None:
-    """A bundled venv has none of the five. Nothing may import one eagerly.
+    """A bundled venv has none of the extra. Nothing may import any of it eagerly.
 
     Runs in a subprocess: the parent session has already imported some of these,
     and a meta-path finder cannot un-import what is already in `sys.modules`.
+
+    Blocked means the whole extra — the five and their closure from uv.lock —
+    and a miss counts whether the finder refused it or the package is simply
+    not installed here: on the bundle-shaped install (base dependencies only,
+    the Windows smoke job) the absence *is* the finding, and treating a plain
+    ModuleNotFoundError as "not ours" is how the missing `toml` read as green.
     """
+    blocked = tuple(sorted(set(WEBUI_ONLY) | _extra_only_import_names()))
+    modules = _engine_modules() + [
+        "hivemind_content_studio.faceless_media",
+        "hivemind_content_studio.control_api",
+        "hivemind_content_studio.media_studio",
+        "auto_clipper.cli",
+    ]
     script = (
-        "import importlib, importlib.abc, pkgutil, sys\n"
-        f"BLOCKED = {WEBUI_ONLY!r}\n"
+        "import importlib, importlib.abc, sys\n"
+        f"BLOCKED = {blocked!r}\n"
+        f"MODULES = {modules!r}\n"
         "class B(importlib.abc.MetaPathFinder):\n"
         "    def find_spec(self, fullname, path=None, target=None):\n"
         "        if fullname.split('.')[0] in BLOCKED:\n"
-        "            raise ModuleNotFoundError('blocked: ' + fullname)\n"
+        "            raise ModuleNotFoundError('blocked: ' + fullname, name=fullname)\n"
         "        return None\n"
         "sys.meta_path.insert(0, B())\n"
-        "import app\n"
         "bad = []\n"
-        "for mod in pkgutil.walk_packages(app.__path__, 'app.'):\n"
-        "    if 'webui' in mod.name:\n"
-        "        continue\n"
-        "    try:\n"
-        "        importlib.import_module(mod.name)\n"
-        "    except ModuleNotFoundError as exc:\n"
-        "        if 'blocked: ' in str(exc):\n"
-        "            bad.append(mod.name + ' -> ' + str(exc))\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "for name in ('hivemind_content_studio.faceless_media', 'hivemind_content_studio.control_api',\n"
-        "             'hivemind_content_studio.media_studio', 'auto_clipper.cli'):\n"
+        "for name in MODULES:\n"
         "    try:\n"
         "        importlib.import_module(name)\n"
         "    except ModuleNotFoundError as exc:\n"
-        "        if 'blocked: ' in str(exc):\n"
-        "            bad.append(name + ' -> ' + str(exc))\n"
+        "        missing = (exc.name or '').split('.')[0]\n"
+        "        if missing in BLOCKED:\n"
+        "            bad.append(name + ' -> ' + (exc.name or str(exc)))\n"
+        "    except Exception:\n"
+        "        pass\n"
         "print('EAGER:' + '|'.join(bad))\n"
     )
     env = dict(os.environ)
