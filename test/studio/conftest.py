@@ -109,6 +109,41 @@ def _no_test_stamps_the_machines_access_ledger():
 
 
 @pytest.fixture(autouse=True)
+def _no_test_reads_this_machines_tailnet_identity():
+    """No test may inherit the MagicDNS name of the machine it runs on.
+
+    `build_control_app()` calls `tailnet_hostname()`, which shells out to the
+    Tailscale CLI — so on a developer's Mac every one of the fifty-odd app
+    builds in this suite runs `Tailscale status --json` (~36ms each) and the
+    app under test carries that machine's real tailnet name into
+    `_same_site_origin`. CI has no Tailscale and gets '', so the value the
+    origin check is built on differed by machine: the same trap as the shared
+    hive env and the rental SSH key, and the reason a refused-tunnel test
+    failed on one Mac and nowhere else (the Tailscale shell-out collided with
+    a process-wide Popen patch).
+
+    '' is what a machine without Tailscale reports, which makes the CI reading
+    the default everywhere. A test that wants a served tailnet host patches
+    `control_api.tailnet_hostname` itself — test_remote_access.py does.
+
+    Restored by hand rather than through monkeypatch, for the same reason
+    `_test_client_calls_from_loopback` above is: test_gpu_rentals_api's
+    `test_account_state_reports_burn_and_runway` and
+    `test_attach_fails_loudly_when_the_tunnel_is_refused` both call
+    `monkeypatch.undo()`, which would drop this along with their own patches
+    and send the two tests that most need it back to the real CLI.
+    """
+    from hivemind_content_studio import control_api
+
+    original = control_api.tailnet_hostname
+    control_api.tailnet_hostname = lambda: ""
+    try:
+        yield
+    finally:
+        control_api.tailnet_hostname = original
+
+
+@pytest.fixture(autouse=True)
 def _no_workspace_scope_leaks_between_apps() -> None:
     """Each test starts with no HivemindOS account scope installed.
 
