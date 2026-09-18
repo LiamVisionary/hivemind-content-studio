@@ -1867,18 +1867,38 @@ def test_attach_fails_loudly_when_the_tunnel_is_refused(tmp_path: Path, monkeypa
     (tmp_path / "key").write_text("x")
     monkeypatch.setattr(gpu_rentals, "_tunnel_pid", lambda rid: None)
     # The undo above dropped the suite-wide SSH-probe block with everything
-    # else, and this box's address is invented. Put it back, or the door check
-    # dials 9.9.9.9 for real and the attach fails on the wrong thing.
+    # else, and this box's address is invented. Put BOTH halves back, or the
+    # door check dials 9.9.9.9 for real and the attach fails on the wrong
+    # thing. The beacon half matters again now that the shim below leaves
+    # `subprocess.run` real: reading a mute box's beacon shells out to ssh.
     monkeypatch.setattr(gpu_rentals, "_ssh_banner_fault",
                         lambda host, port, timeout=3.0, cache=False: None)
+    monkeypatch.setattr(gpu_rentals, "_beacon_over_ssh",
+                        lambda endpoint, timeout=5.0: None)
 
     class DeadSsh:
+        """What Popen hands back for an ssh that is about to exit.
+
+        Exactly what the spawner reads and no more: `pid` for the pidfile,
+        `poll()` for _await_tunnel's loop. It is deliberately NOT a stand-in
+        for a Popen in general — `subprocess.run` drives its process as a
+        context manager and calls `communicate` and `kill` on it — and the
+        shim below is what keeps one from reaching any other caller.
+        """
+
         pid = 4242
 
         def poll(self):
             return 255
 
-    def fake_popen(*args, **kwargs):
+    def fake_popen(argv, *_args, **_kwargs):
+        if not (isinstance(argv, (list, tuple)) and list(argv[:2]) == ["ssh", "-N"]):
+            raise AssertionError(
+                "only the tunnel spawn is faked here, and something else in "
+                f"gpu_rentals asked for a real process: {list(argv)!r}. Popen "
+                "there is a stack restart, so let it through and the suite "
+                "restarts the developer's studio."
+            )
         log = gpu_rentals._tunnel_dir() / "vast-7.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(
@@ -1888,7 +1908,28 @@ def test_attach_fails_loudly_when_the_tunnel_is_refused(tmp_path: Path, monkeypa
         )
         return DeadSsh()
 
-    monkeypatch.setattr(gpu_rentals.subprocess, "Popen", fake_popen)
+    real_subprocess = gpu_rentals.subprocess
+
+    class _OnlyTheTunnelSpawnIsFake:
+        """gpu_rentals' subprocess, with Popen replaced and nothing else.
+
+        `gpu_rentals.subprocess` IS the stdlib module, so setting Popen ON it
+        replaced Popen for the whole process, `subprocess.run` included — and
+        building the client below shells out to the Tailscale CLI. That call
+        got a DeadSsh back from `subprocess.run`, which drives its process as
+        a context manager, and the test died on a TypeError inside
+        subprocess.py before it ever reached the attach it is about. The fake
+        was never wrong; its blast radius was. Rebinding the NAME inside
+        gpu_rentals keeps it to the module under test, and `run`, `DEVNULL`
+        and the exception types stay real for everyone.
+        """
+
+        Popen = staticmethod(fake_popen)
+
+        def __getattr__(self, name):
+            return getattr(real_subprocess, name)
+
+    monkeypatch.setattr(gpu_rentals, "subprocess", _OnlyTheTunnelSpawnIsFake())
     monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda rid: None)
     client = _client(tmp_path, monkeypatch)
 
@@ -1899,7 +1940,12 @@ def test_attach_fails_loudly_when_the_tunnel_is_refused(tmp_path: Path, monkeypa
     assert "Permission denied (publickey)" in detail
     # The message has to say what to DO about it, not just what broke.
     assert "StrictModes" in detail and "re-rented" in detail
-    # No half-attached state left behind for the gateway to route into.
+    # No half-attached state left behind for the gateway to route into. A
+    # tripwire rather than a reading: attach_rental writes the attachment only
+    # AFTER _spawn_tunnel returns, so on this path nothing has been written and
+    # this cannot fail today. It is here to catch the reordering that would put
+    # the write first — which is the bug the whole test is about, in its other
+    # possible shape.
     assert gpu_rentals._read_attachments() == {}
 
 
