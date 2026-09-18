@@ -195,6 +195,7 @@ def test_catalog_drives_lanes_and_provider_choices(tmp_path: Path, monkeypatch) 
         "first-frame-animation-ad",
         "stickman-performance-ad",
         "static-text-ad",
+        "persona-series",
         "animation",
         "faceless",
         "clip",

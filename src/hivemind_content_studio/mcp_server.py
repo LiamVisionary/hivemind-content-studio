@@ -36,7 +36,7 @@ from .metrics import summarize_metrics
 from .orchestrator import ContentOrchestrator
 from .planner import plan
 from .providers import provider_report
-from .publishing import dry_run, execute_publish, prepare_publish
+from .publishing import dry_run, execute_publish, handoff_to_hivemindos, prepare_publish, sync_hivemindos_posts
 from .stickman import render_stickman_frames
 from .voice import generate_elevenlabs_lines
 
@@ -374,8 +374,47 @@ def build_mcp_server():
         return machine_operation_receipt(export_capcut_handoff(manifest_path, output_dir=output_dir or None))
 
     @mcp.tool()
-    def prepare_social_publish(manifest_path: str, video: str, title: str, caption: str, platforms: list[str], provider: str = "postiz", scheduled_at: str = "") -> dict:
-        return machine_operation_receipt(prepare_publish(manifest_path, video=video, title=title, caption=caption, platforms=platforms, provider=provider, scheduled_at=scheduled_at or None))
+    def prepare_social_publish(manifest_path: str, video: str, title: str, caption: str, platforms: list[str], provider: str = "auto", scheduled_at: str = "", accounts: dict[str, str] | None = None) -> dict:
+        """provider "auto" picks HivemindOS when it runs on this machine, then hosted publishing, then the owner's own keys."""
+        return machine_operation_receipt(prepare_publish(manifest_path, video=video, title=title, caption=caption, platforms=platforms, provider=provider, scheduled_at=scheduled_at or None, accounts=accounts))
+
+    @mcp.tool()
+    def save_content_persona(persona: dict) -> dict:
+        """Create or update a recurring character: id, name, appearance or references, platforms, posts_per_day, review_in (studio|hivemindos)."""
+        from .persona_autopilot import save_persona
+
+        return machine_operation_receipt({"ok": True, "persona": save_persona(persona)})
+
+    @mcp.tool()
+    def plan_persona_day(persona_id: str, trend_notes: str = "", count: int = 0, model_id: str = "") -> dict:
+        """Write today's hooks, captions and shots for a persona. Gather trend_notes first (X discovery, reddit-voc, research). Starts nothing."""
+        from .persona_autopilot import plan_persona_day as plan_day
+
+        return machine_operation_receipt({"ok": True, **plan_day(persona_id, trend_notes=trend_notes, count=count or None, model_id=model_id)})
+
+    @mcp.tool()
+    def start_persona_day(persona_id: str, posts: list[dict]) -> dict:
+        """Open one persona-series run per planned post. Each run stops for generation, then for a person's review; nothing publishes."""
+        from .persona_autopilot import start_persona_day as start_day
+
+        return machine_operation_receipt({"ok": True, **start_day(persona_id, posts, orchestrator=_orchestrator())})
+
+    @mcp.tool()
+    def social_publish_rails() -> dict:
+        """Which publishing rails can take a post now, and what each unavailable one needs."""
+        from .posting_rails import posting_rails
+
+        return machine_operation_receipt(posting_rails())
+
+    @mcp.tool()
+    def handoff_social_publish(manifest_path: str) -> dict:
+        """Hand drafts prepared for HivemindOS to its Socials queue for human review. Publishes nothing."""
+        return machine_operation_receipt(handoff_to_hivemindos(manifest_path))
+
+    @mcp.tool()
+    def sync_social_publish(manifest_path: str, refresh: bool = True) -> dict:
+        """Pull handed-off posts' state and platform numbers back onto the run."""
+        return machine_operation_receipt(sync_hivemindos_posts(manifest_path, refresh=refresh))
 
     @mcp.tool()
     def dry_run_social_publish(manifest_path: str) -> dict:

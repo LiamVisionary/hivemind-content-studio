@@ -220,7 +220,17 @@ class ContentOrchestrator:
                         "reason": "Rights, claims, and outward publication require approval.",
                     }])
             elif step == "publish":
-                if not manifest.get("publish", {}).get("receipts"):
+                publish = manifest.get("publish", {})
+                drafts = publish.get("drafts") or []
+                if not publish.get("receipts") and drafts and all(draft.get("provider") == "hivemindos" for draft in drafts):
+                    # Reviewed in HivemindOS: the hand-off publishes nothing, so it is not the confirmed live action below.
+                    return self._block(run_id, step, "awaiting_agent", [{
+                        "intent": "handoff_to_hivemindos",
+                        "tool": "handoff_social_publish",
+                        "arguments": {"manifest_path": manifest_path},
+                        "reason": "These drafts are reviewed, scheduled and published in HivemindOS Socials.",
+                    }])
+                if not publish.get("receipts"):
                     return self._block(run_id, step, "awaiting_approval", [{
                         "intent": "publish_approved_content",
                         "tool": "execute_social_publish",
@@ -228,6 +238,14 @@ class ContentOrchestrator:
                         "reason": "Publishing remains a separately confirmed outward action.",
                     }])
             elif step == "metrics":
+                handed_off = any(item.get("provider") == "hivemindos" for item in manifest.get("publish", {}).get("receipts") or [])
+                if not manifest.get("performance") and handed_off:
+                    return self._block(run_id, step, "awaiting_metrics", [{
+                        "intent": "sync_hivemindos_posts",
+                        "tool": "sync_social_publish",
+                        "arguments": {"manifest_path": manifest_path},
+                        "reason": "HivemindOS holds this post's state and numbers; sync pulls them onto the run once it is live.",
+                    }])
                 if not manifest.get("performance"):
                     return self._block(run_id, step, "awaiting_metrics", [{
                         "intent": "ingest_performance_metrics",

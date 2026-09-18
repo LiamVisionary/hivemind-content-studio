@@ -72,7 +72,7 @@ def load_brief(path: str | Path) -> dict[str, Any]:
 
 def infer_lane(brief: dict[str, Any]) -> str:
     explicit = str(brief.get("lane") or "").strip().lower()
-    if explicit in {"animation", "first-frame-animation-ad", "stickman-performance-ad", "static-text-ad", "faceless", "clip", "social-post"}:
+    if explicit in {"animation", "first-frame-animation-ad", "persona-series", "stickman-performance-ad", "static-text-ad", "faceless", "clip", "social-post"}:
         return explicit
     brief_type = str(brief.get("type") or "").lower()
     if "clip" in brief_type:
@@ -99,6 +99,8 @@ def plan(brief_path: str | Path, *, lane: str | None = None) -> Path:
         _plan_animation(run_dir, brief, manifest)
     elif selected_lane == "first-frame-animation-ad":
         _plan_first_frame_animation_ad(run_dir, brief, manifest)
+    elif selected_lane == "persona-series":
+        _plan_persona_series(run_dir, brief, manifest)
     elif selected_lane == "stickman-performance-ad":
         manifest["providers"]["image"] = str(provider_overrides.get("image") or "stickman-renderer")
         _plan_stickman_performance_ad(run_dir, brief, manifest)
@@ -243,6 +245,44 @@ def _write_editor_handoff(run_dir: Path, brief: dict[str, Any], manifest: dict[s
 
 
 def _plan_first_frame_animation_ad(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
+    _write_script_request(run_dir, brief, manifest)
+    _plan_animation(run_dir, brief, manifest)
+    _write_generation_requests(run_dir, brief, manifest, keyframes=True)
+    _write_editor_handoff(run_dir, brief, manifest)
+
+
+def _persona_continuity(brief: dict[str, Any]) -> dict[str, Any]:
+    """What keeps the character the same person in every clip of the series.
+
+    The persona rides in ``continuity``, the field every keyframe request
+    already carries to its image provider, so the series needs no generation
+    path of its own: a lane that respects continuity respects the persona.
+    """
+    persona = brief.get("persona")
+    if not isinstance(persona, dict) or not str(persona.get("name") or "").strip():
+        raise ValueError("A persona-series brief needs persona.name (and persona.appearance or persona.references) so every clip shows the same character")
+    references = [str(item) for item in persona.get("references") or [] if str(item).strip()]
+    appearance = str(persona.get("appearance") or "").strip()
+    if not references and not appearance:
+        raise ValueError("A persona needs persona.appearance or persona.references; a name alone cannot keep a character consistent")
+    base = brief.get("continuity") if isinstance(brief.get("continuity"), dict) else {}
+    return {
+        **base,
+        "persona": {
+            "id": str(persona.get("id") or "").strip() or None,
+            "name": str(persona["name"]).strip(),
+            "appearance": appearance,
+            "references": references,
+            "disclosed_as_ai": persona.get("disclosed_as_ai") is not False,
+        },
+    }
+
+
+def _plan_persona_series(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
+    brief["continuity"] = _persona_continuity(brief)
+    # A persona clip is a silent loop unless the brief asks for a voice.
+    if not isinstance(brief.get("voice"), dict):
+        brief["voice"] = {"enabled": False}
     _write_script_request(run_dir, brief, manifest)
     _plan_animation(run_dir, brief, manifest)
     _write_generation_requests(run_dir, brief, manifest, keyframes=True)

@@ -33,7 +33,7 @@ from .mcp_http import McpHttpClient
 from .planner import plan
 from .orchestrator import ContentOrchestrator
 from .providers import provider_report
-from .publishing import dry_run, execute_publish, prepare_publish
+from .publishing import dry_run, execute_publish, handoff_to_hivemindos, prepare_publish, sync_hivemindos_posts
 from .qa import qa_video
 from .stickman import render_stickman_frames
 from .template_catalog import template_by_id, template_report
@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     planner = sub.add_parser("plan", help="Create a canonical run from a YAML brief")
     planner.add_argument("brief")
-    planner.add_argument("--lane", choices=["animation", "first-frame-animation-ad", "stickman-performance-ad", "static-text-ad", "faceless", "clip", "social-post"])
+    planner.add_argument("--lane", choices=["animation", "first-frame-animation-ad", "persona-series", "stickman-performance-ad", "static-text-ad", "faceless", "clip", "social-post"])
     planner.set_defaults(func=cmd_plan)
 
     run = sub.add_parser("run", help="Create, inspect, resume, retry, or cancel durable agent runs")
@@ -257,9 +257,21 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--title", required=True)
     prepare.add_argument("--caption", default="")
     prepare.add_argument("--platforms", required=True)
-    prepare.add_argument("--provider", choices=["postiz", "upload-post"], default="postiz")
+    prepare.add_argument("--provider", choices=["auto", "hivemindos", "managed-socials", "postiz", "upload-post"], default="auto",
+                         help="auto picks HivemindOS when it is running here, then hosted publishing, then your own keys")
+    prepare.add_argument("--account", action="append", default=[], metavar="PLATFORM=ID",
+                         help="HivemindOS Socials account (or hosted channel) to post from; repeat per platform")
     prepare.add_argument("--scheduled-at")
     prepare.set_defaults(func=cmd_publish_prepare)
+    rails = publish_sub.add_parser("rails", help="Show which publishing rails can take a post now, and what each unavailable one needs")
+    rails.set_defaults(func=cmd_publish_rails)
+    handoff = publish_sub.add_parser("handoff", help="Hand HivemindOS drafts to the local Socials queue for review (publishes nothing)")
+    handoff.add_argument("manifest")
+    handoff.set_defaults(func=cmd_publish_handoff)
+    sync = publish_sub.add_parser("sync", help="Pull handed-off posts' state and numbers back from HivemindOS")
+    sync.add_argument("manifest")
+    sync.add_argument("--no-refresh", action="store_true", help="Read the last numbers HivemindOS holds without asking the platform again")
+    sync.set_defaults(func=cmd_publish_sync)
     validate = publish_sub.add_parser("dry-run")
     validate.add_argument("manifest")
     validate.set_defaults(func=cmd_publish_dry_run)
@@ -267,6 +279,21 @@ def build_parser() -> argparse.ArgumentParser:
     execute.add_argument("manifest")
     execute.add_argument("--confirm", default="")
     execute.set_defaults(func=cmd_publish_execute)
+
+    persona = sub.add_parser("persona", help="Recurring characters and their daily autopilot (drafts only; nothing publishes)")
+    persona_sub = persona.add_subparsers(dest="persona_command", required=True)
+    persona_save = persona_sub.add_parser("save", help="Create or update a persona from a JSON file")
+    persona_save.add_argument("file")
+    persona_save.set_defaults(func=cmd_persona_save)
+    persona_list = persona_sub.add_parser("list")
+    persona_list.set_defaults(func=cmd_persona_list)
+    persona_day = persona_sub.add_parser("day", help="Plan today's posts and open one run per post")
+    persona_day.add_argument("persona_id")
+    persona_day.add_argument("--trend-notes", default="", help="What is working right now, as text or @path to a file")
+    persona_day.add_argument("--count", type=int)
+    persona_day.add_argument("--model-id", default="")
+    persona_day.add_argument("--plan-only", action="store_true", help="Print the day plan without opening runs")
+    persona_day.set_defaults(func=cmd_persona_day)
 
     metrics = sub.add_parser("metrics", help="Record and summarize per-run distribution outcomes")
     metrics_sub = metrics.add_subparsers(dest="metrics_command", required=True)
@@ -618,8 +645,53 @@ def cmd_media_studio_generate(args: argparse.Namespace) -> int:
 
 
 def cmd_publish_prepare(args: argparse.Namespace) -> int:
-    draft = prepare_publish(args.manifest, video=args.video, media=args.media, text_only=args.text_only, title=args.title, caption=args.caption, platforms=args.platforms.split(","), provider=args.provider, scheduled_at=args.scheduled_at)
+    draft = prepare_publish(args.manifest, video=args.video, media=args.media, text_only=args.text_only, title=args.title, caption=args.caption, platforms=args.platforms.split(","), provider=args.provider, scheduled_at=args.scheduled_at, accounts=dict(item.split("=", 1) for item in args.account if "=" in item))
     print(json.dumps({"ok": True, "published": False, "draft": draft}, indent=2))
+    return 0
+
+
+def cmd_persona_save(args: argparse.Namespace) -> int:
+    from .persona_autopilot import save_persona
+
+    print(json.dumps({"ok": True, "persona": save_persona(json.loads(Path(args.file).expanduser().read_text(encoding="utf-8")))}, indent=2))
+    return 0
+
+
+def cmd_persona_list(args: argparse.Namespace) -> int:
+    from .persona_autopilot import list_personas
+
+    print(json.dumps({"ok": True, "personas": list_personas()}, indent=2))
+    return 0
+
+
+def cmd_persona_day(args: argparse.Namespace) -> int:
+    from .persona_autopilot import plan_persona_day, start_persona_day
+
+    notes = args.trend_notes
+    if notes.startswith("@"):
+        notes = Path(notes[1:]).expanduser().read_text(encoding="utf-8")
+    plan_result = plan_persona_day(args.persona_id, trend_notes=notes, count=args.count, model_id=args.model_id)
+    if args.plan_only:
+        print(json.dumps({"ok": True, **plan_result}, indent=2))
+        return 0
+    print(json.dumps({"ok": True, "plan": plan_result, **start_persona_day(args.persona_id, plan_result["posts"], orchestrator=_orchestrator())}, indent=2))
+    return 0
+
+
+def cmd_publish_rails(args: argparse.Namespace) -> int:
+    from .posting_rails import posting_rails
+
+    print(json.dumps(posting_rails(), indent=2))
+    return 0
+
+
+def cmd_publish_handoff(args: argparse.Namespace) -> int:
+    print(json.dumps(handoff_to_hivemindos(args.manifest), indent=2))
+    return 0
+
+
+def cmd_publish_sync(args: argparse.Namespace) -> int:
+    print(json.dumps(sync_hivemindos_posts(args.manifest, refresh=not args.no_refresh), indent=2))
     return 0
 
 

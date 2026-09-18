@@ -54,6 +54,16 @@ LANE_MATRIX: tuple[LaneDefinition, ...] = (
         {"scenes": True, "voice": False, "source": False, "media_source": False},
     ),
     LaneDefinition(
+        "persona-series",
+        "Persona series",
+        "One character, daily",
+        "Keep one recurring character on model across short daily clips: a hook, one consistent shot, a caption, then review, post and measure.",
+        ("script", "keyframes", "motion", "assembly", "evaluation", "approval", "publish", "metrics"),
+        "9:16",
+        10,
+        {"scenes": True, "voice": False, "source": False, "media_source": False},
+    ),
+    LaneDefinition(
         "animation",
         "Animation",
         "Scene-led production",

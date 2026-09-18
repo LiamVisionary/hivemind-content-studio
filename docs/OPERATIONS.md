@@ -142,7 +142,8 @@ Do not replace a remote/Tailnet service URL with client-local `127.0.0.1`. The l
 | Static text ad | One headline/subtext per scene | Deterministic 4:5/9:16/1:1 renderer | Generated product or UGC cut-ins when explicitly requested |
 | Faceless short | Topic/script/search terms | Embedded MoneyPrinterTurbo + stock/local media + Universal TTS | Pexels, Pixabay, configured LLMs |
 | Clipping | Long video URL/file | Embedded Auto Clipper + Podcli/FFmpeg | MUAPI AI clipping |
-| Social post | Approved final media | Self-hosted Postiz | Upload-Post |
+| Persona series | A saved persona + a day plan | The first-frame pipeline with the persona carried as continuity; no voice by default | Same providers as first-frame ads |
+| Social post | Approved final media | HivemindOS Socials when it is open here, else your own Upload-Post/Postiz keys | Hosted publishing (HivemindOS account) |
 
 The optional `clueso-mcp` provider adds 90 agent-discoverable workflows for
 motion graphics, demos, training, editing, localization, repurposing, and
@@ -332,6 +333,62 @@ Live publishing additionally requires both
 `CONTENT_STUDIO_ENABLE_LIVE_PUBLISH=true` and `--confirm LIVE_PUBLISH`. Use
 `passbook run --` so credentials stay in the shared store and every read is
 recorded.
+
+### Where a post goes
+
+`--provider` defaults to `auto`, which picks the first of these that can take
+*this* post (its platforms and its kind of file), and `publish rails` shows the
+answer with what each unavailable one needs:
+
+| Rail | When | Who reviews and sends | Cost |
+|---|---|---|---|
+| `hivemindos` | HivemindOS is open on this machine with a connected account it can post from, on a platform that takes this file | You, in HivemindOS → Socials. It schedules, sends, and measures. | Free |
+| `managed-socials` | No HivemindOS, but you are signed in to a HivemindOS account and hosted publishing is switched on | The studio's approval gate, then the hosted service sends (also while this machine is off) | Included with a subscription up to its monthly allowance, then credits per post per channel |
+| `upload-post`, `postiz` | Your own keys are present | The studio's approval gate, from this machine | Free |
+
+The studio works with none of HivemindOS present: it lands on your own keys.
+
+A `hivemindos` draft is not published from here. `publish handoff` gives it to
+the HivemindOS Socials queue as a review suggestion, and nothing posts until you
+approve it there. `publish sync` then pulls each post's state and numbers back
+onto the run. Two things to know:
+
+- The hand-off writes an **unencrypted copy** of the file, because HivemindOS
+  uploads it by path, possibly hours later. This is the one place run media
+  leaves the vault. It only happens for a run you approved, or a persona you
+  set to `review_in: hivemindos`; the copy lives in `publish-handoff/` inside
+  the studio's data folder, readable only by you; and `publish sync` deletes it
+  once the post is sent, cancelled, or deleted.
+- The post can only be sent from this machine, since that is where the file is.
+
+```bash
+uv run content-studio publish rails
+uv run content-studio publish prepare <manifest.json> --video <final.mp4> --title "..." --caption "..." --platforms tiktok --account tiktok=<socials-account-id>
+uv run content-studio publish handoff <manifest.json>
+uv run content-studio publish sync <manifest.json>
+```
+
+### Persona series and the daily autopilot
+
+The `persona-series` lane keeps one recurring character on model across short
+daily clips. The persona (name, appearance or reference pictures) rides in the
+`continuity` every keyframe request already carries, so any image provider that
+respects continuity respects the character. A persona is labelled as AI unless
+you turn that off: an undisclosed synthetic person is what gets accounts
+restricted.
+
+```bash
+uv run content-studio persona save persona.json
+uv run content-studio persona day <persona-id> --trend-notes @notes.txt        # plans the day and opens one run per post
+uv run content-studio persona day <persona-id> --plan-only                      # just the hooks, captions and shots
+```
+
+A day writes up to six hooks, each with a caption and one shot, from your trend
+notes and from what this persona's measured posts say has worked, then opens a
+run per post. Each run stops for generation and then for your review. The
+autopilot never publishes. Trend notes are an input on purpose: gather them
+with HivemindOS X discovery, `reddit-voc`, a research run, or type them, so the
+studio stays usable standalone with a local text model.
 
 After distribution, attach platform outcomes to the same run:
 

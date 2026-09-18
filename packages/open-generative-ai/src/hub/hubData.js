@@ -1809,6 +1809,7 @@ export function providerRolesForLane() {
     'first-frame-animation-ad': ['script', 'image', 'motion', 'voice', 'assembly', 'publish'],
     'stickman-performance-ad': ['script', 'image', 'voice', 'assembly', 'publish'],
     'static-text-ad': ['script', 'image', 'publish'],
+    'persona-series': ['script', 'image', 'motion', 'assembly', 'publish'],
     animation: ['script', 'image', 'motion', 'voice', 'music', 'assembly', 'publish'],
     faceless: ['script', 'stock', 'voice', 'assembly', 'publish'],
     clip: ['clip', 'publish'],
