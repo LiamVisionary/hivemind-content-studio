@@ -404,6 +404,52 @@ def _hardware_verdict(definition, facts):
     return verdict
 
 
+def _h3_native_report(workflow_id, definition, lane, checked_at):
+    """The preflight for a lane that is not a ComfyUI graph at all.
+
+    h3.c is its own program reading its own checkpoint tree, so none of the
+    machinery above applies: there is no /object_info to ask, no node pack to
+    install and no models/ folder to drop a file into. What CAN be missing is
+    the engine, ffmpeg, or the checkpoint — and each has a different fix, so
+    the lane reports them itself and the studio shows the one that is actually
+    in the way. Nothing here is installable in place: building a C engine and
+    fetching 134 GB of weights are both terminal work, deliberately.
+    """
+    from gateway import h3_native  # local: dependencies is imported very early
+
+    readiness = h3_native.route_readiness()
+    blocker = readiness["blocked_by"] or {}
+    missing = []
+    if not readiness["ok"]:
+        missing.append({
+            "id": "engine:h3.c",
+            "kind": "engine",
+            "name": "MiniMax H3 for Apple silicon (h3.c)",
+            "installable": False,
+            "reason": " ".join(part for part in (blocker.get("reason"), blocker.get("fix")) if part),
+        })
+    return {
+        "ok": readiness["ok"],
+        "known": True,
+        "workflow_id": workflow_id,
+        "title": str(definition.get("title") or definition.get("label") or workflow_id),
+        "lane": lane,
+        "remote": False,
+        "hardware": {
+            "supported": readiness["profile"]["apple_silicon"],
+            "reason": "" if readiness["profile"]["apple_silicon"] else (blocker.get("reason") or ""),
+            "accelerators": ["mps"] if readiness["profile"]["apple_silicon"] else [],
+        },
+        "missing": missing,
+        "missing_bytes": 0,
+        "satisfied": 1 if readiness["ok"] else 0,
+        # The one thing this lane knows that no graph preflight could: whether
+        # reference mode is available, which is a second 62 GiB checkpoint.
+        "h3_native": {"reference_mode": readiness["reference_mode"], "machine": readiness["profile"]},
+        "checked_at": checked_at,
+    }
+
+
 def check_workflow(workflow_id, lane="default", registry=None):
     """Everything the lane lacks for this workflow, each with its source.
 
@@ -415,6 +461,8 @@ def check_workflow(workflow_id, lane="default", registry=None):
     checked_at = util.now_iso()
     if definition is None:
         return {"ok": True, "known": False, "workflow_id": workflow_id, "lane": lane, "missing": [], "checked_at": checked_at}
+    if str(definition.get("builder") or "") == "h3-native":
+        return _h3_native_report(workflow_id, definition, lane, checked_at)
     remote = bool(lanes.comfy_lane_is_remote(lane))
     try:
         graph = load_workflow_graph(definition)

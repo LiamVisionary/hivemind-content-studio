@@ -682,8 +682,53 @@ def local_loras_unfiltered():
     return out
 
 
-def lora_preview_source(path, meta):
-    """Return a local image path or remote image URL for a LoRA card."""
+VIDEO_PREVIEW_SUFFIXES = ('.mp4', '.webm', '.mov')
+# Civitai renders a frame when asked for one, as a PATH transform like every
+# other option it takes. width=450 matches the card the grid draws.
+CIVITAI_STILL_TRANSFORM = 'anim=false,width=450'
+
+
+def _is_video_url(url):
+    return str(url or '').split('?', 1)[0].lower().endswith(VIDEO_PREVIEW_SUFFIXES)
+
+
+def _is_video_preview(image):
+    """Civitai labels these, but hand-written sidecars do not — so check both."""
+    if str(image.get('type') or '').lower() == 'video':
+        return True
+    return _is_video_url(image.get('url'))
+
+
+def civitai_still_url(url):
+    """A Civitai media URL rewritten to serve one frame, or '' for other hosts.
+
+    The transform is the second-to-last path segment: `.../<uuid>/original=true/
+    file.mp4` becomes `.../<uuid>/anim=false,width=450/file.mp4`. The path keeps
+    its .mp4 name and the response is a JPEG, which is why the content type has
+    to come from the response rather than the extension.
+    """
+    try:
+        parsed = urlparse(str(url or ''))
+    except ValueError:
+        return ''
+    host = (parsed.netloc or '').lower()
+    if not (host == 'image.civitai.com' or host.endswith('.civitai.com')):
+        return ''
+    parts = [part for part in parsed.path.split('/') if part]
+    if len(parts) < 2:
+        return ''
+    if '=' in parts[-2]:
+        parts[-2] = CIVITAI_STILL_TRANSFORM
+    else:
+        parts.insert(len(parts) - 1, CIVITAI_STILL_TRANSFORM)
+    return parsed._replace(path='/' + '/'.join(parts)).geturl()
+
+
+def lora_preview_sources(path, meta):
+    """Every candidate for a LoRA card, best first: local files, then remote.
+
+    A list rather than one answer because the remote half is a third party that
+    may not do what it is asked — see the anim=false note below."""
     model_path = Path(path)
     candidates = []
     for key in ['preview_url', 'previewUrl', 'image', 'thumbnail']:
@@ -691,28 +736,73 @@ def lora_preview_source(path, meta):
             candidates.append(str(meta.get(key)))
     for ext in ['.preview.png', '.preview.jpg', '.preview.jpeg', '.png', '.jpg', '.jpeg', '.webp']:
         candidates.append(str(model_path.with_suffix(ext)))
+    found = []
     for candidate in candidates:
         if candidate.startswith(('http://', 'https://')):
-            return candidate
+            # A remote video can be asked for as a frame; anywhere but Civitai
+            # that returns nothing usable, and dropping it is the right answer.
+            if _is_video_url(candidate):
+                still = civitai_still_url(candidate)
+                if still:
+                    found.append(still)
+            else:
+                found.append(candidate)
+            continue
         preview_path = Path(candidate)
         if not preview_path.is_absolute():
             preview_path = model_path.parent / preview_path
         if preview_path.exists() and preview_path.is_file():
-            return str(preview_path.resolve())
+            # A LOCAL clip is skipped rather than served. The downloader saves
+            # one beside the weights and records it as preview_url, and this
+            # function used to return it and stop — so the route guessed
+            # video/mp4 from the extension and sent 7MB of mp4 into an <img>,
+            # which paints nothing. There is no transcoder here, so the card
+            # falls through to the remote stills below instead of losing its
+            # art. Predates the H3 work; it is why some Krea2 cards were blank.
+            if not _is_video_url(str(preview_path)):
+                found.append(str(preview_path.resolve()))
 
+    # A local file needs no network and no third party, so it wins — but the
+    # remote gallery rides behind it as the fallback for a LoRA whose only
+    # local art is a clip.
     image_groups = [
         (meta.get('civitai') or {}).get('images') or [],
         meta.get('images') or [],
         (meta.get('modelVersion') or {}).get('images') or [],
     ]
-    for images in image_groups:
-        for image in images:
-            if not isinstance(image, dict) or not image.get('url'):
-                continue
-            if str(image.get('type') or 'image').lower() == 'video':
-                continue
-            return str(image['url'])
-    return ''
+    entries = [
+        image for images in image_groups for image in images
+        if isinstance(image, dict) and image.get('url')
+    ]
+    # A real still first: it needs no transform and no third party to honour one.
+    remote = [str(image['url']) for image in entries if not _is_video_preview(image)]
+    # Then every video, as a STILL FRAME. Skipping videos outright left every
+    # LoRA for a video model with a blank card — H3's whole community gallery is
+    # clips, so all 14 installed H3 LoRAs resolved to no art at all. Civitai
+    # renders the frame for us: measured 2026-09-14 on a real H3 LoRA, the raw
+    # url is video/mp4 at 1621 KB and the transform is image/jpeg at 69 KB.
+    #
+    # ALL of them, not just the first, because the CDN does not always honour
+    # the transform: on HMNSFW_AIO_V2 the first clip came back video/mp4 at
+    # 5.1 MB with anim=false set, while the second and third answered image/jpeg.
+    # The fetcher walks this list and takes the first that really is an image
+    # (get_api_loras_preview), so one uncooperative asset costs a card its art
+    # only when EVERY clip in its gallery behaves that way. Only Civitai's CDN
+    # renders a frame, so a video anywhere else is no card art at all — an <img>
+    # cannot show an mp4.
+    remote += [still for still in (civitai_still_url(str(image['url'])) for image in entries) if still]
+    ordered, seen = [], set()
+    for url in found + remote:
+        if url and url not in seen:
+            seen.add(url)
+            ordered.append(url)
+    return ordered
+
+
+def lora_preview_source(path, meta):
+    """The best single candidate — what `hasPreview` and every older caller want."""
+    sources = lora_preview_sources(path, meta)
+    return sources[0] if sources else ''
 
 
 def compact_lora_record(item):

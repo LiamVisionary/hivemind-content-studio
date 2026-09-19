@@ -24,14 +24,20 @@ def queue_native_mlx_biglove_job(prompt, image_path, options, workflow=None):
     if not config.supports_native_mlx_biglove_route():
         raise RuntimeError(f"native MLX BigLove route is not available for accelerator profile {config.accelerator_profile()}")
     options = dict(options or {})
-    image_names = options.get('image_paths') if isinstance(options.get('image_paths'), list) else [image_path]
+    # Klein is one model with two modes. No reference at all is a text-to-image
+    # run; `image_path` stays None and every reference-shaped option is simply
+    # absent, rather than the lane refusing the request.
+    if isinstance(options.get('image_paths'), list):
+        image_names = options['image_paths']
+    else:
+        image_names = [image_path] if image_path else []
     uploaded_images = []
     for item in image_names[:graphs.BIGLOVE_KLEIN3_MAX_REFERENCES]:
         p = Path(str(item))
         if not p.is_absolute():
             p = config.COMFY_INPUT_DIR / str(item)
         uploaded_images.append(p)
-    uploaded_image = uploaded_images[0]
+    uploaded_image = uploaded_images[0] if uploaded_images else None
     if len(uploaded_images) > 1:
         options['image_paths'] = [str(p) for p in uploaded_images]
     job_id = uuid.uuid4().hex[:12]
@@ -42,6 +48,7 @@ def queue_native_mlx_biglove_job(prompt, image_path, options, workflow=None):
         "comfy_prompt": graphs._comfy_history_prompt_tuple(job_id, workflow),
         "status": "queued",
         "backend": "mlx-mxfp8-bigloves-klein3-edit",
+        "mode": "edit" if uploaded_images else "text-to-image",
         "created_at": util.now_iso(),
         "options": {
             **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths', 'studio_lane', 'run_on'}},
@@ -77,11 +84,12 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
     guidance = util.float_quality_option(options, 'guidance', 1.0)
     seed = config.resolve_seed_option(options)
     native_loras = loras._dedupe_lora_requests(options.get('loras') or [])
-    reference_images = []
-    for item in (options.get('image_paths') if isinstance(options.get('image_paths'), list) else [image_path]):
-        p = Path(str(item)).resolve()
-        reference_images.append(p)
-    reference_images = reference_images[:graphs.BIGLOVE_KLEIN3_MAX_REFERENCES] or [Path(image_path).resolve()]
+    if isinstance(options.get('image_paths'), list):
+        requested_references = options['image_paths']
+    else:
+        requested_references = [image_path] if image_path else []
+    reference_images = [Path(str(item)).resolve() for item in requested_references]
+    reference_images = reference_images[:graphs.BIGLOVE_KLEIN3_MAX_REFERENCES]
     out = config.OUT_DIR / f"biglove_klein3_mlx_{job_id}.png"
     rec = {
         "id": job_id,
@@ -89,6 +97,7 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
         "comfy_prompt": graphs._comfy_history_prompt_tuple(job_id, workflow),
         "status": "running",
         "backend": "mlx-mxfp8-bigloves-klein3-edit",
+        "mode": "edit" if reference_images else "text-to-image",
         "created_at": queued_rec.get("created_at") or started,
         "started_at": started,
         "outputs": [],
@@ -131,9 +140,12 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
         # Size the canvas from the reference image, not the fixed portrait
         # bucket — the bucket kept its ~1.5MP budget but stretched every
         # non-2:3 source. Same budget, source aspect, then the speed cap.
-        width, height = graphs._cap_native_mx_dimensions(
-            *graphs._reshape_dims_to_image_aspect(reference_images[0], bucket_width, bucket_height)
-        )
+        # A text-to-image run has no source to take an aspect from, so the
+        # bucket the caller asked for IS the canvas.
+        if reference_images:
+            width, height = graphs._cap_native_mx_dimensions(
+                *graphs._reshape_dims_to_image_aspect(reference_images[0], bucket_width, bucket_height)
+            )
         rec["options"].update({"width": width, "height": height})
         with jobs.jobs_lock:
             jobs.jobs[job_id] = rec
@@ -180,7 +192,13 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
 def _klein3_native_edit_once(prompt, reference_images, out, *, width, height, steps,
                              guidance, seed, native_loras=None, server_job_id=None,
                              poll_job_id=None):
-    """One native Klein 9B edit: warm Swift server first, CLI fallback.
+    """One native Klein 9B render: warm Swift server first, CLI fallback.
+
+    An empty `reference_images` is a text-to-image run, not a missing input.
+    Klein is one model with two modes and the engine has always had both
+    (Flux2GenerationMode.textToImage, the CLI's `t2i`); it was this function,
+    the server's GenerateRequest and the registry row that between them made
+    the lane image-only.
 
     BigLoveKlein3 MXFP8 is exposed to flux-2-swift-mlx as the local Klein9B transformer.
     The MXFP8 file is pre-dequantized with Comfy's exact E8M0 blocked-scale layout
@@ -200,7 +218,9 @@ def _klein3_native_edit_once(prompt, reference_images, out, *, width, height, st
         t0 = time.monotonic()
         payload_data = {
             "prompt": prompt,
-            "imagePath": str(reference_images[0]),
+            # Absent, not empty: the server reads a missing imagePath as
+            # text-to-image and takes its canvas from width/height instead.
+            **({"imagePath": str(reference_images[0])} if reference_images else {}),
             "outputPath": str(out),
             "width": width,
             "height": height,
@@ -272,7 +292,7 @@ def _klein3_native_edit_once(prompt, reference_images, out, *, width, height, st
                      '--lora-scale', str(float(native_loras[0].get('scale', 1.0)))]
     cmd = [
         str(config.SWIFT_FLUX2_BIN),
-        'i2i',
+        'i2i' if reference_images else 't2i',
         prompt,
         # Swift ArgumentParser array options take ONE value per flag:
         # --images a --images b. A single flag followed by several paths
@@ -919,6 +939,101 @@ def _probe_video_dimensions(path):
     return width, height
 
 
+def _probe_media_duration(path):
+    """Seconds of media at `path`, or 0.0 when it cannot be read."""
+    ffprobe = shutil.which('ffprobe')
+    if not ffprobe:
+        return 0.0
+    try:
+        payload = subprocess.check_output(
+            [
+                ffprobe, '-v', 'error', '-show_entries', 'format=duration',
+                '-of', 'json', str(path),
+            ],
+            text=True, stderr=subprocess.DEVNULL, timeout=30,
+        )
+        return float((json.loads(payload or '{}').get('format') or {}).get('duration') or 0.0)
+    except Exception:
+        return 0.0
+
+
+# The smallest tail worth handing back as a shot. Below this the extension did
+# not really happen and a "clip" of a few frames is worse than the honest error.
+LTX_EXTENSION_MIN_TAIL_SECONDS = 0.2
+
+
+def trim_ltx_extension_tail(path, source_video):
+    """Cut an extension down to the frames it ADDED, in place.
+
+    `ltx-2-mlx extend` regenerates the source AND the new frames as one
+    continuous file — which is exactly how the soundtrack carries across the
+    join: the model holds the source's audio latent clean and denoises only the
+    tail. A sequence wants one shot per press, though, not a clip that contains
+    every shot before it, so when the caller asks for the tail we cut the
+    source's span off here. The file that is sealed, filed in History and drawn
+    on the segment card IS the new shot; the grown intermediate never leaves
+    this function.
+
+    Cut by the SOURCE's own duration rather than by the frame arithmetic: the
+    latent lattice may round the added frames, and "everything after the source
+    ends" is true whatever it rounded to. `-ss` AFTER `-i` decodes and discards
+    rather than seeking to a keyframe, so the cut lands on the right frame, and
+    the audio is re-encoded alongside it so picture and sound stay on one grid
+    (the H3 chain carries its own trim for the same reason).
+
+    Returns a detail dict for the job record; never raises. A failed trim leaves
+    the full clip in place and says so, because a clip with too much in it is
+    recoverable and a deleted one is not.
+    """
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        return {'applied': False, 'error': 'ffmpeg not found'}
+    target = Path(path)
+    source_seconds = _probe_media_duration(source_video)
+    total_seconds = _probe_media_duration(target)
+    if source_seconds <= 0 or total_seconds <= 0:
+        return {'applied': False, 'error': 'could not measure the source or the extension'}
+    tail_seconds = total_seconds - source_seconds
+    if tail_seconds < LTX_EXTENSION_MIN_TAIL_SECONDS:
+        return {
+            'applied': False,
+            'source_seconds': round(source_seconds, 3),
+            'total_seconds': round(total_seconds, 3),
+            'error': f'the extension added only {tail_seconds:.2f}s — nothing to keep',
+        }
+    scratch = target.with_name(f'{target.stem}.tail-tmp{target.suffix or ".mp4"}')
+    cmd = [
+        ffmpeg, '-y', '-loglevel', 'error',
+        '-i', str(target),
+        '-ss', f'{source_seconds:.6f}',
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-pix_fmt', 'yuv420p',
+        # Re-encoded, not copied: a stream copy would start at the nearest
+        # keyframe before the cut and hand back a second of the previous shot.
+        '-c:a', 'aac', '-b:a', '192k',
+        '-movflags', '+faststart',
+        str(scratch),
+    ]
+    started = time.monotonic()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        kept = _probe_media_duration(scratch) if scratch.exists() else 0.0
+        if result.returncode != 0 or kept < LTX_EXTENSION_MIN_TAIL_SECONDS:
+            detail = (result.stderr or result.stdout or 'the trimmed clip was empty').strip()
+            scratch.unlink(missing_ok=True)
+            return {'applied': False, 'error': detail[-400:]}
+        os.replace(scratch, target)
+        return {
+            'applied': True,
+            'source_seconds': round(source_seconds, 3),
+            'total_seconds': round(total_seconds, 3),
+            'kept_seconds': round(kept, 3),
+            'seconds': round(time.monotonic() - started, 2),
+        }
+    except Exception as exc:
+        scratch.unlink(missing_ok=True)
+        return {'applied': False, 'error': str(exc)[-400:]}
+
+
 def _snap_headswap_dimension(value, grid=BFS_HEADSWAP_DIMENSION_GRID):
     """Round a pixel dimension to the nearest grid multiple, never below one."""
     snapped = int(round(float(value) / grid)) * grid
@@ -1405,15 +1520,34 @@ def _anonymous_input_arguments(cmd, paths):
                 pass
 
 
-def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400, anonymize_paths=()):
-    """Run ltx-2-mlx while publishing tqdm progress from both output streams."""
+def run_native_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400, anonymize_paths=(),
+                          on_progress=_update_native_ltx_process_progress):
+    """Run a native engine while publishing its progress from both streams.
+
+    Everything here is engine-agnostic — cancellation, the timeout, the
+    nameless-input descriptors, the process group — except how a line of output
+    becomes a percentage, which is `on_progress(job_id, rec, tail)`. ltx-2-mlx
+    prints tqdm and is the default; h3.c prints its own `phase n/total` and
+    passes its own parser (gateway/h3_native.py).
+    """
     if native_job_cancel_requested(job_id):
         raise NativeJobCancelled(f"job {job_id} was cancelled before the render started")
     with _anonymous_input_arguments(cmd, anonymize_paths) as (cmd, inherited):
-        return _spawn_native_ltx_subprocess(job_id, rec, cmd, cwd=cwd, env=env, timeout=timeout, inherited=inherited)
+        return _spawn_native_ltx_subprocess(
+            job_id, rec, cmd, cwd=cwd, env=env, timeout=timeout, inherited=inherited,
+            on_progress=on_progress,
+        )
 
 
-def _spawn_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400, inherited=()):
+def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400, anonymize_paths=()):
+    """Run ltx-2-mlx while publishing tqdm progress from both output streams."""
+    return run_native_subprocess(
+        job_id, rec, cmd, cwd=cwd, env=env, timeout=timeout, anonymize_paths=anonymize_paths,
+    )
+
+
+def _spawn_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400, inherited=(),
+                                 on_progress=_update_native_ltx_process_progress):
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -1462,7 +1596,7 @@ def _spawn_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400, in
                 if len(output[stream]) > 500_000:
                     del output[stream][:-500_000]
                 progress_tail = (progress_tail + chunk.decode('utf-8', errors='replace'))[-8192:]
-                _update_native_ltx_process_progress(job_id, rec, progress_tail)
+                on_progress(job_id, rec, progress_tail)
         returncode = proc.wait()
     except Exception:
         if proc.poll() is None:
@@ -1956,9 +2090,24 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                         flush=True,
                     )
                 rec['options']['head_swap'] = {**headswap_guide_info, 'output_width': got_w, 'output_height': got_h}
-            # Both post-passes run while the output is still marked active, so the
-            # E2E sweeper never seals the intermediate file out from under them.
-            # Detailer first: it resamples the clip, so grain filtering afterwards
+            # The post-passes all run while the output is still marked active, so
+            # the E2E sweeper never seals an intermediate file out from under
+            # them. The TRIM goes first of all: everything after it should be
+            # judging — and spending time on — the frames that actually ship,
+            # not the source span this is about to discard.
+            if operation == 'extend' and options.get('return_tail_only') and source_video:
+                tail_detail = trim_ltx_extension_tail(out, source_video)
+                rec['options']['extension_tail'] = tail_detail
+                if not tail_detail.get('applied'):
+                    # The full clip is still there and still playable, so this is
+                    # a note rather than a failure — but it is the difference
+                    # between one shot and a shot containing every shot before
+                    # it, which nobody should have to diagnose from the picture.
+                    print(
+                        f"[ltx] extension tail not trimmed for {job_id}: {tail_detail.get('error')}",
+                        flush=True,
+                    )
+            # Detailer next: it resamples the clip, so grain filtering afterwards
             # judges the texture that actually ships.
             detailer_detail = apply_ltx_detailer_pass(
                 out, options,

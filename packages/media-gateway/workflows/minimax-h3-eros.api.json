@@ -1,10 +1,10 @@
 {
-  "comment": "MiniMax H3 Turbo (BETA), API format. Same graph contract as minimax-h3.api.json plus larryvrh's turbo distill LoRA at minimax_h3_turbo_v4_step600_ema \u2014 upstream's current recommendation \u2014 applied by UPSTREAM'S OWN LOADER, MiniMaxH3TurboLoRA (node 40). That loader is mandatory: ComfyUI's plain LoraLoaderModelOnly cannot apply this LoRA to our PRUNED int8-convrot base because the 51 AdaLN pairs have no home, which is why this graph previously shipped drbaph's ckpt500 conversion with those adapters STRIPPED and its own metadata warning that 4-step behaviour 'may be degraded or broken'. Upstream's loader detects the pruned base and re-injects the time conditioning from the h3_silu_temb_grid.safetensors shipped with the node, so all 259 pairs apply intact. strength 1.0, scheduler simple, 6 steps (upstream: 4 is the minimum, 4-8 the useful range; at 4 steps with heavy motion v4-600 can smear). low_vram OFF applies the LoRA at run time \u2014 turn it ON only if the card OOMs, since merging rounds the delta away on a quantized base, which is exactly this one. We do NOT use upstream's MiniMaxH3TurboSampler: measured on a rented 5090 it bypasses Spectrum's sampler hooks, so every step becomes a real eval \u2014 61s of sampling against 30s through KSamplerSelect/euler with the manual dual sigma shift restored. On a ComfyUI recent enough to schedule audio natively (ours, e377e263) their sampler is documented to behave as a stock sampler anyway, and MiniMaxH3SigmaShift video=12 audio=6 supplies the dual schedule as it always did \u2014 verified by audio measurement, mean -32.7 dB / max -7.1 dB, louder and un-clipped against the old LoRA's -45.2/-20.0. MODEL chain: UNETLoader(6) -> MiniMaxH3TurboLoRA(40) -> PathchSageAttentionKJ(31) -> MiniMaxH3SigmaShift(43) -> Spectrum(30) -> scheduler+guider. Benchmarked at ~80s for a 5s 960x544 clip against 98s for the minimax-h3 quality tier. Keep minimax-h3 as the quality tier.",
+  "comment": "Built from minimax-h3.api.json (text/image-to-video+audio). H3 Eros Max beta5 (TURBO-hybrid int8), the uncensored H3 finetune, on the graph named above with exactly three things changed and nothing else: the unet_name, the sampler and the step count.\n\nWHY THE WEIGHTS DROP IN. Eros Max is a graft/consensus merge over H3 itself, quantised int8_convrot like our official DiT and loaded by the same plain UNETLoader, so every node downstream — the H3 conditioning, the dual video/audio VAE decode, Spectrum, Sol-Attn, the motion-context pack — is the graph you already know. Text encoder and both VAEs are the OFFICIAL H3 files, unchanged; only the transformer is the finetune.\n\nNO TURBO LoRA. This is the TURBO-hybrid build: the ref and fl turbo deltas are fused into the weights, which is the whole point of it (the author's note: it saves loading both turbos, 4.2GB). Stacking MiniMaxH3TurboLoRA on top would apply a second distillation to an already distilled model, so this lane inherits the plain minimax-h3 MODEL chain rather than the turbo one. The same fusion is why the step count drops from 15 to 8.\n\nSAMPLING. res_multistep/simple at 8 steps is the author's own go-to for motion quality; the other setups they publish as working are er_sde/beta 4 steps, er_sde/beta57 4-6, LCM/simple 6-8 (their best turbo audio) and Euler/simple 4-8. Steps are exposed, so 6 and 8 are both one field away. NO sigma shift: beta4 needed MiniMaxH3SigmaShift 12/7 and beta5's published setups do not mention it, so this lane matches minimax-h3 and carries none — unlike minimax-h3-turbo, which needs it for the pruned official base.\n\nSPECTRUM IS OFF BY DEFAULT HERE, where the official lane has it on. Two reasons: the author reports cache and Spectrum cost accuracy on this model, and Spectrum forecasts from sampling history it barely has at 8 steps. The node is still in the graph and still on the `spectrum` control, so it is one toggle away.\n\nLICENCE: MiniMax H3 community licence, plus the LTX 2.3, Wan 2.2 and Krea 2 community licences for the character transferred in by the grafts (the author's own statement). Weights: HF TenStrip/10Eros-Max 10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors, sha256 4dd96549… — the same file as Civitai 2851079 version 3294059 (beta5).",
   "prompt": {
     "6": {
       "class_type": "UNETLoader",
       "inputs": {
-        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "unet_name": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
         "weight_dtype": "default"
       }
     },
@@ -32,10 +32,35 @@
       "class_type": "PathchSageAttentionKJ",
       "inputs": {
         "model": [
-          "40",
+          "6",
           0
         ],
         "sage_attention": "auto"
+      }
+    },
+    "30": {
+      "class_type": "SpectrumApplyMiniMaxH3",
+      "inputs": {
+        "model": [
+          "33",
+          0
+        ],
+        "enabled": false,
+        "blend_weight": 0.5,
+        "degree": 1,
+        "ridge_lambda": 0.1,
+        "window_size": 2.0,
+        "flex_window": 0.75,
+        "warmup_steps": 1,
+        "tail_actual_steps": 1,
+        "max_history": 8,
+        "debug": false,
+        "history_storage": "vram",
+        "bootstrap_first_forecast": true,
+        "offline_smoothing_replay": true,
+        "anchor_residual_feedback": false,
+        "selective_rollback_correction": false,
+        "audio_blend_weight": 0.0
       }
     },
     "70": {
@@ -77,14 +102,14 @@
           0
         ],
         "scheduler": "simple",
-        "steps": 6,
+        "steps": 8,
         "denoise": 1.0
       }
     },
     "17": {
       "class_type": "KSamplerSelect",
       "inputs": {
-        "sampler_name": "euler"
+        "sampler_name": "res_multistep"
       }
     },
     "15": {
@@ -178,57 +203,9 @@
           "91",
           0
         ],
-        "filename_prefix": "video/minimax_h3_turbo",
+        "filename_prefix": "video/minimax_h3",
         "format": "mp4",
         "codec": "h264"
-      }
-    },
-    "40": {
-      "class_type": "MiniMaxH3TurboLoRA",
-      "inputs": {
-        "model": [
-          "6",
-          0
-        ],
-        "lora_name": "minimax_h3_turbo_v4_step600_ema.safetensors",
-        "strength": 1.0,
-        "low_vram": false
-      }
-    },
-    "30": {
-      "class_type": "SpectrumApplyMiniMaxH3",
-      "inputs": {
-        "model": [
-          "43",
-          0
-        ],
-        "enabled": true,
-        "blend_weight": 0.5,
-        "degree": 1,
-        "ridge_lambda": 0.1,
-        "window_size": 2.0,
-        "flex_window": 0.75,
-        "warmup_steps": 1,
-        "tail_actual_steps": 1,
-        "max_history": 8,
-        "debug": false,
-        "history_storage": "vram",
-        "bootstrap_first_forecast": true,
-        "offline_smoothing_replay": true,
-        "anchor_residual_feedback": false,
-        "selective_rollback_correction": false,
-        "audio_blend_weight": 0.0
-      }
-    },
-    "43": {
-      "class_type": "MiniMaxH3SigmaShift",
-      "inputs": {
-        "model": [
-          "33",
-          0
-        ],
-        "shift_video": 12.0,
-        "shift_audio": 6.0
       }
     },
     "71": {

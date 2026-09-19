@@ -196,3 +196,63 @@ def test_agent_reveal_serves_an_agent_copy_but_never_a_private_clip(tmp_path):
     priv = media_seal.seal(b"secret pixels", media_seal.load_public_key(owner_spki)); priv["v"] = 1
     media.e2e_envelope_path_for(base3).write_text(json.dumps(priv))
     assert media.reveal_agent_plaintext(base3) is None
+
+
+def test_generated_audio_is_sealed_and_never_served_in_the_clear(tmp_path):
+    """A rendered song must seal exactly like a clip does.
+
+    `find_output_logical_path` — which backs `/image/<name>` — has no extension
+    gate, so before audio was added to OUTPUT_MEDIA_EXTS a generated .wav was
+    refused by `is_encryptable_output` and then served anyway, in plaintext, to
+    anyone who could name it. This asserts the whole loop: sealed, plaintext
+    gone, the right media_type on the envelope, and byte-exact recovery.
+    """
+    gw = _load_gateway()
+    keypair = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    vault_db = tmp_path / "owner-vault.sqlite3"
+    _write_vault_db(vault_db, keypair.public_key())
+
+    gw.config.OUT_DIR = out_dir
+    gw.media.VAULT_DB = vault_db
+    gw.media.E2E_MEDIA_ENABLED = True
+    gw.media._vault_public_key_cache.update(mtime=None, spki=None)
+
+    # A RIFF header and some payload — enough that mimetypes calls it audio.
+    original = b"RIFF" + (0).to_bytes(4, "little") + b"WAVEfmt " + b"\x00\x11\x22\x33" * 500
+    song = out_dir / "music_00001_.wav"
+    song.write_bytes(original)
+
+    assert gw.media.is_encryptable_output(song) is True, "audio must be sealable at all"
+    gw.media.encrypt_output_file(song)
+
+    assert not song.exists(), "the plaintext song must not survive sealing"
+    envelope_path = out_dir / "music_00001_.wav.e2e"
+    assert envelope_path.is_file()
+    assert not (out_dir / "music_00001_.wav.zenc").exists(), "must NOT fall back to the server-held key"
+    envelope = json.loads(envelope_path.read_text())
+    assert envelope["v"] == 1
+    assert envelope["media_type"] in {"audio/x-wav", "audio/wav", "audio/wave"}, envelope["media_type"]
+    assert original not in envelope_path.read_bytes()
+
+    dek_and_iv = keypair.decrypt(
+        _unb64url(envelope["wrapped_dek"]),
+        padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+    )
+    iv, dek = dek_and_iv[:12], dek_and_iv[12:]
+    assert AESGCM(dek).decrypt(iv, _unb64url(envelope["ciphertext"]), None) == original
+
+    assert gw.media.logical_path_for_encrypted(envelope_path).name == "music_00001_.wav"
+
+
+def test_every_audio_format_the_music_lane_can_emit_is_sealable():
+    """SaveAudio/SaveAudioMP3/SaveAudioOpus each write a different suffix.
+
+    One missing from the set is a silent plaintext leak, not a failed render,
+    so pin the whole list rather than the one format today's graph uses.
+    """
+    gw = _load_gateway()
+    for suffix in (".wav", ".mp3", ".flac", ".m4a", ".opus", ".ogg"):
+        assert suffix in gw.media.OUTPUT_MEDIA_EXTS, f"{suffix} would be served in the clear"

@@ -82,6 +82,10 @@ ROUTES = (
     # the inline installers (gateway/dependencies.py).
     Route("GET", "get_api_workflow_dependencies", exact=("/api/workflows/dependencies",)),
     Route("GET", "get_api_workflow_dependency_jobs", exact=("/api/workflows/dependencies/jobs",)),
+    # What this Mac is, and what of the h3.c lane is installed on it, so the
+    # Video studio can recommend a preset and name the one missing piece
+    # instead of offering a model that cannot run.
+    Route("GET", "get_api_h3_native_profile", exact=("/api/h3-native/profile",)),
     # The rendered control a Klein direction edit sends to its LoRA, so the
     # picker can show the reference rather than a drawing of it.
     Route("GET", "get_api_direction_reference", exact=("/api/direction-reference",)),
@@ -110,6 +114,7 @@ ROUTES = (
     Route("POST", "post_api_delete_input", exact=("/api/delete-input",)),
     Route("POST", "post_api_interpolate", exact=("/api/interpolate",)),
     Route("POST", "post_api_smart_mask", exact=("/api/smart-mask",)),
+    Route("POST", "post_api_audio_split", exact=("/api/audio-split",)),
     Route("POST", "post_api_ltx_director", exact=("/api/ltx-director",)),
     Route("POST", "post_api_episode", exact=("/api/episode",)),
     Route("POST", "post_api_upscale", exact=("/api/upscale",)),

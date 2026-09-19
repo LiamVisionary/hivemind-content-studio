@@ -2,6 +2,7 @@
 and writes the record. One function per studio lane."""
 import base64
 import binascii
+import contextlib
 import json
 import os
 import re
@@ -119,7 +120,16 @@ def run_generation(job_id, prompt, loras=None, options=None):
         jobs.jobs[job_id] = rec
 
 
-def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
+def run_comfy_klein3_edit(job_id, prompt, image_path=None, options=None,
+                          unet_name=None, backend="comfy-bigloves-klein3-edit"):
+    """A Klein 9B render on the ComfyUI route.
+
+    `image_path` is optional — without one this is a text-to-image run off an
+    empty Flux.2 latent, which is what the model has always been able to do and
+    what the native route does too. `unet_name` picks the checkpoint, so the
+    BigLove finetune and stock Klein 9B share one graph builder instead of
+    drifting apart as two copies.
+    """
     started = util.now_iso()
     options = options or {}
     steps = util.int_option(options, 'steps', 4, 1, 12)
@@ -133,14 +143,17 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
         "id": job_id,
         "prompt": _history.PRIVATE_PROMPT_LABEL,
         "status": "running",
-        "backend": "comfy-bigloves-klein3-edit",
+        "backend": backend,
+        "mode": "edit" if image_path else "text-to-image",
         "created_at": started,
         "outputs": [],
         "options": {
             "steps": steps,
             "cfg": cfg,
             "seed": seed,
-            "denoise": denoise,
+            # Only an edit has a denoise to report; a text-to-image run always
+            # samples the whole latent.
+            **({"denoise": denoise} if image_path else {}),
             "width": width,
             "height": height,
             "lora_count": len(options.get('loras') or []),
@@ -149,34 +162,42 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
     with jobs.jobs_lock:
         jobs.jobs[job_id] = rec
     try:
-        image_path = Path(image_path).resolve()
-        allowed = [config.OUT_DIR.resolve(), config.COMFY_OUTPUT_DIR.resolve(), config.COMFY_INPUT_DIR.resolve()]
-        if not any(str(image_path).startswith(str(root)) for root in allowed) or not image_path.exists():
-            raise RuntimeError("input image is outside private image storage or does not exist")
-        config.COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
-        input_name = util.safe_name(image_path.name)
-        comfy_input = (config.COMFY_INPUT_DIR / input_name).resolve()
-        if comfy_input != image_path:
-            comfy_input.write_bytes(image_path.read_bytes())
-        # Node 4b resizes with crop:'disabled', which stretches anything the
-        # canvas doesn't match — keep the requested pixel budget but adopt the
-        # source image's aspect so the edit never distorts it.
-        width, height = _graphs._reshape_dims_to_image_aspect(comfy_input, width, height, multiple=16)
+        if image_path:
+            image_path = Path(image_path).resolve()
+            allowed = [config.OUT_DIR.resolve(), config.COMFY_OUTPUT_DIR.resolve(), config.COMFY_INPUT_DIR.resolve()]
+            if not any(str(image_path).startswith(str(root)) for root in allowed) or not image_path.exists():
+                raise RuntimeError("input image is outside private image storage or does not exist")
+            config.COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+            input_name = util.safe_name(image_path.name)
+            comfy_input = (config.COMFY_INPUT_DIR / input_name).resolve()
+            if comfy_input != image_path:
+                comfy_input.write_bytes(image_path.read_bytes())
+            # Node 4b resizes with crop:'disabled', which stretches anything the
+            # canvas doesn't match — keep the requested pixel budget but adopt the
+            # source image's aspect so the edit never distorts it.
+            width, height = _graphs._reshape_dims_to_image_aspect(comfy_input, width, height, multiple=16)
         rec["options"].update({"width": width, "height": height})
-        filename_prefix = f"biglove_klein3_comfy_edit_{job_id}"
+        filename_prefix = f"{util.safe_name(backend)}_{'edit' if image_path else 't2i'}_{job_id}"
         api_prompt = {
-            '1': {'class_type':'UNETLoader','inputs':{'unet_name':'BigLoveKlein3_bf16.safetensors','weight_dtype':'default'}},
+            '1': {'class_type':'UNETLoader','inputs':{'unet_name':unet_name or _graphs.BIGLOVE_KLEIN3_COMFY_BF16_MODEL,'weight_dtype':'default'}},
             '2': {'class_type':'CLIPLoader','inputs':{'clip_name':'qwen_3_8b_fp8mixed.safetensors','type':'flux2','device':'default'}},
             '3': {'class_type':'VAELoader','inputs':{'vae_name':'flux2-vae.safetensors'}},
-            '4': {'class_type':'LoadImage','inputs':{'image':input_name}},
-            '4b': {'class_type':'ImageScale','inputs':{'image':['4',0],'upscale_method':'lanczos','width':width,'height':height,'crop':'disabled'}},
             '5': {'class_type':'CLIPTextEncode','inputs':{'clip':['2',0],'text':prompt}},
             '6': {'class_type':'CLIPTextEncode','inputs':{'clip':['2',0],'text':negative}},
-            '7': {'class_type':'VAEEncode','inputs':{'pixels':['4b',0], 'vae':['3',0]}},
             '8': {'class_type':'KSampler','inputs':{'model':['1',0],'positive':['5',0],'negative':['6',0],'latent_image':['7',0],'seed':seed,'steps':steps,'cfg':cfg,'sampler_name':'euler','scheduler':'beta','denoise':denoise}},
             '9': {'class_type':'VAEDecode','inputs':{'samples':['8',0], 'vae':['3',0]}},
             '10': {'class_type':'SaveImage','inputs':{'images':['9',0], 'filename_prefix':filename_prefix}},
         }
+        if image_path:
+            # Edit: the source is encoded and partially re-noised.
+            api_prompt['4'] = {'class_type':'LoadImage','inputs':{'image':input_name}}
+            api_prompt['4b'] = {'class_type':'ImageScale','inputs':{'image':['4',0],'upscale_method':'lanczos','width':width,'height':height,'crop':'disabled'}}
+            api_prompt['7'] = {'class_type':'VAEEncode','inputs':{'pixels':['4b',0], 'vae':['3',0]}}
+        else:
+            # Text-to-image: Flux.2's own empty latent, sampled in full. The
+            # edit lane's partial denoise would only re-noise nothing.
+            api_prompt['7'] = {'class_type':'EmptyFlux2LatentImage','inputs':{'width':width,'height':height,'batch_size':1}}
+            api_prompt['8']['inputs']['denoise'] = 1.0
         model_ref = ['1', 0]
         lora_root = (config.COMFY / 'models' / 'loras').resolve()
         for index, item in enumerate(options.get('loras') or [], start=11):
@@ -356,6 +377,15 @@ def run_comfy_api_image(job_id, prompt, options=None):
                 applied = _graphs._auto_apply_model_loras(graph, sampler_inputs, resolved)
                 if applied:
                     rec["loras_applied"] = applied
+
+            # References: the caller's pictures into the graph's own LoadImage
+            # nodes, in node order. Until now this branch touched no picture at
+            # all — only the two graphs we fingerprint (the H3 Director and the
+            # Klein direction lanes, both above) could take one — so a person's
+            # own edit workflow had nowhere to put the thing being edited.
+            references = options.get("reference_image_paths") or []
+            if references:
+                _graphs._auto_apply_reference_images(graph, references, rec)
 
             # Dimensions: patch every node that carries a width+height pair so
             # latent size and regional-prompt canvases stay consistent.
@@ -1629,6 +1659,208 @@ def run_comfy_upscale(job_id, image_path, options=None):
         })
     except Exception as exc:
         rec.update({"status": "error", "finished_at": util.now_iso(), "error": str(exc)})
+    _history.append_history(rec)
+    with jobs.jobs_lock:
+        jobs.jobs[job_id] = rec
+
+
+# --- music ---------------------------------------------------------------------
+
+# ACE-Step decodes to float and ComfyUI's save_audio hands that float straight
+# to the encoder with no clamp (comfy_api/latest/_ui.py save_audio), so a render
+# that peaks above full scale stays above it. Measured on the first real render
+# here: peak 1.3389, with 0.167% of samples over 1.0. Written to FLAC that is
+# merely unusual; converted to any integer format — an MP3 the user shares, a
+# WAV an editor opens — it is audible hard clipping on every one of those
+# samples. Mastering is not a nicety for a tool whose whole purpose is
+# publishable content, so the lane renders lossless and masters before it ever
+# encodes lossily.
+MUSIC_MASTER_LUFS = -14.0   # the streaming-platform reference (Spotify/YouTube)
+MUSIC_MASTER_TRUE_PEAK = -1.0
+
+
+def master_audio_output(source, target_suffix=".mp3"):
+    """Limit + loudness-normalise a rendered track, returning the new file.
+
+    Degrades the way the rest of the gateway degrades when ffmpeg is absent
+    (native_mlx.py does the same): the raw render is returned untouched and the
+    caller records that mastering did not happen, because a user would far
+    rather have an un-normalised song than no song.
+    """
+    source = Path(source)
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return source, {"mastered": False, "reason": "ffmpeg not found"}
+    target = source.with_suffix(target_suffix)
+    if target == source:
+        target = source.with_name(f"{source.stem}-master{target_suffix}")
+    command = [
+        ffmpeg, "-y", "-loglevel", "error", "-i", str(source),
+        "-af", (
+            f"alimiter=limit={10 ** (MUSIC_MASTER_TRUE_PEAK / 20):.4f},"
+            f"loudnorm=I={MUSIC_MASTER_LUFS}:TP={MUSIC_MASTER_TRUE_PEAK}:LRA=11"
+        ),
+        "-c:a", "libmp3lame", "-q:a", "2", str(target),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    except Exception as exc:  # noqa: BLE001 — a failed master must not lose the render
+        return source, {"mastered": False, "reason": str(exc)[:200]}
+    if result.returncode != 0 or not target.is_file() or target.stat().st_size < 1024:
+        detail = (result.stderr or result.stdout or "unknown ffmpeg error").strip()
+        return source, {"mastered": False, "reason": detail[:200]}
+    return target, {"mastered": True, "lufs": MUSIC_MASTER_LUFS, "true_peak": MUSIC_MASTER_TRUE_PEAK}
+
+
+def run_comfy_api_audio(job_id, prompt, options=None):
+    """Runner for registry-shipped API-format ComfyUI MUSIC workflows.
+
+    Deliberately not a branch inside run_comfy_api_image. That runner drives a
+    graph by inference — locate the KSampler, walk its conditioning upstream to
+    a text node, patch width/height — and every one of those moves is wrong
+    here: an audio graph has no dimensions, its duration lives in two nodes at
+    once, and its "prompt" is a style-tag list sitting beside a lyrics field.
+    This one is driven entirely by the registry's `slots` map instead, so the
+    graph and the options it accepts are declared together in one place.
+    """
+    started = util.now_iso()
+    options = dict(options or {})
+    rec = {
+        "id": job_id,
+        "prompt": _history.PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "comfy-api-audio",
+        "created_at": started,
+        "outputs": [],
+        "options": {k: v for k, v in options.items() if k not in ("lyrics", "workflow_file")},
+    }
+    with jobs.jobs_lock:
+        jobs.jobs[job_id] = rec
+    progress_stop = threading.Event()
+    try:
+        workflow_path, graph = _graphs._load_auto_api_workflow(options.get("workflow_file"))
+        rec["workflow"] = workflow_path.stem
+        definition = _graphs._registry_entry_for_workflow_file(str(workflow_path)) or {}
+
+        # The style description arrives as `prompt` like every other lane, and
+        # the registry points that name at whichever input this model calls it
+        # (ACE-Step calls it "tags").
+        if prompt is not None and "prompt" not in options:
+            options["prompt"] = prompt
+        _graphs.fill_empty_lyrics(definition, options)
+        options["seed"] = config.resolve_seed_option(options)
+        seconds = options.get("seconds")
+        limits = ((definition.get("limits") or {}).get("seconds") or {})
+        if seconds is not None and limits:
+            low, high = float(limits.get("min", 1)), float(limits.get("max", 600))
+            clamped = max(low, min(high, float(seconds)))
+            if clamped != float(seconds):
+                # Say so rather than silently rendering a different song than
+                # the length asked for.
+                rec["seconds_clamped_from"] = float(seconds)
+            options["seconds"] = clamped
+
+        applied = _graphs.apply_registry_slots(graph, definition, options)
+        if "prompt" not in applied:
+            raise RuntimeError(
+                f"{workflow_path.name} has no registry slot for the prompt — the music lane is "
+                "driven entirely by workflow-registry.json `slots`, so a missing one means the "
+                "song text would never reach the graph"
+            )
+        rec["applied_options"] = applied
+
+        body = {"prompt": graph}
+        lane_name = lanes.comfy_lane_for_prompt_body(body, run_on=options.get("run_on"))
+        lane_url = lanes.COMFY_LANES.get(lane_name, config.COMFY_HTTP_DEFAULT)
+        rec["lane"] = lane_url
+        if lanes.comfy_lane_is_remote(lane_name):
+            # Audio harvest over the rented-lane route is untested: the harvest
+            # filter accepts audio now, but no rented music render has ever been
+            # proven end to end. Refusing with a reason beats a job that appears
+            # to run and produces nothing recoverable.
+            raise RuntimeError(
+                f"lane '{lane_name}' is a rented machine, and music renders locally only for now — "
+                "unpin 'Run on' to render on this computer"
+            )
+
+        t0 = time.monotonic()
+        client_id = f"zimage-music-{job_id}"
+        queued = _graphs._auto_submit_prompt(lane_url, graph, client_id)
+        prompt_id = queued.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+        rec["comfy_prompt_id"] = prompt_id
+        with jobs.jobs_lock:
+            jobs.jobs[job_id] = rec
+        threading.Thread(
+            target=_graphs.poll_local_comfy_progress,
+            args=(job_id, lane_name, prompt_id, progress_stop),
+            # Without the registry's measured shares the bar would fill during
+            # the LM phase, reset, and fill again during sampling.
+            kwargs={"phases": definition.get("progress_phases") or None},
+            daemon=True,
+        ).start()
+
+        history = None
+        # A ten-minute track at the measured ~2.3x realtime is a few minutes of
+        # sampling; the ceiling is generous so a long song on a cold model is
+        # never cut off mid-render.
+        for _ in range(1800):
+            time.sleep(2)
+            try:
+                payload = net.urlopen(f"{lane_url}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                data = json.loads(payload or "{}")
+                if prompt_id in data:
+                    history = data[prompt_id]
+                    break
+            except Exception:
+                pass
+        if history is None:
+            raise RuntimeError(f"music workflow timed out waiting for prompt {prompt_id}")
+        status = history.get("status") or {}
+        if status.get("status_str") != "success" or not status.get("completed"):
+            raise RuntimeError(f"music workflow failed: {status}")
+
+        rendered = []
+        for node_out in (history.get("outputs") or {}).values():
+            # ComfyUI reports SaveAudio under "audio"; the image runner's
+            # "images"/"videos" keys are never populated by an audio graph.
+            for item in node_out.get("audio") or []:
+                name = util.safe_name(item.get("filename") or "")
+                subfolder = item.get("subfolder") or ""
+                typ = item.get("type") or "output"
+                root = config.COMFY_OUTPUT_DIR if typ == "output" else config.COMFY_INPUT_DIR
+                path = (root / subfolder / name).resolve()
+                if media.existing_output_path(path):
+                    rendered.append(path)
+        if not rendered:
+            raise RuntimeError("music workflow completed without an audio output")
+
+        outputs = []
+        master_info = {}
+        for source in rendered:
+            mastered, info = master_audio_output(source)
+            master_info = info
+            if mastered != source:
+                # The lossless render was only ever an intermediate. Leaving it
+                # would double every song on disk and put a second, unmastered
+                # copy of the same track in the user's library.
+                with contextlib.suppress(OSError):
+                    source.unlink()
+            outputs.append(str(mastered))
+        rec["mastering"] = master_info
+
+        outputs = media.encrypt_outputs(outputs, job_id=job_id)
+        rec.update({
+            "status": "success",
+            "finished_at": util.now_iso(),
+            "outputs": outputs,
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as e:
+        rec.update({"status": "error", "finished_at": util.now_iso(), "error": str(e)})
+    finally:
+        progress_stop.set()
     _history.append_history(rec)
     with jobs.jobs_lock:
         jobs.jobs[job_id] = rec

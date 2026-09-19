@@ -34,11 +34,12 @@ FILES = [
         "bytes": 605254808,
         "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
     },
-    {
-        "key": "vae/minimax_h3_video_vae_fp16.safetensors",
-        "bytes": 5207808496,
-        "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
-    },
+    # The VIDEO VAE is deliberately absent. It was relayed here as
+    # minimax_h3_video_vae_fp16.safetensors until 2026-09-18, when every H3 lane
+    # moved to Kijai's int8_convrot decoder (via the same Comfy-Org repo). That
+    # file is public and ungated and the boxes now pull it straight from
+    # HuggingFace, so relaying it would put 2.8GB in the bucket that nothing
+    # reads. See _MINIMAX_PUBLIC_FILES in src/hivemind_content_studio/gpu_rentals.py.
     {  # official template TE pairing (nvfp4, Blackwell-native)
         "key": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
         "bytes": 15687142551,

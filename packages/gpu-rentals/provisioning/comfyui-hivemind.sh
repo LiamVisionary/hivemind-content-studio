@@ -446,7 +446,7 @@ if [[ "${RENTAL_TIER:-image}" == "minimax-video" ]]; then
     fi
     # The node scans this directory at schema time, so the weights have to land
     # before ComfyUI starts or the model_name combo comes up empty.
-    fetch "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/minimax_h3_latent_upscaler_3d_bf16.safetensors" \
+    fetch "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/minimax_h3_latent_upscaler_3d_conv_v1/minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors" \
           "latent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors"
 
     # RIFE weights for core ComfyUI's FrameInterpolate (no custom node needed).
@@ -458,14 +458,51 @@ if [[ "${RENTAL_TIER:-image}" == "minimax-video" ]]; then
           "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     fetch "${R2_BASE_URL}/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" \
           "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
-    fetch "${R2_BASE_URL}/vae/minimax_h3_video_vae_fp16.safetensors" \
-          "vae/minimax_h3_video_vae_fp16.safetensors"
+    # Kijai's int8_convrot quantisation of H3's video decoder (via Comfy-Org's
+    # mirror), which replaced the fp16 decoder on 2026-09-18: VAE decode peaks
+    # at 2,677MB against 4,965MB and runs ~1.5x faster, and only the DECODER is
+    # quantised, so the reference/inpaint lanes that encode are unaffected.
+    # Public and ungated, so it comes from HuggingFace rather than the bucket.
+    # NEEDS ComfyUI >= v0.31.0 (#15334): older builds decode BLACK FRAMES here
+    # instead of failing, which is why this is not a silent drop-in downgrade.
+    fetch "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors" \
+          "vae/minimax_h3_video_vae_int8_convrot.safetensors"
     fetch "${R2_BASE_URL}/vae/minimax_h3_audio_vae_fp32.safetensors" \
           "vae/minimax_h3_audio_vae_fp32.safetensors"
     # BETA: larryvrh 4-step Turbo distill (drbaph ckpt500 pruned-ComfyUI
     # conversion) for the minimax-h3-turbo workflow.
     fetch "${R2_BASE_URL}/loras/minimax_h3_turbo_4step_ckpt500_pruned_comfyui.safetensors" \
           "loras/minimax_h3_turbo_4step_ckpt500_pruned_comfyui.safetensors"
+fi
+
+# ---------------------------------------------------------------------------
+# CUDA 13 torch. comfy/quant_ops.py disables comfy-kitchen's CUDA backend on
+# anything below it:
+#     if tuple(map(int, str(torch.version.cuda).split('.'))) < (13,):
+#         ck.registry.disable("cuda")
+# which silently drops int8_linear, dequantize_int8_convrot_weight,
+# scaled_mm_nvfp4 and sol_attn — so the H3 int8_convrot DiT, the nvfp4 text
+# encoder and the int8_convrot video VAE all run a dequantize-then-compute
+# fallback. MEASURED 2026-09-18 on a rented 5090, same seeds, only torch
+# changed: a 5s 960x544 H3 clip went 113.0s (cu128) -> 48.5s (cu130), and the
+# VAE decode alone 12.10s -> 2.38s.
+#
+# Not fatal: a box that cannot reach the index is slow, not broken. Upgrade
+# torchvision/torchaudio WITH torch — they pin an exact build, and a lone torch
+# bump leaves `import torchvision` raising "operator torchvision::nms does not
+# exist", which ComfyUI will not start past.
+# ---------------------------------------------------------------------------
+cuda_major=$(python -c "import torch;v=torch.version.cuda;print(int(v.split('.')[0]) if v else 0)" 2>/dev/null || echo 0)
+if [[ "${cuda_major:-0}" -lt 13 ]]; then
+    echo "torch is CUDA ${cuda_major}; upgrading to cu130 so quantized models use the optimized kernels"
+    if pip install -qU --index-url https://download.pytorch.org/whl/cu130 torch torchvision torchaudio \
+       && python -c "import torch, torchvision" 2>/dev/null; then
+        echo "torch upgraded to $(python -c 'import torch;print(torch.__version__)')"
+    else
+        echo "WARNING: cu130 upgrade failed; continuing on the image torch (renders will be ~2x slower)"
+    fi
+else
+    echo "torch already on CUDA ${cuda_major}; optimized quant kernels available"
 fi
 
 echo "provisioning complete"

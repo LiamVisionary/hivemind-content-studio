@@ -1404,6 +1404,52 @@ class ZImageAppTests(unittest.TestCase):
         self.assertEqual(native['options']['extension_latent_frames'], 12)
         self.assertTrue(native['options']['distilled'])
 
+    def test_native_mlx_ltx_extension_carries_the_tail_request_through(self):
+        """`return_tail_only` decides whether one press makes one shot.
+
+        The extension regenerates the source AND the new frames as one file —
+        that is how the soundtrack carries. A sequence asks for the tail so a
+        shot card holds the new shot rather than every shot before it; the
+        standalone "extend this clip" surface asks for nothing and keeps the
+        grown clip it has always had, which is why the default must stay off.
+        """
+        app = load_app()
+
+        def spec_for(video_meta):
+            with TemporaryDirectory() as td:
+                model_dir = Path(td) / 'regular'
+                model_dir.mkdir()
+                variants = {key: dict(value) for key, value in app.config.LTX2_MLX_VARIANTS.items()}
+                variants['regular-q8-distilled'].update({
+                    'model': str(model_dir), 'video_model': str(model_dir),
+                })
+                body = json.dumps({
+                    'prompt': {
+                        '597': {'class_type': 'VHS_VideoCombine', 'inputs': {'filename_prefix': 'LTX23/native_mlx_ltx__regular-q8-distilled'}},
+                        '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                        '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'the dog lands and runs on'}},
+                    },
+                    'extra_data': {'extra_pnginfo': {'workflow': {'extra': {'nativeMlxLtx': {
+                        'enabled': True,
+                        'variant': 'regular-q8-distilled',
+                        'defaults': {'frame_rate': 24, 'duration_seconds': 4},
+                        'video': video_meta,
+                    }}}}},
+                }).encode('utf-8')
+                with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                     patch.object(app.config, 'LTX2_MLX_VARIANTS', variants):
+                    return app.graphs.detect_native_mlx_ltx_prompt(body)
+
+        asked = spec_for({'path': 'source.mp4', 'mode': 'extend', 'return_tail_only': True})
+        self.assertIsNotNone(asked)
+        self.assertEqual(asked['operation'], 'extend')
+        self.assertTrue(asked['options']['return_tail_only'])
+
+        # Off unless asked, and a literal False — the runner branches on it, and
+        # a missing key would read the same as "no" only by accident.
+        plain = spec_for({'path': 'source.mp4', 'mode': 'extend'})
+        self.assertIs(plain['options']['return_tail_only'], False)
+
     def test_native_mlx_ltx_regular_variant_uses_metadata_frames(self):
         app = load_app()
         body = json.dumps({
@@ -4509,6 +4555,123 @@ class WorkflowEnvelopeIndexTests(unittest.TestCase):
                     has_dev,
                     f'{variant} runs the dev two-stage but ships no dev transformer: {sorted(names)}',
                 )
+
+
+class LoraVideoPreviewTests(unittest.TestCase):
+    """A LoRA for a VIDEO model has no still art anywhere — its whole Civitai
+    gallery is clips. Skipping videos outright gave every one of them a blank
+    card; all 14 installed MiniMax H3 LoRAs resolved to no art at all."""
+
+    def _meta(self, images):
+        return {'modelVersion': {'id': '9', 'modelId': '42', 'images': images}}
+
+    def test_every_clip_is_a_candidate_because_the_cdn_may_refuse_the_transform(self):
+        """Measured on HMNSFW_AIO_V2: clip 1 answered video/mp4 at 5.1 MB with
+        anim=false set, while clips 2 and 3 answered image/jpeg. One
+        uncooperative asset must not cost the card its art, so the fetcher gets
+        the whole gallery in order and takes the first that is really an image."""
+        app = load_app()
+        clips = [
+            {'url': f'https://image.civitai.com/h/u-{n}/original=true/{n}.mp4', 'type': 'video'}
+            for n in (1, 2, 3)
+        ]
+        sources = app.models.lora_preview_sources('/models/loras/h3.safetensors', self._meta(clips))
+        self.assertEqual(len(sources), 3)
+        self.assertTrue(all('anim=false,width=450' in url for url in sources), sources)
+        self.assertEqual(sources[0], app.models.lora_preview_source('/models/loras/h3.safetensors', self._meta(clips)))
+
+    def test_a_cached_video_is_a_miss_like_a_fresh_one(self):
+        """A cache entry outlives the bug that wrote it. A build that applied
+        the still transform without checking the answer cached the mp4s the CDN
+        handed back, so the read path needs the same rule as the fetch path or
+        those cards stay broken until the cache is cleared by hand."""
+        route = (BASE / 'gateway/http.py').read_text(encoding='utf-8')
+        block = route[route.index('def get_api_loras_preview'):][:4200]
+        self.assertIn("str(cached[1] or '').lower().startswith('video/')", block)
+        # …and the fresh fetch rejects one too, with the next candidate taking over.
+        self.assertIn("if got.lower().startswith('video/'):", block)
+        self.assertIn('for candidate in sources[:PREVIEW_SOURCE_ATTEMPTS]:', block)
+
+    def test_a_local_clip_is_skipped_and_the_remote_gallery_takes_over(self):
+        """The downloader saves a preview clip beside the weights and records it
+        as preview_url. The resolver used to return it and STOP, so the route
+        guessed video/mp4 from the extension and sent 7 MB of mp4 into an <img>
+        — which paints nothing. Measured on Krea2-realism-V2. Predates the H3
+        work; it is why some Krea2 cards were blank."""
+        app = load_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            weights = root / 'k2.safetensors'
+            weights.write_bytes(b'w')
+            clip = root / 'k2.mp4'
+            clip.write_bytes(b'mp4')
+            meta = {
+                'preview_url': str(clip),
+                'modelVersion': {'id': '9', 'images': [
+                    {'url': 'https://image.civitai.com/h/u/original=true/still.jpeg', 'type': 'image'},
+                ]},
+            }
+            sources = app.models.lora_preview_sources(str(weights), meta)
+            self.assertNotIn(str(clip), sources, 'a local clip cannot be shown in an <img>')
+            self.assertEqual(sources[0], 'https://image.civitai.com/h/u/original=true/still.jpeg')
+
+            # A local STILL beside the weights still wins outright — no network.
+            png = root / 'k2.png'
+            png.write_bytes(b'png')
+            self.assertEqual(
+                app.models.lora_preview_sources(str(weights), meta)[0], str(png.resolve()),
+            )
+
+    def test_a_video_only_gallery_resolves_to_a_still_frame(self):
+        app = load_app()
+        raw = 'https://image.civitai.com/hash/uuid-1/original=true/140459617.mp4'
+        source = app.models.lora_preview_source(
+            '/models/loras/h3.safetensors', self._meta([{'url': raw, 'type': 'video'}]),
+        )
+        # Civitai renders the frame: measured against the live CDN, the raw url
+        # is video/mp4 at 1621 KB and this one is image/jpeg at 69 KB.
+        self.assertEqual(
+            source,
+            'https://image.civitai.com/hash/uuid-1/anim=false,width=450/140459617.mp4',
+        )
+
+    def test_a_real_still_is_preferred_over_a_transformed_video(self):
+        app = load_app()
+        still = 'https://image.civitai.com/hash/uuid-2/original=true/card.jpeg'
+        video = 'https://image.civitai.com/hash/uuid-1/original=true/clip.mp4'
+        source = app.models.lora_preview_source('/models/loras/h3.safetensors', self._meta([
+            {'url': video, 'type': 'video'},
+            {'url': still, 'type': 'image'},
+        ]))
+        self.assertEqual(source, still, 'a still needs no transform and no third party to honour one')
+
+    def test_a_video_off_civitai_is_still_no_card_art(self):
+        """An <img> cannot show an mp4, and only Civitai's CDN renders a frame
+        for us. Returning the url anyway would serve video/mp4 into an <img>."""
+        app = load_app()
+        source = app.models.lora_preview_source('/models/loras/h3.safetensors', self._meta([
+            {'url': 'https://example.com/a/original=true/clip.mp4', 'type': 'video'},
+        ]))
+        self.assertEqual(source, '')
+
+    def test_a_sidecar_that_forgot_to_say_video_is_caught_by_the_extension(self):
+        app = load_app()
+        source = app.models.lora_preview_source('/models/loras/h3.safetensors', self._meta([
+            {'url': 'https://image.civitai.com/h/u/original=true/clip.webm'},
+        ]))
+        self.assertTrue(source.endswith('/anim=false,width=450/clip.webm'), source)
+
+    def test_the_transform_replaces_an_existing_one_rather_than_stacking(self):
+        app = load_app()
+        self.assertEqual(
+            app.models.civitai_still_url('https://image.civitai.com/h/u/width=450/c.mp4'),
+            'https://image.civitai.com/h/u/anim=false,width=450/c.mp4',
+        )
+        # …and is inserted when the url carries no transform segment at all.
+        self.assertEqual(
+            app.models.civitai_still_url('https://image.civitai.com/h/u/c.mp4'),
+            'https://image.civitai.com/h/u/anim=false,width=450/c.mp4',
+        )
 
 
 class LoraCacheTests(unittest.TestCase):
@@ -8023,3 +8186,475 @@ class CivitaiFeedResilienceTests(unittest.TestCase):
         self.assertEqual(len(scrapes), 6, 'one scrape of six model types, not one per caller')
         self.assertEqual(len(results), 4)
         self.assertTrue(all(r == results[0] for r in results), 'every caller got the same answer')
+
+
+class H3NativeLaneTests(unittest.TestCase):
+    """MiniMax H3 through h3.c: the arithmetic the engine will hold us to.
+
+    Every number here is transcribed from vendor/h3.c (h3_host.h for the canvas
+    and frame constants, h3_valid_params in h3.c for the dial ranges), so these
+    are not the studio's opinions — they are what the engine refuses. A render
+    that violates one fails forty seconds in, after a 62 GB text encoder has
+    loaded, which is exactly why they are checked before the queue.
+    """
+
+    def h3(self):
+        load_app()
+        from gateway import h3_native
+        return h3_native
+
+    def test_frames_land_on_the_engines_own_lattice(self):
+        h3 = self.h3()
+        # h3_align_frame_count: the smallest 5+17n at or above the request.
+        self.assertEqual(h3.align_frames(1), 5)
+        self.assertEqual(h3.align_frames(22), 22)
+        self.assertEqual(h3.align_frames(23), 39)
+        self.assertEqual(h3.align_frames(96), 107)
+        self.assertEqual(h3.align_frames(362), 362)
+        for requested in range(1, 400):
+            aligned = h3.align_frames(requested)
+            self.assertGreaterEqual(aligned, requested if requested >= 5 else 5)
+            self.assertEqual((aligned - h3.FRAME_OFFSET) % h3.FRAME_MODULUS, 0)
+
+    def test_the_canvas_keeps_its_shape_rather_than_its_pixels(self):
+        h3 = self.h3()
+        # 16:9 has no exact representation on the 32-grid inside the budget, so
+        # what matters is that the drift is small — an earlier scale-and-floor
+        # turned 1920x1080 into 1.83:1, which letterboxes.
+        for width, height in ((1920, 1080), (1280, 720), (1080, 1920), (3840, 2160)):
+            snapped_w, snapped_h = h3.snap_canvas(width, height)
+            self.assertEqual(snapped_w % h3.CANVAS_MULTIPLE, 0)
+            self.assertEqual(snapped_h % h3.CANVAS_MULTIPLE, 0)
+            self.assertLessEqual(snapped_w * snapped_h, h3.MAX_PIXELS)
+            drift = abs((snapped_w / snapped_h) - (width / height)) / (width / height)
+            self.assertLess(drift, 0.01, f'{width}x{height} -> {snapped_w}x{snapped_h}')
+
+    def test_a_canvas_that_already_fits_is_left_exactly_alone(self):
+        h3 = self.h3()
+        self.assertEqual(h3.snap_canvas(864, 480), (864, 480))
+        self.assertEqual(h3.snap_canvas(768, 1344), (768, 1344))
+        # And a small request is never enlarged to spend the pixel budget.
+        self.assertEqual(h3.snap_canvas(320, 320), (320, 320))
+
+    def test_the_internal_canvas_is_exactly_the_same_aspect_or_absent(self):
+        h3 = self.h3()
+        # The engine's test is integer-exact: render_w * h == render_h * w.
+        for width, height in ((1024, 576), (512, 512), (768, 1344), (1216, 704)):
+            render = h3.snap_render_canvas(width, height, 0.5)
+            if render == (0, 0):
+                continue
+            self.assertEqual(render[0] * height, render[1] * width)
+            self.assertEqual(render[0] % h3.CANVAS_MULTIPLE, 0)
+            self.assertEqual(render[1] % h3.CANVAS_MULTIPLE, 0)
+            self.assertGreaterEqual(min(render), h3.MIN_RENDER_EDGE)
+        # Below the coherence floor there is no smaller canvas worth using, so
+        # the engine samples at full size rather than at a size that renders mush.
+        self.assertEqual(h3.snap_render_canvas(384, 384, 0.5), (0, 0))
+
+    def test_the_two_reuse_dials_are_never_raised_together(self):
+        h3 = self.h3()
+        # h3.c refuses core_reuse > 1 alongside reuse > 1. A request that sets
+        # both is resolved rather than failing at the engine.
+        settings = h3.resolve_settings({'preset': 'balanced', 'core_reuse': 4})
+        self.assertEqual(settings['core_reuse'], 4)
+        self.assertEqual(settings['reuse'], 1)
+        settings = h3.resolve_settings({'preset': 'balanced', 'core_reuse': 4, 'reuse': 3})
+        self.assertEqual(settings['reuse'], 3)
+        self.assertEqual(settings['core_reuse'], 1)
+
+    def test_token_reduction_is_off_by_default_and_refused_on_a_thinned_transformer(self):
+        h3 = self.h3()
+        self.assertFalse(h3.resolve_settings({})['token_reduction'])
+        self.assertFalse(h3.resolve_settings({'preset': 'draft'})['token_reduction'])
+        # Upstream's own warning, and the shape of the artefact reports: paired
+        # tokens over 40 layers at reuse 3 is where doubled frames come from.
+        self.assertFalse(h3.resolve_settings({'preset': 'draft', 'token_reduction': True})['token_reduction'])
+        # Anywhere else it is a choice, and an explicit one is honoured.
+        self.assertTrue(h3.resolve_settings({'preset': 'balanced', 'token_reduction': True})['token_reduction'])
+
+    def test_every_dial_is_clamped_into_the_engines_range(self):
+        h3 = self.h3()
+        settings = h3.resolve_settings({'steps': 0, 'layers': 9999, 'reuse': 77, 'core_reuse': 0})
+        self.assertGreaterEqual(settings['steps'], h3.STEP_RANGE[0])
+        self.assertLessEqual(settings['layers'], h3.LAYER_RANGE[1])
+        self.assertLessEqual(settings['reuse'], h3.REUSE_RANGE[1])
+        self.assertGreaterEqual(settings['core_reuse'], h3.CORE_REUSE_RANGE[0])
+
+    def test_the_command_line_is_what_the_engine_documents(self):
+        h3 = self.h3()
+        settings = h3.resolve_settings({'preset': 'draft', 'ssd_streaming': True, 'int8_row_fc2': False})
+        command = h3.build_command(
+            prompt='a balloon', output='/out/clip.mp4', width=864, height=480,
+            frames=56, seed=7, settings=settings, binary='/bin/h3', directory='/model',
+        )
+        self.assertEqual(command[:5], ['/bin/h3', '-d', '/model', '-p', 'a balloon'])
+        self.assertEqual(command[-2:], ['-o', '/out/clip.mp4'])
+        for flag, value in (('--width', '864'), ('--height', '480'), ('--frames', '56'),
+                            ('--steps', '4'), ('--layers', '40'), ('--reuse', '3'), ('--seed', '7')):
+            self.assertEqual(command[command.index(flag) + 1], value)
+        self.assertIn('--ssd-streaming', command)
+        self.assertNotIn('--use-int8-row-fc2', command)
+        self.assertNotIn('--token-reduction', command)
+        # core_reuse 1 is the engine's own default and is left unsaid, which is
+        # also what keeps it from colliding with --reuse.
+        self.assertNotIn('--core-reuse', command)
+
+    def test_a_motion_clips_own_sound_picks_the_flag_rather_than_a_re_encode(self):
+        h3 = self.h3()
+        command = h3.build_command(
+            prompt='p', output='/o.mp4', width=512, height=512, frames=22, seed=1,
+            settings=h3.resolve_settings({'preset': 'fast'}),
+            reference_images=['a.png'],
+            reference_videos=[('loud.mp4', True), ('quiet.mp4', False)],
+            reference_audios=['voice.wav'],
+            binary='/bin/h3', directory='/model',
+        )
+        self.assertEqual(command[command.index('--ref-image') + 1], 'a.png')
+        self.assertEqual(command[command.index('--ref-video') + 1], 'loud.mp4')
+        self.assertEqual(command[command.index('--ref-silent-video') + 1], 'quiet.mp4')
+        self.assertEqual(command[command.index('--ref-audio') + 1], 'voice.wav')
+
+    def test_references_and_frame_anchors_are_refused_together(self):
+        h3 = self.h3()
+        with self.assertRaises(ValueError) as caught:
+            h3.build_command(
+                prompt='p', output='/o.mp4', width=512, height=512, frames=22, seed=1,
+                settings=h3.resolve_settings({}),
+                reference_images=['a.png'], first_frame='start.png',
+                binary='/bin/h3', directory='/model',
+            )
+        # Two different checkpoints, and the message has to say which choice to make.
+        self.assertIn('reference pictures', str(caught.exception))
+
+    def test_progress_reads_the_engines_own_lines(self):
+        h3 = self.h3()
+        # h3_cli.c writes "\r%-25s %4d/%-4d" to stderr.
+        self.assertEqual(h3.parse_progress_line('denoise                      3/20   '), ('denoise', 3, 20))
+        self.assertEqual(h3.parse_progress_line('text encoder                50/50'), ('text encoder', 50, 50))
+        self.assertIsNone(h3.parse_progress_line('h3: wrote /tmp/out.mp4'))
+        self.assertIsNone(h3.parse_progress_line(''))
+        # And the bands are monotonic across the render, so the bar never runs backwards.
+        percents = [
+            h3.progress_percent('tokenizer', 1, 1),
+            h3.progress_percent('text encoder', 50, 50),
+            h3.progress_percent('denoise', 10, 20),
+            h3.progress_percent('video VAE load', 1, 2),
+            h3.progress_percent('FFmpeg', 22, 22),
+        ]
+        self.assertEqual(percents, sorted(percents))
+        self.assertEqual(percents[-1], 100.0)
+
+    def test_the_bands_are_in_the_order_the_engine_emits_them(self):
+        """The bar only moves forward, so a phase listed above where h3.c emits
+        it never moves it at all — it reads as a hang.
+
+        The first real render on an M5 Max sat at 37% for twenty-five seconds
+        because `load transformer core` was above `refine text` here while
+        h3_dit.c's load_dit calls refine_text, then the AdaLN precompute, then
+        load_core. This pins that sequence against the SOURCE rather than
+        against a remembered run."""
+        h3 = self.h3()
+        source = (Path(__file__).resolve().parents[2] / 'vendor/h3.c/h3_dit.c')
+        if source.exists():
+            text = source.read_text(encoding='utf-8', errors='replace')
+            body = text[text.index('static h3_dit *load_dit('):]
+            # Each phase, at the call that emits it. The AdaLN precompute
+            # reports through schedule_report, so its position in load_dit is
+            # the schedule call rather than a literal string.
+            positions = [
+                body.index('"refine text"'),
+                body.index('h3_dit_schedule_precompute'),
+                body.index('load_core('),
+            ]
+            self.assertEqual(positions, sorted(positions), 'load_dit no longer calls them in this order')
+            # And this table lists them in that same sequence.
+            table = [name for name in h3.PHASE_ORDER
+                     if name in ('refine text', 'precompute AdaLN', 'load transformer core')]
+            self.assertEqual(table, ['refine text', 'precompute AdaLN', 'load transformer core'])
+        # Whether or not the vendored engine is checked out, the table itself
+        # must be monotonic and must end at exactly 100.
+        starts = [h3.progress_percent(name, 0, 1) for name in h3.PHASE_ORDER]
+        self.assertEqual(starts, sorted(starts), 'the bands are out of order')
+        self.assertEqual(h3.progress_percent(h3.PHASE_ORDER[-1], 1, 1), 100.0)
+        # And the two phases that dominate the clock own the two widest bands.
+        widths = {name: end - start for name, start, end in h3._PROGRESS_BANDS}
+        self.assertEqual(
+            sorted(widths, key=widths.get, reverse=True)[:2],
+            ['denoise', 'load transformer core'],
+        )
+
+    def test_the_bar_takes_the_last_measurement_in_a_mixed_tail(self):
+        h3 = self.h3()
+        load_app()
+        from gateway import jobs
+        record = {'id': 'j1', 'progress': 0}
+        with jobs.jobs_lock:
+            jobs.jobs['j1'] = record
+        h3.update_process_progress('j1', record, 'denoise  1/20\rdenoise  9/20   ')
+        self.assertEqual(record['current_step'], 9)
+        self.assertEqual(record['progress_phase'], 'denoise')
+        # A later line that would move the bar BACKWARDS is ignored: the phases
+        # interleave in the tail and a percentage that retreats reads as a stall.
+        before = record['progress']
+        h3.update_process_progress('j1', record, 'tokenizer  1/1')
+        self.assertEqual(record['progress'], before)
+
+    def test_the_lane_says_what_is_missing_and_what_to_run(self):
+        h3 = self.h3()
+        blocked = h3._first_blocker({
+            'apple_silicon': True, 'route_enabled': True, 'engine_installed': False,
+            'ffmpeg': True, 'model': {'fl2va': True},
+        })
+        self.assertIn('scripts/install_h3c.sh', blocked['fix'])
+        blocked = h3._first_blocker({
+            'apple_silicon': True, 'route_enabled': True, 'engine_installed': True,
+            'ffmpeg': True, 'model': {'fl2va': False},
+        })
+        self.assertIn('assemble_h3c_model.py', blocked['fix'])
+        # Nothing in the way is None, not an empty string dressed as a problem.
+        self.assertIsNone(h3._first_blocker({
+            'apple_silicon': True, 'route_enabled': True, 'engine_installed': True,
+            'ffmpeg': True, 'model': {'fl2va': True},
+        }))
+
+    def test_the_machine_decides_streaming_and_the_m5_kernel(self):
+        h3 = self.h3()
+        big = h3.recommended_settings({'memory_gb': 128.0, 'chip_generation': 5, 'chip': 'Apple M5 Max'})
+        self.assertEqual(big['preset'], 'balanced')
+        self.assertFalse(big['ssd_streaming'])
+        self.assertTrue(big['int8_row_fc2'])
+        small = h3.recommended_settings({'memory_gb': 16.0, 'chip_generation': 2, 'chip': 'Apple M2'})
+        self.assertEqual(small['preset'], 'draft')
+        self.assertTrue(small['ssd_streaming'], '16 GB cannot hold a 36 GB transformer')
+        self.assertFalse(small['int8_row_fc2'])
+        # And it is never recommended, on any machine.
+        for memory in (8, 16, 32, 64, 128, 512):
+            self.assertFalse(h3.recommended_settings({'memory_gb': float(memory), 'chip_generation': 5})['token_reduction'])
+
+    def test_the_marker_is_what_routes_a_submit_and_nothing_else(self):
+        app = load_app()
+        from gateway import graphs
+        body = json.dumps({
+            'prompt': {'1': {'class_type': 'HivemindNativeH3', 'inputs': {}}},
+            'extra_data': {'extra_pnginfo': {'nativeH3': {
+                'enabled': True, 'prompt': 'hello',
+                'reference_videos': [{'path': 'clip.mp4', 'use_audio': True}, 'quiet.mp4'],
+                'options': {'width': 864, 'height': 480},
+            }}},
+        }).encode()
+        detected = graphs.detect_native_h3_prompt(body)
+        self.assertEqual(detected['prompt'], 'hello')
+        self.assertEqual(detected['reference_videos'], [
+            {'path': 'clip.mp4', 'use_audio': True},
+            {'path': 'quiet.mp4', 'use_audio': False},
+        ])
+        # An ordinary ComfyUI submit is not this lane's, and must pass through.
+        self.assertIsNone(graphs.detect_native_h3_prompt(
+            json.dumps({'prompt': {'1': {'class_type': 'KSampler'}}}).encode()))
+        self.assertIsNone(graphs.detect_native_h3_prompt(b'not json'))
+
+    def test_a_cuda_machine_refuses_the_submit_rather_than_forwarding_it(self):
+        # There is no ComfyUI H3 on the other side of this marker, so a body
+        # built for h3.c must never reach a ComfyUI as a graph it will reject in
+        # its own words. The route says why, in the lane's words.
+        with patch.dict(os.environ, CUDA_ENV):
+            load_app()
+            from gateway import graphs
+            body = json.dumps({
+                'prompt': {'1': {'class_type': 'HivemindNativeH3', 'inputs': {}}},
+                'extra_data': {'extra_pnginfo': {'nativeH3': {'enabled': True, 'prompt': 'x'}}},
+            }).encode()
+            with self.assertRaises(RuntimeError) as caught:
+                graphs.detect_native_h3_prompt(body)
+            self.assertIn('Apple Silicon', str(caught.exception))
+
+    def test_a_misaligned_snapshot_gets_copied_weights_and_an_aligned_one_keeps_the_engines_default(self):
+        """The setting that decided whether this lane rendered anything.
+
+        The safetensors format pads its header so the payload starts on an
+        8-byte boundary. MLX's writer skipped the padding, h3.c on an M5 maps
+        shard bytes straight into GPU buffers, and a 4-byte GPU load at a
+        2-mod-4 address silently reads the wrong bytes: black video, saturated
+        audio, byte-identical across seeds — while the CPU read the same file
+        perfectly. So the choice of weight path follows the snapshot: copied
+        buffers (H3_ZERO_COPY_WEIGHTS=0) for a misaligned one, the engine's own
+        file-backed default for an aligned one. An operator's value wins."""
+        h3 = self.h3()
+        base = {'PATH': os.environ.get('PATH', '')}
+        misaligned = h3.runner_environment(base, shards_aligned=False)
+        self.assertEqual(misaligned['H3_ZERO_COPY_WEIGHTS'], '0')
+        aligned = h3.runner_environment(base, shards_aligned=True)
+        self.assertNotIn('H3_ZERO_COPY_WEIGHTS', aligned, 'an aligned snapshot must keep the engine default')
+        pinned = h3.runner_environment({**base, 'H3_ZERO_COPY_WEIGHTS': 'transformer'}, shards_aligned=False)
+        self.assertEqual(pinned['H3_ZERO_COPY_WEIGHTS'], 'transformer', 'the operator wins')
+        if shutil.which('ffmpeg'):
+            self.assertTrue(aligned['H3_FFMPEG'].endswith('ffmpeg'))
+        # The job record says which way the weights were loaded.
+        self.assertIn('zero_copy_weights', gateway_source())
+
+    def test_shard_alignment_is_read_the_way_the_format_defines_it(self):
+        """Eight bytes of length, then the header, then the payload: the
+        payload's offset mod 8 is the whole test. Written against two synthetic
+        shards rather than the real 5 GB ones."""
+        h3 = self.h3()
+        with TemporaryDirectory() as td:
+            transformer = Path(td) / 'FL2VA' / 'transformer'
+            transformer.mkdir(parents=True)
+            header = b'{"t":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]}}'
+            padded = header + b' ' * ((-(8 + len(header))) % 8)
+            (transformer / 'good.safetensors').write_bytes(len(padded).to_bytes(8, 'little') + padded + b'\0' * 4)
+            (transformer / 'bad.safetensors').write_bytes(len(header).to_bytes(8, 'little') + header + b'\0' * 4)
+            self.assertEqual(h3.shard_alignment(transformer / 'good.safetensors'), 0)
+            self.assertNotEqual(h3.shard_alignment(transformer / 'bad.safetensors'), 0)
+            aligned, names = h3.transformer_shards_aligned(Path(td))
+            self.assertFalse(aligned)
+            self.assertEqual(names, ['bad.safetensors'])
+            (transformer / 'bad.safetensors').unlink()
+            self.assertEqual(h3.transformer_shards_aligned(Path(td)), (True, []))
+
+    def test_a_misaligned_snapshot_is_an_advisory_with_its_fix_not_a_blocker(self):
+        """The runner copies the weights, so the render is right either way —
+        but file-backed weights are what let H3 fit on a smaller Mac, so the
+        profile says why it is heavier here and names the one command."""
+        h3 = self.h3()
+        with TemporaryDirectory() as td, patch.object(h3.config, 'H3C_MODEL_DIR', Path(td)):
+            transformer = Path(td) / 'FL2VA' / 'transformer'
+            transformer.mkdir(parents=True)
+            header = b'{"t":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]}}'
+            (transformer / 'model-00001-of-00001.safetensors').write_bytes(len(header).to_bytes(8, 'little') + header + b'\0' * 4)
+            profile = h3.machine_profile(refresh=True)
+            self.assertFalse(profile['model']['shards_aligned'])
+            self.assertEqual(profile['model']['misaligned_shards'], ['model-00001-of-00001.safetensors'])
+            self.assertIn('--realign', profile['advisory']['fix'])
+            # Not what stands between this machine and a render.
+            self.assertNotEqual((profile['blocked_by'] or {}).get('fix'), profile['advisory']['fix'])
+        h3.machine_profile(refresh=True)
+
+    def test_the_registry_lane_declares_what_this_module_implements(self):
+        h3 = self.h3()
+        registry = json.loads((BASE / 'workflow-registry.json').read_text(encoding='utf-8'))
+        lane = next(w for w in registry['workflows'] if w['id'] == 'minimax-h3-native')
+        self.assertEqual(lane['builder'], 'h3-native')
+        self.assertEqual(lane['hardware']['accelerator'], 'mps')
+        self.assertIn('h3_native', lane['accepts'])
+        # h3.c fuses LoRAs itself, so the studio offers its LoRA panel here,
+        # listing the same library the CUDA H3 lanes do.
+        self.assertIs(lane['supports_loras'], True)
+        self.assertIn('loras', lane['accepts'])
+        self.assertEqual(lane['compatible_base_models'], ['MiniMax H3'])
+        block = lane['h3_native']
+        # The panel renders the registry's presets and the runner resolves this
+        # module's; they are the same table or the studio shows a lie.
+        self.assertEqual(list(block['preset_order']), list(h3.PRESET_ORDER))
+        for name in h3.PRESET_ORDER:
+            for dial in ('steps', 'layers', 'reuse', 'core_reuse', 'render_scale'):
+                self.assertEqual(block['presets'][name][dial], h3.PRESETS[name][dial], f'{name}.{dial}')
+        self.assertEqual(block['limits']['max_pixels'], h3.MAX_PIXELS)
+        self.assertEqual(block['limits']['max_frames'], h3.MAX_FRAMES)
+        self.assertEqual(block['limits']['min_render_edge'], h3.MIN_RENDER_EDGE)
+        self.assertIs(block['token_reduction']['default'], False)
+
+    def test_loras_ride_the_command_line_in_the_order_they_stack(self):
+        """h3.c fuses each --lora at the --lora-strength after it, stacked in
+        the order given, and is handed the library's resolved file, never the
+        name the studio sent."""
+        h3 = self.h3()
+        settings = {'preset': 'fast', 'steps': 20, 'layers': 45, 'reuse': 2, 'core_reuse': 1,
+                    'render_scale': 1.0, 'token_reduction': False, 'ssd_streaming': False,
+                    'int8_row_fc2': False, 'custom': False}
+        command = h3.build_command(
+            prompt='p', output='/o.mp4', width=512, height=512, frames=22, seed=1, settings=settings,
+            loras=[{'name': 'a.safetensors', 'filePath': '/loras/a.safetensors', 'scale': 0.8},
+                   {'name': 'b.safetensors', 'filePath': '/loras/b.safetensors', 'scale': -0.25}],
+            binary='/bin/h3', directory='/model',
+        )
+        pairs = [command[index:index + 2] for index, part in enumerate(command)
+                 if part in ('--lora', '--lora-strength')]
+        self.assertEqual(pairs, [['--lora', '/loras/a.safetensors'], ['--lora-strength', '0.8'],
+                                 ['--lora', '/loras/b.safetensors'], ['--lora-strength', '-0.25']])
+        self.assertEqual(command[-2:], ['-o', '/o.mp4'])
+        plain = h3.build_command(prompt='p', output='/o.mp4', width=512, height=512, frames=22, seed=1,
+                                 settings=settings, binary='/bin/h3', directory='/model')
+        self.assertNotIn('--lora', plain)
+
+    def test_a_lora_render_that_cannot_start_says_why_before_the_queue(self):
+        """The engine checks every adapter against the checkpoint within a
+        second of starting. What it cannot know — a name the library does not
+        hold, a build from before the patch, a Mac that streams the transformer
+        instead of loading it — is refused here, each with what to do."""
+        h3 = self.h3()
+        big_mac = {'engine_loras': True, 'memory_gb': 128.0, 'recommended': {
+            'preset': 'balanced', 'ssd_streaming': False, 'int8_row_fc2': True, 'token_reduction': False}}
+        small_mac = {**big_mac, 'memory_gb': 24.0, 'recommended': {
+            **big_mac['recommended'], 'preset': 'draft', 'ssd_streaming': True, 'int8_row_fc2': False}}
+        found = {'name': 'H3_Deeper.safetensors', 'filePath': '/loras/H3_Deeper.safetensors', 'scale': 0.6}
+
+        def refusal(profile, native):
+            readiness = {'ok': True, 'reference_mode': False, 'blocked_by': None, 'profile': profile}
+            with patch.object(h3, 'route_readiness', return_value=readiness), \
+                    patch.object(h3, 'machine_profile', return_value=profile), \
+                    patch.object(h3.jobs, 'start_studio_generation_thread') as started:
+                with self.assertRaises(RuntimeError) as caught:
+                    h3.queue_native_h3_job(native)
+                started.assert_not_called()
+            return str(caught.exception)
+
+        missing = {'name': 'gone.safetensors', 'source': 'gone.safetensors', 'scale': 1.0}
+        self.assertIn('gone.safetensors', refusal(big_mac, {'prompt': 'p', 'loras': [missing]}))
+        self.assertIn('scripts/install_h3c.sh',
+                      refusal({**big_mac, 'engine_loras': False}, {'prompt': 'p', 'loras': [found]}))
+        self.assertIn('switch SSD streaming off', refusal(
+            big_mac, {'prompt': 'p', 'loras': [found], 'options': {'ssd_streaming': True}}))
+        streamed = refusal(small_mac, {'prompt': 'p', 'loras': [found]})
+        self.assertIn('rented NVIDIA machine', streamed)
+        self.assertIn('24', streamed)
+
+        readiness = {'ok': True, 'reference_mode': False, 'blocked_by': None, 'profile': big_mac}
+        with patch.object(h3, 'route_readiness', return_value=readiness), \
+                patch.object(h3, 'machine_profile', return_value=big_mac), \
+                patch.object(h3.jobs, 'start_studio_generation_thread') as started:
+            job_id = h3.queue_native_h3_job({'prompt': 'p', 'loras': [found]})
+            started.assert_called_once()
+        options = h3.jobs.jobs[job_id]['options']
+        # Names and strengths, as the LTX lane records them, and never a path.
+        self.assertEqual(options['loras'], [{'name': 'H3_Deeper.safetensors', 'strength': 0.6}])
+        self.assertEqual(options['lora_count'], 1)
+        self.assertNotIn('/loras/', json.dumps(options))
+
+    def test_what_the_engine_says_it_fused_lands_on_the_job(self):
+        """An adapter that does not fit the checkpoint is skipped, which is
+        ComfyUI's rule too, so the job has to say how many were; otherwise a
+        half-applied LoRA reads exactly like a whole one."""
+        h3 = self.h3()
+        stderr = (
+            "h3: lora: fusing 466 adapters into 216 DiT tensors from 2 files\n"
+            "h3: lora warning: skipped 50 adapters that do not fit this checkpoint "
+            "(H3-GalaxyAce.safetensors: blocks.0.adaln_proj.linear.weight is 96768x2688, its adapter 96768x8)\n"
+            "\rdenoise                    20/20  \n"
+        )
+        self.assertEqual(h3.lora_fusion_report(stderr),
+                         {'lora_adapters': 466, 'lora_tensors': 216, 'lora_adapters_skipped': 50})
+        self.assertEqual(h3.lora_fusion_report('h3: lora: fusing 208 adapters into 208 DiT tensors from 1 files'),
+                         {'lora_adapters': 208, 'lora_tensors': 208, 'lora_adapters_skipped': 0})
+        self.assertEqual(h3.lora_fusion_report('h3: wrote /tmp/out.mp4'), {})
+
+    def test_the_marker_carries_loras_resolved_against_the_library(self):
+        load_app()
+        from gateway import graphs
+        with TemporaryDirectory() as td, patch.object(graphs.config, 'COMFY', Path(td)):
+            library = Path(td) / 'models' / 'loras'
+            library.mkdir(parents=True)
+            (library / 'H3_Deeper.safetensors').write_bytes(b'lora')
+            detected = graphs.detect_native_h3_prompt(json.dumps({
+                'prompt': {'1': {'class_type': 'HivemindNativeH3', 'inputs': {}}},
+                'extra_data': {'extra_pnginfo': {'nativeH3': {
+                    'enabled': True, 'prompt': 'hello',
+                    'loras': [{'name': 'H3_Deeper.safetensors', 'strength': 0.6},
+                              {'name': 'gone.safetensors', 'strength': 1}],
+                }}},
+            }).encode())
+            expected = str((library / 'H3_Deeper.safetensors').resolve())
+        self.assertEqual(detected['loras'][0]['filePath'], expected)
+        self.assertEqual(detected['loras'][0]['scale'], 0.6)
+        self.assertEqual(detected['loras'][1]['name'], 'gone.safetensors')
+        self.assertNotIn('filePath', detected['loras'][1])

@@ -1,10 +1,10 @@
 {
-  "comment": "MiniMax H3 head replacement by inpainting. The source clip is masked (a hand-painted static region, or SAM3 video tracking), cropped to the subject, and only the masked region is denoised: NKDAVLatent encodes the crop into a joint audio+video latent and puts the mask on it as a noise_mask, so the unmasked pixels and the WHOLE soundtrack are held. Holding the audio is what makes the new head lip-sync -- the model sees the original speech while it paints the face. Identity comes from the reference pictures (nodes 120-128, <Picture N>), exactly as in reference mode. The result is pasted back into the untouched frames by MVEx_SubjectUncrop.\n\nTHREE MASK BRANCHES, and the MCP prunes the two not chosen: 152/166/167/153 is the painted static mask (conformed to the footage and repeated to its frame count, so a single PNG authored in the browser is legal input); 154/155/156/157 is SAM3 video tracking on the lane itself; 168/169/170/171 is a mask SEQUENCE already tracked elsewhere (the hosted SAM3 service, or any tool that can write a white-on-black clip), which is how a lane with no SAM3 checkpoint still gets a tracked mask. As shipped, node 159 reads the SAM3 branch.\n\nNeeds, beyond the ordinary H3 lane: Nekodificador/ComfyUI-NKD-Basic-Tools (MIT) for NKDAVLatent + NKDMaskOps, drozbay/MaskVidExperiments (GPL-3.0) for the subject crop and uncrop, and -- for the SAM3 branch only -- comfy-core's native SAM3 video nodes plus checkpoints/sam3.1_multiplex_fp16.safetensors. See packages/gpu-rentals provisioning.",
+  "comment": "Built from minimax-h3-inpaint.api.json (head replacement by masked inpainting, audio held). H3 Eros Max beta5 (TURBO-hybrid int8), the uncensored H3 finetune, on the graph named above with exactly three things changed and nothing else: the unet_name, the sampler and the step count.\n\nWHY THE WEIGHTS DROP IN. Eros Max is a graft/consensus merge over H3 itself, quantised int8_convrot like our official DiT and loaded by the same plain UNETLoader, so every node downstream — the H3 conditioning, the dual video/audio VAE decode, Spectrum, Sol-Attn, the motion-context pack — is the graph you already know. Text encoder and both VAEs are the OFFICIAL H3 files, unchanged; only the transformer is the finetune.\n\nNO TURBO LoRA. This is the TURBO-hybrid build: the ref and fl turbo deltas are fused into the weights, which is the whole point of it (the author's note: it saves loading both turbos, 4.2GB). Stacking MiniMaxH3TurboLoRA on top would apply a second distillation to an already distilled model, so this lane inherits the plain minimax-h3 MODEL chain rather than the turbo one. The same fusion is why the step count drops from 15 to 8.\n\nSAMPLING. res_multistep/simple at 8 steps is the author's own go-to for motion quality; the other setups they publish as working are er_sde/beta 4 steps, er_sde/beta57 4-6, LCM/simple 6-8 (their best turbo audio) and Euler/simple 4-8. Steps are exposed, so 6 and 8 are both one field away. NO sigma shift: beta4 needed MiniMaxH3SigmaShift 12/7 and beta5's published setups do not mention it, so this lane matches minimax-h3 and carries none — unlike minimax-h3-turbo, which needs it for the pruned official base.\n\nSPECTRUM IS OFF BY DEFAULT HERE, where the official lane has it on. Two reasons: the author reports cache and Spectrum cost accuracy on this model, and Spectrum forecasts from sampling history it barely has at 8 steps. The node is still in the graph and still on the `spectrum` control, so it is one toggle away.\n\nLICENCE: MiniMax H3 community licence, plus the LTX 2.3, Wan 2.2 and Krea 2 community licences for the character transferred in by the grafts (the author's own statement). Weights: HF TenStrip/10Eros-Max 10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors, sha256 4dd96549… — the same file as Civitai 2851079 version 3294059 (beta5).",
   "prompt": {
     "6": {
       "class_type": "UNETLoader",
       "inputs": {
-        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "unet_name": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
         "weight_dtype": "default"
       }
     },
@@ -69,7 +69,7 @@
           "33",
           0
         ],
-        "enabled": true,
+        "enabled": false,
         "blend_weight": 0.5,
         "degree": 1,
         "ridge_lambda": 0.1,
@@ -111,7 +111,7 @@
           0
         ],
         "scheduler": "simple",
-        "steps": 15,
+        "steps": 8,
         "denoise": 1.0
       }
     },
@@ -124,7 +124,7 @@
     "17": {
       "class_type": "KSamplerSelect",
       "inputs": {
-        "sampler_name": "euler"
+        "sampler_name": "res_multistep"
       }
     },
     "34": {

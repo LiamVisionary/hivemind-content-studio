@@ -51,6 +51,25 @@ BIGLOVE_KLEIN3_MAX_PIXELS = 1152 * 1728
 # Flux2Config.maxReferenceImages for every klein variant, matching BFL's
 # editing docs). Every reference cap on this route reads this one number.
 BIGLOVE_KLEIN3_MAX_REFERENCES = 4
+# Every name this lane answers to, the way KREA2_IDENTITY_BACKENDS names the
+# Krea 2 lane. A lane reached BY NAME can run in whichever mode the request
+# asks for; a lane reached only by "an image happens to be attached" cannot,
+# which is how Klein ended up declared image-only all the way to the composer.
+BIGLOVE_KLEIN3_BACKENDS = {
+    "comfy-bigloves-klein3-edit",
+    "mlx-bigloves-klein3-edit",
+    "mlx-mxfp8-bigloves-klein3-edit",
+}
+# The subset that names the native MLX route explicitly.
+BIGLOVE_KLEIN3_NATIVE_BACKENDS = {
+    "mlx-bigloves-klein3-edit",
+    "mlx-mxfp8-bigloves-klein3-edit",
+}
+# Stock Klein 9B, the same file the direction LoRAs load. Its own lane rather
+# than a mode of the BigLove one: two different checkpoints are two different
+# models, whatever they share.
+FLUX2_KLEIN_9B_BACKEND = "comfy-flux2-klein-9b"
+FLUX2_KLEIN_9B_COMFY_MODEL = "flux-2-klein-9b.safetensors"
 BIGLOVE_KLEIN3_COMFY_MXFP8_MODEL = "BigLoveKlein3_mxfp8.safetensors"
 BIGLOVE_KLEIN3_COMFY_DEQUANT_BF16_MODEL = "BigLoveKlein3_mxfp8_dequant_bf16.safetensors"
 BIGLOVE_KLEIN3_COMFY_BF16_MODEL = "BigLoveKlein3_bf16.safetensors"
@@ -366,6 +385,55 @@ def _load_auto_api_workflow(workflow_file):
 
 _AUTO_PROMPT_TEXT_KEYS = ("text", "positive_text", "prompt")
 _AUTO_SAMPLER_CLASSES = {"KSampler", "KSamplerAdvanced"}
+
+
+def auto_reference_slots(graph):
+    """The picture inputs of a discovered graph, in the order a person fills them.
+
+    Every stock image loader is a slot. Node ids are sorted numerically, which
+    is the order ComfyUI itself lays a graph out and the only ordering a person
+    can predict from looking at it — so reference 1 lands in the lowest-numbered
+    loader, and the same graph fills the same way every run.
+
+    Mirrors referenceSlots() in packages/open-generative-ai/auto-workflow-discovery.js,
+    which counts these to publish `max_reference_images`. The two must agree or
+    the composer offers a slot the runner will not fill.
+    """
+    def sort_key(node_id):
+        text = str(node_id)
+        return (0, int(text), "") if text.isdigit() else (1, 0, text)
+
+    # LoadImage only. PRIVATE_LOADERS also covers video and audio loaders, but
+    # those are not picture slots and filling one with a reference image would
+    # hand the graph a file of the wrong kind.
+    return [
+        (node_id, PRIVATE_LOADERS["LoadImage"][1])
+        for node_id in sorted(graph, key=sort_key)
+        if str((graph.get(node_id) or {}).get("class_type")) == "LoadImage"
+    ]
+
+
+def _auto_apply_reference_images(graph, references, rec=None):
+    """Put the caller's pictures into a discovered graph's loaders.
+
+    The bytes are staged into ComfyUI's input dir under their own names and the
+    loader is pointed at them; PRIVATE_LOADERS then swaps that loader for the
+    private one at submit, so nothing here leaves a plaintext reference behind
+    that outlives the run. A slot the caller did not fill keeps whatever the
+    workflow shipped with, which is how a graph that carries its own control
+    image still runs untouched.
+    """
+    slots = auto_reference_slots(graph)
+    if not slots or not references:
+        return 0
+    applied = 0
+    for (node_id, key), path in zip(slots, references):
+        graph[node_id].setdefault("inputs", {})[key] = stage_graph_reference(path, "")
+        applied += 1
+    if rec is not None and applied:
+        # The COUNT, never the names: a reference filename is owner content.
+        rec.setdefault("options", {})["reference_images"] = applied
+    return applied
 
 
 def _auto_find_text_node(graph, start_id, seen=None):
@@ -1129,7 +1197,7 @@ def _direction_node(graph, title):
     raise RuntimeError(f"the direction graph has no '{title}' node")
 
 
-def _stage_direction_image(path_or_bytes, name):
+def stage_graph_reference(path_or_bytes, name):
     """Put a reference where ComfyUI's LoadImage can read it and answer its
     name. Bytes are the rendered control, which exists only in memory until
     here; a path is the picture being edited, copied in when it lives
@@ -1302,8 +1370,8 @@ def _apply_direction_lane(graph, kind, prompt, options, rec):
         control = direction_reference.render_eyes_dot_png(dot_x, dot_y)
         rec["options"].update({"x": dot_x, "y": dot_y})
 
-    source_name = _stage_direction_image(references[0], "")
-    control_name = _stage_direction_image(control, f"direction_{kind}_{uuid.uuid4().hex[:8]}.png")
+    source_name = stage_graph_reference(references[0], "")
+    control_name = stage_graph_reference(control, f"direction_{kind}_{uuid.uuid4().hex[:8]}.png")
     source_id, source_node = _direction_node(graph, _DIRECTION_SOURCE_TITLE)
     source_node["inputs"]["image"] = source_name
     _direction_node(graph, _DIRECTION_REFERENCE_TITLE)[1]["inputs"]["image"] = control_name
@@ -2299,6 +2367,11 @@ def detect_native_mlx_ltx_prompt(body):
                 'extension_output_frames': extension_output_frames,
                 'extension_latent_frames': extension_latent_frames,
                 'extend_latent_frames': extension_latent_frames,
+                # Hand back only the frames this run ADDED, not the source it
+                # grew. A sequence asks for this so one press makes one shot;
+                # the standalone "extend this clip" surface does not, and gets
+                # the grown clip it has always got.
+                'return_tail_only': bool(video.get('return_tail_only')),
                 'frame_rate': frame_rate,
                 'seed': seed,
                 'model': video_model,
@@ -2376,6 +2449,61 @@ def _studio_lane_from_comfy_prompt_body(body):
         or extra_pnginfo.get('studio_lane')
         or ''
     ).strip()[:512]
+
+
+def detect_native_h3_prompt(body):
+    """Return an h3.c job from a submit that carries the native H3 marker.
+
+    Unlike the LTX native route this does not read a graph: there is no
+    ComfyUI H3 on Apple silicon to fall back to, so the MCP's `h3-native`
+    builder ships the whole request under `extra_pnginfo.nativeH3` and the
+    prompt graph beside it is only the placeholder that makes the submit look
+    like every other one. Nothing here is inferred from node shapes, which is
+    why this detector is twenty lines and the LTX one is two hundred.
+    """
+    try:
+        data = json.loads(body.decode('utf-8', errors='replace') if isinstance(body, (bytes, bytearray)) else body)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    extra_data = data.get('extra_data') if isinstance(data.get('extra_data'), dict) else {}
+    extra_pnginfo = extra_data.get('extra_pnginfo') if isinstance(extra_data.get('extra_pnginfo'), dict) else {}
+    native = extra_pnginfo.get('nativeH3')
+    if not isinstance(native, dict) or native.get('enabled') is False:
+        return None
+    # The marker is present, so this submit is FOR this route and must never be
+    # forwarded to ComfyUI — a machine that cannot run it gets an error naming
+    # the reason, not a graph ComfyUI would reject in its own words.
+    if not config.supports_native_h3_route():
+        raise RuntimeError(
+            f"MiniMax H3 (Apple Silicon) is not available for accelerator profile {config.accelerator_profile()}"
+        )
+    options = dict(native.get('options') or {}) if isinstance(native.get('options'), dict) else {}
+    studio_lane = _studio_lane_from_comfy_prompt_body(body)
+    if studio_lane:
+        options['studio_lane'] = studio_lane
+    return {
+        'prompt': str(native.get('prompt') or ''),
+        'first_frame': native.get('first_frame') or None,
+        'last_frame': native.get('last_frame') or None,
+        'reference_images': [str(item) for item in (native.get('reference_images') or []) if item],
+        # A motion clip is {path, use_audio}; a bare string is the same clip
+        # with its soundtrack left out, which is what h3.c's --ref-silent-video
+        # means.
+        'reference_videos': [
+            {'path': str(item.get('path') or ''), 'use_audio': bool(item.get('use_audio'))}
+            if isinstance(item, dict) else {'path': str(item), 'use_audio': False}
+            for item in (native.get('reference_videos') or [])
+            if (item.get('path') if isinstance(item, dict) else item)
+        ],
+        'reference_audios': [str(item) for item in (native.get('reference_audios') or []) if item],
+        # Resolved against the LoRA library here, as the LTX native route does:
+        # {name, source, scale, filePath}, filePath absent for a name the
+        # library does not hold, which the lane then refuses in words.
+        'loras': _native_ltx_loras(native.get('loras') or []),
+        'options': options,
+    }
 
 
 def detect_native_mlx_biglove_prompt(body):
@@ -2483,7 +2611,7 @@ def detect_native_mlx_biglove_prompt(body):
     }
 
 
-def poll_local_comfy_progress(job_id, lane, prompt_id, stop_event, poll_seconds=0.4):
+def poll_local_comfy_progress(job_id, lane, prompt_id, stop_event, poll_seconds=0.4, phases=None):
     """Mirror a local lane's real sampler counters into the wrapper job record.
 
     ComfyUI publishes step counts over its websocket only, addressed to the
@@ -2513,14 +2641,41 @@ def poll_local_comfy_progress(job_id, lane, prompt_id, stop_event, poll_seconds=
             value, maximum = float(payload.get("value") or 0), float(payload.get("max") or 0)
             if maximum > 0:
                 fraction = max(0.0, min(1.0, value / maximum))
+                # A graph whose work is split across several counting nodes
+                # reports each one from zero, so a single unscaled fraction
+                # makes the bar run to full, reset, and run again. ACE-Step is
+                # the clear case: the LM that writes the audio codes is 81% of
+                # the wall time and the 8-step sampler only 15% (measured), so
+                # the naive bar spends four fifths of the job in a phase it
+                # presents as the whole thing. When the registry declares
+                # measured shares, map each node into its own span instead.
+                phase_label, offset, share = "sampling", 0.0, 1.0
+                if phases:
+                    node_id = str(payload.get("node_id") or "")
+                    running = 0.0
+                    for entry in phases:
+                        entry_share = float(entry.get("share") or 0)
+                        if str(entry.get("node") or "") == node_id:
+                            phase_label = str(entry.get("label") or phase_label)
+                            offset, share = running, entry_share
+                            break
+                        running += entry_share
+                    else:
+                        # A counting node the registry does not describe: keep
+                        # the bar where it is rather than inventing a position.
+                        continue
+                overall = max(0.0, min(1.0, offset + fraction * share))
                 with jobs.jobs_lock:
                     job = jobs.jobs.get(job_id)
                     if job and job.get("status") == "running":
+                        # The bar must never travel backwards. Phases are
+                        # ordered, but polls are not guaranteed to be.
+                        previous = float(job.get("progress") or 0) / 100.0
                         job.update({
                             "current_step": int(value),
                             "total_steps": int(maximum),
-                            "progress": round(fraction * 100, 1),
-                            "progress_phase": "sampling",
+                            "progress": round(max(previous, overall) * 100, 1),
+                            "progress_phase": phase_label,
                         })
                         jobs.jobs[job_id] = job
         except Exception:
@@ -2648,3 +2803,86 @@ def embed_workflow_text_chunk(png_path, workflow):
     except Exception as e:
         print(f"[workflow-metadata] failed to embed workflow in {png_path}: {e}", file=sys.stderr)
     return False
+
+
+# --- registry `slots`: addressing a graph input by name ------------------------
+
+def _registry_entry_for_workflow_file(workflow_file):
+    """The registry row that ships this graph, or None.
+
+    `_registry_definition_for_graph` already answers this for the H3 family;
+    this is the same lookup kept separate because it is called before any
+    family-specific handling and must never raise.
+    """
+    try:
+        return _registry_definition_for_graph(workflow_file)
+    except Exception:
+        return None
+
+
+def fill_empty_lyrics(definition, options):
+    """Give a blank lyrics field the meaning its lane declares for one.
+
+    A lane whose lyrics field carries something other than words says what an
+    EMPTY one means, as `empty_lyrics`. The instrumental YuE2 lane was trained
+    on `[instrumental]` and never on a blank field, and the slot applier would
+    otherwise write the caller's "" straight over the graph's own default. A
+    lane that declares nothing is left alone: on ACE-Step and base YuE2 an empty
+    field already IS the instruction.
+    """
+    fallback = str((definition or {}).get("empty_lyrics") or "")
+    if fallback and not str(options.get("lyrics") or "").strip():
+        options["lyrics"] = fallback
+    return options
+
+
+def apply_registry_slots(graph, definition, options):
+    """Patch `options` into `graph` through the registry entry's `slots` map.
+
+    An image graph can be driven by inference — find the KSampler, walk its
+    conditioning back to a text node — because every image graph has the same
+    skeleton. An audio graph does not: it has no width or height, its length
+    lives in TWO nodes that must agree (the text encoder plans an arrangement
+    for a duration, the latent reserves it), and its "prompt" is a style tag
+    list that sits beside a separate lyrics field. So the registry addresses
+    each option at a node and an input by name instead of guessing.
+
+    A slot may be a single {node, input} or a LIST of them for one option that
+    legitimately drives several inputs. An option with no slot is ignored here
+    rather than being forced somewhere it does not belong.
+
+    Returns the names actually applied, so a runner can record what it drove
+    and a caller can tell a silently-dropped option from an honoured one.
+    """
+    slots = (definition or {}).get("slots")
+    if not isinstance(slots, dict):
+        return []
+    applied = []
+    for name, target in slots.items():
+        if name not in options:
+            continue
+        value = options.get(name)
+        if value is None:
+            continue
+        targets = target if isinstance(target, list) else [target]
+        landed = False
+        for item in targets:
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("node") or "")
+            input_name = str(item.get("input") or "")
+            node = graph.get(node_id)
+            if not node or not input_name:
+                continue
+            inputs = node.setdefault("inputs", {})
+            # Never overwrite a LINK. A slot names a widget; if this input is
+            # wired to another node, the registry is pointed at the wrong place
+            # and quietly replacing the edge would break the graph in a way
+            # that surfaces as a baffling render, not an error.
+            if isinstance(inputs.get(input_name), list):
+                continue
+            inputs[input_name] = value
+            landed = True
+        if landed:
+            applied.append(name)
+    return applied

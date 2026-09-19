@@ -532,6 +532,8 @@ function publicWorkflow(workflow) {
     ...(workflow.max_reference_images ? { max_reference_images: workflow.max_reference_images } : {}),
     // Reference-mode capacity, read off the wired slots rather than restated:
     // the studio sizes its References menu from this instead of hardcoding 9/3/3.
+    // A lane with no ComfyUI graph has no slots to count and declares the
+    // numbers directly — its engine takes repeated flags, not wired nodes.
     ...(workflow.reference_image_slots || workflow.reference_video_slots || workflow.reference_audio_slots
       ? {
         reference_slots: {
@@ -540,13 +542,23 @@ function publicWorkflow(workflow) {
           audios: (workflow.reference_audio_slots || []).length,
         },
       }
-      : {}),
+      : (workflow.reference_slots && typeof workflow.reference_slots === 'object'
+        ? { reference_slots: { ...workflow.reference_slots } }
+        : {})),
     defaults: publicWorkflowDefaults(workflow.id),
     ...(workflow.beta ? { beta: true } : {}),
     // Reached by routing, never picked by hand: the studio sends a run here
     // when references are attached to the family's normal tier, and the MCP
     // routes an agent's reference_* call here the same way (routeReferenceArguments).
     ...(workflow.routing_only ? { routing_only: true } : {}),
+    // What this lane has to RUN on. Without it every consumer matches a lane to
+    // a machine by name alone, and a name is not a capability: "MiniMax H3
+    // (Apple Silicon)" is antirez/h3.c, a Metal engine, and its id contains
+    // "minimax_h3" — so a rented RTX 5090 whose needles say minimax_h3 was
+    // offered it, and the preflight then (correctly) refused the run.
+    ...(workflow.hardware?.accelerator
+      ? { hardware: { accelerator: String(workflow.hardware.accelerator) } }
+      : {}),
     ...(workflow.prompt_helper ? { prompt_helper: workflow.prompt_helper } : {}),
     ...(workflow.prompt_contract ? { prompt_contract: workflow.prompt_contract } : {}),
     ...(workflow.ingredient_inputs ? { ingredient_inputs: workflow.ingredient_inputs } : {}),
@@ -563,6 +575,13 @@ function publicWorkflow(workflow) {
     // out a ceiling: the budget gives the packed rows the card holds, the grid
     // says which frame counts the graph can actually sample.
     ...(workflow.frame_grid ? { frame_grid: workflow.frame_grid } : {}),
+    // The h3.c lane's whole control surface — the Effort presets, the dials
+    // behind them and their engine ranges — published as the registry writes
+    // it. The studio renders this rather than holding its own copy, which is
+    // what keeps the panel and the engine from drifting apart.
+    ...(workflow.h3_native && typeof workflow.h3_native === 'object'
+      ? { h3_native: workflow.h3_native }
+      : {}),
     ...(Number(workflow.motion_reference_budget?.max_packed_rows) > 0
       ? { motion_reference_max_packed_rows: Number(workflow.motion_reference_budget.max_packed_rows) }
       : {}),
@@ -589,10 +608,18 @@ function listRegisteredWorkflows({ media_type, query } = {}) {
     .map(publicWorkflow);
 }
 
+// `routing_only` is never inherited. It says THIS row is not a lane — a
+// shared-weights declaration, or a tier reached only by routing — and that is
+// not a property a lane built on those weights takes on. Inherited, it marked
+// every Klein lane that shares the 9B download unpickable, which no picker
+// noticed only because the image path happens not to read the flag.
+const NOT_INHERITED = new Set(['routing_only']);
+
 function mergeWorkflowDefinition(base, override) {
   if (!base || typeof base !== 'object' || Array.isArray(base)) return cloneJson(override);
   if (!override || typeof override !== 'object' || Array.isArray(override)) return cloneJson(override);
   const out = cloneJson(base);
+  NOT_INHERITED.forEach((key) => { delete out[key]; });
   for (const [key, value] of Object.entries(override)) {
     if (value && typeof value === 'object' && !Array.isArray(value)
         && out[key] && typeof out[key] === 'object' && !Array.isArray(out[key])) {
@@ -3328,6 +3355,11 @@ function updateLtxErosEditorWorkflow(workflow, spec, settings) {
     ...((settings.videoName && !settings.headSwap) ? { video: {
       mode: 'extend',
       path: settings.videoName,
+      // One shot per press: the runner cuts the source's span off the result,
+      // so a sequence gets the new frames rather than a clip that contains
+      // every shot before it. The soundtrack still carries — that happens in
+      // the latent, before anything is trimmed.
+      ...(settings.extendReturnTail ? { return_tail_only: true } : {}),
       ...(!settings.sourceHasAudio ? { source_has_audio: false } : {}),
       duration_seconds: settings.durationSeconds,
       frame_rate: settings.frameRate,
@@ -3446,8 +3478,15 @@ function suppliedReferenceArguments(args = {}) {
 }
 
 function workflowTakesReferences(workflow) {
-  return ['reference_image_slots', 'reference_video_slots', 'reference_audio_slots']
-    .some((key) => Array.isArray(workflow?.[key]) && workflow[key].length);
+  if (['reference_image_slots', 'reference_video_slots', 'reference_audio_slots']
+    .some((key) => Array.isArray(workflow?.[key]) && workflow[key].length)) return true;
+  // A lane with no ComfyUI graph declares its capacity as numbers — it has no
+  // wired nodes to count. Without this it looked like a workflow that takes no
+  // references at all, and a reference run on it was routed away to a sibling
+  // (or refused for having none) rather than reaching the engine that can.
+  const declared = workflow?.reference_slots;
+  return Boolean(declared && typeof declared === 'object'
+    && ['images', 'videos', 'audios'].some((key) => Number(declared[key]) > 0));
 }
 
 // The reference-mode sibling of a workflow: the first workflow of the same
@@ -3489,6 +3528,182 @@ function routeReferenceArguments(workflow, args, registry) {
   throw error;
 }
 
+// MiniMax H3 on Apple silicon (antirez/h3.c). There is no ComfyUI graph here
+// and no ComfyUI fallback: the engine is its own program, so this builder's
+// whole job is to stage the media and describe the render under
+// `extra_pnginfo.nativeH3`, which the gateway's /prompt interceptor picks up
+// (gateway/graphs.py detect_native_h3_prompt).
+//
+// `body.prompt` is a one-node placeholder rather than a graph. It exists
+// because /prompt is the submit endpoint every lane shares and a body with no
+// prompt object is malformed; nothing ever executes it, and the interceptor
+// refuses the submit outright rather than forwarding it when the route is
+// unavailable, so the placeholder can never reach a ComfyUI.
+const H3_NATIVE_FRAME_MODULUS = 17;
+const H3_NATIVE_FRAME_OFFSET = 5;
+const H3_NATIVE_MIN_FRAMES = 22;
+const H3_NATIVE_MAX_FRAMES = 362;
+
+function h3NativeAlignFrames(requested) {
+  const value = Math.max(H3_NATIVE_FRAME_OFFSET, Math.round(Number(requested) || 0));
+  const remainder = (value - H3_NATIVE_FRAME_OFFSET) % H3_NATIVE_FRAME_MODULUS;
+  const aligned = remainder ? value + (H3_NATIVE_FRAME_MODULUS - remainder) : value;
+  return Math.min(H3_NATIVE_MAX_FRAMES, Math.max(H3_NATIVE_MIN_FRAMES, aligned));
+}
+
+// Only the dials the request actually moved. An absent dial means "whatever
+// the preset says", and the preset itself may be absent, meaning "whatever
+// this machine recommends" — resolved on the gateway, which is the only place
+// that knows what the machine is.
+const H3_NATIVE_DIALS = ['steps', 'layers', 'reuse', 'core_reuse', 'render_scale'];
+const H3_NATIVE_SWITCHES = ['token_reduction', 'ssd_streaming', 'int8_row_fc2'];
+
+function h3NativeOptions(args = {}) {
+  const raw = (args.h3_native && typeof args.h3_native === 'object' ? args.h3_native : null)
+    || (args.params?.h3_native && typeof args.params.h3_native === 'object' ? args.params.h3_native : null)
+    || {};
+  const out = {};
+  const preset = String(raw.preset || '').trim().toLowerCase();
+  if (preset) out.preset = preset;
+  for (const key of H3_NATIVE_DIALS) {
+    const value = raw[key];
+    if (value === undefined || value === null || value === '') continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) out[key] = parsed;
+  }
+  for (const key of H3_NATIVE_SWITCHES) {
+    if (typeof raw[key] === 'boolean') out[key] = raw[key];
+  }
+  return out;
+}
+
+async function buildH3NativePromptBody(args = {}, workflow) {
+  const defaults = { ...(workflow.defaults || {}) };
+  const prompt = String(args.prompt ?? defaults.prompt ?? '').trim();
+  if (!prompt) throw new Error(`workflow ${workflow.id} requires prompt`);
+  // Checked before any media is staged. h3.c fuses LoRAs into the transformer
+  // as it loads, so they travel by name and strength and the gateway resolves
+  // them against the LoRA library.
+  const loras = normalizeWorkflowLoras(args, workflow);
+
+  const references = Array.isArray(args.reference_images) ? args.reference_images : [];
+  const referenceVideos = Array.isArray(args.reference_videos) ? args.reference_videos : [];
+  const referenceAudios = Array.isArray(args.reference_audios) ? args.reference_audios : [];
+  const hasReferences = references.length || referenceVideos.length || referenceAudios.length;
+
+  // Ref2VA and the frame anchors are two different checkpoints in this engine
+  // and it refuses the combination. Say so here, where the request is still a
+  // request, rather than after the 62 GB text encoder has loaded. Both sources
+  // are resolved exactly once: resolving an inline image WRITES it to the
+  // input directory, so asking twice would stage two copies of the same frame.
+  const rawFirst = await imageSourceFromArgs(args, {});
+  const rawLast = await imageSourceFromPrefixedArgs(args, 'end');
+  if (hasReferences && (rawFirst || rawLast)) {
+    throw new Error(
+      `workflow ${workflow.id} runs reference pictures through a different checkpoint than start/end frames `
+      + 'and cannot use both in one render — send references, or frames, not both.',
+    );
+  }
+  const firstFrame = rawFirst ? stageLtxErosImage(rawFirst) : null;
+  const lastFrame = rawLast ? stageLtxErosImage(rawLast) : null;
+
+  if (references.length > 9) throw new Error(`workflow ${workflow.id} accepts at most 9 reference images`);
+  if (referenceVideos.length > 3) throw new Error(`workflow ${workflow.id} accepts at most 3 reference videos`);
+  if (referenceAudios.length > 3) throw new Error(`workflow ${workflow.id} accepts at most 3 reference audio clips`);
+  if (referenceAudios.length && !references.length && !referenceVideos.length) {
+    throw new Error(
+      `workflow ${workflow.id} cannot take reference audio alone — supply at least one reference picture or video alongside it`,
+    );
+  }
+
+  const referenceImageNames = [];
+  for (const entry of references) {
+    const source = await imageSourceFromArgs(entry, {});
+    if (source !== undefined) referenceImageNames.push(stageLtxErosImage(source));
+  }
+  const referenceVideoRows = [];
+  for (const entry of referenceVideos) {
+    const source = await referenceVideoSourceFromEntry(entry);
+    if (source === undefined) continue;
+    // `use_audio` chooses h3's flag (--ref-video vs --ref-silent-video), so
+    // the clip itself is normalised for framerate and length only — never
+    // re-encoded to strip a soundtrack the engine will simply not read.
+    const useAudio = entry.use_audio === true && stagedVideoHasAudio(source);
+    referenceVideoRows.push({
+      path: normalizeReferenceVideo(source, { keepAudio: useAudio, canvas: 'full' }),
+      use_audio: useAudio,
+    });
+  }
+  const referenceAudioNames = [];
+  for (const entry of referenceAudios) {
+    const source = await audioSourceFromEntry(entry);
+    if (source !== undefined) referenceAudioNames.push(source);
+  }
+
+  const frameRate = 24;  // h3.c is fixed at 24 fps (H3_FPS)
+  const durationSeconds = positiveFloat(
+    args.duration_seconds ?? args.params?.duration_seconds, defaults.duration_seconds || 4, { min: 1 / 24, max: 16 },
+  );
+  const frames = h3NativeAlignFrames(
+    args.frames ?? args.params?.frames ?? Math.round(durationSeconds * frameRate),
+  );
+  const settings = {
+    prompt,
+    imageName: firstFrame,
+    endImageName: lastFrame,
+    width: positiveInt(args.width, defaults.width, { min: 32, max: 1344 }),
+    height: positiveInt(args.height, defaults.height, { min: 32, max: 1344 }),
+    frames,
+    frameRate,
+    durationSeconds: frames / frameRate,
+    seed: resolveSeed(args.seed, defaults.seed),
+    referenceImageNames,
+    referenceVideoNames: referenceVideoRows.map((row) => row.path),
+    referenceAudioNames,
+    loras,
+    h3Native: h3NativeOptions(args),
+  };
+
+  const nativeH3 = {
+    enabled: true,
+    prompt: settings.prompt,
+    ...(firstFrame ? { first_frame: firstFrame } : {}),
+    ...(lastFrame ? { last_frame: lastFrame } : {}),
+    ...(referenceImageNames.length ? { reference_images: referenceImageNames } : {}),
+    ...(referenceVideoRows.length ? { reference_videos: referenceVideoRows } : {}),
+    ...(referenceAudioNames.length ? { reference_audios: referenceAudioNames } : {}),
+    ...(loras.length ? { loras: loras.map((item) => ({ name: item.id, strength: item.strength })) } : {}),
+    options: {
+      width: settings.width,
+      height: settings.height,
+      frames: settings.frames,
+      seed: settings.seed,
+      ...settings.h3Native,
+    },
+  };
+  return {
+    spec: {
+      id: workflow.id,
+      title: workflow.title,
+      benchmarkSeconds: workflow.benchmark_seconds,
+      native: true,
+    },
+    workflow: publicWorkflow(workflow),
+    settings,
+    body: {
+      // Never executed. See the note above this builder.
+      prompt: { 1: { class_type: 'HivemindNativeH3', inputs: {} } },
+      client_id: `media-studio-mcp-${randomUUID()}`,
+      extra_data: {
+        extra_pnginfo: {
+          nativeH3,
+          ...(args.studio_lane ? { studioLane: args.studio_lane } : {}),
+        },
+      },
+    },
+  };
+}
+
 async function buildVideoPromptBody(args = {}) {
   const workflowId = normalizeWorkflowId(args.workflow_id || args.workflow, { mediaType: 'video' });
   const registry = videoWorkflowRegistry();
@@ -3496,6 +3711,8 @@ async function buildVideoPromptBody(args = {}) {
   let built;
   if (workflow.builder === 'ltx-eros') {
     built = await buildLtxErosPromptBody(args, workflow);
+  } else if (workflow.builder === 'h3-native') {
+    built = await buildH3NativePromptBody(args, workflow);
   } else if (workflow.builder === 'comfy-api') {
     built = await buildComfyApiPromptBody(args, workflow);
   } else {
@@ -3671,6 +3888,12 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     settings.headSwap = videoTaskFrom(args) === 'head-swap';
     settings.videoMode = String(args.video_mode ?? args.params?.video_mode ?? 'extend').trim().toLowerCase();
     if (!settings.headSwap && settings.videoMode !== 'extend') throw new Error('video_mode must be extend');
+    // Deliberately its own flag rather than a second video_mode value: the mode
+    // says how the source clip is USED (extend it), and this says what to hand
+    // back (the whole grown clip, or only the frames it added). Three layers
+    // validate video_mode as the literal "extend"; none of them has an opinion
+    // about the return shape.
+    settings.extendReturnTail = Boolean(args.extend_return_tail ?? args.params?.extend_return_tail);
     settings.sourceHasAudio = stagedVideoHasAudio(settings.videoName);
     settings.audioMode = settings.sourceHasAudio ? 'extend' : 'generate';
     if (settings.headSwap) {
@@ -5233,6 +5456,27 @@ function buildServer() {
         id: z.string().min(1),
         strength: z.number().min(-10).max(10).optional(),
       })).max(20).optional().describe('Installed workflow-compatible LoRAs. Each is applied to video/model layers only so generated audio conditioning stays unchanged.'),
+      h3_native: z.object({
+        preset: z.enum(['draft', 'fast', 'balanced', 'reference']).optional(),
+        steps: z.number().int().min(2).max(1000).optional(),
+        layers: z.number().int().min(35).max(50).optional(),
+        reuse: z.number().int().min(1).max(3).optional(),
+        core_reuse: z.number().int().min(1).max(6).optional(),
+        render_scale: z.number().min(0.25).max(1).optional(),
+        token_reduction: z.boolean().optional(),
+        ssd_streaming: z.boolean().optional(),
+        int8_row_fc2: z.boolean().optional(),
+      }).optional().describe(
+        'minimax-h3-native only (MiniMax H3 through h3.c on Apple silicon). `preset` is the Effort ladder — '
+        + 'draft / fast / balanced / reference, each a different trade of sampling steps, how many of the 50 '
+        + 'transformer blocks run, and how often the denoiser\'s velocity is recomputed. Omit it and the gateway '
+        + 'picks what this Mac can hold. Every dial below overrides its preset: steps, layers, reuse, core_reuse '
+        + '(core_reuse and reuse cannot both exceed 1 — the engine refuses it), and render_scale, the internal '
+        + 'sampling canvas as a fraction of the output. ssd_streaming and int8_row_fc2 are read off the machine '
+        + 'unless set: streaming trades 26% of the speed for ~34 GB of memory, and the int8 FC2 kernel is M5-only. '
+        + 'token_reduction is 28% faster and OFF by default — it has a standing artefact report (doubled images, '
+        + 'garbled audio) and the lane refuses it outright alongside the draft preset.',
+      ),
       params: z.record(z.string(), z.any()).optional().describe('Additional workflow parameters for registry-defined slots, e.g. steps, cfg, guidance, or model-specific controls.'),
       width: z.number().int().min(64).max(4096).optional(),
       height: z.number().int().min(64).max(4096).optional(),
@@ -5278,7 +5522,9 @@ function buildServer() {
       job,
       workflow: {
         ...workflow,
-        route: submission.native_mlx ? 'native-mlx-apple-silicon' : 'comfyui-fallback',
+        route: submission.native_h3
+          ? 'h3c-metal-apple-silicon'
+          : (submission.native_mlx ? 'native-mlx-apple-silicon' : 'comfyui-fallback'),
         ...(spec.native !== false ? { native_variant: spec.id, native_title: spec.title } : {}),
         image: settings.imageName,
         video: settings.videoName,

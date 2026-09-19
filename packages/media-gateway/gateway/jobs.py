@@ -479,7 +479,7 @@ def _register_klein_job(job_id, fingerprint, record):
 
 def _studio_generation_lane_key(media_type, options=None):
     media = str(media_type or '').strip().lower()
-    if media not in {'image', 'video'}:
+    if media not in {'image', 'video', 'audio'}:
         raise ValueError(f'unsupported generation media type: {media_type}')
     raw = str(dict(options or {}).get('studio_lane') or 'legacy-clients').strip()
     # Callers choose this value, so keep the scheduler key bounded and opaque.

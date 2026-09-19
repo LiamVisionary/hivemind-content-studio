@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "comment": "What a rented box is provisioned WITH, per tier — edited from the studio's Rental build page (Advanced) and committed here on purpose. `loras` pins installed LoRA ids to a tier; with no pins the tier falls back to every registered LoRA whose base-model family it serves. `checkpoints` maps a default weight's models/ destination to an installed checkpoint that stands in for it, landing under the default's filename so every graph keeps resolving. A swap names its source and never a credential: source \"huggingface\" carries a public file URL used verbatim, and source \"civitai\" carries the version/file ids whose signed download URL is resolved on the studio machine once per rental — so the box is handed a presigned URL, exactly like the ones our own bucket gives it, and never a token. A signed URL is deliberately NOT stored here: it expires, and it is a capability anyone reading the repo could spend. Upload state and R2 keys are machine state and live in ~/.hivemindos/media-studio/rental-loras.json.",
+  "tiers": {
+    "minimaxeros": {
+      "loras": [
+        "MysticXXX_MMH3-V2.safetensors",
+        "H3_Deeper.safetensors",
+        "MysticXXX_MMH3-V4.safetensors",
+        "MM-H3_-_Passionate_Kiss.safetensors",
+        "cum_facial_000005400.safetensors",
+        "worship_it_000006210.safetensors",
+        "thumbh3_000002000.safetensors",
+        "H3-GalaxyAce.safetensors",
+        "epic_cumshots-MiniMaxH3-ALPHA-CUMSH0T.safetensors",
+        "minimax-jav-voice.safetensors"
+      ]
+    }
+  }
+}

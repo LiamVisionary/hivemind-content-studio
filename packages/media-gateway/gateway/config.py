@@ -59,6 +59,12 @@ SWIFT_FLUX2_BIN = Path(os.environ.get("SWIFT_FLUX2_BIN", str(STUDIO_ROOT / "engi
 SWIFT_MLX_METALLIB = Path(os.environ.get("SWIFT_MLX_METALLIB", str(Path.home() / "comfy/Flux2CLI-v2.1.0/mlx.metallib")))
 SWIFT_FLUX2_SERVER_URL = os.environ.get("SWIFT_FLUX2_SERVER_URL", "http://127.0.0.1:8791")
 SWIFT_MODELS_CACHE = Path(os.environ.get("SWIFT_MODELS_CACHE", str(Path.home() / "Library/Caches/models")))
+# antirez/h3.c — MiniMax H3 natively on Metal, installed by scripts/install_h3c.sh
+# into the gitignored vendor/ and invoked as its own process. The model
+# directory is a checkpoint tree, not a file: scripts/assemble_h3c_model.py
+# builds it out of a Hugging Face snapshot without copying the bytes.
+H3C_BIN = Path(os.environ.get("H3C_BIN", str(STUDIO_ROOT / "vendor/h3.c/h3")))
+H3C_MODEL_DIR = Path(os.environ.get("H3C_MODEL_DIR", str(Path.home() / "comfy/mlx-models/minimax-h3/h3c-model")))
 
 
 def resolve_ltx2_mlx_dir(*, env=None, studio_root=None, home=None, temp_root=None):
@@ -264,6 +270,17 @@ def supports_native_mlx_biglove_route():
 
 def supports_native_mlx_ltx_route():
     return bool(optimization_capabilities().get("native_mlx")) and _env_enabled("ZIMG_ENABLE_MLX_LTX_ROUTE", "1")
+
+
+def supports_native_h3_route():
+    """Can this machine run MiniMax H3 through h3.c?
+
+    Three things have to be true and each fails differently, so the lane's
+    preflight reports them separately (h3_native.route_readiness); this is only
+    the coarse "is the route even a possibility here" gate that keeps the
+    /prompt interceptor off non-Apple machines.
+    """
+    return bool(optimization_capabilities().get("native_mlx")) and _env_enabled("ZIMG_ENABLE_H3C_ROUTE", "1")
 
 
 def use_swift_flux2_server():

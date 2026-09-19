@@ -1,10 +1,10 @@
 {
-  "comment": "MiniMax H3 reference mode. Conditions on up to nine reference pictures (autogrow ref_images), up to three reference videos (autogrow ref_videos, each optionally carrying its own soundtrack through ref_video_audios) and up to three standalone reference audio clips (autogrow ref_audios \u2014 voice/music timbre cloning; each 2-15s, 15s total, never audio alone) through MiniMaxH3ReferenceToVideo rather than a first/last frame. Same weights and lane as minimax-h3; prompts follow the ref_en guide's subject_definitions / retention_analysis format with <Picture i> / <Video k> / <Audio j> labels. Reference videos load through core LoadVideo -> GetVideoComponents, whose images output is the ref_video frame stack and whose audio output is the same-numbered ref_video_audio; the node reads those frames as 24 fps, so the MCP resamples every uploaded clip to 24 fps before staging it.",
+  "comment": "Built from minimax-h3-reference.api.json (up to nine reference pictures, three reference videos, three reference audio clips). H3 Eros Max beta5 (TURBO-hybrid int8), the uncensored H3 finetune, on the graph named above with exactly three things changed and nothing else: the unet_name, the sampler and the step count.\n\nWHY THE WEIGHTS DROP IN. Eros Max is a graft/consensus merge over H3 itself, quantised int8_convrot like our official DiT and loaded by the same plain UNETLoader, so every node downstream — the H3 conditioning, the dual video/audio VAE decode, Spectrum, Sol-Attn, the motion-context pack — is the graph you already know. Text encoder and both VAEs are the OFFICIAL H3 files, unchanged; only the transformer is the finetune.\n\nNO TURBO LoRA. This is the TURBO-hybrid build: the ref and fl turbo deltas are fused into the weights, which is the whole point of it (the author's note: it saves loading both turbos, 4.2GB). Stacking MiniMaxH3TurboLoRA on top would apply a second distillation to an already distilled model, so this lane inherits the plain minimax-h3 MODEL chain rather than the turbo one. The same fusion is why the step count drops from 15 to 8.\n\nSAMPLING. res_multistep/simple at 8 steps is the author's own go-to for motion quality; the other setups they publish as working are er_sde/beta 4 steps, er_sde/beta57 4-6, LCM/simple 6-8 (their best turbo audio) and Euler/simple 4-8. Steps are exposed, so 6 and 8 are both one field away. NO sigma shift: beta4 needed MiniMaxH3SigmaShift 12/7 and beta5's published setups do not mention it, so this lane matches minimax-h3 and carries none — unlike minimax-h3-turbo, which needs it for the pruned official base.\n\nSPECTRUM IS OFF BY DEFAULT HERE, where the official lane has it on. Two reasons: the author reports cache and Spectrum cost accuracy on this model, and Spectrum forecasts from sampling history it barely has at 8 steps. The node is still in the graph and still on the `spectrum` control, so it is one toggle away.\n\nLICENCE: MiniMax H3 community licence, plus the LTX 2.3, Wan 2.2 and Krea 2 community licences for the character transferred in by the grafts (the author's own statement). Weights: HF TenStrip/10Eros-Max 10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors, sha256 4dd96549… — the same file as Civitai 2851079 version 3294059 (beta5).",
   "prompt": {
     "6": {
       "class_type": "UNETLoader",
       "inputs": {
-        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "unet_name": "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
         "weight_dtype": "default"
       }
     },
@@ -45,7 +45,7 @@
           "33",
           0
         ],
-        "enabled": true,
+        "enabled": false,
         "blend_weight": 0.5,
         "degree": 1,
         "ridge_lambda": 0.1,
@@ -168,14 +168,14 @@
           0
         ],
         "scheduler": "simple",
-        "steps": 15,
+        "steps": 8,
         "denoise": 1.0
       }
     },
     "17": {
       "class_type": "KSamplerSelect",
       "inputs": {
-        "sampler_name": "euler"
+        "sampler_name": "res_multistep"
       }
     },
     "15": {

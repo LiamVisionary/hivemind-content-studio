@@ -20,7 +20,20 @@ from pathlib import Path
 from gateway import config, history, promptroutes, util, workflow_index
 
 
-OUTPUT_MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v", ".mkv"}
+# Every extension the gateway treats as generated media. This set is what turns
+# sealing ON: `is_encryptable_output` refuses anything not named here, while
+# `find_output_logical_path` — which backs `/image/<name>` — has no extension
+# gate at all. So a suffix missing from this set is not merely "unsupported",
+# it is served in the clear. Audio was missing until the music lane landed; a
+# generated song would have sat in OUT_DIR as a plaintext .wav that anyone who
+# could guess its name could fetch. The crypto itself is byte-oriented and
+# format-blind (`media_seal.seal`), and the envelope's media_type comes from
+# `mimetypes`, so adding a suffix here is the whole change.
+OUTPUT_MEDIA_EXTS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif",
+    ".mp4", ".mov", ".webm", ".m4v", ".mkv",
+    ".wav", ".mp3", ".flac", ".m4a", ".opus", ".ogg",
+}
 OUTPUT_ENCRYPTION_ENABLED = os.environ.get("ZIMG_OUTPUT_ENCRYPTION", "1") != "0"
 OUTPUT_ENCRYPTION_SERVICE = os.environ.get("ZIMG_OUTPUT_KEYCHAIN_SERVICE", "zimage-output-encryption")
 OUTPUT_ENCRYPTION_ITER = int(os.environ.get("ZIMG_OUTPUT_ENCRYPTION_ITER", "50000"))

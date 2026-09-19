@@ -15,8 +15,11 @@ Env:
   STEPS     sampler steps (community: 15 ~= 20 for H3)        (default 20)
   SEED      noise seed                                        (default 42)
 
-Requires ComfyUI >= e377e263 (2026-08-03: native MiniMax H3 + packed-latent
-sampler API) and the ComfyUI-Spectrum-MiniMax-H3 custom node when SPECTRUM=1.
+Requires ComfyUI >= v0.31.0 and the ComfyUI-Spectrum-MiniMax-H3 custom node when
+SPECTRUM=1. The floor used to be e377e263 (2026-08-03: native MiniMax H3 +
+packed-latent sampler API); it rose when the video decoder here became the
+int8_convrot one, which needs comfyanonymous/ComfyUI#15334 (bbda8364,
+2026-08-06, first released in v0.31.0) and decodes BLACK FRAMES without it.
 """
 import json
 import os
@@ -91,7 +94,7 @@ g = {
            "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
                       "type": "minimax", "device": "default"}},
     "11": {"class_type": "VAELoader",
-           "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}},
+           "inputs": {"vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"}},
     "24": {"class_type": "VAELoader",
            "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
     "104": {"class_type": "MiniMaxH3ImageToVideo",

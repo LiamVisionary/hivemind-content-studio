@@ -78,6 +78,7 @@ EXPECTED = [
     ('POST', '/api/delete-input', 'post_api_delete_input'),
     ('POST', '/api/interpolate', 'post_api_interpolate'),
     ('POST', '/api/smart-mask', 'post_api_smart_mask'),
+    ('POST', '/api/audio-split', 'post_api_audio_split'),
     ('POST', '/api/ltx-director', 'post_api_ltx_director'),
     ('POST', '/api/episode', 'post_api_episode'),
     ('POST', '/api/upscale', 'post_api_upscale'),

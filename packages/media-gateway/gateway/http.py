@@ -16,7 +16,13 @@ from urllib.parse import parse_qs, urlparse, urlencode, unquote
 from urllib.request import Request
 from urllib.error import HTTPError
 
-from gateway import config, dependencies as _dependencies, direction_reference as _direction_reference, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, private_inputs, promptroutes, restore, routes, runners, util, workflow_index
+from gateway import config, dependencies as _dependencies, direction_reference as _direction_reference, graphs, h3_native, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, private_inputs, promptroutes, restore, routes, runners, stems as _stems, util, workflow_index
+
+
+# How many gallery entries a card will chase before giving up. Each one is a
+# round trip to Civitai, and a gallery whose every clip refuses the still
+# transform is not worth ten of them.
+PREVIEW_SOURCE_ATTEMPTS = 4
 
 
 class _MultipartPart:
@@ -352,6 +358,32 @@ class Handler(BaseHTTPRequestHandler):
         url = upstream_base + target_path + (("?" + query) if query else "")
         if method == "POST" and target_path in {"/api/prompt", "/prompt"} and body:
             _loras.record_mobile_prompt_lora_trace(body)
+            # MiniMax H3 through h3.c. First of the native routes because its
+            # marker is explicit: a body carrying nativeH3 was built for this
+            # lane and has no ComfyUI graph worth forwarding.
+            try:
+                native_h3 = graphs.detect_native_h3_prompt(body)
+            except RuntimeError as e:
+                return self.send_json({"error": str(e)}, 400)
+            if native_h3:
+                try:
+                    workflow = graphs._mobile_prompt_workflow_from_body(body)
+                    job_id = h3_native.queue_native_h3_job(native_h3, workflow)
+                    self.register_native_job_seal_recipients(job_id)
+                    return self.send_json({
+                        "prompt_id": job_id,
+                        "number": 0,
+                        "node_errors": {},
+                        "native_h3": True,
+                        "native_video": True,
+                        "backend": h3_native.BACKEND,
+                        "status": "queued",
+                    }, 200)
+                except Exception as e:
+                    # No ComfyUI fallback exists for this lane, so the refusal
+                    # IS the answer — and it is the lane's own sentence, which
+                    # names the missing piece and how to get it.
+                    return self.send_json({"error": str(e)}, 400)
             native_ltx = graphs.detect_native_mlx_ltx_prompt(body)
             if native_ltx:
                 try:
@@ -706,6 +738,18 @@ class Handler(BaseHTTPRequestHandler):
         # decrypt key.
         return self.send_json({"error": "workflow key endpoint disabled; unlock in the browser"}, status=410)
 
+    def get_api_h3_native_profile(self, parsed, qs):
+        """The h3.c lane's own preflight: the machine, the presets, the limits.
+
+        Behind the token like everything else — it names the chip, the memory
+        and a path under the owner's home, which is exactly the fingerprint
+        /health was trimmed of.
+        """
+        refresh = str(qs.get('refresh', [''])[0]).strip().lower() in {'1', 'true', 'yes'}
+        if refresh:
+            h3_native.machine_profile(refresh=True)
+        return self.send_json({"ok": True, **h3_native.public_profile()})
+
     def get_api_e2e_vault_identity(self, parsed, qs):
         identity = media.vault_identity_json()
         return self.send_json({"ok": True, "exists": identity is not None, "identity": identity})
@@ -776,39 +820,77 @@ class Handler(BaseHTTPRequestHandler):
         item = next((value for value in _models.local_loras_unfiltered() if value.get('id') == lora_id), None)
         if not item:
             return self.send_text("not found\n", 404, "text/plain")
-        source = _models.lora_preview_source(item['path'], item.get('metadata') or {})
-        if not source:
+        sources = _models.lora_preview_sources(item['path'], item.get('metadata') or {})
+        if not sources:
             return self.send_text("not found\n", 404, "text/plain")
+        # A local candidate may sit ahead of the remote ones, so the walk below
+        # has to handle both. Locals never reach the network.
+        lora_root = (config.COMFY / 'models' / 'loras').resolve()
+        local = next((s for s in sources if not s.startswith(('http://', 'https://'))), '')
+        if local:
+            preview_path = Path(local).resolve()
+            if preview_path.exists() and preview_path.is_file() and util._is_under(preview_path, lora_root):
+                ctype = mimetypes.guess_type(str(preview_path))[0] or 'application/octet-stream'
+                if not ctype.lower().startswith('video/'):
+                    return self._send_lora_preview(preview_path.read_bytes(), ctype)
+        source = sources[0]
         try:
             if source.startswith(('http://', 'https://')):
                 # Civitai-hosted card art: fetched once, then served from the
                 # encrypted cache until this LoRA file changes or goes away.
-                cached = _loras.cached_lora_preview(item, source)
-                if cached:
-                    data, ctype = cached
-                else:
-                    preview_request = Request(source, headers={'User-Agent': 'HivemindContentStudio/1.0'})
+                #
+                # Walked, not taken on faith. A LoRA for a video model has only
+                # clips in its gallery and they are asked for as still frames,
+                # but the CDN does not always honour that — measured on
+                # HMNSFW_AIO_V2, clip 1 answered video/mp4 at 5.1MB with the
+                # transform set while clips 2 and 3 answered image/jpeg. An mp4
+                # in an <img> paints nothing, so a video answer is a MISS and
+                # the next candidate gets a turn. Bounded, because each turn is
+                # a round trip to a third party.
+                data = ctype = None
+                for candidate in sources[:PREVIEW_SOURCE_ATTEMPTS]:
+                    cached = _loras.cached_lora_preview(item, candidate)
+                    if cached:
+                        # The SAME rule as a fresh fetch. A build that served
+                        # the transform without checking the answer cached the
+                        # mp4s it got, and a cache entry outlives the bug that
+                        # wrote it — so a video here is a miss too, and the
+                        # next candidate quietly replaces it.
+                        if str(cached[1] or '').lower().startswith('video/'):
+                            continue
+                        data, ctype = cached
+                        source = candidate
+                        break
+                    preview_request = Request(candidate, headers={'User-Agent': 'HivemindContentStudio/1.0'})
                     with net.urlopen(preview_request, timeout=30) as upstream:
-                        data = upstream.read()
-                        ctype = upstream.headers.get('Content-Type', 'image/jpeg').split(';', 1)[0]
-                    _loras.cache_lora_preview(item, source, data, ctype)
-            else:
-                preview_path = Path(source).resolve()
-                lora_root = (config.COMFY / 'models' / 'loras').resolve()
-                if not preview_path.exists() or not preview_path.is_file() or not util._is_under(preview_path, lora_root):
+                        body = upstream.read()
+                        got = upstream.headers.get('Content-Type', 'image/jpeg').split(';', 1)[0]
+                    if got.lower().startswith('video/'):
+                        continue
+                    data, ctype, source = body, got, candidate
+                    _loras.cache_lora_preview(item, candidate, body, got)
+                    break
+                if data is None:
+                    # Every candidate came back as video. The card falls back to
+                    # its label rather than showing a broken image.
                     return self.send_text("not found\n", 404, "text/plain")
-                data = preview_path.read_bytes()
-                ctype = mimetypes.guess_type(str(preview_path))[0] or 'application/octet-stream'
-            self.send_response(200)
-            self.cors_headers()
-            self.send_header("Content-Type", ctype)
-            self.send_header("Cache-Control", "private, max-age=3600")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
+            else:
+                # Every usable local candidate was already tried above, so
+                # anything still here is a path that is gone or out of bounds.
+                return self.send_text("not found\n", 404, "text/plain")
+            return self._send_lora_preview(data, ctype)
         except Exception:
             return self.send_text("not found\n", 404, "text/plain")
+
+    def _send_lora_preview(self, data, ctype):
+        self.send_response(200)
+        self.cors_headers()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        return
 
     def get_api_loras(self, parsed, qs):
         requested_bases = []
@@ -1359,6 +1441,35 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self.send_json({"error": str(exc)}, 500)
 
+    def post_api_audio_split(self, parsed, qs):
+        """Split a clip's sound into dialogue, effects, music and voices.
+
+        The clip arrives inline and already decrypted, like every other route
+        that post-processes a finished output — and unlike them it is never
+        written down: the bytes go from this request straight into the
+        in-memory staging the private loader reads (gateway/stems.py)."""
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            # ValueError from here is already a sentence; the except below sends it.
+            payload, media_type = _stems.decode_inline_media(data.get("media_base64"))
+            options = {"voices": data.get("voices", True)}
+            job_id = uuid.uuid4().hex[:12]
+            with jobs.jobs_lock:
+                jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": _stems.BACKEND}
+            threading.Thread(
+                target=_stems.run_audio_split, args=(job_id, payload, media_type, options), daemon=True,
+            ).start()
+            return self.send_json({
+                "id": job_id,
+                "status": "queued",
+                "backend": _stems.BACKEND,
+                "job_url": f"/api/job/{job_id}",
+            }, 202)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
     def post_api_ltx_director(self, parsed, qs):
         try:
             data = json.loads((self.read_body() or b"{}").decode("utf-8"))
@@ -1795,7 +1906,7 @@ class Handler(BaseHTTPRequestHandler):
                 # loudly instead of letting the request fall through to a lane
                 # that would silently ignore the key.
                 klein_reachable = (
-                    backend in {'mlx-bigloves-klein3-edit', 'mlx-mxfp8-bigloves-klein3-edit'}
+                    backend in graphs.BIGLOVE_KLEIN3_BACKENDS
                     or (uploaded_image is not None and backend != 'comfy-api-image' and backend not in config.KREA2_IDENTITY_BACKENDS)
                 )
                 if not klein_reachable:
@@ -1841,6 +1952,39 @@ class Handler(BaseHTTPRequestHandler):
                     "id": job_id,
                     "status": "queued",
                     "backend": "comfy-api-image",
+                    "job_url": f"/api/job/{job_id}",
+                    "page_url": f"/job/{job_id}",
+                    "history_url": "/api/history",
+                }, 202)
+            if backend == 'comfy-api-audio':
+                # Music. Everything the graph needs is addressed by the
+                # registry's `slots` map, so this branch only has to carry the
+                # named options through; it deliberately does not touch
+                # width/height, which an audio graph does not have.
+                options['workflow_file'] = str(data.get('workflow_file', '') if isinstance(data, dict) else '')
+                if isinstance(data, dict):
+                    for key in ('lyrics', 'seconds', 'bpm', 'timesignature', 'language',
+                                'keyscale', 'generate_audio_codes'):
+                        if key in data:
+                            options[key] = data.get(key)
+                job_id = uuid.uuid4().hex[:12]
+                with jobs.jobs_lock:
+                    jobs.jobs[job_id] = {
+                        "id": job_id,
+                        "prompt": history.PRIVATE_PROMPT_LABEL,
+                        "status": "queued",
+                        "created_at": util.now_iso(),
+                        "backend": "comfy-api-audio",
+                        # Lyrics are as private as a prompt and are held back
+                        # from the job record for the same reason.
+                        "options": {k: v for k, v in options.items() if k not in ('lyrics', 'workflow_file')},
+                    }
+                jobs.start_studio_generation_thread(
+                    'audio', options, runners.run_comfy_api_audio, (job_id, prompt, options))
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": "comfy-api-audio",
                     "job_url": f"/api/job/{job_id}",
                     "page_url": f"/job/{job_id}",
                     "history_url": "/api/history",
@@ -1976,21 +2120,66 @@ class Handler(BaseHTTPRequestHandler):
                     "page_url": f"/job/{job_id}",
                     "history_url": "/api/history",
                 }, 202)
-            if backend in {'mlx-bigloves-klein3-edit', 'mlx-mxfp8-bigloves-klein3-edit'} or uploaded_image is not None:
+            # Stock Klein 9B runs the same graph as the BigLove lane with a
+            # different checkpoint, and on the ComfyUI route on every platform:
+            # the warm MLX server is pinned to the BigLove weights.
+            if backend == graphs.FLUX2_KLEIN_9B_BACKEND:
+                klein_refs = media.collect_reference_image_paths(data, uploaded_image)[:graphs.BIGLOVE_KLEIN3_MAX_REFERENCES]
+                if klein_refs:
+                    uploaded_image = klein_refs[0]
+                klein_loras = _loras._native_loras_from_generation_request(data, ['Flux.2 Klein 9B'])
+                if klein_loras:
+                    options['loras'] = klein_loras
+                mode = "edit" if klein_refs else "text-to-image"
+                job_id = uuid.uuid4().hex[:12]
+                with jobs.jobs_lock:
+                    jobs.jobs[job_id] = {
+                        "id": job_id,
+                        "prompt": history.PRIVATE_PROMPT_LABEL,
+                        "status": "queued",
+                        "created_at": util.now_iso(),
+                        "backend": graphs.FLUX2_KLEIN_9B_BACKEND,
+                        "mode": mode,
+                        "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
+                    }
+                jobs.start_studio_generation_thread(
+                    'image', options, runners.run_comfy_klein3_edit,
+                    (job_id, prompt, uploaded_image, options,
+                     graphs.FLUX2_KLEIN_9B_COMFY_MODEL, graphs.FLUX2_KLEIN_9B_BACKEND),
+                )
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": graphs.FLUX2_KLEIN_9B_BACKEND,
+                    "mode": mode,
+                    "job_url": f"/api/job/{job_id}",
+                    "page_url": f"/job/{job_id}",
+                    "history_url": "/api/history",
+                }, 202)
+            # By NAME first, then by attachment. The name is what lets this lane
+            # run text-to-image: reached only by "an image is attached", a
+            # reference-free Klein request used to fall through to the generic
+            # SDXL runner below, which is why the composer had to block it.
+            if backend in graphs.BIGLOVE_KLEIN3_BACKENDS or uploaded_image is not None:
                 native_loras = _loras._native_loras_from_generation_request(data, ['Flux.2 Klein 9B'])
                 if native_loras:
                     options['loras'] = native_loras
                 # Klein conditions on up to BIGLOVE_KLEIN3_MAX_REFERENCES
                 # images (identity across views, character sheets).
                 reference_images = media.collect_reference_image_paths(data, uploaded_image)[:graphs.BIGLOVE_KLEIN3_MAX_REFERENCES]
-                if not reference_images:
-                    return self.send_json({"error": "image required for BigLoveKlein3 edit"}, 400)
-                uploaded_image = reference_images[0]
+                # No reference is the model's other mode, not a missing input.
+                # This used to 400 with "image required for BigLoveKlein3 edit"
+                # even though Klein has always done text-to-image.
+                uploaded_image = reference_images[0] if reference_images else None
                 if len(reference_images) > 1:
                     options['image_paths'] = [str(p) for p in reference_images]
                 # Character sheet: N per-view edits of the same reference(s) on
                 # the native Klein lane, composited into one labeled sheet.
                 if wants_character_sheet:
+                    # A sheet is N views OF something, so this one really does
+                    # need a reference — unlike the lane it rides on.
+                    if not reference_images:
+                        return self.send_json({"error": "a character sheet is made from a reference image — attach one first"}, 400)
                     sheet_req = data.get('character_sheet')
                     try:
                         sheet_views = config.resolve_character_sheet_views(sheet_req)
@@ -2009,19 +2198,20 @@ class Handler(BaseHTTPRequestHandler):
                         "page_url": f"/job/{job_id}",
                         "history_url": "/api/history",
                     }, 202)
+                klein_mode = "edit" if reference_images else "text-to-image"
                 if config.supports_native_mlx_biglove_route():
                     job_id = native_mlx.queue_native_mlx_biglove_job(prompt, uploaded_image, options)
-                    return self.send_json({"id": job_id, "status": "queued", "backend": "mlx-mxfp8-bigloves-klein3-edit", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
-                if backend in {'mlx-bigloves-klein3-edit', 'mlx-mxfp8-bigloves-klein3-edit'}:
+                    return self.send_json({"id": job_id, "status": "queued", "backend": "mlx-mxfp8-bigloves-klein3-edit", "mode": klein_mode, "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
+                if backend in graphs.BIGLOVE_KLEIN3_NATIVE_BACKENDS:
                     return self.send_json({"error": f"native MLX BigLove route is not available for accelerator profile {config.accelerator_profile()}"}, 400)
                 job_id = uuid.uuid4().hex[:12]
                 with jobs.jobs_lock:
-                    jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "comfy-bigloves-klein3-edit", "options": {k: v for k, v in options.items() if k != 'negative_prompt'}}
+                    jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "comfy-bigloves-klein3-edit", "mode": klein_mode, "options": {k: v for k, v in options.items() if k != 'negative_prompt'}}
                 jobs.start_studio_generation_thread(
                     'image', options, runners.run_comfy_klein3_edit,
                     (job_id, prompt, uploaded_image, options),
                 )
-                return self.send_json({"id": job_id, "status": "queued", "backend": "comfy-bigloves-klein3-edit", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
+                return self.send_json({"id": job_id, "status": "queued", "backend": "comfy-bigloves-klein3-edit", "mode": klein_mode, "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
             req_loras = data.get('loras') if isinstance(data, dict) else None
             loras = _models.resolve_lora_selection(req_loras, _models.current_base_models()) if req_loras is not None else _models.load_selected_loras()
             job_id = uuid.uuid4().hex[:12]
