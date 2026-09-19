@@ -16,6 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = dirname(__dirname);
 const mediaStateRoot = process.env.HIVEMIND_MEDIA_STATE_DIR || join(homedir(), '.hivemindos/media-studio');
 const tokenPath = process.env.MEDIA_STUDIO_TOKEN_FILE || process.env.ZIMG_TOKEN_FILE || join(mediaStateRoot, 'secure/zimg-token');
+const backendTokenPath = process.env.MEDIA_STUDIO_BACKEND_TOKEN_FILE || process.env.ZIMG_TOKEN_FILE || join(mediaStateRoot, 'secure/zimg-token');
 const backendBase = (
   process.env.MEDIA_STUDIO_MCP_BACKEND_URL
   || process.env.MEDIA_STUDIO_BACKEND_URL
@@ -148,6 +149,16 @@ function token() {
   if (process.env.ZIMG_TOKEN) return process.env.ZIMG_TOKEN.trim();
   try {
     return readFileSync(tokenPath, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+function backendToken() {
+  if (process.env.MEDIA_STUDIO_BACKEND_TOKEN) return process.env.MEDIA_STUDIO_BACKEND_TOKEN.trim();
+  if (process.env.ZIMG_TOKEN) return process.env.ZIMG_TOKEN.trim();
+  try {
+    return readFileSync(backendTokenPath, 'utf8').trim();
   } catch {
     return '';
   }
@@ -432,6 +443,16 @@ async function imageSourceFromArgs(args = {}, defaults = {}) {
   return argOrDefault(args, defaults, 'image_path') ?? defaults.image;
 }
 
+async function imageSourceFromPrefixedArgs(args = {}, prefix) {
+  const source = {
+    image_base64: args[`${prefix}_image_base64`],
+    image_url: args[`${prefix}_image_url`],
+    image_path: args[`${prefix}_image_path`],
+  };
+  const staged = await stageInlineImageFromArgs(source);
+  return staged || source.image_path;
+}
+
 function inputRelativeName(path) {
   const inputRoot = resolve(comfyInputDir);
   const absolute = resolve(path);
@@ -489,6 +510,73 @@ function argOrDefault(args, defaults, key) {
   return defaults[key];
 }
 
+function normalizedLtxFrameCount(value, fallback = 233) {
+  const numeric = Number(value);
+  const requested = Number.isFinite(numeric) ? Math.round(numeric) : fallback;
+  const clamped = Math.max(9, Math.min(721, requested));
+  return Math.max(9, Math.round((clamped - 1) / 8) * 8 + 1);
+}
+
+function videoFrameCount(args, settings, defaults = {}) {
+  const direct = args.frames ?? args.params?.frames ?? settings.frames ?? defaults.frames;
+  if (direct !== undefined && direct !== null && direct !== '') {
+    return normalizedLtxFrameCount(direct);
+  }
+  const duration = Number(args.duration_seconds ?? args.params?.duration_seconds ?? settings.duration_seconds ?? defaults.duration_seconds);
+  const frameRate = Number(args.frame_rate ?? args.params?.frame_rate ?? settings.frame_rate ?? settings.frameRate ?? defaults.frame_rate ?? 24);
+  if (Number.isFinite(duration) && duration > 0 && Number.isFinite(frameRate) && frameRate > 0) {
+    return normalizedLtxFrameCount(Math.round(duration * frameRate) + 1);
+  }
+  return normalizedLtxFrameCount(defaults.frames ?? 233);
+}
+
+function videoAnchorFrame(entry, frames, frameRate) {
+  const role = String(entry.role || '').trim().toLowerCase();
+  let frame = entry.frame ?? entry.frame_idx;
+  if (frame === undefined && entry.time_seconds !== undefined) frame = Number(entry.time_seconds) * frameRate;
+  if (frame === undefined && role === 'middle') frame = Math.floor((frames - 1) / 2);
+  if (frame === undefined && role === 'end') frame = frames - 1;
+  if (frame === undefined) frame = 0;
+  const numeric = Number(frame);
+  return Math.max(0, Math.min(frames - 1, Math.round(Number.isFinite(numeric) ? numeric : 0)));
+}
+
+async function normalizeVideoKeyframes(args, settings, defaults = {}) {
+  const frames = videoFrameCount(args, settings, defaults);
+  const frameRate = Number(args.frame_rate ?? args.params?.frame_rate ?? settings.frame_rate ?? settings.frameRate ?? defaults.frame_rate ?? 24) || 24;
+  const ordered = [];
+  if (settings.imageName) {
+    ordered.push({ image_path: settings.imageName, frame: 0, strength: 1, role: 'start' });
+  }
+  for (const role of ['middle', 'end']) {
+    const source = await imageSourceFromPrefixedArgs(args, role);
+    if (!source) continue;
+    ordered.push({
+      image_path: stageLtxErosImage(source),
+      frame: videoAnchorFrame({ role }, frames, frameRate),
+      strength: 1,
+      role,
+    });
+  }
+  for (const entry of Array.isArray(args.keyframes) ? args.keyframes : []) {
+    if (!entry || typeof entry !== 'object') continue;
+    const source = await imageSourceFromArgs(entry, {});
+    if (!source) throw new Error('each video keyframe requires image_path, image_base64, or image_url');
+    const role = String(entry.role || '').trim().toLowerCase();
+    const rawStrength = Number(entry.strength ?? 1);
+    ordered.push({
+      image_path: stageLtxErosImage(source),
+      frame: videoAnchorFrame(entry, frames, frameRate),
+      strength: Math.max(0, Math.min(1, Number.isFinite(rawStrength) ? rawStrength : 1)),
+      ...(role ? { role } : {}),
+    });
+  }
+  const byFrame = new Map();
+  for (const anchor of ordered) byFrame.set(anchor.frame, anchor);
+  if (byFrame.size > 20) throw new Error('video generation supports at most 20 unique image anchor frames');
+  return [...byFrame.values()].sort((left, right) => left.frame - right.frame);
+}
+
 function editorNode(workflow, id) {
   return (workflow?.nodes || []).find((node) => String(node?.id) === String(id));
 }
@@ -528,6 +616,7 @@ function updateLtxErosEditorWorkflow(workflow, spec, settings) {
       frame_rate: settings.frameRate,
       seed: settings.seed,
     },
+    keyframes: Array.isArray(settings.keyframes) ? settings.keyframes : [],
     fallback: 'ComfyUI LTX graph on non-Apple-Silicon or when the native MLX LTX route is disabled',
   };
   setEditorWidget(out, 597, 'filename_prefix', spec.marker);
@@ -556,6 +645,7 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
     frameRate: positiveFloat(args.frame_rate, defaults.frame_rate, { min: 1, max: 120 }),
     seed: positiveInt(args.seed, defaults.seed, { min: 0, max: 1_000_000_000 }),
   };
+  settings.keyframes = await normalizeVideoKeyframes(args, settings, defaults);
   const apiWorkflow = loadJsonFile(ltxErosApiWorkflowPath, 'LTX Eros API workflow');
   const promptGraph = cloneJson(apiWorkflow.prompt || apiWorkflow);
   setApiInput(promptGraph, 597, 'filename_prefix', spec.marker);
@@ -629,6 +719,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     frames: slots.frames,
     frame_rate: slots.frame_rate,
     seed: slots.seed,
+    duration_seconds: slots.duration_seconds,
     steps: slots.steps,
     cfg: slots.cfg,
     guidance: slots.guidance,
@@ -643,7 +734,30 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   const extraPngInfo = {};
   const mobileWorkflowPath = resolveWorkflowFile(workflow.mobile_workflow || workflow.editor_workflow || workflow.mobileWorkflow);
   if (mobileWorkflowPath && existsSync(mobileWorkflowPath)) {
-    extraPngInfo.workflow = loadJsonFile(mobileWorkflowPath, `${workflow.id} editor workflow`);
+    const editorWorkflow = loadJsonFile(mobileWorkflowPath, `${workflow.id} editor workflow`);
+    settings.keyframes = await normalizeVideoKeyframes(args, settings, defaults);
+    editorWorkflow.extra = editorWorkflow.extra && typeof editorWorkflow.extra === 'object' ? editorWorkflow.extra : {};
+    const existingNative = editorWorkflow.extra.nativeMlxLtx && typeof editorWorkflow.extra.nativeMlxLtx === 'object'
+      ? editorWorkflow.extra.nativeMlxLtx
+      : {};
+    const nativeSpec = workflow.native_mlx && typeof workflow.native_mlx === 'object' ? workflow.native_mlx : {};
+    editorWorkflow.extra.nativeMlxLtx = {
+      ...existingNative,
+      enabled: nativeSpec.enabled !== false,
+      variant: nativeSpec.variant || existingNative.variant,
+      defaults: {
+        ...(existingNative.defaults && typeof existingNative.defaults === 'object' ? existingNative.defaults : {}),
+        ...(settings.imageName ? { image: settings.imageName } : {}),
+        ...(settings.prompt !== undefined ? { prompt: settings.prompt } : {}),
+        ...(settings.width !== undefined ? { width: settings.width } : {}),
+        ...(settings.height !== undefined ? { height: settings.height } : {}),
+        frames: videoFrameCount(args, settings, defaults),
+        frame_rate: Number(settings.frame_rate ?? defaults.frame_rate ?? 24),
+        ...(settings.seed !== undefined ? { seed: settings.seed } : {}),
+      },
+      keyframes: settings.keyframes,
+    };
+    extraPngInfo.workflow = editorWorkflow;
   }
 
   return {
@@ -749,7 +863,7 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
     if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
   }
   const headers = { Accept: 'application/json' };
-  const authToken = token();
+  const authToken = backendToken();
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
   const init = {
     method,
@@ -803,14 +917,14 @@ function fail(error) {
 }
 
 function authorizedHttpRequest(req) {
-  const expected = token();
-  if (!expected) return false;
+  const expectedTokens = [...new Set([token(), backendToken()].filter(Boolean))];
+  if (!expectedTokens.length) return false;
   const auth = String(req.headers.authorization || '');
-  if (auth === `Bearer ${expected}`) return true;
-  if (String(req.headers['x-token'] || '') === expected) return true;
+  if (expectedTokens.some((expected) => auth === `Bearer ${expected}`)) return true;
+  if (expectedTokens.includes(String(req.headers['x-token'] || ''))) return true;
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-    if (url.searchParams.get('token') === expected) return true;
+    if (expectedTokens.includes(String(url.searchParams.get('token') || ''))) return true;
   } catch {}
   return false;
 }
@@ -868,7 +982,7 @@ async function getComfyHistoryIfPresent(promptId) {
   }
 }
 
-function comfyHistoryToJob(promptId, history) {
+function comfyHistoryToJob(promptId, history, { includeUrls = false } = {}) {
   if (!history) return null;
   const status = history?.status || {};
   const completed = Boolean(status.completed);
@@ -882,13 +996,19 @@ function comfyHistoryToJob(promptId, history) {
       }
     }
   }
-  return {
+  const authToken = backendToken();
+  const imageUrls = outputs.map((item) => {
+    const query = authToken ? `?token=${encodeURIComponent(authToken)}` : '';
+    return `/image/${encodeURIComponent(basename(String(item.filename)))}` + query;
+  });
+  return normalizeRecord({
     id: promptId,
     status: completed ? (statusText.includes('error') ? 'error' : 'success') : 'running',
     backend: 'comfy-ltx-eros-video',
     comfy_status: status,
     outputs,
-  };
+    image_urls: imageUrls,
+  }, { includeUrls });
 }
 
 async function waitForLtxErosPrompt(promptId, { timeoutS = 1800, pollMs = 1500, includeUrls = false } = {}) {
@@ -900,7 +1020,7 @@ async function waitForLtxErosPrompt(promptId, { timeoutS = 1800, pollMs = 1500, 
       if (Date.now() - started > timeoutS * 1000) return { ...wrapperJob, wait_timed_out: true };
     } else {
       const history = await getComfyHistoryIfPresent(promptId);
-      const comfyJob = comfyHistoryToJob(promptId, history);
+      const comfyJob = comfyHistoryToJob(promptId, history, { includeUrls });
       if (comfyJob?.status && comfyJob.status !== 'running') return comfyJob;
       if (Date.now() - started > timeoutS * 1000) {
         return comfyJob ? { ...comfyJob, wait_timed_out: true } : { id: promptId, status: 'queued', wait_timed_out: true };
@@ -1057,10 +1177,27 @@ function buildServer() {
     description: 'Queue a registered video workflow. If workflow_id is omitted, the default local video workflow is used.',
     inputSchema: {
       workflow_id: z.string().optional().describe(`Registered workflow id. Defaults to ${defaultVideoWorkflowId()}. Use media_list_workflows to discover options.`),
-      prompt: z.string().min(1).max(4000).optional().describe('Optional positive video prompt. If omitted, the workflow default prompt is used.'),
+      prompt: z.string().min(1).optional().describe('Optional positive video prompt. Long natural-language prompts are preserved without a client-side character cap.'),
+      negative_prompt: z.string().max(2000).optional().describe('Optional negative video prompt mapped through the registered workflow when supported.'),
       image_path: z.string().optional().describe('Absolute local image path or existing Comfy input filename. Absolute paths are copied into the private Comfy input folder before queueing if the workflow needs Comfy access.'),
       image_base64: z.string().optional().describe('Inline source image as raw base64 or data:image/...;base64,... data URL. Wins over image_path.'),
       image_url: z.string().optional().describe('Optional HTTP(S) source image fetched by Media Studio. Ignored when image_base64 is supplied.'),
+      middle_image_path: z.string().optional(),
+      middle_image_base64: z.string().optional(),
+      middle_image_url: z.string().optional(),
+      end_image_path: z.string().optional(),
+      end_image_base64: z.string().optional(),
+      end_image_url: z.string().optional(),
+      keyframes: z.array(z.object({
+        image_path: z.string().optional(),
+        image_base64: z.string().optional(),
+        image_url: z.string().optional(),
+        frame: z.number().optional(),
+        frame_idx: z.number().optional(),
+        time_seconds: z.number().optional(),
+        role: z.enum(['start', 'middle', 'end']).optional(),
+        strength: z.number().min(0).max(1).optional(),
+      })).max(20).optional().describe('Arbitrary image anchors. Later anchors targeting the same normalized frame win.'),
       params: z.record(z.string(), z.any()).optional().describe('Additional workflow parameters for registry-defined slots, e.g. steps, cfg, guidance, or model-specific controls.'),
       width: z.number().int().min(64).max(4096).optional(),
       height: z.number().int().min(64).max(4096).optional(),
@@ -1119,9 +1256,15 @@ function buildServer() {
       id: z.string().min(1),
       include_urls: z.boolean().default(false).describe('Include token-bearing absolute Studio URLs in results.'),
     },
-  }, tool(async ({ id, include_urls }) => ({
-    job: normalizeRecord(await requestJson(`/api/job/${encodeURIComponent(id)}`), { includeUrls: include_urls }),
-  })));
+  }, tool(async ({ id, include_urls }) => {
+    const wrapperJob = await getWrapperJobIfPresent(id, { includeUrls: include_urls });
+    if (wrapperJob) return { job: wrapperJob };
+    const comfyJob = comfyHistoryToJob(id, await getComfyHistoryIfPresent(id), { includeUrls: include_urls });
+    if (comfyJob) return { job: comfyJob };
+    const error = new Error('not found');
+    error.status = 404;
+    throw error;
+  }));
 
   server.registerTool('media_list_history', {
     title: 'List History',

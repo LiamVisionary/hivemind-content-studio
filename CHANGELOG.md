@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-07-17 — Native LTX output encryption no longer races active video writers
+
+- Status: Uncommitted
+- User-facing result: Long native LTX 2.3 renders remain writable until the generator has closed and validated the MP4, so the at-rest encryption sweeper can no longer move a partial file out from under FFmpeg and leave an unplayable video without a `moov` atom.
+- Areas changed: Media Gateway active-output lifecycle tracking around native MLX LTX generation; encryption eligibility guard; focused regression coverage.
+- Safety boundary: completed media is still encrypted by the existing sweeper after the native writer releases the path. The guard applies only while a registered native output is actively being produced.
+- Verification: reproduced a 361-frame LTX render whose encrypted sidecar contained an MP4 header but no `moov` atom; focused regression passes and the corrected gateway was installed on the M5 with the managed stack restarted. End-to-end replacement-render verification is in progress.
+- Intended commit message: `fix: keep active native renders out of encryption sweeps`
+- MCP retrieval follow-up: private backend reads now use the backend token rather than the separate inbound MCP token, while HTTP MCP auth accepts either configured credential. Successful jobs retain output URLs for automated download and exact-frame continuation without breaking existing Z-Image-token clients.
+
+## 2026-07-16 — Accelerator-heavy renders no longer trip the frontend watchdog
+
+- Status: Uncommitted
+- User-facing result: Long local LTX 2.3 renders can temporarily starve the browser frontend without causing the supervisor to terminate the healthy Comfy, Media Studio, and in-flight generation processes.
+- Areas changed: managed-stack frontend health policy and a focused source-contract regression.
+- Safety boundary: exited child processes remain fatal and still restart the managed stack. Only the already-designated soft frontend HTTP check is non-fatal; operator restart remains available for a genuinely wedged frontend.
+- Verification: reproduced the live failure when six consecutive frontend timeouts killed a running regular-LTX job; shell syntax passes; focused watchdog and embedded-component tests pass 4/4; the corrected script was installed on the M5 and a subsequent regular-LTX render completed without a supervisor restart.
+- Media Studio MCP contract: registered video workflows now actually receive a caller-provided `negative_prompt` instead of Zod stripping it before workflow construction; focused contract coverage passes.
+- Intended commit message: `fix: preserve active renders through frontend health stalls`
+
 ## 2026-07-12 02:22:15 +0800 — Run history restores reference images
 
 - Status: Uncommitted

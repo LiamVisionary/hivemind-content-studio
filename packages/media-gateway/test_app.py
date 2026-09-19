@@ -18,6 +18,23 @@ def load_app():
 
 
 class ZImageAppTests(unittest.TestCase):
+    def test_active_output_is_not_encryptable_until_native_writer_finishes(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output_dir = Path(td) / 'output'
+            output_dir.mkdir()
+            output = output_dir / 'render.png'
+            output.write_bytes(b'x' * 1000)
+
+            with patch.object(app, 'OUT_DIR', output_dir), patch.object(app, 'COMFY_OUTPUT_DIR', Path(td) / 'comfy'):
+                app.mark_output_active(output)
+                self.assertTrue(app.output_path_is_active(output))
+                self.assertFalse(app.is_encryptable_output(output))
+
+                app.mark_output_inactive(output)
+                self.assertFalse(app.output_path_is_active(output))
+                self.assertTrue(app.is_encryptable_output(output))
+
     def test_hardware_profile_cuda_disables_apple_specific_routes(self):
         app = load_app()
         with patch.dict('os.environ', CUDA_ENV, clear=False):

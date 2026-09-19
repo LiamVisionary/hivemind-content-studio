@@ -212,6 +212,8 @@ jobs_lock = threading.Lock()
 download_jobs = {}
 download_jobs_lock = threading.Lock()
 encryption_lock = threading.Lock()
+active_output_paths = set()
+active_output_paths_lock = threading.Lock()
 _output_encryption_password = None
 
 
@@ -283,9 +285,26 @@ def logical_path_for_encrypted(path):
     return path
 
 
+def mark_output_active(path):
+    with active_output_paths_lock:
+        active_output_paths.add(str(Path(path).resolve()))
+
+
+def mark_output_inactive(path):
+    with active_output_paths_lock:
+        active_output_paths.discard(str(Path(path).resolve()))
+
+
+def output_path_is_active(path):
+    with active_output_paths_lock:
+        return str(Path(path).resolve()) in active_output_paths
+
+
 def is_encryptable_output(path):
     path = Path(path)
     if not OUTPUT_ENCRYPTION_ENABLED:
+        return False
+    if output_path_is_active(path):
         return False
     if path.name.endswith(OUTPUT_ENCRYPTION_SUFFIX):
         return False
@@ -2611,15 +2630,19 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
         with jobs_lock:
             jobs[job_id] = rec
         t0 = time.monotonic()
-        proc = subprocess.run(cmd, cwd=str(LTX2_MLX_DIR), text=True, capture_output=True, timeout=2400, env=env)
-        elapsed = round(time.monotonic() - t0, 2)
-        stdout = proc.stdout.strip()
-        stderr = proc.stderr.strip()
-        if proc.returncode != 0:
-            raise RuntimeError(f"ltx-2-mlx exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
-        if not out.exists() or out.stat().st_size < 1000:
-            raise RuntimeError("ltx-2-mlx finished without a valid output video")
-        visible_out = mirror_output_to_comfy_output(out)
+        mark_output_active(out)
+        try:
+            proc = subprocess.run(cmd, cwd=str(LTX2_MLX_DIR), text=True, capture_output=True, timeout=2400, env=env)
+            elapsed = round(time.monotonic() - t0, 2)
+            stdout = proc.stdout.strip()
+            stderr = proc.stderr.strip()
+            if proc.returncode != 0:
+                raise RuntimeError(f"ltx-2-mlx exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
+            if not out.exists() or out.stat().st_size < 1000:
+                raise RuntimeError("ltx-2-mlx finished without a valid output video")
+            visible_out = mirror_output_to_comfy_output(out)
+        finally:
+            mark_output_inactive(out)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
