@@ -39,6 +39,22 @@ if (bridgeEnabled && !window.localAI) {
     getBinaryStatus: () => call('getBinaryStatus'),
     downloadBinary: () => call('downloadBinary'),
     listModels: () => call('listModels'),
+    // Deliberately absent from the postMessage surface: this returns a URL the
+    // page loads directly, and in the embedded bridge the renderer lives on the
+    // host's origin, not ours. The picker drops its reference thumbnail rather
+    // than showing a broken one (see DirectionDialog).
+    directionReferenceUrl: () => '',
+    listLoras: (modelId, baseModels) => call('listLoras', modelId, baseModels),
+    generatePrompt: (params) => call('generatePrompt', params),
+    startCivitaiDownload: (url, options) => call('startCivitaiDownload', url, options),
+    listLoraUpdates: (baseModels) => call('listLoraUpdates', baseModels),
+    getCivitaiDownloadJob: (jobId) => call('getCivitaiDownloadJob', jobId),
+    checkWorkflowDependencies: (options) => call('checkWorkflowDependencies', options),
+    installWorkflowDependencies: (options) => call('installWorkflowDependencies', options),
+    getWorkflowDependencyJob: (jobId) => call('getWorkflowDependencyJob', jobId),
+    cancelWorkflowDependencyJob: (jobId) => call('cancelWorkflowDependencyJob', jobId),
+    restartWorkflowLane: (options) => call('restartWorkflowLane', options),
+    cancelCivitaiDownload: (jobId) => call('cancelCivitaiDownload', jobId),
     downloadModel: (modelId) => call('downloadModel', modelId),
     downloadAuxiliary: (auxKey) => call('downloadAuxiliary', auxKey),
     deleteModel: (modelId) => call('deleteModel', modelId),

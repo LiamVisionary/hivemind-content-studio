@@ -206,8 +206,12 @@ export type EncryptedWorkflowEnvelope = {
   version?: number;
   kdf?: string;
   cipher?: string;
-  iterations: number;
-  salt: string;
+  // Only a v1 (PBKDF2-over-passphrase) envelope carries these. A v2 envelope is
+  // sealed under the owner vault's master key, which needs neither a salt nor an
+  // iteration count — so requiring them here rejected every workflow this build
+  // writes. decryptWorkflowFromStorage is what tells the two apart.
+  iterations?: number;
+  salt?: string;
   iv: string;
   data: string;
 };
@@ -217,10 +221,9 @@ export function isEncryptedWorkflowEnvelope(value: unknown): value is EncryptedW
     isRecord(value)
       && value.encrypted === true
       && value.format === 'comfyui-mobile-encrypted-workflow'
-      && typeof value.iterations === 'number'
-      && typeof value.salt === 'string'
       && typeof value.iv === 'string'
-      && typeof value.data === 'string',
+      && typeof value.data === 'string'
+      && (value.version === 2 || (typeof value.iterations === 'number' && typeof value.salt === 'string')),
   );
 }
 

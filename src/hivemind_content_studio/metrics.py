@@ -46,6 +46,57 @@ def record_metrics(
     return entry
 
 
+#: Platform counter names that mean "how many times it was seen", best first.
+_VIEW_KEYS = ("views", "impressions", "reach", "plays")
+_CLICK_KEYS = ("clicks", "link_clicks", "url_clicks")
+
+
+def upsert_post_metrics(
+    manifest_path: str | Path,
+    *,
+    platform: str,
+    external_id: str,
+    metrics: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    """Record a post's latest platform counters, replacing the previous read.
+
+    A post's numbers keep growing, so unlike ``record_metrics`` (one entry per
+    event) this keeps ONE entry per post and source: summing every poll would
+    count the same views again each time. Counters the run summary does not
+    model (likes, reposts, saves...) are kept verbatim under ``engagement``.
+    """
+    if not external_id.strip():
+        raise ValueError("external_id is required")
+    counters = {str(key): int(value) for key, value in metrics.items() if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0}
+    views = next((counters[key] for key in _VIEW_KEYS if key in counters), 0)
+    clicks = min(next((counters[key] for key in _CLICK_KEYS if key in counters), 0), views)
+    manifest = load_manifest(manifest_path)
+    entries = manifest.setdefault("performance", [])
+    previous = next((item for item in entries if item.get("external_id") == external_id and item.get("source") == source), None)
+    entry = {
+        "platform": platform.strip().lower(),
+        "views": views,
+        "completed_views": 0,
+        "clicks": clicks,
+        # Money is entered by hand or by a revenue import; a counter refresh must not erase it.
+        "conversions": int(previous.get("conversions", 0)) if previous else 0,
+        "revenue": float(previous.get("revenue", 0.0)) if previous else 0.0,
+        "spend": float(previous.get("spend", 0.0)) if previous else 0.0,
+        "external_id": external_id,
+        "retention": dict(previous.get("retention") or {}) if previous else {},
+        "engagement": {key: value for key, value in counters.items() if key not in _VIEW_KEYS and key not in _CLICK_KEYS},
+        "source": source,
+        "recorded_at": utc_now(),
+    }
+    if previous:
+        entries[entries.index(previous)] = entry
+    else:
+        entries.append(entry)
+    write_manifest(manifest_path, manifest)
+    return entry
+
+
 def summarize_metrics(manifest_path: str | Path) -> dict[str, Any]:
     entries = load_manifest(manifest_path).get("performance", [])
     totals = {

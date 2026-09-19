@@ -2,9 +2,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hivemind_content_studio.generation import record_generated_asset
 from hivemind_content_studio.manifest import load_manifest
 from hivemind_content_studio.planner import plan
-from hivemind_content_studio.provider_execution import ProviderExecutors
+from hivemind_content_studio.provider_execution import ProviderExecutors, _format_template
+
+
+def test_provider_template_preserves_exact_seed_and_mode_types() -> None:
+    payload = _format_template(
+        {
+            "seed": "{seed}",
+            "seed_mode": "{seed_mode}",
+            "label": "seed-{seed}-{seed_mode}",
+        },
+        {"seed": 4_294_967_295, "seed_mode": "randomize"},
+    )
+
+    assert payload == {
+        "seed": 4_294_967_295,
+        "seed_mode": "randomize",
+        "label": "seed-4294967295-randomize",
+    }
 
 
 def test_higgsfield_consumer_executes_scene_contract_and_records_provenance(tmp_path: Path, monkeypatch) -> None:
@@ -46,6 +64,44 @@ def test_muapi_requires_explicit_endpoint_and_payload_contract(tmp_path: Path, m
         assert "endpoint" in str(exc).lower()
     else:
         raise AssertionError("MUAPI should fail closed without a discovered endpoint contract")
+
+
+def test_media_studio_motion_uses_the_selected_workflow_model(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
+    brief = tmp_path / "brief.yaml"
+    brief.write_text(
+        """id: ltx-workflow-route
+lane: first-frame-animation-ad
+providers:
+  motion: media-studio-mcp
+provider_options:
+  media-studio-mcp:
+    motion:
+      model: ltx23-eros-fast
+scenes:
+  - image_prompt: Product hero frame
+    motion_prompt: Slow natural handheld motion
+""",
+        encoding="utf-8",
+    )
+    manifest_path = plan(brief)
+    keyframe = tmp_path / "keyframe.png"
+    keyframe.write_bytes(b"fake-keyframe")
+    record_generated_asset(manifest_path, {"provider": "comfyui", "model": "workflow-default", "output": str(keyframe)}, role="keyframe", scene=1)
+    calls: list[dict] = []
+
+    def fake_media_studio(**kwargs):
+        calls.append(kwargs)
+        output = Path(kwargs["output_dir"]) / "ltx-scene.mp4"
+        output.write_bytes(b"fake-video")
+        return {"provider": "media-studio-mcp", "model": kwargs["workflow_id"], "output": str(output), "job_id": "ltx-job"}
+
+    result = ProviderExecutors(media_studio=fake_media_studio).animate_scenes(manifest_path, "media-studio-mcp")
+
+    assert result["artifacts"]
+    assert calls[0]["workflow_id"] == "ltx23-eros-fast"
+    artifact = next(item for item in load_manifest(manifest_path)["artifacts"] if item["role"] == "scene-video")
+    assert artifact["model"] == "ltx23-eros-fast"
 
 
 def test_hivemindos_hosted_executor_binds_the_consumed_maximum_to_each_scene(tmp_path: Path, monkeypatch) -> None:

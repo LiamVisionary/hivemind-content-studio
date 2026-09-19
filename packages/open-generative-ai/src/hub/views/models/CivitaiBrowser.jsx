@@ -1,0 +1,420 @@
+// Discover tab — search Civitai and install straight into the ComfyUI models tree.
+//
+// Downloads go through the shared civitaiDownloadStore, the same one the studio LoRA
+// panel uses: progress survives leaving this view, a second click on a running
+// download joins it instead of starting another, and the gateway files each model by
+// type (loras / checkpoints / embeddings…). Results paginate on Civitai's cursor
+// ("Load more" appends); the rating filter is Safe by default and NSFW previews stay
+// blurred until clicked even when they are allowed.
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCivitaiDownloads } from '../../../hooks/hooks.js';
+import { isCivitaiUrl } from '../../../lib/civitaiDownload.js';
+import {
+  cancelCivitaiDownload, civitaiDownloadName, civitaiDownloadPercent, clearCivitaiDownload,
+  describeCivitaiDownload, startCivitaiDownload,
+} from '../../../lib/civitaiDownloadStore.js';
+import { localAI } from '../../../lib/localInferenceClient.js';
+import { pref, setPrefs } from '../../../lib/prefs.js';
+import {
+  CIVITAI_PERIODS, CIVITAI_SORTS, CIVITAI_TYPES, DEFAULT_CIVITAI_FILTERS,
+  civitaiSearchParams, formatBytes, formatCount, isCivitaiResultInstalled, mergeCivitaiResults,
+} from '../../../lib/modelLibrary.js';
+import { Icon } from '../../../ui/icons.jsx';
+import { Button, CardGridSkeleton, EmptyState, NativeSelect, Pill, ProgressBar, Spinner, TextInput, cx } from '../../../ui/kit.jsx';
+import { t, tf } from '../../../lib/i18n.js';
+
+// The FILTERS are remembered; the query is not. A search box is something a
+// person typed, and typed text does not go into plaintext browser storage —
+// same rule the composer follows. (lib/prefs.js drops the query when it
+// migrates the old `models_discover_search_v1` key.)
+function readSaved() {
+  const saved = pref('discoverFilters');
+  return saved ? { query: '', filters: { ...DEFAULT_CIVITAI_FILTERS, ...saved } } : null;
+}
+
+// Failed / finished download controls shared by result cards and URL cards:
+// a failed transfer offers Retry and Dismiss instead of sitting on "failed"
+// until the page reloads.
+function DownloadOutcome({ download, onRetry }) {
+  const failed = download?.status === 'error';
+  const cancelled = download?.status === 'cancelled';
+  const status = describeCivitaiDownload(download);
+  return (
+    <div className="flex flex-col gap-1">
+      <ProgressBar value={failed ? 1 : civitaiDownloadPercent(download) / 100} tone={failed ? 'danger' : 'honey'} label={status || undefined} />
+      <div className={cx('min-w-0 break-words text-[10px]', failed ? 'text-danger' : 'text-ink3')}>{status}</div>
+      {failed || cancelled ? (
+        <div className="flex items-center gap-1.5">
+          <Button size="sm" icon="refresh" onClick={onRetry}>{t('common.retry')}</Button>
+          <Button size="sm" variant="ghost" onClick={() => clearCivitaiDownload(download.key)}>{t('common.dismiss')}</Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// A finger never hovers, so a video result here was a still nothing could
+// start. Read once, like kit.jsx's pointer test and InspoView's: a pointer does
+// not change under a running page.
+const COARSE_POINTER = typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches;
+
+function ResultCard({ item, installed, download, onDownload, nsfwAllowed }) {
+  const [hover, setHover] = useState(false);
+  // NSFW previews arrive blurred even when the filter lets them through; one
+  // click reveals that card only.
+  const [revealed, setRevealed] = useState(false);
+  const running = download?.status === 'running';
+  const failed = download?.status === 'error';
+  const cancelled = download?.status === 'cancelled';
+  const done = installed || download?.status === 'success';
+  const status = describeCivitaiDownload(download);
+  const blurred = Boolean(item.nsfw) && nsfwAllowed && !revealed;
+  return (
+    <div
+      // Split by pointer rather than run both: a tap fires the compatibility
+      // `mouseenter` BEFORE its click, so a card that took both turned itself on
+      // and straight back off and never played until the second tap. And a
+      // click that reached a mouse would stop the preview the cursor is still
+      // over — every press inside the card bubbles here, Download included.
+      onMouseEnter={() => { if (!COARSE_POINTER) setHover(true); }}
+      onMouseLeave={() => { if (!COARSE_POINTER) setHover(false); }}
+      // The card itself is not a control — the buttons inside it are — so under
+      // a thumb its press is free to carry motion.
+      onClick={() => { if (COARSE_POINTER) setHover((v) => !v); }}
+      className={cx(
+        'flex min-w-0 flex-col overflow-hidden rounded-md border bg-bg2 transition-colors duration-150',
+        done ? 'border-ok/40' : 'border-line1 hover:border-line2',
+      )}
+    >
+      <div className="relative flex aspect-[4/3] items-center justify-center overflow-hidden bg-bg3">
+        {item.previewUrl ? (
+          hover && item.previewKind === 'video' && !blurred ? (
+            <video src={item.previewUrl} muted loop autoPlay playsInline className="h-full w-full object-cover" />
+          ) : (
+            <img
+              src={item.previewKind === 'video' ? `${item.previewUrl}${item.previewUrl.includes('?') ? '&' : '?'}anim=0` : item.previewUrl}
+              alt=""
+              loading="lazy"
+              className={cx('h-full w-full object-cover transition-[filter] duration-200', blurred && 'scale-105 blur-lg')}
+            />
+          )
+        ) : (
+          <Icon name="image" size={18} className="text-ink3" />
+        )}
+        {blurred ? (
+          <button
+            type="button"
+            onClick={() => setRevealed(true)}
+            className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-bg0/40 text-ink1"
+            aria-label={tf('discover.revealFor', item.name)}
+          >
+            <Icon name="eye" size={16} />
+            <span className="text-[10px] font-semibold">{t('discover.clickToReveal')}</span>
+          </button>
+        ) : null}
+        {item.nsfw ? (
+          <span className="absolute left-1 top-1 rounded-sm bg-bg0/80 px-1 py-px text-[9px] font-semibold uppercase text-warn">18+</span>
+        ) : null}
+        {done ? (
+          <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-ok text-bg0">
+            <Icon name="check" size={11} />
+          </span>
+        ) : null}
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5 p-2.5">
+        <div className="truncate text-xs font-semibold text-ink1" title={item.name}>{item.name}</div>
+        <div className="truncate text-[10px] text-ink3">
+          {[item.type, item.baseModel, item.creator && tf('assets.byCreator', item.creator)].filter(Boolean).join(' · ')}
+        </div>
+        <div className="flex items-center gap-2 text-[10px] text-ink3">
+          <span className="inline-flex items-center gap-1" title={t('discover.downloads')}><Icon name="download" size={9} />{formatCount(item.downloads)}</span>
+          <span className="inline-flex items-center gap-1" title={t('discover.likes')}><Icon name="heart" size={9} />{formatCount(item.likes)}</span>
+          {item.sizeBytes ? <span className="font-mono">{formatBytes(item.sizeBytes)}</span> : null}
+        </div>
+
+        {running ? (
+          <div className="flex flex-col gap-1">
+            <ProgressBar value={civitaiDownloadPercent(download) / 100} label={status || undefined} />
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate text-[10px] text-ink3">{status}</span>
+              <button
+                type="button"
+                onClick={() => void cancelCivitaiDownload(localAI, download.key)}
+                disabled={download.cancelling}
+                className="shrink-0 text-[10px] font-medium text-ink3 transition-colors hover:text-danger disabled:opacity-40"
+              >
+                {t('common.cancel')}
+              </button>
+            </div>
+          </div>
+        ) : failed || cancelled ? (
+          <DownloadOutcome download={download} onRetry={() => { clearCivitaiDownload(download.key); onDownload(item); }} />
+        ) : (
+          <div className="mt-auto flex items-center gap-1.5 pt-0.5">
+            <Button
+              size="sm"
+              variant="neutral"
+              icon={done ? 'check' : 'download'}
+              disabled={done || !item.versionId}
+              onClick={() => onDownload(item)}
+              className="flex-1"
+            >
+              {done ? t('common.installed') : t('common.download')}
+            </Button>
+            {item.url ? (
+              <button
+                type="button"
+                onClick={() => window.open(item.url, '_blank', 'noopener,noreferrer')}
+                title={t('discover.openOnCivitai')}
+                aria-label={tf('discover.openNamedOnCivitai', item.name)}
+                className="grid h-ctl-sm w-7 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+              >
+                <Icon name="external" size={13} />
+              </button>
+            ) : null}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function CivitaiBrowser({ onInstalled, baseModelOptions }) {
+  // Lazy initialisers: the last search is restored once, not re-read per render.
+  const [query, setQuery] = useState(() => readSaved()?.query || '');
+  const [filters, setFilters] = useState(() => readSaved()?.filters || DEFAULT_CIVITAI_FILTERS);
+  const [items, setItems] = useState([]);
+  const [nextCursor, setNextCursor] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [installed, setInstalled] = useState({ versionIds: new Set(), fileIds: new Set() });
+  const [state, setState] = useState({ status: 'idle', message: '' });
+  const downloads = useCivitaiDownloads();
+  const searchable = localAI.supportsCivitaiSearch();
+
+  useEffect(() => {
+    setPrefs({ discoverFilters: filters });
+  }, [filters]);
+
+  const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
+
+  const search = useCallback(async (nextQuery, nextFilters) => {
+    setState({ status: 'loading', message: t('discover.searching') });
+    setNextCursor('');
+    try {
+      const result = await localAI.searchCivitai(civitaiSearchParams(nextQuery, nextFilters));
+      setItems(result.items);
+      setNextCursor(result.nextCursor || '');
+      setInstalled({
+        versionIds: new Set(result.installedVersionIds),
+        fileIds: new Set(result.installedFileIds),
+      });
+      setState({
+        status: 'done',
+        message: result.items.length
+          ? tf('discover.resultCount', result.items.length, Boolean(result.nextCursor))
+          : t('discover.noResults'),
+      });
+    } catch (error) {
+      setItems([]);
+      setState({ status: 'error', message: error.message });
+    }
+  }, []);
+
+  // The next page, appended and deduped; the filters are the ones the current
+  // results were searched with.
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const result = await localAI.searchCivitai(civitaiSearchParams(query, filters, nextCursor));
+      setItems((current) => mergeCivitaiResults(current, result.items));
+      setNextCursor(result.nextCursor || '');
+      setInstalled({
+        versionIds: new Set(result.installedVersionIds),
+        fileIds: new Set(result.installedFileIds),
+      });
+    } catch (error) {
+      setState({ status: 'error', message: error.message });
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore, query, filters]);
+
+  // A pasted Civitai URL is a download instruction, not a search term — the old
+  // surface had a separate box for it, which only ever confused the two.
+  const pastedUrl = isCivitaiUrl(query.trim());
+  const submit = (event) => {
+    event?.preventDefault?.();
+    if (pastedUrl) {
+      startCivitaiDownload(localAI, query.trim(), { onComplete: onInstalled });
+      setState({ status: 'done', message: t('discover.downloadStarted') });
+      return;
+    }
+    void search(query, filters);
+  };
+
+  const byUrl = useMemo(() => new Map(downloads.map((item) => [item.url, item])), [downloads]);
+  const urlDownloads = useMemo(
+    () => downloads.filter((item) => !items.some((result) => result.url === item.url)),
+    [downloads, items],
+  );
+  const nsfwAllowed = filters.nsfw === 'true' || filters.nsfw === '';
+
+  if (!searchable) {
+    return (
+      <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+        <EmptyState
+          icon="cloud"
+          title={t('discover.needsBridge')}
+          hint={t('discover.needsBridgeHint')}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <form onSubmit={submit} className="flex flex-col gap-2 border-b border-line1 px-4 py-2.5 md:px-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative min-w-[220px] flex-1">
+            <Icon name="search" size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3" />
+            <TextInput
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={t('discover.searchPlaceholder')}
+              aria-label={t('discover.searchLabel')}
+              className="pl-8"
+            />
+          </div>
+          <Button
+            type="submit"
+            variant="primary"
+            icon={pastedUrl ? 'download' : 'search'}
+            loading={state.status === 'loading'}
+          >
+            {pastedUrl ? t('discover.installUrl') : t('discover.search')}
+          </Button>
+        </div>
+        {/* Fixed widths that wrap leave a ragged stack of half-rows on a phone.
+            Two even columns below sm; the desktop row is untouched. */}
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+          <NativeSelect aria-label={t('discover.type')} value={filters.types} onChange={(event) => setFilter('types', event.target.value)} className="w-full sm:w-[150px]">
+            {CIVITAI_TYPES.map((value) => <option key={value} value={value}>{value === 'TextualInversion' ? t('assets.kindEmbedding') : value}</option>)}
+          </NativeSelect>
+          <NativeSelect aria-label={t('discover.baseModel')} value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-full sm:w-[170px]">
+            <option value="">{t('assets.anyBaseModel')}</option>
+            {baseModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+          </NativeSelect>
+          <NativeSelect aria-label={t('discover.sort')} value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-full sm:w-[160px]">
+            {CIVITAI_SORTS.map((value) => <option key={value} value={value}>{value}</option>)}
+          </NativeSelect>
+          <NativeSelect aria-label={t('discover.period')} value={filters.period} onChange={(event) => setFilter('period', event.target.value)} className="w-full sm:w-[120px]">
+            {CIVITAI_PERIODS.map((value) => <option key={value} value={value}>{value === 'AllTime' ? t('discover.allTime') : value}</option>)}
+          </NativeSelect>
+          <NativeSelect aria-label={t('discover.rating')} value={filters.nsfw} onChange={(event) => setFilter('nsfw', event.target.value)} className="w-full sm:w-[150px]">
+            <option value="false">{t('discover.safeOnly')}</option>
+            <option value="true">{t('discover.includeNsfw')}</option>
+            <option value="">{t('discover.anyRating')}</option>
+          </NativeSelect>
+          <NativeSelect aria-label={t('discover.perPage')} value={filters.limit} onChange={(event) => setFilter('limit', event.target.value)} className="w-full sm:w-[110px]">
+            {['20', '40', '60', '100'].map((value) => <option key={value} value={value}>{tf('discover.resultsPerPage', value)}</option>)}
+          </NativeSelect>
+        </div>
+      </form>
+
+      <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+        <div className="mb-3 flex items-center gap-2">
+          {state.status === 'loading' ? <Spinner size={13} className="text-honey" /> : null}
+          <span className={cx('text-[11px]', state.status === 'error' ? 'text-danger' : 'text-ink3')}>
+            {state.message || t('discover.searchPrompt')}
+          </span>
+        </div>
+
+        {/* Downloads started from a pasted URL have no result card to live on. */}
+        {urlDownloads.length ? (
+          <div className="mb-4 flex flex-col gap-2">
+            {urlDownloads.map((download) => (
+              <div key={download.key} className="rounded-md border border-line1 bg-bg2 p-2.5">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate text-xs font-medium text-ink1" title={download.url}>{civitaiDownloadName(download)}</span>
+                  <Pill tone={download.status === 'error' ? 'danger' : download.status === 'success' ? 'ok' : download.status === 'cancelled' ? 'warn' : 'honey'} dot>
+                    {download.status}
+                  </Pill>
+                </div>
+                {download.status === 'error' || download.status === 'cancelled' ? (
+                  <DownloadOutcome
+                    download={download}
+                    onRetry={() => { clearCivitaiDownload(download.key); startCivitaiDownload(localAI, download.url, { onComplete: onInstalled }); }}
+                  />
+                ) : (
+                  <>
+                    <ProgressBar value={civitaiDownloadPercent(download) / 100} tone={download.status === 'success' ? 'ok' : 'honey'} />
+                    <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-ink3">
+                      <span className="min-w-0 truncate">{describeCivitaiDownload(download)}</span>
+                      {download.status === 'success' ? (
+                        <button type="button" onClick={() => clearCivitaiDownload(download.key)} className="shrink-0 font-medium text-ink3 hover:text-ink1">{t('common.dismiss')}</button>
+                      ) : download.status === 'running' ? (
+                        <button
+                          type="button"
+                          onClick={() => void cancelCivitaiDownload(localAI, download.key)}
+                          disabled={download.cancelling}
+                          className="shrink-0 font-medium text-ink3 transition-colors hover:text-danger disabled:opacity-40"
+                        >
+                          {t('common.cancel')}
+                        </button>
+                      ) : null}
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {items.length ? (
+          <>
+            <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(190px,1fr))]">
+              {items.map((item) => (
+                <ResultCard
+                  key={`${item.id}-${item.versionId}`}
+                  item={item}
+                  installed={isCivitaiResultInstalled(item, installed)}
+                  download={byUrl.get(item.url) || null}
+                  nsfwAllowed={nsfwAllowed}
+                  onDownload={(result) => startCivitaiDownload(localAI, result.url, { onComplete: onInstalled })}
+                />
+              ))}
+            </div>
+            {nextCursor ? (
+              <div className="mt-4 flex justify-center">
+                <Button icon="chevronDown" loading={loadingMore} onClick={() => void loadMore()}>{t('discover.loadMore')}</Button>
+              </div>
+            ) : null}
+          </>
+        ) : state.status === 'loading' ? (
+          // Same rule as the inspiration finder next door: a page waiting for
+          // Civitai claims the space the results will claim, instead of leaving
+          // a body that reads as "nothing found".
+          <CardGridSkeleton count={12} minWidth={190} label={t('discover.searching')} />
+        ) : (
+          <EmptyState
+            icon="search"
+            title={state.status === 'error' ? t('discover.searchFailed') : t('discover.nothingYet')}
+            hint={state.status === 'error'
+              ? state.message
+              : t('discover.searchByName')}
+            // A failed search had no way out — the one rule this app does not
+            // bend (DESIGN.md §4). Civitai's 503s are transient, so the way out
+            // is literally "ask again".
+            action={state.status === 'error'
+              ? <Button icon="refresh" onClick={() => void search(query, filters)}>{t('common.retry')}</Button>
+              : null}
+          />
+        )}
+      </div>
+    </div>
+  );
+}

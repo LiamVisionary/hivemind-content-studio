@@ -26,6 +26,7 @@ import { type ViewerImage } from './utils/viewerImages';
 import { OutputsPanel } from './components/OutputsPanel';
 import { useOutputsStore } from './hooks/useOutputs';
 import { WorkflowUnlockGate } from './components/WorkflowUnlockGate';
+import { OwnerHistoryBridge } from './components/OwnerHistoryBridge';
 import { buildFollowQueueViewerImages } from './utils/followQueueViewerImages';
 import { INITIAL_HISTORY_PAGE_SIZE } from './hooks/useHistory';
 
@@ -329,6 +330,7 @@ function App() {
 
       <ConnectionLostOverlay />
       <NoWorkflowImageDialog />
+      <OwnerHistoryBridge />
       <WorkflowUnlockGate />
     </div>
   );

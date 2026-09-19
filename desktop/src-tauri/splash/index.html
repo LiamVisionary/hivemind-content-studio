@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hivemind Content Studio</title>
+<style>
+  /* The studio's own tokens, copied rather than imported: this page has to
+     render before any sidecar exists to serve a stylesheet. Keep in sync with
+     packages/open-generative-ai/src/styles/variables.css. */
+  :root {
+    --bg-0: #0c0c0e;
+    --bg-1: #111114;
+    --bg-2: #17171b;
+    --ink-1: #f2f2f3;
+    --ink-2: #a3a3ac;
+    --ink-3: #6b6b74;
+    --honey: #f6b21b;
+    --ok: #34c77b;
+    --warn: #e8893a;
+    --danger: #f26d5f;
+    --line-1: rgba(255, 255, 255, 0.08);
+    --line-2: rgba(255, 255, 255, 0.16);
+    --r-md: 10px;
+    --r-lg: 14px;
+    --r-full: 9999px;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg-0);
+    color: var(--ink-1);
+    font: 14px/1.5 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: grid;
+    place-items: center;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { width: min(560px, calc(100vw - 64px)); padding: 32px 0 40px; }
+  header { margin-bottom: 24px; }
+  h1 { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 6px; }
+  #message { color: var(--ink-2); margin: 0; min-height: 21px; }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  li {
+    background: var(--bg-1);
+    border: 1px solid var(--line-1);
+    border-radius: var(--r-lg);
+    padding: 12px 14px;
+    display: grid;
+    grid-template-columns: 10px 1fr auto;
+    gap: 12px;
+    align-items: start;
+  }
+  .dot {
+    width: 8px; height: 8px; margin-top: 6px;
+    border-radius: var(--r-full);
+    background: var(--ink-3);
+  }
+  .dot[data-state="starting"], .dot[data-state="restarting"] {
+    background: var(--honey);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .dot[data-state="ready"], .dot[data-state="attached"] { background: var(--ok); }
+  .dot[data-state="failed"] { background: var(--danger); }
+  .dot[data-state="skipped"] { background: var(--warn); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .label { font-weight: 500; }
+  .state { color: var(--ink-3); font-size: 12px; text-transform: capitalize; }
+  .detail { color: var(--ink-2); font-size: 13px; margin-top: 4px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  button {
+    font: inherit;
+    font-size: 12px;
+    color: var(--ink-1);
+    background: var(--bg-2);
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-md);
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  button:hover { background: #22222a; }
+  button:focus-visible { outline: 2px solid var(--honey); outline-offset: 2px; }
+  footer { margin-top: 20px; color: var(--ink-3); font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Starting your studio…</h1>
+    <p id="message">Reserving a port and starting the studio server.</p>
+  </header>
+  <ul id="services" aria-live="polite"></ul>
+  <footer id="footer"></footer>
+</main>
+<script type="module">
+  const invoke = window.__TAURI__?.core?.invoke;
+  const list = document.getElementById('services');
+  const message = document.getElementById('message');
+  const heading = document.querySelector('h1');
+  const footer = document.getElementById('footer');
+
+  const ACTION_LABEL = {
+    retry: 'Retry',
+    'show-logs': 'Show logs',
+    'continue-without': 'Continue without it',
+  };
+  const STATE_LABEL = {
+    waiting: 'Waiting',
+    starting: 'Starting',
+    ready: 'Running',
+    attached: 'Already running',
+    restarting: 'Restarting',
+    failed: 'Not running',
+    skipped: 'Skipped',
+  };
+
+  // Named so the failure a person sees is a sentence, never a stack trace or a
+  // raw backend string.
+  const call = async (name, args) => {
+    if (!invoke) return null;
+    try {
+      return await invoke(name, args);
+    } catch (_) {
+      message.textContent = 'The studio could not do that. Try again, or show the logs.';
+      return null;
+    }
+  };
+
+  const act = async (action, id) => {
+    if (action === 'show-logs') return void call('reveal_logs');
+    if (action === 'retry') return void render(await call('retry_service', { service: id }));
+    if (action === 'continue-without') return void render(await call('skip_service', { service: id }));
+  };
+
+  function render(status) {
+    if (!status) return;
+    message.textContent = status.message || '';
+    heading.textContent = status.phase === 'blocked' ? 'The studio server did not start' : 'Starting your studio…';
+
+    list.replaceChildren(...status.services.map((service) => {
+      const row = document.createElement('li');
+
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.dataset.state = service.state;
+      row.append(dot);
+
+      const body = document.createElement('div');
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = service.label;
+      const state = document.createElement('div');
+      state.className = 'state';
+      state.textContent = STATE_LABEL[service.state] ?? service.state;
+      body.append(label, state);
+      if (service.detail) {
+        const detail = document.createElement('div');
+        detail.className = 'detail';
+        detail.textContent = service.detail;
+        body.append(detail);
+      }
+      row.append(body);
+
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      for (const action of service.actions) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = ACTION_LABEL[action] ?? action;
+        button.addEventListener('click', () => act(action, service.id));
+        actions.append(button);
+      }
+      row.append(actions);
+      return row;
+    }));
+
+    footer.textContent = status.studioUrl ? `Opening ${status.studioUrl}` : '';
+  }
+
+  if (!invoke) {
+    message.textContent = 'This page is the desktop app’s boot screen. Open the studio from the app.';
+  } else {
+    const poll = async () => {
+      render(await call('boot_status'));
+      setTimeout(poll, 600);
+    };
+    poll();
+  }
+</script>
+</body>
+</html>

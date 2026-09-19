@@ -1,0 +1,291 @@
+# Release checklist
+
+The list that has to be green before a desktop build is dispatched, and the
+manual steps no suite can do. [`RELEASE.md`](RELEASE.md) is the *why* — what the
+bundle contains and the decisions behind it; this is the *what to run*, in order.
+
+Steps 1–7 are the gate. A failure at any of them stops the release; none of them
+is skipped because "it passed yesterday".
+
+Nothing in this document signs, notarizes or publishes anything. Building is
+[`release-desktop.yml`](../.github/workflows/release-desktop.yml); delivering is
+[`release-desktop-promote.yml`](../.github/workflows/release-desktop-promote.yml),
+and it is a separate, human step.
+
+---
+
+## 1. The five suites
+
+Run from the repository root unless a command says otherwise. `$PWD/src` on
+`PYTHONPATH` is what makes a worktree test its own sources rather than whatever
+the editable install points at.
+
+| # | Suite | Command | Expected |
+|---|---|---|---|
+| 1 | Studio frontend | `cd packages/open-generative-ai && node --test tests/*.test.js` | 1392 pass |
+| 2 | Canvas (comfyui-mobile) | `cd packages/comfyui-mobile && npx vitest run` | 945 pass, 129 files |
+| 3 | Studio control plane | `PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q test/studio` | 1356 pass, 1 skipped |
+| 4 | Faceless engine | `PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q test --ignore=test/studio` | 554 pass, 9 skipped |
+| 5 | Media gateway | `cd packages/media-gateway && ../../.venv/bin/python -m pytest -q .` | 459 pass, 1 skipped |
+
+Measured on this checkout on 2026-09-04. They are here so a suite that silently
+stops collecting is visible: "green" with 300 fewer tests is not green. Re-measure
+them when you change one, and say in the commit why a row moved.
+
+Row 4 moved **down** since the first version of this table, from 634 to 554, and
+that is accounted for: the Streamlit WebUI was deleted, and the seven
+`test_webui_*.py` files, `test_main.py` and `test_mpt_agent_skill.py` went with
+it (commit `630754b`).
+
+Two of these need something built or installed first — see
+[`../test/README.md`](../test/README.md) for the prerequisites and the
+environment-dependent skips in rows 3-5. In particular, suite 3 fails four tests
+unless the studio frontend has been built (step 3 below), because those tests
+assert the served page *is* the studio.
+
+## 2. The lint gate
+
+```bash
+.venv/bin/ruff check .                                  # 0 errors, whole tree
+cd packages/open-generative-ai && npm run lint          # 0 errors, 0 warnings
+cd packages/comfyui-mobile && npx tsc --noEmit -p tsconfig.app.json
+```
+
+The ruff line used to name a path list, and two of its entries (`main.py`,
+`webui`) moved under `archive/moneyprinterturbo/` — so the documented gate had
+been answering `E902 No such file or directory` instead of linting. It is the
+whole tree now; the vendored trees are excluded by name in `pyproject.toml`.
+
+`npm run build:mobile` runs `tsc -b` first, so a type error here is a release
+that cannot be built at all.
+
+## 3. The frontend build
+
+```bash
+npm run build:embedded    # studio dist/, Canvas dist/, gateway Next build
+```
+
+Then re-run suite 3: the owner-gate and static-asset tests read the built bundle.
+
+## 4. Notices, identity, the version and the updater
+
+```bash
+.venv/bin/python scripts/generate_notices.py --check
+PYTHONPATH=$PWD/src .venv/bin/python -m hivemind_content_studio.identity --write \
+  && git diff --exit-code -- packages/open-generative-ai/identity.json
+.venv/bin/python scripts/check_version.py
+.venv/bin/python scripts/check_updater_config.py    # config + plugin present
+.venv/bin/python scripts/generate_gate_css.py --check   # sign-in gate stylesheet
+.venv/bin/python scripts/build_desktop_python.py   # dependency split + size
+```
+
+The interpreter is the project's, not whatever `python3` resolves to — these
+read `uv.lock` through `uv` and import the package.
+
+`generate_notices.py` describes the bundle from lockfiles: the `--extra desktop`
+set out of `uv.lock`, the three npm lockfiles, every crate in
+`desktop/src-tauri/Cargo.lock` (statically linked into the shipped binary), and
+the hand-written block for the three binaries no lockfile knows about. Licences
+are carried forward from the committed file and looked up afresh only for an
+entry it does not already carry, so `--check` answers the same here as it does
+in the preflight job, and a version bump is what forces a new lookup. Anything
+it could not resolve is listed in `unresolved` and shown on the About page —
+if a new package lands there, run the plain command (no `--check`) in a synced
+venv, with a cargo registry populated (`cargo fetch --manifest-path
+desktop/src-tauri/Cargo.toml`) for a new crate. `THIRD_PARTY_NOTICES.md` must carry no
+open distribution gate.
+
+`check_version.py` holds `desktop/src-tauri/Cargo.toml` and
+`desktop/src-tauri/tauri.conf.json` to `[project] version` in `pyproject.toml`.
+Bump all three together: preflight runs it with the version being dispatched and
+refuses a build whose bundle would be stamped with a version its tag does not
+carry.
+
+The build script prints the desktop dependency set, what the `faceless-webui`
+split leaves out, and the size of each; it exits non-zero if `streamlit`,
+`streamlit-tour`, `azure-cognitiveservices-speech`, `dashscope` or `redis` has
+crept back into the bundled set.
+
+## 5. Cold boot to the sign-in gate
+
+On a machine (or a fresh account) with no running stack:
+
+```bash
+npm run stack:start
+open http://127.0.0.1:8765
+```
+
+* The page reaches the sign-in gate — on a first run, the "Name your studio"
+  card, not a blank window and not a raw error.
+* `curl -fsS http://127.0.0.1:8765/healthz` answers, and `/readyz` reports every
+  sidecar it supervises.
+* The Models page shows lanes that are not set up as **not set up**, not as
+  errors.
+
+`npm run stack:stop` when finished. On a developer machine that is already
+running the stack, this step belongs on the second machine in step 7 instead —
+do not restart someone's working stack to tick a box.
+
+## 6. The manual smoke: owner gate and vault
+
+No suite can do these, because they are about what a person sees.
+
+1. **Sign in** at the gate with the owner passkey. A second, unenrolled browser
+   profile must be refused, and must be told what to do about it.
+2. **Lock the vault** (Settings → the vault card). Sealed media in the library
+   turns into the locked placeholder with an Unlock action next to it — never a
+   broken thumbnail and never a provider error string.
+3. **Unlock**, and confirm a sealed output opens: pick a generation from before
+   the lock and check it renders and downloads.
+4. **Quit and reopen.** The session survives; a locked vault stays locked.
+5. **Confirm no ComfyUI process was killed.** `pgrep -fl comfy` before and after.
+   The packaged app attaches to the user's lanes and never reaps them.
+
+## 7. Packaging
+
+1. Bump `[project] version` in `pyproject.toml`, `desktop/src-tauri/Cargo.toml`
+   and `desktop/src-tauri/tauri.conf.json` to the version being released, and
+   merge that first — the build workflow builds the default branch as it stands
+   and writes no version into it.
+2. Dispatch **Release desktop (build only)** with the version (semver, no
+   prefix — the tag it names is `studio-v<version>`). Preflight refuses a tag
+   that already exists, a version the three files disagree with, a stale notices
+   file, a drifted identity, an updater config that disagrees with
+   `tauri.conf.json` or describes a plugin that is not in the build, and a
+   desktop dependency set that carries the Streamlit stack. The macOS job then
+   stages the bundle's resources and runs
+   `scripts/stage_desktop_resources.py --verify`, which refuses to bundle the
+   committed placeholders instead of the real runtimes, and refuses a staged
+   `ffmpeg` whose licence `docs/notices.json` does not record.
+3. Download the artifact. Its name ends in `signed` or `UNSIGNED`; an
+   `UNSIGNED.txt` inside says which secrets were absent
+   (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`
+   for signing; `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` for notarization;
+   `TAURI_SIGNING_PRIVATE_KEY` for the updater). Unsigned builds are for the
+   person who built them: macOS refuses to open one, and promotion rejects it.
+4. Smoke-test the DMG on a **second** machine — install, launch, sign in, one
+   hosted generation, one restore, then **press Download on the result and
+   confirm a native save sheet appears and the file is on disk afterwards**
+   ([`RELEASE.md`](RELEASE.md) §2.5), quit, and check again that no ComfyUI
+   process was killed on quit. The Download check is blocking, not advisory:
+   when the dialog/fs plugins are unreachable the browser fallback reports
+   success and writes nothing, and the one-time vault recovery key goes through
+   the same function.
+5. Dispatch **Release desktop (promote)** with the build's run id and the
+   approval string `promote-<run id>`. It refuses an unsigned or un-notarized
+   candidate, publishes the release at the tag, and only then writes
+   `latest.json`.
+6. A **pre-release** publishes a downloadable build and does **not** write
+   `latest.json`. No existing install updates from it. That is the whole point:
+   a candidate that fails step 4 was never delivered to anyone.
+
+Rollback is editing `latest.json` on the release — one file, not un-shipping a
+build. The tag itself is the AGPL source offer and is never moved or deleted.
+
+---
+
+## Secrets
+
+Every one of these is referenced by name and **unset** in this repository. None
+of them is ever printed, written into an artifact, or committed in any form.
+
+| Name | Used for | Absent means |
+|---|---|---|
+| `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` | Developer ID signing | The build is labelled UNSIGNED and cannot be promoted |
+| `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | `notarytool` and stapling | Signed but not notarized; first launch is still blocked |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The signed update manifest | No updater artifacts; nothing can be delivered to an install |
+
+The updater's **public** key is a config value in
+[`desktop/src-tauri/updater.json`](../desktop/src-tauri/updater.json) and ships inside the
+app; `tauri.conf.json` must agree with it, which
+`scripts/check_updater_config.py` enforces. The **private** half is a secret and
+never enters this repository in any form.
+
+### Generating the updater key pair — do this ONCE
+
+Two things about `signer generate` catch people, and they compound:
+
+1. **The plain form prints both halves and saves nothing.** No file, no
+   keychain, nothing. Close the terminal and the key is gone.
+2. **Every run mints a brand-new, unrelated pair.** So "just run it again"
+   does not recover the last one — it replaces it.
+
+Run it three times without saving and you have three orphaned keys and an
+empty `pubkey`, which is exactly the state that looks like "it isn't
+persisting".
+
+**It only matters once.** An app installed with public key A can *only* ever be
+updated by a build signed with private key A — there is no channel left to
+correct it through. So while `pubkey` is still empty and no signed build has
+been promoted, regenerating is free; after that, it is permanent.
+
+Copy this whole block, not just the first line. It ends with the key in all
+three places it has to be, and none of the three is optional:
+
+```bash
+# 1. Generate. `signer` is part of the Tauri CLI, which checking this repo out
+#    does NOT install — a bare `cargo tauri` fails with `no such command:
+#    tauri`, and there is no npm project here so `npm run tauri` does not exist
+#    either (which is why release-desktop.yml installs the Rust CLI and passes
+#    `tauriScript: cargo tauri`). npx needs nothing installed:
+npx --yes @tauri-apps/cli@^2 signer generate
+#    Or, if you want the CLI on PATH permanently (a few minutes of compiling):
+#    cargo install tauri-cli --version "^2.11" --locked && cargo tauri signer generate
+
+# 2. PRIVATE half -> this machine's credential store, so a local signed build
+#    can find it later. Prompts without echo, so it never reaches shell history.
+passbook-add TAURI_SIGNING_PRIVATE_KEY
+#    …and TAURI_SIGNING_PRIVATE_KEY_PASSWORD too, only if you gave it a password.
+
+# 3. PRIVATE half -> the repository secret the release workflow reads. Also
+#    prompts, for the same reason.
+gh secret set TAURI_SIGNING_PRIVATE_KEY
+
+# 4. PUBLIC half -> BOTH config files, which must match exactly:
+#      desktop/src-tauri/updater.json      .pubkey
+#      desktop/src-tauri/tauri.conf.json   .plugins.updater.pubkey
+#    Then prove the channel is complete:
+python3 scripts/check_updater_config.py --require-key
+
+# 5. Clear the scrollback — the private key is still sitting in it.
+printf '\033[3J\033[H\033[2J'
+```
+
+`signer generate` prompts for a password unless you pass `-p` or `--ci`. If you
+give the key a password, the build needs `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+as well; if you leave it empty, that variable is not needed at all.
+
+Tauri reads three variables, and the release workflow deliberately sets only
+the two that suit a CI secret:
+
+| Variable | Holds | Used by |
+|---|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | The private key **as a string** | The release workflow, from the repository secret |
+| `TAURI_SIGNING_PRIVATE_KEY_PATH` | A **path** to the key file `-w` wrote | A signed build run locally |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The key's password | Both, and only when the key has one |
+
+So a signed build **on this machine** — which step 4's smoke test needs, since
+the DMG a person installs is the only place the Download control and the
+updater can really be exercised — wants the path form:
+
+If you already followed the block above, the key is in the credential store and
+the string form is what you have — so hand it to the build from there rather
+than generating a second key, which would orphan the first:
+
+```bash
+passbook run --only TAURI_SIGNING_PRIVATE_KEY -- <the build command>
+```
+
+If you would rather have the key as a FILE (the `_PATH` form), generate it with
+`-w` **instead of** step 1 above — not as well as it, or you end up with two
+pairs and no way to tell which one the release was signed with:
+
+```bash
+npx --yes @tauri-apps/cli@^2 signer generate -w ~/.tauri/hivemind-content-studio.key
+export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.tauri/hivemind-content-studio.key"
+# and, only if you gave the key a password:
+# export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=...
+```
+
+Keep that file out of the repository and out of any transcript. The public half
+is the only part that belongs in git.

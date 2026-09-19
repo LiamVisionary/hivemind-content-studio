@@ -14,6 +14,7 @@ import { extractMetadata } from '@/utils/metadata';
 import { isVideoFilename } from '@/utils/media';
 import { getFileWorkflowAvailability, getImageMetadata } from '@/api/client';
 import { resolveFilePath, resolveFileSource } from '@/utils/workflowOperations';
+import { useResolvedMediaSrc } from '@/hooks/useResolvedMediaSrc';
 
 interface MediaViewerProps {
   open: boolean;
@@ -248,6 +249,11 @@ export function MediaViewer({
   }, [isCurrentImageLoading]);
   const renderIsVideo = Boolean(renderItem && isViewerVideo(renderItem));
   const renderFullSrc = renderItem && !renderIsVideo ? getFullScreenImageSrc(renderItem) : null;
+  // E2E-sealed outputs decrypt in-page to a blob URL before display; plaintext
+  // URLs pass through untouched. All bookkeeping (keys, markLoaded, refs) stays
+  // on the ORIGINAL src — only the element attribute uses the resolved value.
+  const resolvedVideoSrc = useResolvedMediaSrc(renderItem && renderIsVideo ? renderItem.src : null);
+  const resolvedImageSrc = useResolvedMediaSrc(renderFullSrc);
   const fileId = currentItem?.file?.id ?? null;
   const fetchedMetadata = fileId ? metadataById[fileId] : undefined;
   const metadata = currentItem?.metadata ?? (fetchedMetadata === undefined ? undefined : fetchedMetadata);
@@ -1196,7 +1202,7 @@ export function MediaViewer({
                   // element whose old (looping, autoplaying) stream keeps decoding.
                   key={renderItem.src}
                   ref={videoRef}
-                  src={renderItem.src}
+                  src={resolvedVideoSrc}
                   controls
                   autoPlay
                   loop
@@ -1221,7 +1227,7 @@ export function MediaViewer({
             ) : (
               <img
                 ref={imageRef}
-                src={getFullScreenImageSrc(renderItem)}
+                src={resolvedImageSrc}
                 alt={renderItem.alt || 'Generation'}
                 className="w-full h-auto block select-none relative"
                 draggable={false}

@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping
 from urllib.parse import urljoin, urlparse, urlunparse
 
+from .identity import PRODUCT_NAME, SOURCE_URL
+from .settings import load_settings
+
 
 Probe = Callable[[str], bool]
 
@@ -30,23 +33,13 @@ class SourceRepository:
 SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
     SourceRepository(
         "hivemind-content-studio",
-        "Hivemind Content Studio",
-        "https://github.com/LiamVisionary/hivemind-content-studio",
+        PRODUCT_NAME,
+        SOURCE_URL,
         None,
         "product",
         "native",
         ".",
         ("durable-runs", "provider-routing", "approvals", "publishing", "metrics"),
-    ),
-    SourceRepository(
-        "unified-image-studio-template",
-        "Unified Media Studio Template",
-        "https://github.com/LiamVisionary/unified-image-studio-template",
-        None,
-        "package",
-        "embedded",
-        "packages/unified-studio-launcher",
-        ("service-catalog", "repository-bootstrap", "desktop-launchers"),
     ),
     SourceRepository(
         "Open-Generative-AI",
@@ -118,9 +111,14 @@ def unified_runtime_snapshot(
     env = os.environ if environ is None else environ
     probe_fn = probe or _http_probe
 
-    comfy_url, comfy_error = _configured_url(env, ("COMFYUI_URL", "COMFY_HTTP", "COMFY_HTTP_DEFAULT"), "http://127.0.0.1:8188/")
+    # Defaults come from this machine's settings document (which reads the same
+    # variables), so a moved gateway or a second ComfyUI is reported at the
+    # address it actually answers on rather than at the address we assumed.
+    network = load_settings(env=env).network
+    comfy_url, comfy_error = _configured_url(env, ("COMFYUI_URL", "COMFY_HTTP", "COMFY_HTTP_DEFAULT"), f"{network.comfy_url}/")
+    bridge_url, bridge_error = _configured_url(env, ("OPEN_GENERATIVE_AI_URL", "OGA_URL"), f"{network.bridge_url}/")
     flux_url, flux_error = _configured_url(env, ("SWIFT_FLUX2_SERVER_URL", "FLUX2_SERVER_URL"), "http://127.0.0.1:8791/")
-    backend_url, backend_error = _configured_url(env, ("MEDIA_STUDIO_BACKEND_URL", "ZIMAGE_API_URL", "ZIMG_BACKEND_URL"), "http://127.0.0.1:8787/")
+    backend_url, backend_error = _configured_url(env, ("MEDIA_STUDIO_BACKEND_URL", "ZIMAGE_API_URL", "ZIMG_BACKEND_URL"), f"{network.gateway_url}/")
 
     surface = {
         "id": "studio",
@@ -137,6 +135,18 @@ def unified_runtime_snapshot(
             url=backend_url,
             health_path="healthz",
             misconfigured=backend_error,
+        ),
+        # Everything the studio calls "local" reaches its models through this
+        # bridge, so "is the thing behind /local-ai up?" had no answer here
+        # while the studio was already showing an empty picker because of it.
+        _remote_component(
+            id="open-generative-ai-bridge",
+            label="Local Model Bridge",
+            description="Serves the studio and answers /local-ai for local model discovery and generation.",
+            source_repository="Open-Generative-AI",
+            url=bridge_url,
+            health_path="health",
+            misconfigured=bridge_error,
         ),
         _remote_component(
             id="comfyui",

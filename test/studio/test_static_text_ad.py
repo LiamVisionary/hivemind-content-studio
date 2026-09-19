@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from PIL import Image
 
 from hivemind_content_studio.manifest import load_manifest
 from hivemind_content_studio.planner import plan
+from hivemind_content_studio.private_access import read_private_media
 from hivemind_content_studio.static_text import render_static_text_frames
 
 
@@ -30,6 +32,8 @@ scenes:
     result = render_static_text_frames(manifest_path)
 
     assert load_manifest(manifest_path)["providers"]["image"] == "static-text-renderer"
-    with Image.open(result["frames"][0]) as image:
+    frame = Path(result["frames"][0])
+    assert not frame.is_file()  # keyframes are encrypted at rest
+    with Image.open(io.BytesIO(read_private_media(frame))) as image:
         assert image.size == (1080, 1350)
     assert result["provider"] == "static-text-renderer"

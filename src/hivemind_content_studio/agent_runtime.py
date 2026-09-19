@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Sequence
 
 from .manifest import add_artifact, load_manifest, utc_now, write_manifest
+from .private_access import read_private_text, write_private_json, write_private_text
 from .runtime_registry import RuntimeRegistry
 
 
@@ -41,7 +40,7 @@ def run_agent_script(
     request = _script_request(manifest_path)
     completed = subprocess.run(
         selected,
-        input=request.read_text(encoding="utf-8"),
+        input=read_private_text(request),
         text=True,
         capture_output=True,
         timeout=timeout_seconds,
@@ -52,7 +51,7 @@ def run_agent_script(
     if not completed.stdout.strip():
         raise RuntimeError("Agent runtime returned an empty script")
     generated = Path(manifest_path).expanduser().resolve().parent / "agent-script.md"
-    generated.write_text(completed.stdout.rstrip() + "\n", encoding="utf-8")
+    write_private_text(generated, completed.stdout.rstrip() + "\n")
     return attach_script(manifest_path, generated, runtime=runtime, copy=False)
 
 
@@ -83,11 +82,13 @@ def attach_script(
 ) -> dict[str, str]:
     manifest_file = Path(manifest_path).expanduser().resolve()
     source = Path(script_path).expanduser().resolve()
-    if not source.is_file() or not source.read_text(encoding="utf-8").strip():
+    if not source.is_file():
+        raise ValueError("Script must be a non-empty UTF-8 text file")
+    script_text = read_private_text(source)
+    if not script_text.strip():
         raise ValueError("Script must be a non-empty UTF-8 text file")
     destination = manifest_file.parent / "script.md"
-    if copy or source != destination:
-        shutil.copyfile(source, destination)
+    write_private_text(destination, script_text)
     receipt = {
         "runtime": runtime.strip() or "external-agent",
         "attached_at": utc_now(),
@@ -95,7 +96,7 @@ def attach_script(
         "script": str(destination),
     }
     receipt_path = manifest_file.parent / "script-receipt.json"
-    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(receipt_path, receipt)
     manifest = load_manifest(manifest_file)
     manifest["artifacts"] = [item for item in manifest["artifacts"] if item["role"] not in {"script", "script-receipt"}]
     add_artifact(manifest, role="script", path=destination, provider="agent-runtime")

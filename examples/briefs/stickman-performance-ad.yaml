@@ -4,7 +4,7 @@ title: The cheapest-looking ad can hold attention
 audience: direct-to-consumer growth teams
 goal: test a simple visual argument without inventing a performance claim
 runtime_seconds: 12
-aspect_ratio: 9:16
+aspect_ratio: "9:16"
 tone: dry, confident, concise
 voice:
   provider: elevenlabs

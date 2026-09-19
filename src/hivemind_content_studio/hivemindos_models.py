@@ -1,0 +1,1409 @@
+"""HivemindOS Models: the same cloud text models the HivemindOS app itself uses.
+
+The studio's producer used to be local-only — a ``llama-server`` this app spawns.
+That is the right default when the machine has weights on it and the wrong one
+when it does not: a new install had no producer at all, and the whole Story
+studio is a producer with a UI around it.
+
+**The HivemindOS desktop app is not required.** It is a proxy in front of a
+public gateway, and this module talks to whichever of the two is there:
+
+  ``app``     the HivemindOS app on this machine, at ``/api/hivemindos/models/*``
+  ``direct``  the hosted gateway it proxies to, at ``/api/paid-agents/<slug>/*``
+
+The app is PREFERRED when it is running, and only because of what it saves the
+owner: it already holds the machine's credit token, so nothing has to be
+connected by hand. Without it the catalog, the free tier and paid inference all
+still work.
+
+**It is the same balance either way.** A HivemindOS balance is a credit account
+on the gateway, and any client holding a token for that account spends it —
+the desktop app's own token, or a passkey-minted session token
+(``hmos_credit_…``) from the HivemindOS account page. The studio holds the
+latter, so "no desktop app" means "connect your account once", not "start a
+second balance". Where two balances do end up existing (someone topped up here
+before connecting), ``merge_accounts`` folds them into one rather than leaving
+money stranded.
+
+Model ids are identical on both routes, so a model chosen today is still the
+model chosen after installing the app tomorrow. Prices, routing and the credit
+ledger are the gateway's, exactly as they are for the desktop app.
+
+Privacy: this is the one producer path where the text leaves the machine. The
+studio says so on the picker, beside the models it applies to.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import re
+import secrets
+import socket
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Iterable, Iterator
+
+from .config import load_config
+from .hivemindos_hosted_media import DEFAULT_HIVEMINDOS_URL, _dashboard_token
+
+MODELS_PATH = "/api/hivemindos/models"
+PROVIDER = "hivemindos"
+
+ROUTE_APP = "app"
+ROUTE_DIRECT = "direct"
+
+# The gateway the desktop app proxies to. Public, and the same one its own
+# `paid-agent-cloud-client` defaults to — kept in step by env override rather
+# than by a second guess at the address.
+DEFAULT_GATEWAY_URL = "https://hivemindos-paid-agent-gateway.hivemindos.workers.dev"
+GATEWAY_URL_ENV = "HIVEMINDOS_GATEWAY_URL"
+GATEWAY_SLUG_ENV = "HIVEMINDOS_GATEWAY_SLUG"
+DEFAULT_SLUG = "default"
+
+# The id prefix HivemindOS gives every model it can route, both its own tiers
+# ("hivemindos/auto") and the gateway's catalog ("hivemindos/custom:<upstream>").
+# One prefix is all the studio needs to know which engine runs a model id.
+ID_PREFIX = "hivemindos/"
+CUSTOM_PREFIX = "hivemindos/custom:"
+
+# The default cloud producer. GPT-5.6 Luna is the house default across HivemindOS
+# work, and the gateway carries it.
+DEFAULT_MODEL_ID = "hivemindos/custom:openai/gpt-5.6-luna"
+
+# What a caller sends as its funding identity to the APP route. The credit pool
+# is shared per install and resolved before this is looked at, so it is an
+# identity for the ledger rather than a separate account.
+AGENT_ID = "hivemind-content-studio"
+FREE_AGENT_ID = "free-tier"
+
+# The one model that rides the free daily allowance instead of credits.
+FREE_MODEL_ID = "hivemindos/swarm-sovereign-scout"
+FREE_MODEL_UPSTREAM = "swarm-sovereign-scout-12b"
+FREE_MODEL_NAME = "Swarm Sovereign Scout"
+
+# The free tier caps its own answers, and the cap is well under what several
+# producer tasks ask for ("concepts" budgets 6000). Sending a bigger number is
+# not merely ignored — the free service REFUSES the call outright ("Free Scout
+# requests may use at most 1024 output tokens."), so every stage button failed on
+# that model until this clamp existed. Clamping instead of refusing is right
+# because a short answer is already handled: the producer salvages what finished.
+FREE_MODEL_MAX_TOKENS = 1024
+
+# What a HivemindOS credit is worth, mirrored from the app's own
+# `HIVEMINDOS_CREDITS_PER_RETAIL_USD`. The gateway quotes retail USD per token
+# (its markup already applied); the app turns that into credits per million
+# tokens with this one number, and the studio must use the same one or a model
+# would appear to cost two different things in two HivemindOS products.
+CREDITS_PER_USD = 500
+
+
+def credits_per_mtok(usd_per_token: Any) -> float | None:
+    """A gateway price (USD per token) as credits per million tokens."""
+    try:
+        usd = float(usd_per_token)
+    except (TypeError, ValueError):
+        return None
+    if usd < 0:
+        return None
+    return round(usd * 1_000_000 * CREDITS_PER_USD, 4)
+
+# How long a "is the app running?" probe is trusted. Long enough that a page of
+# picker interactions does not re-probe on every row, short enough that starting
+# the app is noticed without a restart of this studio.
+_APP_PROBE_TTL_SECONDS = 30.0
+_app_probe: tuple[float, bool, str] = (0.0, False, "")
+
+
+class HivemindosModelsError(RuntimeError):
+    """A cloud producer call that failed in a way the owner can act on.
+
+    ``remedy`` names the action the studio should offer beside the message —
+    never a bare sentence with nothing to press. ``status`` is the HTTP status
+    HivemindOS answered with, or 0 when there was no answer: a caller that
+    treats "refused" and "could not ask" differently needs to tell them apart.
+    """
+
+    def __init__(self, message: str, *, remedy: str = "", detail: str = "", status: int = 0) -> None:
+        super().__init__(message)
+        self.remedy = remedy
+        self.detail = detail
+        self.status = status
+
+
+# The dev build of the app (`tauri.conf.json` devUrl) serves on 5021; the
+# packaged app reserves 5020. On a machine running the app from source the
+# only HivemindOS answering is the dev one, and a studio that probes 5020 alone
+# reports "direct" with the app open in front of the owner — while the OAuth
+# helper, which already tried both, reached it fine.
+DEV_APP_URL = "http://127.0.0.1:5021"
+
+
+def candidate_urls() -> tuple[str, ...]:
+    """Where the app could be, in the order to try: a configured address alone,
+    else the packaged port then the dev port."""
+    configured = os.environ.get("HIVEMINDOS_URL", "").strip().rstrip("/")
+    candidates = [configured] if configured else [DEFAULT_HIVEMINDOS_URL, DEV_APP_URL]
+    for value in candidates:
+        if not value.startswith(("http://127.0.0.1:", "http://localhost:", "https://")):
+            raise ValueError("HIVEMINDOS_URL must use local HTTP or HTTPS")
+    return tuple(candidates)
+
+
+def base_url() -> str:
+    """Where the HivemindOS app is: the candidate that answered the last probe,
+    else the first one to try."""
+    candidates = candidate_urls()
+    _stamp, answered, found = _app_probe
+    return found if answered and found in candidates else candidates[0]
+
+
+def gateway_url() -> str:
+    base = (os.environ.get(GATEWAY_URL_ENV, "") or DEFAULT_GATEWAY_URL).strip().rstrip("/")
+    if not base.startswith("https://") and not base.startswith("http://127.0.0.1:"):
+        raise ValueError(f"{GATEWAY_URL_ENV} must use HTTPS")
+    return base
+
+
+def gateway_slug() -> str:
+    slug = (os.environ.get(GATEWAY_SLUG_ENV, "") or DEFAULT_SLUG).strip().lower()
+    return slug if slug.replace("-", "").isalnum() else DEFAULT_SLUG
+
+
+def is_hivemindos_model(model_id: str) -> bool:
+    return str(model_id or "").startswith(ID_PREFIX)
+
+
+def upstream_model(model_id: str) -> str:
+    """The gateway's own id for one of ours."""
+    if model_id == FREE_MODEL_ID:
+        return FREE_MODEL_UPSTREAM
+    if model_id.startswith(CUSTOM_PREFIX):
+        return model_id[len(CUSTOM_PREFIX):]
+    return model_id
+
+
+def app_is_running(*, connector: Callable[[str, int], bool] | None = None) -> bool:
+    """Is the HivemindOS app on this machine, linked and answering?
+
+    Both halves matter. A token with nothing listening is an app that is
+    installed but closed; a listener with no token is an app this studio has not
+    been linked to. Either way the direct route is the one that works.
+    """
+    global _app_probe
+    if not _dashboard_token():
+        return False
+    now = time.monotonic()
+    stamped, answered, _found = _app_probe
+    if connector is None and now - stamped < _APP_PROBE_TTL_SECONDS:
+        return answered
+    try:
+        candidates = candidate_urls()
+    except ValueError:
+        return False
+    probe = connector or _connects
+    found = ""
+    for candidate in candidates:
+        parsed = urllib.parse.urlparse(candidate)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if probe(host, port):
+            found = candidate
+            break
+    if connector is None:
+        _app_probe = (now, bool(found), found)
+    return bool(found)
+
+
+def _connects(host: str, port: int, timeout: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def resolve_route(*, connector: Callable[[str, int], bool] | None = None) -> str:
+    """Which side serves this call: the app when it is running, else direct.
+
+    For a workspace that is not the owner's the app is the owner's — its
+    catalog is the owner's, its balance is the owner's pool — so that
+    workspace is routed through it only while it is SPENDING the owner's
+    shared credits, and goes direct with its own key (or none) otherwise.
+    """
+    scope = account_scope()
+    if scope is not None and not scope.is_owner:
+        grant = credit_grant(scope)
+        if grant is None or grant.sharer is None or not grant.sharer.is_owner:
+            return ROUTE_DIRECT
+    return ROUTE_APP if app_is_running(connector=connector) else ROUTE_DIRECT
+
+
+# ------------------------------------------------------------- whose account
+#
+# Every workspace on this machine holds its OWN HivemindOS account: its own
+# credit key and its own chosen name, in its own subtree
+# (`<state>/accounts/<id>/hivemindos-account.json`, see account_scope.py). The
+# one exception is the owner, whose account is the machine-wide store this
+# module always had — the same file that holds the device id and the free
+# tier's records — because the owner IS the machine's person: a machine caller
+# (the MCP, an agent on a machine token, a background thread with no request
+# in scope) resolves to the owner, exactly as an unclaimed run does.
+#
+# Before this, the store was machine-wide for everyone, and with the desktop
+# app installed every workspace fell through to ITS vault key, so two people
+# signing into two workspaces were shown one account with one name. The
+# library and the settings were scoped; the account was not.
+#
+# The scope is a provider the control app installs at boot (the same shape as
+# `media_studio.set_owner_spki_provider`), never a default: with none installed
+# — the CLI, a test — everything reads the machine-wide store as before.
+
+@dataclass(frozen=True)
+class AccountScope:
+    """One workspace, as this module needs to know it."""
+
+    account_id: int
+    name: str
+    is_owner: bool
+    store_path: Path
+    colour: str = ""
+
+
+_scope_provider: Callable[[], AccountScope | None] | None = None
+_directory_provider: Callable[[], list[AccountScope]] | None = None
+# A scope carried across a hop that has no request — the app's link callback
+# finishing a link a workspace started. Set only by `scoped_to`.
+_scope_override: ContextVar[AccountScope | None] = ContextVar("hivemindos_account_scope", default=None)
+
+
+def set_account_scope_provider(
+    scope: Callable[[], AccountScope | None] | None,
+    directory: Callable[[], list[AccountScope]] | None = None,
+) -> None:
+    """Install how the running app answers "which workspace is asking" and
+    "which workspaces exist". Both, because sharing needs the second."""
+    global _scope_provider, _directory_provider
+    _scope_provider = scope
+    _directory_provider = directory
+
+
+def account_scope() -> AccountScope | None:
+    """The workspace this call is for, or None for the machine as a whole."""
+    override = _scope_override.get()
+    if override is not None:
+        return override
+    return _scope_provider() if _scope_provider is not None else None
+
+
+def workspace_directory() -> list[AccountScope]:
+    """Every workspace on this machine, or [] when nothing can say."""
+    if _directory_provider is None:
+        return []
+    try:
+        return list(_directory_provider())
+    except Exception:  # noqa: BLE001 - a directory that cannot be read shares nothing
+        return []
+
+
+@contextmanager
+def scoped_to(scope: AccountScope | None) -> Iterator[None]:
+    """Run a block as `scope`, wherever the request context has gone."""
+    token = _scope_override.set(scope)
+    try:
+        yield
+    finally:
+        _scope_override.reset(token)
+
+
+# ---------------------------------------------------------------- credentials
+
+def _store_path() -> Path:
+    """The machine-wide store: the device id, the free tier's records, and the
+    owner's own account."""
+    return load_config().data_dir / "hivemindos-models.json"
+
+
+_CURRENT = object()
+
+
+def _resolve_scope(scope: Any) -> AccountScope | None:
+    return account_scope() if scope is _CURRENT else scope
+
+
+def _account_store_path(scope: Any = _CURRENT) -> Path:
+    """Where the account of `scope` (default: the one asking) keeps its key
+    and its name. The owner's, and the machine's, is the store above."""
+    resolved = _resolve_scope(scope)
+    if resolved is None or resolved.is_owner:
+        return _store_path()
+    return resolved.store_path
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _write_json(path: Path, values: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(values, indent=1), encoding="utf-8")
+    # A bearer token for money lives in here. Owner-only on disk, on top of the
+    # encryption, so a stray backup or a shared machine cannot read it.
+    os.chmod(path, 0o600)
+
+
+def _read_store() -> dict[str, Any]:
+    return _read_json(_store_path())
+
+
+def _write_store(values: dict[str, Any]) -> None:
+    _write_json(_store_path(), values)
+
+
+def _read_account_store(scope: Any = _CURRENT) -> dict[str, Any]:
+    return _read_json(_account_store_path(scope))
+
+
+def _write_account_store(values: dict[str, Any], scope: Any = _CURRENT) -> None:
+    _write_json(_account_store_path(scope), values)
+
+
+def device_id() -> str:
+    """This install's free-tier identity.
+
+    The free allowance is counted per device. On the app route HivemindOS owns
+    that identity; direct, the studio needs its own stable one — regenerating it
+    per call would be asking a shared service for a fresh allowance every time,
+    which is not a bug in their meter, it is abuse of it.
+    """
+    store = _read_store()
+    existing = str(store.get("deviceId") or "").strip()
+    if existing:
+        return existing
+    minted = f"content-studio-{uuid.uuid4()}"
+    store["deviceId"] = minted
+    _write_store(store)
+    return minted
+
+
+def _store_key_path() -> Path:
+    return _store_path().with_suffix(".key")
+
+
+def _cipher():
+    """The cipher for the account key at rest.
+
+    Keyed by a 0600 file this module owns rather than by the macOS Keychain: the
+    studio also runs in a Linux container, where a Keychain call raises and took
+    every one of these paths down with it. This is the same shape HivemindOS
+    uses for the same kind of secret — a generated key file beside the store —
+    so the credential is never plaintext on any platform.
+    """
+    from . import private_access
+
+    path = _store_key_path()
+    try:
+        secret = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        secret = ""
+    if not secret:
+        secret = base64.urlsafe_b64encode(os.urandom(48)).decode("ascii")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(secret, encoding="utf-8")
+        os.chmod(path, 0o600)
+    return private_access.PrivateFieldCipher.from_secret(secret)
+
+
+# Where the HivemindOS app keeps its own credit key, and the sibling file whose
+# contents key it. Same user, same `~/.hivemindos` directory this studio already
+# reads its device token and shared env from — so an install on this machine can
+# be linked without asking the owner to copy anything.
+APP_HOME_ENV = "HIVEMINDOS_HOME"
+APP_VAULT_NAME = "hivemindos-model-credit-vault.json"
+APP_VAULT_KEY_NAME = "hivemindos-model-credit-vault.key"
+
+
+def app_home() -> Path:
+    """The HivemindOS directory on this machine. Overridable so a test can point
+    at a vault it wrote itself rather than at the developer's real one."""
+    configured = os.environ.get(APP_HOME_ENV, "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".hivemindos"
+# The app's own pooled account id, and the record key layout it stores under.
+APP_POOL_ACCOUNT = "shared:hivemindos-models"
+
+
+def app_credit_token() -> str:
+    """The HivemindOS app's own account key, read from its vault on this machine.
+
+    Read live rather than copied into this studio's store: a copy would go stale
+    the moment the app rotates its key, and duplicating a bearer credential to
+    keep two files in step is how one of them ends up wrong. Returns '' when
+    there is no app, no vault, or nothing decryptable in it — every one of which
+    just means "not linked from the app".
+
+    This grants no capability the studio does not already have: with the app
+    running it proxies through it and spends the same balance anyway. What it
+    adds is that the link SURVIVES the app being closed.
+    """
+    home = app_home()
+    try:
+        key_material = (home / APP_VAULT_KEY_NAME).read_text(encoding="utf-8").strip()
+        vault = json.loads((home / APP_VAULT_NAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return ""
+    records = vault.get("records") if isinstance(vault, dict) else None
+    if not isinstance(records, dict) or not key_material:
+        return ""
+    slug = gateway_slug()
+    ordered = [f"{APP_POOL_ACCOUNT}::{slug}", *sorted(records)]
+    key = hashlib.sha256(key_material.encode("utf-8")).digest()
+    for record_key in ordered:
+        record = records.get(record_key)
+        if not isinstance(record, dict):
+            continue
+        token = _decrypt_app_record(record, key)
+        if token:
+            return token
+    return ""
+
+
+def _decrypt_app_record(record: dict[str, Any], key: bytes) -> str:
+    """One AES-256-GCM record, in the app's own layout (base64url iv/tag/body)."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        nonce = _b64url(record["iv"])
+        payload = _b64url(record["encryptedToken"]) + _b64url(record["tag"])
+        return AESGCM(key).decrypt(nonce, payload, None).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _b64url(value: str) -> bytes:
+    raw = str(value or "")
+    return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+
+
+def _may_use_app_key(scope: AccountScope | None) -> bool:
+    """The app's vault key is the OWNER's account. Only the owner's workspace
+    (and the machine, which is the owner) adopts it; every other workspace
+    would otherwise be shown the owner's name over the owner's balance, which
+    is the bug this scoping exists to end."""
+    return scope is None or scope.is_owner
+
+
+def own_credit_source(scope: Any = _CURRENT) -> str:
+    """Which key THIS workspace holds: one pasted or signed in ("connected"),
+    the app's ("app", owner only), or none. The picker says this out loud — a
+    credential adopted silently from another app is exactly the kind of thing
+    that should be visible."""
+    resolved = _resolve_scope(scope)
+    if _stored_credit_token(resolved):
+        return "connected"
+    if _may_use_app_key(resolved) and app_credit_token():
+        return "app"
+    return ""
+
+
+def _stored_credit_token(scope: Any = _CURRENT) -> str:
+    """The key this workspace was given by hand, if any.
+
+    Any token the gateway accepts works — the account's own, or a passkey-minted
+    session token from the HivemindOS account page — because both resolve to the
+    same credit account, which is the whole point.
+    """
+    sealed = str(_read_account_store(scope).get("creditToken") or "").strip()
+    if not sealed:
+        return ""
+    try:
+        return _cipher().decrypt(sealed)
+    except Exception:
+        return ""
+
+
+def own_credit_token(scope: Any = _CURRENT) -> str:
+    """The key this workspace HOLDS — the one its account row names, the one
+    its email and recovery key are about, the one a share hands out.
+
+    A key connected by hand wins over the app's, because connecting one
+    deliberately is a choice and the app's is a convenience.
+    """
+    resolved = _resolve_scope(scope)
+    return _stored_credit_token(resolved) or (app_credit_token() if _may_use_app_key(resolved) else "")
+
+
+@dataclass(frozen=True)
+class CreditGrant:
+    """Whose key a workspace SPENDS: its own, or one shared with it."""
+
+    token: str
+    source: str  # "connected" | "app" | "shared"
+    sharer: AccountScope | None = None
+
+
+def credit_grant(scope: Any = _CURRENT) -> CreditGrant | None:
+    """The key this workspace spends, and where it came from.
+
+    Its own always wins: a workspace that has connected or bought an account is
+    on that account, whatever anyone shares with it. With none of its own it
+    spends the first sibling that shares with it — the owner before anyone
+    else, then by id — and the row says whose.
+    """
+    resolved = _resolve_scope(scope)
+    own = own_credit_token(resolved)
+    if own:
+        return CreditGrant(token=own, source=own_credit_source(resolved))
+    for sharer in sharers_for(resolved):
+        token = own_credit_token(sharer)
+        if token:
+            return CreditGrant(token=token, source="shared", sharer=sharer)
+    return None
+
+
+def credit_source() -> str:
+    """Where the key being spent comes from, or '' when there is none."""
+    grant = credit_grant()
+    return grant.source if grant else ""
+
+
+def credit_token() -> str:
+    """The key the direct route spends, from wherever it is — this
+    workspace's own, or a sibling's shared with it."""
+    grant = credit_grant()
+    return grant.token if grant else ""
+
+
+def save_credit_token(token: str, scope: Any = _CURRENT) -> None:
+    """Keep a key as THIS workspace's own. Never a sibling's store: a share is
+    read from the sharer's side at spend time, not copied."""
+    store = _read_account_store(scope)
+    store["creditToken"] = _cipher().encrypt(token.strip())
+    _write_account_store(store, scope)
+
+
+def forget_credit_token(scope: Any = _CURRENT) -> None:
+    store = _read_account_store(scope)
+    store.pop("creditToken", None)
+    _write_account_store(store, scope)
+
+
+# ------------------------------------------------------------------- sharing
+#
+# A workspace may let chosen siblings spend its credits, or every sibling —
+# including ones added later. The policy lives on the SHARER's side, in its
+# own account store, and a beneficiary reads it at spend time; nothing is
+# copied into the beneficiary's store, so ending a share ends it at once, and
+# a beneficiary never holds the key at all. What a share grants is spending:
+# the sharer's name, email, recovery key and plans stay the sharer's, because
+# every route that touches those reads the workspace's OWN key.
+
+CREDIT_SHARE_KEY = "creditShare"
+
+
+def credit_share(scope: Any = _CURRENT) -> dict[str, Any]:
+    """Who this workspace shares its credits with: `{"all": bool, "with": [ids]}`."""
+    raw = _read_account_store(scope).get(CREDIT_SHARE_KEY)
+    record = raw if isinstance(raw, dict) else {}
+    chosen: list[int] = []
+    for value in record.get("with") or []:
+        try:
+            chosen.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return {"all": bool(record.get("all")), "with": sorted(set(chosen))}
+
+
+def set_credit_share(*, everyone: bool, workspaces: Iterable[int], scope: Any = _CURRENT) -> dict[str, Any]:
+    """Write the policy. Ids are checked against the workspaces that exist,
+    and a workspace cannot share with itself; nothing else is a refusal — an
+    empty choice is simply "nobody"."""
+    resolved = _resolve_scope(scope)
+    known = {entry.account_id for entry in workspace_directory()}
+    chosen: set[int] = set()
+    for value in workspaces:
+        try:
+            candidate = int(value)
+        except (TypeError, ValueError):
+            raise HivemindosModelsError("Choose workspaces from the list.") from None
+        if resolved is not None and candidate == resolved.account_id:
+            continue
+        if known and candidate not in known:
+            raise HivemindosModelsError("One of those workspaces no longer exists.")
+        chosen.add(candidate)
+    store = _read_account_store(resolved)
+    policy = {"all": bool(everyone), "with": sorted(chosen)}
+    if policy["all"] or policy["with"]:
+        store[CREDIT_SHARE_KEY] = policy
+    else:
+        store.pop(CREDIT_SHARE_KEY, None)
+    _write_account_store(store, resolved)
+    return policy
+
+
+def sharers_for(scope: AccountScope | None) -> list[AccountScope]:
+    """Every OTHER workspace whose share names `scope` — the owner first, then
+    by id, so which balance a twice-shared workspace spends is not a matter of
+    listing order."""
+    if scope is None:
+        return []
+    found = [
+        other for other in workspace_directory()
+        if other.account_id != scope.account_id
+        and (lambda share: share["all"] or scope.account_id in share["with"])(credit_share(other))
+    ]
+    return sorted(found, key=lambda entry: (not entry.is_owner, entry.account_id))
+
+
+# ------------------------------------------------- the free tier's own meter
+#
+# The gateway reports what is LEFT of the daily free allowance in headers on the
+# responses to real free calls, and nowhere else that can be relied on. (Its
+# status route grew a `usage` block at some point on 2026-09-10 and had lost it
+# again hours later, which is exactly why this exists: the meter cannot be built
+# on a field that comes and goes.) So every free call this studio makes leaves
+# its headers here on the way past, and the meter reads the record.
+FREE_ALLOWANCE_KEY = "freeAllowance"
+
+_ALLOWANCE_HEADERS = {
+    "remainingRequests": "x-hivemindos-free-remaining-requests",
+    "remainingTokens": "x-hivemindos-free-remaining-tokens",
+}
+
+
+def record_free_allowance(headers: dict[str, str]) -> None:
+    """Keep what one free response said about the allowance it just spent.
+
+    Best effort in the strongest sense: this runs on the way out of a
+    generation the owner is waiting on, and a meter is never worth failing that
+    for.
+    """
+    try:
+        reset_at = str(headers.get("x-hivemindos-free-reset-at") or "").strip()
+        if not reset_at:
+            return
+        snapshot: dict[str, Any] = {"resetAt": reset_at, "observedAt": time.time()}
+        for field, header in _ALLOWANCE_HEADERS.items():
+            try:
+                value = int(str(headers.get(header) or "").strip())
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                snapshot[field] = value
+        if len(snapshot) > 2:
+            set_store_value(FREE_ALLOWANCE_KEY, snapshot)
+    except OSError:
+        pass
+
+
+FREE_CEILING_KEY = "freeCeiling"
+
+
+def remember_free_ceiling(requests: int | None, tokens: int | None, tier: str = "") -> None:
+    """Keep the daily ceiling the gateway last stated.
+
+    The most stable fact about this tier — it moves when a stake tier does and
+    not otherwise — so remembering it means a slow or unreachable status route
+    costs the meter its freshness rather than its existence.
+    """
+    try:
+        set_store_value(FREE_CEILING_KEY, {
+            "requestLimit": requests, "tokenLimit": tokens,
+            "tierLabel": str(tier or ""), "at": time.time(),
+        })
+    except OSError:
+        pass
+
+
+def free_ceiling_record() -> dict[str, Any]:
+    record = store_value(FREE_CEILING_KEY)
+    return record if isinstance(record, dict) else {}
+
+
+def free_allowance_record() -> dict[str, Any]:
+    """The last thing a free call told us, or {}."""
+    record = store_value(FREE_ALLOWANCE_KEY)
+    return record if isinstance(record, dict) else {}
+
+
+def store_value(key: str) -> Any:
+    """A plain (unencrypted) MACHINE-wide value this module's store holds for
+    its siblings: the free tier's records, which are about this device and not
+    about anyone's account. Only for values that are NOT credentials — the
+    account key has its own encrypted slot above.
+    """
+    return _read_store().get(key)
+
+
+def set_store_value(key: str, value: Any) -> None:
+    """Write (or, with None, remove) one of those values."""
+    store = _read_store()
+    if value is None:
+        store.pop(key, None)
+    else:
+        store[key] = value
+    _write_store(store)
+
+
+def account_store_value(key: str, scope: Any = _CURRENT) -> Any:
+    """A plain value that belongs to ONE workspace's account — the chosen
+    display name — kept beside that workspace's key rather than in a second
+    file: same owner, same 0600 store, same lifetime as the account it names."""
+    return _read_account_store(scope).get(key)
+
+
+def set_account_store_value(key: str, value: Any, scope: Any = _CURRENT) -> None:
+    store = _read_account_store(scope)
+    if value is None:
+        store.pop(key, None)
+    else:
+        store[key] = value
+    _write_account_store(store, scope)
+
+
+# What a HivemindOS account token looks like. Checked here so a typo is refused
+# with "that does not look like one" instead of spending a round trip to be told
+# the account does not exist.
+_TOKEN_SHAPE = re.compile(r"^hmos_(?:credit|account)_[A-Za-z0-9_-]{20,}$")
+
+
+def connect_account(token: str, *, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    """Point this studio at the owner's HivemindOS account.
+
+    Verified before it is stored, by asking the gateway what the balance is: a
+    token that is saved and only tried later fails at the worst moment, in the
+    middle of a generation the owner was waiting on.
+    """
+    candidate = str(token or "").strip()
+    if not _TOKEN_SHAPE.match(candidate):
+        raise HivemindosModelsError(
+            "That does not look like a HivemindOS account key. Copy it from the account "
+            "page in HivemindOS — it starts with hmos_.",
+            remedy="connect-account",
+        )
+    payload = _gateway_request(
+        f"/api/paid-agents/{gateway_slug()}/credits/balance",
+        headers={"X-HivemindOS-Credit-Token": candidate}, opener=opener,
+    )
+    save_credit_token(candidate)
+    balance = payload.get("balanceCredits") if isinstance(payload, dict) else None
+    return {"connected": True, "credits": balance, "label": _credit_label(balance)}
+
+
+def merge_accounts(tokens: list[str], *, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    """Fold several HivemindOS balances into one.
+
+    For the case this design tries to avoid and cannot always prevent: credits
+    bought here before the owner connected the account they already had. The
+    gateway merges them; stranding money in an account nobody can see would be
+    the worse answer.
+    """
+    candidates = [str(token or "").strip() for token in tokens]
+    candidates = [token for token in candidates if _TOKEN_SHAPE.match(token)]
+    if len(candidates) < 2:
+        raise HivemindosModelsError("Two account keys are needed to merge balances.", remedy="connect-account")
+    payload = _gateway_request(
+        f"/api/paid-agents/{gateway_slug()}/credits/consolidate",
+        method="POST", body={"creditTokens": candidates}, timeout=30.0, opener=opener,
+    )
+    kept = str((payload or {}).get("creditToken") or "").strip()
+    if kept:
+        save_credit_token(kept)
+    return {"merged": True, "credits": (payload or {}).get("balanceCredits")}
+
+
+def _credit_label(balance: Any) -> str:
+    # The gateway keeps fractions ("999.385"); a balance is read at a glance.
+    if isinstance(balance, (int, float)):
+        return f"{round(balance):,} credits"
+    return "Unknown"
+
+
+# ------------------------------------------------------------------ transport
+
+def _app_request(
+    path: str,
+    *,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+    timeout: float = 20.0,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> Any:
+    token = _dashboard_token()
+    if not token:
+        raise HivemindosModelsError(
+            "HivemindOS is not linked to this studio yet.",
+            remedy="link-hivemindos",
+            detail="HIVEMINDOS_DASHBOARD_DEVICE_TOKEN is not set on this machine.",
+        )
+    headers = {"x-hivemindos-device-token": token, "Accept": "application/json"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        headers["x-hivemindos-wallet-agent-id"] = (
+            FREE_AGENT_ID if body.get("model") == FREE_MODEL_ID else AGENT_ID
+        )
+    request = urllib.request.Request(f"{base_url()}{path}", data=data, method=method, headers=headers)
+    return _send(request, timeout=timeout, opener=opener, where="app")
+
+
+# The gateway sits behind Cloudflare, which blocks urllib's default
+# "Python-urllib/3.x" outright ("The site owner has blocked access based on your
+# browser's signature") — a 403 that reads like an outage rather than a missing
+# header. Identify the product honestly instead of impersonating a browser.
+USER_AGENT = "HivemindContentStudio/1.0 (+https://hivemindos.com)"
+
+
+def _gateway_request(
+    path: str,
+    *,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 20.0,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+    headers_sink: dict[str, str] | None = None,
+) -> Any:
+    sent = {"Accept": "application/json", "User-Agent": USER_AGENT, **(headers or {})}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        sent["Content-Type"] = "application/json"
+    request = urllib.request.Request(f"{gateway_url()}{path}", data=data, method=method, headers=sent)
+    return _send(request, timeout=timeout, opener=opener, where="gateway", headers_sink=headers_sink)
+
+
+def _send(
+    request: urllib.request.Request, *, timeout: float, opener: Callable[..., Any], where: str,
+    headers_sink: dict[str, str] | None = None,
+) -> Any:
+    """`headers_sink`, when given, is filled with the response headers.
+
+    The free tier's remaining allowance is reported ONLY on the responses to
+    real free calls (see `record_free_allowance`), so the one place it can be
+    learned for free is here, on the way past.
+    """
+    try:
+        with opener(request, timeout=timeout) as response:
+            if headers_sink is not None:
+                try:
+                    headers_sink.update({str(k).lower(): str(v) for k, v in response.headers.items()})
+                except (AttributeError, TypeError):
+                    # A test double that answers bytes and nothing else. The
+                    # body is what the caller came for; headers are a bonus.
+                    pass
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # A 429 carries the allowance headers too, and it is the single most
+        # useful moment to record them: this is the call that ran it out.
+        if headers_sink is not None:
+            try:
+                headers_sink.update({str(k).lower(): str(v) for k, v in exc.headers.items()})
+            except (AttributeError, TypeError):
+                pass
+        raise _http_error(exc, where=where) from None
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        if where == "app":
+            raise HivemindosModelsError(
+                "The HivemindOS app is not running on this machine.",
+                remedy="open-hivemindos", detail=str(exc),
+            ) from None
+        raise HivemindosModelsError(
+            "HivemindOS could not be reached. Check this machine's internet connection.",
+            remedy="retry", detail=str(exc),
+        ) from None
+    except json.JSONDecodeError as exc:
+        raise HivemindosModelsError("HivemindOS returned something that was not JSON.", detail=str(exc)) from None
+
+
+def _http_error(exc: urllib.error.HTTPError, *, where: str) -> HivemindosModelsError:
+    """HivemindOS's own sentence, with the action it implies attached.
+
+    Its messages are already written for a person ("Add HivemindOS Models credits
+    with card or link a local funding wallet before chatting."), so they are kept
+    rather than replaced — what is added is which button repairs them.
+    """
+    try:
+        payload = json.loads(exc.read().decode("utf-8"))
+    except (json.JSONDecodeError, AttributeError, OSError, UnicodeDecodeError):
+        payload = {}
+    message = str(payload.get("error") or payload.get("detail") or "").strip()
+    if exc.code == 402:
+        # The gateway's own words for this are "Payment required." — true, and
+        # not something anyone can act on. Say what it means here.
+        return HivemindosModelsError(
+            "This model is paid, and no HivemindOS account is connected to this studio.",
+            remedy="connect-account", detail=message, status=exc.code,
+        )
+    if exc.code == 401:
+        if where == "gateway":
+            return HivemindosModelsError(
+                message or "These credits were not accepted.", remedy="top-up", status=exc.code,
+            )
+        return HivemindosModelsError(
+            message or "This studio is not authorised to reach HivemindOS on this machine.",
+            remedy="link-hivemindos", status=exc.code,
+        )
+    if exc.code in (403, 404) and ("credit" in message.lower() or "wallet" in message.lower()):
+        return HivemindosModelsError(message, remedy="top-up", status=exc.code)
+    if exc.code == 429:
+        return HivemindosModelsError(
+            message or "The free allowance for today is used up.", remedy="top-up", status=exc.code,
+        )
+    return HivemindosModelsError(
+        message or f"HivemindOS returned HTTP {exc.code}.",
+        remedy="open-hivemindos" if (exc.code >= 500 and where == "app") else "",
+        status=exc.code,
+    )
+
+
+# -------------------------------------------------------------------- catalog
+
+def _price_line(prompt_usd: Any, completion_usd: Any) -> str:
+    """Prices exactly as the HivemindOS app prints them, so the same model does
+    not appear to cost two different things in two of its own products."""
+    def per_million(value: Any) -> str:
+        try:
+            usd = float(value) * 1_000_000
+        except (TypeError, ValueError):
+            return ""
+        if usd == 0:
+            return "$0"
+        if usd >= 100:
+            return f"${round(usd)}"
+        return "$" + f"{usd:.2f}".rstrip("0").rstrip(".")
+
+    prompt = per_million(prompt_usd)
+    completion = per_million(completion_usd)
+    if not prompt or not completion:
+        return ""
+    return f"{prompt} in · {completion} out /1M"
+
+
+def _row(
+    model_id: str, name: str, subtitle: str, group: str, badge: str, tier: str, *,
+    prompt_credits: float | None = None, completion_credits: float | None = None,
+    max_output_tokens: int | None = None,
+) -> dict[str, Any]:
+    """One picker row.
+
+    The two rates are credits per MILLION tokens, numeric, so the browser can
+    say what one press will cost ("≈ 5 credits per draft") instead of leaving
+    the owner to multiply a per-token price by an answer size they cannot see.
+    `maxOutputTokens` is the free tier's cap, stated on the row because a draft
+    of eight concepts does not fit in it and the owner should learn that before
+    the press, not from six concepts arriving.
+    """
+    return {
+        "id": model_id, "name": name, "subtitle": subtitle, "group": group,
+        "badge": badge, "tier": tier, "provider": PROVIDER, "source": PROVIDER,
+        "promptCreditsPerMTok": prompt_credits,
+        "completionCreditsPerMTok": completion_credits,
+        "maxOutputTokens": max_output_tokens,
+    }
+
+
+def _metadata_rate(meta: dict[str, Any], key: str) -> float | None:
+    try:
+        value = float(meta.get(key))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _app_catalog(*, opener: Callable[..., Any] = urllib.request.urlopen) -> list[dict[str, Any]]:
+    payload = _app_request(f"{MODELS_PATH}/models", opener=opener)
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    models: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get("id") or "").strip()
+        if not model_id:
+            continue
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        tier = str(meta.get("tier") or "paid")
+        models.append(_row(
+            model_id, str(row.get("display_name") or model_id), str(meta.get("subtitle") or ""),
+            str(meta.get("group") or "HivemindOS"), str(meta.get("badge") or ""), tier,
+            # The app already prices its rows in credits per million tokens
+            # (`promptCreditsPerMTok`); passed through rather than recomputed so
+            # the number here is the number the app shows.
+            prompt_credits=_metadata_rate(meta, "promptCreditsPerMTok"),
+            completion_credits=_metadata_rate(meta, "completionCreditsPerMTok"),
+            max_output_tokens=FREE_MODEL_MAX_TOKENS if tier == "free" else None,
+        ))
+    return models
+
+
+def _gateway_catalog(*, opener: Callable[..., Any] = urllib.request.urlopen) -> list[dict[str, Any]]:
+    """The gateway's own catalog, without the app.
+
+    The house tiers (Auto/Fast/Deep) are deliberately NOT synthesized here: their
+    GPU-first routing lives in the app, so offering them without it would be a
+    row that promises something this route cannot do. The free model IS offered,
+    because the free rail is the gateway's and works either way.
+    """
+    payload = _gateway_request(
+        f"/api/paid-agents/{gateway_slug()}/models",
+        headers={"X-HivemindOS-Official-Paid-Agent-Client": "models"},
+        opener=opener,
+    )
+    rows = (payload.get("data") or payload.get("models")) if isinstance(payload, dict) else None
+    models = [_row(
+        FREE_MODEL_ID, FREE_MODEL_NAME, "Free daily allowance · Scout 12B",
+        "HivemindOS", "Free", "free", max_output_tokens=FREE_MODEL_MAX_TOKENS,
+    )]
+    pricing_key = ("prompt", "completion")
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        upstream = str(row.get("id") or row.get("model") or "").strip()
+        if not upstream:
+            continue
+        pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
+        models.append(_row(
+            f"{CUSTOM_PREFIX}{upstream}",
+            str(row.get("display_name") or row.get("name") or upstream),
+            _price_line(pricing.get(pricing_key[0]), pricing.get(pricing_key[1])) or "HivemindOS credits",
+            "Gateway", "Wallet", "paid",
+            prompt_credits=credits_per_mtok(pricing.get(pricing_key[0])),
+            completion_credits=credits_per_mtok(pricing.get(pricing_key[1])),
+        ))
+    return models
+
+
+def catalog(*, route: str = "", opener: Callable[..., Any] = urllib.request.urlopen) -> list[dict[str, Any]]:
+    """Every model HivemindOS can route, as picker rows.
+
+    The shape is deliberately the studio's, not the gateway's: the browser reads
+    `id`, `name`, `subtitle`, `group`, `badge` and `tier` for every source it can
+    offer, so a cloud row and a local row render through the same component.
+    """
+    if (route or resolve_route()) == ROUTE_APP:
+        return _app_catalog(opener=opener)
+    return _gateway_catalog(opener=opener)
+
+
+def credits(*, route: str = "", opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    """The credit balance, as whichever side holds the account reports it."""
+    if (route or resolve_route()) == ROUTE_APP:
+        query = urllib.parse.urlencode({"creditAccountId": AGENT_ID})
+        payload = _app_request(f"{MODELS_PATH}/credits?{query}", opener=opener)
+        if not isinstance(payload, dict):
+            return {"configured": False, "label": "Unknown", "source": "app"}
+        return {
+            "configured": bool(payload.get("configured")),
+            "credits": payload.get("balanceCredits"),
+            "label": str(payload.get("balanceLabel") or "Unknown"),
+            "source": "app",
+        }
+    token = credit_token()
+    if not token:
+        return {"configured": False, "credits": None, "label": "Account not connected", "source": ""}
+    payload = _gateway_request(
+        f"/api/paid-agents/{gateway_slug()}/credits/balance",
+        headers={"X-HivemindOS-Credit-Token": token}, opener=opener,
+    )
+    balance = payload.get("balanceCredits") if isinstance(payload, dict) else None
+    # `source` is shown, not hidden: a key adopted from the app on this machine
+    # should be visible as that, with a way to change it.
+    return {"configured": True, "credits": balance, "label": _credit_label(balance), "source": credit_source()}
+
+
+def status(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    """Whether the cloud producer can be used at all, and on what terms.
+
+    Answered BEFORE anything is generated, because a picker that learns this from
+    a failed request has already spent the press. Never raises: a source that
+    cannot answer is a state the picker renders, not an error that empties it.
+    """
+    route = resolve_route()
+    try:
+        models = catalog(route=route, opener=opener)
+    except HivemindosModelsError as exc:
+        return {
+            "reachable": False, "route": route, "models": [], "detail": str(exc),
+            "remedy": exc.remedy, "defaultModelId": DEFAULT_MODEL_ID,
+        }
+    try:
+        balance = credits(route=route, opener=opener)
+    except HivemindosModelsError:
+        balance = {"configured": False, "label": "Unknown"}
+    known = {model["id"] for model in models}
+    # Never point the default at a model this gateway does not carry: a default
+    # that 404s on first press is worse than an honest second choice.
+    default_id = DEFAULT_MODEL_ID if DEFAULT_MODEL_ID in known else _first_present(
+        models, ("hivemindos/auto", FREE_MODEL_ID),
+    )
+    return {
+        "reachable": True,
+        "route": route,
+        "models": models,
+        "detail": "",
+        "remedy": "",
+        "credits": balance,
+        "defaultModelId": default_id,
+    }
+
+
+def _first_present(models: list[dict[str, Any]], preferred: tuple[str, ...]) -> str:
+    known = {model["id"] for model in models}
+    for candidate in preferred:
+        if candidate in known:
+            return candidate
+    return models[0]["id"] if models else DEFAULT_MODEL_ID
+
+
+def output_budget(model_id: str, requested: int) -> int:
+    """The answer budget this model will actually accept."""
+    if model_id == FREE_MODEL_ID:
+        return min(int(requested), FREE_MODEL_MAX_TOKENS)
+    return int(requested)
+
+
+def start_top_up(*, amount_usd: float = 5.0, return_url: str = "",
+                 opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    """Begin a card checkout for HivemindOS credits, on the direct route.
+
+    Tops up the CONNECTED account when there is one — the gateway credits the
+    account whose token is presented, so this is the owner's usual balance and
+    not a new one. With nothing connected it opens an account, which is the only
+    honest option for someone who has never had HivemindOS credits; the studio
+    then says to secure it with a passkey so their other apps can reach it.
+
+    Nothing is charged by this call: the card is entered on the gateway's own
+    page, by the owner.
+    """
+    # The workspace's OWN key, never one shared with it: a top-up is money
+    # onto an account, and a beneficiary's card goes onto a new account of
+    # theirs, not onto the sharer's.
+    existing = own_credit_token()
+    # With the app running this used to refuse outright, on the reasoning that a
+    # checkout here would open a SECOND balance beside the app's. That is only
+    # true when no key resolves: `own_credit_token` falls back to the app's own
+    # vault key on this machine for the owner, and presenting it tops up the
+    # very balance the app spends. So the refusal now applies to the case it
+    # was actually about — the owner with no key at all, where the gateway
+    # would mint one — and the credits sheet works with the app open, which is
+    # when most people have it open.
+    if not existing and _may_use_app_key(account_scope()) and resolve_route() == ROUTE_APP:
+        raise HivemindosModelsError(
+            "Add credits in the HivemindOS app, so this studio and the app keep sharing one balance.",
+            remedy="open-hivemindos",
+        )
+    payload = _gateway_request(
+        f"/api/paid-agents/{gateway_slug()}/credits/checkout",
+        method="POST",
+        body={
+            "creditAccountId": AGENT_ID,
+            "amountUsd": round(float(amount_usd), 2),
+            **({"successUrl": return_url, "cancelUrl": return_url} if return_url else {}),
+        },
+        headers={
+            "Idempotency-Key": f"content-studio-credits-{uuid.uuid4()}",
+            # Presenting the connected account tops IT up. Without this the
+            # gateway mints a new account and the owner ends up with two
+            # balances, which is the thing this whole path exists to avoid.
+            **({"X-HivemindOS-Credit-Token": existing} if existing else {}),
+        },
+        timeout=30.0, opener=opener,
+    )
+    token = str((payload or {}).get("creditToken") or "").strip()
+    if token and not existing:
+        save_credit_token(token)
+    return {
+        "checkoutUrl": str((payload or {}).get("checkoutUrl") or ""),
+        "stored": bool(token and not existing),
+        "openedNewAccount": bool(token and not existing),
+    }
+
+
+# ---------------------------------------------------- the app-mediated link
+#
+# `hivemindos://` is a scheme the desktop app registers, so this handshake is
+# same-machine by construction — it reaches the app on THIS computer and no
+# other. It therefore adds no reach over reading the app's vault directly; what
+# it adds is that the owner is ASKED, in the app, with the app's own unlock in
+# front of it, and that the handover keeps working if HivemindOS ever moves that
+# vault somewhere this studio cannot read (an OS keychain, another user).
+#
+# The nonce is the authorisation. The callback cannot be owner-gated — the
+# poster is the desktop app, not the browser — so what proves the exchange is
+# legitimate is that it carries a secret this studio minted moments ago for a
+# link the owner started here. Single use, five minutes, memory only: a studio
+# restart cancels every pending link rather than leaving one openable later.
+
+LINK_TTL_SECONDS = 300.0
+# nonce -> (started, the workspace that asked). The callback arrives from the
+# desktop app with no session, so the key it hands back would otherwise land
+# in whatever scope a machine caller resolves to; the request remembers.
+_link_requests: dict[str, tuple[float, AccountScope | None]] = {}
+_link_results: dict[str, str] = {}
+
+
+def start_link(callback_url: str) -> dict[str, str]:
+    """Mint a one-time link request and the deep link that carries it."""
+    _expire_links()
+    nonce = secrets.token_urlsafe(32)
+    _link_requests[nonce] = (time.monotonic(), account_scope())
+    query = urllib.parse.urlencode({
+        "nonce": nonce,
+        "callback": callback_url,
+        "app": "Hivemind Content Studio",
+    })
+    return {"nonce": nonce, "url": f"hivemindos://models/link?{query}", "expiresIn": int(LINK_TTL_SECONDS)}
+
+
+def complete_link(nonce: str, token: str, *, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    """Accept the key the app handed back, for a link this studio started."""
+    _expire_links()
+    if nonce not in _link_requests:
+        # Deliberately the same answer for expired, already-used and never-issued:
+        # the caller is not the owner's browser, and telling an unknown local
+        # process which of those it hit is telling it how to try again.
+        raise HivemindosModelsError("That link request is not open.", remedy="connect-account")
+    _started, scope = _link_requests[nonce]
+    with scoped_to(scope):
+        result = connect_account(token, opener=opener)
+    _link_requests.pop(nonce, None)
+    _link_results[nonce] = "linked"
+    return result
+
+
+def link_state(nonce: str) -> str:
+    """What the browser polls: linked, pending, or expired."""
+    _expire_links()
+    if _link_results.get(nonce) == "linked":
+        return "linked"
+    return "pending" if nonce in _link_requests else "expired"
+
+
+def _expire_links() -> None:
+    now = time.monotonic()
+    for nonce, (started, _scope) in list(_link_requests.items()):
+        if now - started > LINK_TTL_SECONDS:
+            _link_requests.pop(nonce, None)
+    # Results are kept only long enough for the browser's next poll.
+    if len(_link_results) > 32:
+        _link_results.clear()
+
+
+class HivemindosRuntime:
+    """A producer engine with the same ``chat`` shape as ``local_llm``'s.
+
+    Same signature on purpose: the tasks in ``story_producer`` are written
+    against an engine, not against a provider, so which one runs is a lookup and
+    not a branch inside every task.
+    """
+
+    def __init__(self, *, opener: Callable[..., Any] = urllib.request.urlopen, route: str = "") -> None:
+        self._opener = opener
+        self._route = route
+
+    def chat(
+        self,
+        *,
+        model_id: str,
+        messages: list[dict[str, str]],
+        temperature: float = 0.8,
+        max_tokens: int = 2048,
+        timeout: float = 180.0,
+        image: str | None = None,
+        images: list[str] | None = None,
+    ) -> str:
+        attached = [url for url in ([image] if image else []) + list(images or []) if url]
+        body: dict[str, Any] = {
+            "model": model_id,
+            "messages": _with_images(messages, attached) if attached else messages,
+            "temperature": temperature,
+            "max_tokens": output_budget(model_id, max_tokens),
+            "stream": False,
+        }
+        route = self._route or resolve_route()
+        if route == ROUTE_APP:
+            payload = _app_request(
+                f"{MODELS_PATH}/chat/completions", method="POST", body=body,
+                timeout=timeout, opener=self._opener,
+            )
+        elif model_id == FREE_MODEL_ID:
+            # The free rail is device-scoped and never touches credits. Its
+            # response headers are the only reliable statement of what is left
+            # of today's allowance, so they are kept — including on the 429 that
+            # says it has just run out, which `_send` sinks before it raises.
+            spent: dict[str, str] = {}
+            try:
+                payload = _gateway_request(
+                    f"/api/free-models/{FREE_MODEL_UPSTREAM}/chat/completions",
+                    method="POST", body={**body, "model": FREE_MODEL_UPSTREAM},
+                    headers={
+                        "X-HivemindOS-Free-Device": device_id(),
+                        "X-HivemindOS-Free-Workspace": "hivemind-content-studio",
+                    },
+                    timeout=timeout, opener=self._opener, headers_sink=spent,
+                )
+            finally:
+                record_free_allowance(spent)
+        else:
+            token = credit_token()
+            if not token:
+                raise HivemindosModelsError(
+                    "Connect your HivemindOS account to spend its credits on this model.",
+                    remedy="connect-account",
+                )
+            payload = _gateway_request(
+                f"/api/paid-agents/{gateway_slug()}/chat/completions",
+                method="POST", body={**body, "model": upstream_model(model_id)},
+                headers={
+                    "X-HivemindOS-Credit-Token": token,
+                    # Since 2026-08-25 the gateway refuses a credit-backed
+                    # completion without one ("This app version cannot safely
+                    # retry a paid request. Update HivemindOS…" — its words
+                    # for the desktop app, which mints its own when a caller
+                    # sends none; on the direct route WE are the app). A fresh
+                    # key per press: a receipt is replayed for the same key
+                    # rather than charged twice, and every press here is a new
+                    # ask, never a resend.
+                    "Idempotency-Key": f"content-studio-chat-{uuid.uuid4()}",
+                },
+                timeout=timeout, opener=self._opener,
+            )
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        if not choices:
+            error = str((payload or {}).get("error") or "").strip()
+            raise HivemindosModelsError(error or "The cloud model returned no completion.")
+        content = str((choices[0].get("message") or {}).get("content") or "").strip()
+        if not content:
+            raise HivemindosModelsError("The cloud model returned an empty answer.")
+        return content
+
+
+def _with_images(messages: list[dict[str, Any]], attached: list[str]) -> list[dict[str, Any]]:
+    """Pictures ride the LAST user turn, matching the local runtime's rule so a
+    vision ask behaves the same on either engine."""
+    copied = [dict(message) for message in messages]
+    for message in reversed(copied):
+        if message.get("role") == "user":
+            message["content"] = [
+                {"type": "text", "text": message.get("content") or ""},
+                *({"type": "image_url", "image_url": {"url": url}} for url in attached),
+            ]
+            break
+    return copied
+
+
+def runtime(*, opener: Callable[..., Any] = urllib.request.urlopen) -> HivemindosRuntime:
+    return HivemindosRuntime(opener=opener)

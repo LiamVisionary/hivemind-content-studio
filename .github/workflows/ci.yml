@@ -1,0 +1,287 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  # Lint is its own job, and a real gate.
+  #
+  # It used to be a step inside the 3.11 test job, which meant one undefined
+  # name in a test file (F821, 2026-08-28) stopped that job before pytest ran:
+  # the unit tests did not execute on 3.11 for three pushes and nobody could
+  # tell from the red X. Split out, a lint failure says "lint failed" and the
+  # tests still report. It also answers in under a minute rather than after the
+  # npm ci / vite build / ffmpeg chain below.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.11
+
+      # The whole tree, not a list. `src` is the product — the control plane
+      # every studio talks to and the clipping engine — and linting only the
+      # inherited faceless engine is how an undefined `sys` sat in the Machines
+      # route's never-crash handler; but a hand-kept list is its own hole, and
+      # this one had never included packages/ or scripts/, where four errors sat
+      # unread. Everything vendored is excluded by name in pyproject's
+      # [tool.ruff] with a reason attached, so this passing means zero.
+      - name: Lint Python sources
+        run: uv run --no-sync ruff check .
+
+  tests:
+    name: Python ${{ matrix.python-version }} tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject declares requires-python = ">=3.11,<3.13", so a 3.13 job
+        # cannot even install: `uv sync` refuses the interpreter. Testing a
+        # version the project says it does not support was a red job that
+        # reported nothing.
+        python-version: ["3.11", "3.12"]
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      MPT_TEST_REDIS_HOST: 127.0.0.1
+      MPT_TEST_REDIS_PORT: 6379
+      MPT_TEST_REDIS_DB: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra mcp --python ${{ matrix.python-version }}
+
+      # The media-studio MCP contract tests shell out to
+      # packages/media-gateway/bin/media-studio-mcp.mjs, which imports
+      # @modelcontextprotocol/sdk. Without its node_modules those 94 tests fail
+      # with ERR_MODULE_NOT_FOUND — a missing install, not a broken contract.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install media gateway node dependencies
+        run: npm ci --prefix packages/media-gateway
+
+      # The MCP contract tests build real ComfyUI graphs from reference clips,
+      # which means probing them with ffprobe. Without ffmpeg they fail as
+      # FileNotFoundError rather than telling anyone what is missing.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # The owner-gate test asserts the served page is the studio, and the
+      # studio is a built bundle. Without dist/ the app serves its "frontend
+      # build is missing" placeholder and the test reads that instead.
+      - name: Build the studio frontend
+        run: |
+          npm ci --prefix packages/open-generative-ai
+          npm --prefix packages/open-generative-ai run vite:build
+
+      - name: Compile Python sources
+        run: uv run --no-sync python -m compileall app cli.py archive/moneyprinterturbo test src
+
+      - name: Run unit tests with coverage
+        # pytest 兼容现有 unittest.TestCase，同时会收集仓库中的 pytest 风格
+        # 测试，避免测试文件已存在但 CI 没有真正执行。
+        run: uv run --no-sync python -X utf8 -m coverage run -m pytest -q test
+
+      # The gateway's own suite: pyproject's `testpaths = ["test"]` excludes it,
+      # so thirteen test files covering sealed media, the model manager and the
+      # ComfyUI graph builders never ran anywhere but a developer's laptop.
+      - name: Run media gateway tests
+        run: uv run --no-sync python -X utf8 -m pytest -q packages/media-gateway
+
+      # The Canvas package's Python half — the ComfyUI-side extension. Excluded
+      # by the same `testpaths = ["test"]`, and the Canvas job below runs only
+      # its TypeScript, so these 94 tests (file_utils path escaping, the
+      # queue-metadata cache, push prefs, the mobile metadata readers) had never
+      # executed on a runner. No PYTHONPATH is needed: the package's own
+      # conftest.py puts itself on sys.path and stubs the ComfyUI runtime
+      # modules (server, folder_paths, aiohttp, PIL) with MagicMocks, so nothing
+      # here wants a ComfyUI checkout. `packages/comfyui-mobile/pytest.ini`
+      # makes that directory the rootdir for this invocation, so the root
+      # pyproject's ini options — the 120s timeout included — do not apply.
+      - name: Run Canvas extension tests
+        run: uv run --no-sync python -X utf8 -m pytest -q packages/comfyui-mobile/tests
+
+      - name: Report test coverage
+        run: uv run --no-sync python -m coverage report
+
+      - name: Export coverage report
+        run: uv run --no-sync python -m coverage xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-python-${{ matrix.python-version }}
+          path: coverage.xml
+          retention-days: 7
+
+  # The other half of the product. These suites carry the studios' logic, the
+  # Canvas editor and the client end of the E2E vault, and none of them had ever
+  # run in CI: a ReferenceError in ModelSourcePicker shipped for a week, and the
+  # mobile vault-decrypt suite was dead for another.
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install studio dependencies
+        run: npm ci
+        working-directory: packages/open-generative-ai
+
+      # Seconds, and it catches the whole missing-import class that no test in
+      # this package can: none of them mounts a component.
+      - name: Lint the studio frontend
+        run: npm run lint
+        working-directory: packages/open-generative-ai
+
+      - name: Run studio tests
+        run: npm test
+        working-directory: packages/open-generative-ai
+
+      - name: Install Canvas dependencies
+        run: npm ci
+        working-directory: packages/comfyui-mobile
+
+      # The E2E media suite seals with the repository venv's Python, which this
+      # job does not have; it skips itself and says so rather than failing.
+      - name: Run Canvas tests
+        run: npm test
+        working-directory: packages/comfyui-mobile
+
+      # `npm run build:mobile` runs `tsc -b` first, so a type error here is a
+      # release that cannot be built.
+      - name: Type-check the Canvas app
+        run: npx tsc --noEmit -p tsconfig.app.json
+        working-directory: packages/comfyui-mobile
+
+  # The shell that is about to become the product. Its 37 tests — port
+  # reservation, the supervisor's diagnosis, the boot plan, the backoff, the
+  # keychain-backed private secret — had never run on a runner: the only
+  # workflow that touches Rust is release-desktop.yml, which is
+  # workflow_dispatch-only and runs `cargo tauri build`, so a compile error
+  # surfaced there and an assertion never did anywhere.
+  #
+  # ubuntu-22.04 with exactly the apt line release-desktop.yml's Linux job
+  # already uses, because that job proves this crate (tauri + keyring + nix)
+  # builds there. A macos-latest job would match the shipping target more
+  # closely and costs ten times the runner minutes for the same 37 assertions;
+  # the platform-specific code here is the `cfg(unix)` process-group kill, which
+  # Linux exercises too.
+  desktop:
+    name: Desktop shell tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install the Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf
+
+      - name: Run the desktop shell tests
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml
+
+      # Cheap, and the thing it checks cannot be checked anywhere else: that
+      # tauri.conf.json's updater block and desktop/src-tauri/updater.json still
+      # agree. RELEASE_CHECKLIST §4 runs it by hand before every dispatch.
+      - name: Check the updater configuration
+        run: python3 scripts/check_updater_config.py
+
+  windows-smoke:
+    name: Windows smoke tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Compile Python sources
+        run: uv run --no-sync python -m compileall app cli.py archive/moneyprinterturbo test src
+
+      - name: Run core service smoke tests
+        run: >-
+          uv run --no-sync python -X utf8 -m pytest -q
+          test/services/test_config.py
+          test/services/test_state.py
+          test/services/test_task.py
+          test/services/test_task_manager.py
+          test/services/test_controller_video.py

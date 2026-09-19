@@ -2,23 +2,76 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import os
 import re
+import sys
+import secrets
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlencode, urljoin, urlparse, urlunparse
 
 from PIL import Image
 
 from .config import load_config
-from .mcp_http import McpHttpClient
+from .mcp_http import PROTOCOL_VERSION, McpHttpClient
 from .publishing import encode_multipart
 from .qa import qa_video
+from .settings import settings
+from .studio_telemetry import failure_hint, safe_failure
+
+# How long to wait for the MCP to hand back a queued video job. Sized against
+# the two slow stretches inside that call - staging references on the target
+# lane, then ComfyUI accepting the prompt once its executor frees up - and kept
+# under the 190s Hivemind Link proxy leg so a phone gets the answer too.
+_VIDEO_START_TIMEOUT_SECONDS = 180.0
+
+
+_VIDEO_ASPECT_DIMENSIONS = {
+    "16:9": (768, 448),
+    "9:16": (448, 768),
+    "4:3": (640, 480),
+    "3:4": (480, 640),
+    "1:1": (576, 576),
+}
+
+# The high tier (~2.5x the pixels) trades render time for detail. It also
+# sharpens IC-LoRA identity transfer: reference sheets are re-encoded at
+# output resolution, so reference faces gain latent tokens 1:1 with output.
+# All buckets stay divisible by 32 (LTX VAE alignment) and within the
+# workflows' 5% aspect-ratio tolerance.
+_VIDEO_ASPECT_DIMENSIONS_HIGH = {
+    "16:9": (1216, 704),
+    "9:16": (704, 1216),
+    "4:3": (1024, 768),
+    "3:4": (768, 1024),
+    "1:1": (896, 896),
+}
+
+# The max tier targets ~1.0MP — MiniMax H3's trained canvas (768px short edge at
+# 16:9). Capped here on purpose: community testing puts H3's quality knee at
+# 0.8-1.0MP and reports the model getting less coherent above it, so no bucket
+# goes past ~1.05MP. Divisible by 32 like the other tiers.
+_VIDEO_ASPECT_DIMENSIONS_MAX = {
+    "16:9": (1344, 768),
+    "9:16": (768, 1344),
+    "4:3": (1152, 864),
+    "3:4": (864, 1152),
+    "1:1": (1024, 1024),
+}
+
+# Pixel budgets + long-side caps per tier for start-frame-matched dimensions.
+_VIDEO_TIER_AREAS = {
+    "standard": (768 * 448, 1024),
+    "high": (1216 * 704, 1216),
+    "max": (1344 * 768, 1344),
+}
 
 
 @dataclass(frozen=True)
@@ -35,8 +88,8 @@ class MediaStudioDescriptor:
 
 def discover_media_studio() -> MediaStudioDescriptor | None:
     direct_url = os.environ.get("MEDIA_STUDIO_MCP_URL", "").strip()
-    direct_upload = os.environ.get("MEDIA_STUDIO_UPLOAD_BASE", "").strip()
-    if direct_url and direct_upload:
+    direct_upload = os.environ.get("MEDIA_STUDIO_UPLOAD_BASE", "").strip() or _local_upload_base()
+    if direct_url:
         return MediaStudioDescriptor(
             app_id="env:media-studio",
             app_name="Media Studio",
@@ -52,7 +105,7 @@ def discover_media_studio() -> MediaStudioDescriptor | None:
     try:
         data = json.loads(preferences.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return _local_managed_descriptor()
     for preference in data.get("preferences", []):
         if not isinstance(preference, dict):
             continue
@@ -73,7 +126,7 @@ def discover_media_studio() -> MediaStudioDescriptor | None:
             job_tool=str(mcp.get("jobTool") or "media_get_job").strip(),
             workflow_id=str(mcp.get("workflowId") or "").strip() or None,
         )
-    return None
+    return _local_managed_descriptor()
 
 
 def media_studio_status() -> dict[str, Any]:
@@ -82,15 +135,28 @@ def media_studio_status() -> dict[str, Any]:
         return {"configured": False, "auth_present": False, "reachable": False, "detail": "No Media Studio mcpVideo preference or environment override was found."}
     token = _token(descriptor)
     reachable = _reachable(descriptor.mcp_url, token)
+    auth_present = not descriptor.auth_env_key or bool(token)
+    # The detail is what the card shows, so it has to describe the state the
+    # caller is actually in. Reporting "reachable" beside available:false told
+    # people the opposite of their own status and named nothing to fix.
+    if not reachable:
+        detail = "Media Studio is configured but its MCP endpoint did not answer."
+    elif not auth_present:
+        detail = (
+            f"Media Studio answered but its token is missing — set {descriptor.auth_env_key} "
+            "in the shared hive env, or sign in to HivemindOS on this machine."
+        )
+    else:
+        detail = "Media Studio MCP is reachable."
     return {
         "configured": True,
-        "auth_present": not descriptor.auth_env_key or bool(token),
+        "auth_present": auth_present,
         "reachable": reachable,
         "app_name": descriptor.app_name,
         "tool": descriptor.tool,
         "job_tool": descriptor.job_tool,
         "workflow_configured": bool(descriptor.workflow_id),
-        "detail": "Media Studio MCP is reachable." if reachable else "Media Studio is configured but its MCP endpoint did not answer.",
+        "detail": detail,
     }
 
 
@@ -99,75 +165,1087 @@ def list_media_studio_tools() -> list[dict[str, Any]]:
     return _client(descriptor).list_tools()
 
 
-def generate_video(
+def list_media_studio_workflows(media_type: str = "video") -> list[dict[str, Any]]:
+    descriptor = _required_descriptor()
+    payload = _result_json(_client(descriptor).call_tool("media_list_workflows", {"media_type": media_type}))
+    workflows = payload.get("workflows", [])
+    return [item for item in workflows if isinstance(item, dict)]
+
+
+# A workflow's frame lattice, read from the MCP's own listing so the frame
+# count this layer forwards lands on the same grid the MCP and the node use.
+# Cached briefly: the listing is static for an MCP process and start_video is
+# the hot path. Advisory only — an unreachable MCP answers None here and
+# start_video surfaces the real failure a moment later.
+_WORKFLOW_GRID_TTL_SECONDS = 60.0
+_workflow_grid_cache: dict[str, Any] = {"key": None, "at": 0.0, "grids": {}}
+
+
+def default_video_workflow_id() -> str:
+    """The workflow a motion request gets when the caller names none.
+
+    The registry marks its own default, so the studio does not hold a second
+    opinion about which one that is; if it marks none, the first video workflow
+    the backend publishes is still better than an empty id, which the backend
+    refuses.
+    """
+    try:
+        workflows = list_media_studio_workflows("video")
+    except Exception:  # noqa: BLE001 — a missing default must not break the call
+        return ""
+    marked = next((str(item.get("id") or "") for item in workflows if item.get("default")), "")
+    return marked or next((str(item.get("id") or "") for item in workflows if item.get("id")), "")
+
+
+def _workflow_frame_grid(descriptor: MediaStudioDescriptor, workflow_id: str | None) -> dict[str, Any] | None:
+    if not workflow_id:
+        return None
+    cache = _workflow_grid_cache
+    key = str(getattr(descriptor, "mcp_url", "") or "")
+    now = time.monotonic()
+    if cache["key"] != key or now - float(cache["at"]) > _WORKFLOW_GRID_TTL_SECONDS:
+        try:
+            payload = _result_json(_client(descriptor).call_tool("media_list_workflows", {"media_type": "video"}))
+        except Exception:
+            return None
+        grids: dict[str, dict[str, Any] | None] = {}
+        items = payload.get("workflows", []) if isinstance(payload, dict) else []
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and item.get("id"):
+                grid = item.get("frame_grid")
+                grids[str(item["id"])] = dict(grid) if isinstance(grid, dict) else None
+        cache.update({"key": key, "at": now, "grids": grids})
+    return cache["grids"].get(str(workflow_id))
+
+
+def _request_frame_count(grid: dict[str, Any] | None, duration: float, frame_rate: float) -> int:
+    """The frame count forwarded with a video request.
+
+    LTX renders 8k+1 frames, so a clip of `duration` seconds has always gone
+    out as round(duration x rate) + 1 — the count the node lands on anyway. A
+    workflow that declares its own lattice (MiniMax H3: 17k+5) must NOT get
+    that +1: the node aligns UP to its grid, and when round(duration x rate)
+    already sits on a lattice point the +1 pushes it a whole step. 8s of H3 is
+    192 frames, on the grid; +1 made it 193, which rendered as 209 = 8.7s —
+    and the MCP priced those 209 frames (86,364 packed rows, over the 85,000
+    budget) while the studio's duration picker had priced 192 (79,832) and
+    offered 8s as the cap. Lattice workflows get the smallest grid point at or
+    above the asked frames: what the MCP derives from duration_seconds alone,
+    and what the picker priced.
+    """
+    clip_frames = int(round(float(duration) * float(frame_rate)))
+    if isinstance(grid, dict) and grid.get("modulus"):
+        return max(1, _grid_frames_at_least(grid, clip_frames))
+    return max(9, min(721, clip_frames + 1))
+
+
+class MediaStudioStartError(RuntimeError):
+    """A start the backend refused, carrying the machine-safe classification it
+    gave (``failure``: a code and, when named, the ComfyUI node class) so the
+    caller can record WHY without keeping any of the message text."""
+
+    def __init__(self, message: str, failure: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.failure = failure
+
+
+def start_video(
     *,
-    image_path: str | Path,
+    image_path: str | Path | None = None,
+    middle_image_path: str | Path | None = None,
+    end_image_path: str | Path | None = None,
+    video_path: str | Path | None = None,
+    motion_context_path: str | Path | None = None,
+    video_mode: str = "extend",
+    # Hand back only the frames the extension ADDED, not the source it grew.
+    # `video_mode` says how the source clip is used; this says what comes back.
+    # A sequence wants one shot per press; the standalone "extend this clip"
+    # surface wants the grown clip, and is the default.
+    extend_return_tail: bool = False,
+    task: str = "generate",
     prompt: str,
+    reference_description: str = "",
+    ingredient_images: list[dict[str, Any]] | None = None,
+    # MiniMax H3 Reference mode: discrete pictures carried into the clip, in
+    # order — reference N is the prompt's <Picture N>. Distinct from
+    # ingredient_images, which LTX stitches into one conditioning sheet.
+    reference_images: list[str | Path] | None = None,
+    # Voice/timbre clips (<Audio N>) and motion references (<Video N>) for the
+    # same Reference mode. Each reference video is {"video_path", "use_audio",
+    # "canvas"}; use_audio also conditions on that clip's own soundtrack, which
+    # then takes an <Audio N> label of its own ahead of its <Video N>, and
+    # canvas "compact" stages the clip inside a 384x1152 box (a third of the
+    # sequence rows, the same motion — motion references only; "full", the
+    # default, keeps the node's own canvas).
+    reference_audios: list[str | Path] | None = None,
+    reference_videos: list[dict[str, Any]] | None = None,
+    # Head replacement (workflow minimax-h3-inpaint). The clip BEING INPAINTED,
+    # which is neither a source video (that means "extend this shot") nor a
+    # reference (that is conditioning): its pixels outside the mask, and its
+    # whole soundtrack, are what the result is made of. `mask_image_path` is the
+    # hand-painted region, white where the head is replaced; with
+    # mask_source="sam3" it is unused and the subject is tracked instead.
+    source_video_path: str | Path | None = None,
+    mask_image_path: str | Path | None = None,
+    mask_video_path: str | Path | None = None,
+    mask_source: str = "",
+    inpaint_options: dict[str, Any] | None = None,
     duration_seconds: float = 4,
+    aspect_ratio: str = "",
+    resolution: str = "",
     workflow_id: str | None = None,
+    studio_lane: str = "",
+    # The studio's per-tab "Run on" pin: the rented machine (rental id) the
+    # job runs on when it serves the workflow. Empty = the gateway's default.
+    run_on: str = "",
+    seed: int | None = None,
+    denoise: str = "",
+    negative_prompt: str = "",
+    nag_scale: float | None = None,
+    head_swap_lora_strength: float | None = None,
+    head_swap_backend: str | None = None,
+    head_swap_face_enhancer: bool = False,
+    spectrum: bool | None = None,
+    fast_high_res: bool | None = None,
+    steps: int | None = None,
+    interpolate: int | None = None,
+    # The MiniMax H3 (Apple Silicon) dials, carried as one bag rather than ten
+    # keyword arguments: they belong to one lane, they are meaningless to every
+    # other, and an absent key means "the preset decides" all the way down.
+    h3_native_options: dict[str, Any] | None = None,
+    loras: list[dict[str, Any]] | None = None,
+    requester_pub: str = "",
+    # Resolved by the CALLER, in its request, and carried: the provider behind
+    # current_owner_spki() reads the account in scope, and the one thing that
+    # must never depend on scope surviving a hop is who can open the result.
+    owner_pub: str = "",
+) -> dict[str, Any]:
+    """Validate + upload the inputs and enqueue the generation, returning as
+    soon as the gateway hands back a job id. High-resolution runs can take tens
+    of minutes, so callers poll check_video / call finish_video instead of
+    holding one blocking request open. The uploaded input names are returned so
+    finish_video can delete them from the gateway once the job completes.
+
+    `requester_pub` is the E2E public key the finished media is sealed to. It
+    belongs to whoever ASKED for the generation — the browser that clicked
+    generate, not this process — and every later call about this job must
+    present the same key to be allowed to read it."""
+    descriptor = _required_descriptor()
+    # "workflow-default" is a catalog placeholder meaning "use the MCP's default/
+    # selected workflow" (media_catalog.BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS), not a
+    # real workflow id. Forwarding it verbatim makes the MCP reject the job with
+    # "unknown video workflow_id: workflow-default", which the machine-private
+    # redaction then hides as a generic MediaStudioError. Drop it so the MCP falls
+    # back to its configured default (e.g. ltx23-eros-fast, which takes a reference).
+    if str(workflow_id or "").strip().lower() == "workflow-default":
+        workflow_id = None
+    video = Path(video_path).expanduser().resolve() if video_path else None
+    motion_context = Path(motion_context_path).expanduser().resolve() if motion_context_path else None
+    image = Path(image_path).expanduser().resolve() if image_path else None
+    # First/middle/end keyframes only apply to image-driven generation, never to
+    # video extension (which continues an existing clip rather than anchoring one).
+    middle = Path(middle_image_path).expanduser().resolve() if (middle_image_path and video is None) else None
+    end = Path(end_image_path).expanduser().resolve() if (end_image_path and video is None) else None
+    ingredients = [
+        {
+            "image_path": Path(str(item.get("image_path") or "")).expanduser().resolve(),
+            "description": str(item.get("description") or "").strip()[:1000],
+        }
+        for item in (ingredient_images or [])
+    ]
+    if len(ingredients) > 12:
+        raise ValueError("At most 12 ingredient reference images are supported")
+    references = [Path(str(item)).expanduser().resolve() for item in (reference_images or [])]
+    if len(references) > 9:
+        raise ValueError("At most 9 reference images are supported")
+    # Staged paths stay out of these messages: they name a temp directory
+    # under the owner's home, and the text reaches the studio's toast.
+    for index, reference in enumerate(references, start=1):
+        if not reference.is_file():
+            raise FileNotFoundError(f"Reference image {index} could not be read")
+    audio_references = [Path(str(item)).expanduser().resolve() for item in (reference_audios or [])]
+    if len(audio_references) > 3:
+        raise ValueError("At most 3 reference audio clips are supported")
+    for index, reference in enumerate(audio_references, start=1):
+        if not reference.is_file():
+            raise FileNotFoundError(f"Voice clip {index} could not be read")
+    video_references = [
+        {
+            "video_path": Path(str(item.get("video_path") or "")).expanduser().resolve(),
+            "use_audio": bool(item.get("use_audio")),
+            "canvas": "compact" if str(item.get("canvas") or "").strip().lower() == "compact" else "full",
+        }
+        for item in (reference_videos or [])
+    ]
+    if len(video_references) > 3:
+        raise ValueError("At most 3 reference videos are supported")
+    for index, reference in enumerate(video_references, start=1):
+        if not reference["video_path"].is_file():
+            raise FileNotFoundError(f"Motion clip {index} could not be read")
+    inpaint_source = Path(source_video_path).expanduser().resolve() if source_video_path else None
+    inpaint_mask = Path(mask_image_path).expanduser().resolve() if mask_image_path else None
+    inpaint_mask_video = Path(mask_video_path).expanduser().resolve() if mask_video_path else None
+    if inpaint_source is not None and not inpaint_source.is_file():
+        raise FileNotFoundError("The clip being inpainted could not be read")
+    if inpaint_mask is not None and not inpaint_mask.is_file():
+        raise FileNotFoundError("The painted mask could not be read")
+    if inpaint_mask_video is not None and not inpaint_mask_video.is_file():
+        raise FileNotFoundError("The tracked mask clip could not be read")
+    # Two different jobs that both attach a clip, and running them together is
+    # not a combination — it is a request with no answer.
+    if inpaint_source is not None and video is not None:
+        raise ValueError(
+            "Head replacement rewrites an existing clip and cannot be combined with a source video"
+        )
+    if video is not None and not video.is_file():
+        raise FileNotFoundError("The source video could not be read")
+    if motion_context is not None and not motion_context.is_file():
+        raise FileNotFoundError("The previous shot's clip could not be read")
+    if motion_context is not None and video is not None:
+        raise ValueError("A motion-context clip seeds a new shot and cannot be combined with a source video")
+    if image is not None and not image.is_file():
+        raise FileNotFoundError("The start image could not be read")
+    if middle is not None and not middle.is_file():
+        raise FileNotFoundError("The middle keyframe image could not be read")
+    if end is not None and not end.is_file():
+        raise FileNotFoundError("The end keyframe image could not be read")
+    missing_ingredient = next(
+        (index for index, item in enumerate(ingredients, start=1) if not item["image_path"].is_file()), None
+    )
+    if missing_ingredient is not None:
+        raise FileNotFoundError(f"Ingredient reference {missing_ingredient} could not be read")
+    if video is None and image is None and not ingredients and not prompt.strip():
+        raise FileNotFoundError("An input image, source video, ingredient reference, or prompt is required")
+    head_swap = task == "head-swap"
+    if video is not None and not head_swap and video_mode != "extend":
+        raise ValueError("video_mode must be extend")
+    if head_swap and (video is None or image is None):
+        raise FileNotFoundError("Head swap needs both a source video and a face image")
+    uploaded_names: list[str] = []
+    try:
+        # Upload each medium under its own name. These used to share one variable,
+        # so a request carrying BOTH (head swap) uploaded only the video and then
+        # passed the video's filename as image_path.
+        uploaded_video_name = _upload_video(descriptor, video) if video is not None else ""
+        if uploaded_video_name:
+            uploaded_names.append(uploaded_video_name)
+        uploaded_motion_context_name = _upload_video(descriptor, motion_context) if motion_context is not None else ""
+        if uploaded_motion_context_name:
+            uploaded_names.append(uploaded_motion_context_name)
+        uploaded_inpaint_source = _upload_video(descriptor, inpaint_source) if inpaint_source is not None else ""
+        if uploaded_inpaint_source:
+            uploaded_names.append(uploaded_inpaint_source)
+        uploaded_inpaint_mask = _upload_image(descriptor, inpaint_mask) if inpaint_mask is not None else ""
+        uploaded_inpaint_mask_video = _upload_video(descriptor, inpaint_mask_video) if inpaint_mask_video is not None else ""
+        if uploaded_inpaint_mask_video:
+            uploaded_names.append(uploaded_inpaint_mask_video)
+        uploaded_image_name = _upload_image(descriptor, image) if image is not None else ""
+        if uploaded_image_name:
+            uploaded_names.append(uploaded_image_name)
+        middle_name = _upload_image(descriptor, middle) if middle is not None else ""
+        if middle_name:
+            uploaded_names.append(middle_name)
+        end_name = _upload_image(descriptor, end) if end is not None else ""
+        if end_name:
+            uploaded_names.append(end_name)
+        reference_names = [_upload_image(descriptor, reference) for reference in references]
+        uploaded_names.extend(name for name in reference_names if name)
+        reference_audio_names = [_upload_audio(descriptor, reference) for reference in audio_references]
+        uploaded_names.extend(name for name in reference_audio_names if name)
+        reference_video_entries = [
+            {
+                "video_path": _upload_video(descriptor, reference["video_path"]),
+                "use_audio": reference["use_audio"],
+                "canvas": reference["canvas"],
+            }
+            for reference in video_references
+        ]
+        uploaded_names.extend(item["video_path"] for item in reference_video_entries if item["video_path"])
+        uploaded_ingredients = []
+        for item in ingredients:
+            name = _upload_image(descriptor, item["image_path"])
+            uploaded_names.append(name)
+            uploaded_ingredients.append({"image_path": name, "description": item["description"]})
+        # An agent lane rarely names a workflow — animate_scenes just asks for
+        # motion. Sending nothing made the backend answer "unknown video
+        # workflow_id: " (an empty id), which machine-private redaction then
+        # flattened to "MediaStudioError" and stalled the whole animation lane
+        # with no way to tell why. Resolve the registry's own default instead.
+        workflow_id = workflow_id or descriptor.workflow_id or default_video_workflow_id()
+        duration = max(1 / 24, min(30.0, float(duration_seconds)))
+        frame_rate = 24
+        frames = _request_frame_count(
+            _workflow_frame_grid(descriptor, workflow_id), duration, frame_rate,
+        )
+        client = _client(descriptor, requester_pub, owner_pub)
+        arguments: dict[str, Any] = {
+            **({"workflow_id": workflow_id} if workflow_id else {}),
+            **({"studio_lane": studio_lane.strip()[:512]} if studio_lane.strip() else {}),
+            **({"run_on": run_on.strip()[:128]} if run_on.strip() else {}),
+            **({"video_path": uploaded_video_name} if video is not None else {}),
+            **({"motion_context_path": uploaded_motion_context_name} if motion_context is not None else {}),
+            **({"video_mode": video_mode} if video is not None and not head_swap else {}),
+            **({"extend_return_tail": True} if extend_return_tail and video is not None and not head_swap else {}),
+            **({"task": task} if task != "generate" else {}),
+            **({"head_swap": True} if head_swap else {}),
+            **({"ingredient_images": uploaded_ingredients} if uploaded_ingredients else {}),
+            **({"image_path": uploaded_image_name} if image is not None else {}),
+            **({"middle_image_path": middle_name} if middle_name else {}),
+            **({"end_image_path": end_name} if end_name else {}),
+            **({"reference_images": [{"image_path": name} for name in reference_names]}
+               if reference_names else {}),
+            **({"reference_audios": [{"audio_path": name} for name in reference_audio_names]}
+               if reference_audio_names else {}),
+            **({"reference_videos": reference_video_entries} if reference_video_entries else {}),
+            **({"source_video_path": uploaded_inpaint_source} if uploaded_inpaint_source else {}),
+            **({"mask_image_path": uploaded_inpaint_mask} if uploaded_inpaint_mask else {}),
+            **({"mask_video_path": uploaded_inpaint_mask_video} if uploaded_inpaint_mask_video else {}),
+            **({"mask_source": mask_source.strip().lower()}
+               if mask_source.strip().lower() in {"manual", "sam3", "sequence"} else {}),
+            # The mask and crop dials, forwarded only where the caller set one so
+            # the workflow's own defaults stay in charge of everything else.
+            **_inpaint_arguments(inpaint_options),
+            # Forward a concrete seed so each run differs; a missing/-1 seed makes the
+            # runner fall back to its FIXED default (42), which is why "every video
+            # looked the same". Callers send a fresh random seed for random mode.
+            **({"seed": int(seed)} if isinstance(seed, int) and seed >= 0 else {}),
+            # Optional post-generation grain cleanup on the native MLX LTX path.
+            **({"denoise": denoise} if denoise in {"light", "strong"} else {}),
+        **({"negative_prompt": negative_prompt.strip()} if negative_prompt.strip() else {}),
+        **({"nag_scale": float(nag_scale)} if nag_scale is not None else {}),
+        # The BFS adapter itself is supplied by the head-swap task server-side;
+        # this is the only part of it a caller sets.
+        **({"head_swap_lora_strength": float(head_swap_lora_strength)}
+           if head_swap and head_swap_lora_strength is not None else {}),
+        **({"head_swap_backend": str(head_swap_backend)} if head_swap and head_swap_backend else {}),
+        **({"head_swap_face_enhancer": True} if head_swap and head_swap_face_enhancer else {}),
+        # Tri-state on purpose: None leaves the workflow's own default alone,
+        # so only an explicit user choice overrides the registered graph.
+        **({"spectrum": bool(spectrum)} if spectrum is not None else {}),
+        # Fast high-res (MiniMax H3 two-pass latent upscale). Tri-state for the
+        # same reason as spectrum: None leaves the registered graph alone.
+        **({"fast_high_res": bool(fast_high_res)} if fast_high_res is not None else {}),
+        # Registry-slot overrides, forwarded through the MCP's `params` record
+        # (argOrDefault reads args.params[key] for every mapped slot). An absent
+        # key keeps the workflow's registered default, and an interpolate under
+        # 2 is no interpolation at all — the compiler lifts the node out — so it
+        # is not worth sending.
+        **_slot_params(steps=steps, interpolate=interpolate),
+        # The h3.c lane's dials. Only what the request actually set: the
+        # gateway resolves everything else from the preset and the machine, and
+        # sending a full bag of nulls would defeat that.
+        **_h3_native_arguments(h3_native_options),
+            "frames": frames,
+            "frame_rate": frame_rate,
+            "duration_seconds": duration,
+            "wait": False,
+            "include_urls": True,
+        }
+        dimensions = (
+            video_dimensions_for_request(image=image, aspect_ratio=aspect_ratio, resolution=resolution)
+            if video is None
+            else None
+        )
+        if dimensions:
+            width, height = dimensions
+            arguments.update({"width": width, "height": height})
+        if prompt.strip():
+            arguments["prompt"] = prompt.strip()
+        if reference_description.strip():
+            arguments["reference_description"] = reference_description.strip()
+        if loras:
+            arguments["loras"] = [
+                {"id": str(item.get("id") or "").strip(), "strength": float(item.get("strength", 1.0))}
+                for item in loras
+                if str(item.get("id") or "").strip()
+            ]
+        queued = _result_json(
+            client.call_tool(
+                descriptor.tool,
+                arguments,
+                # Queueing is not instant and giving up does not cancel it: the
+                # references are staged on the target lane inside this call, and
+                # ComfyUI only answers once its executor is free, so a submit
+                # behind a running render routinely passed the old 30s default.
+                # The studio then reported "timed out" for a job that went on to
+                # render with nobody holding its id. The MCP recovers the id
+                # itself now; this waits long enough to be told about it, while
+                # staying inside the 190s Hivemind Link proxy leg.
+                timeout=_VIDEO_START_TIMEOUT_SECONDS,
+            )
+        )
+        job_id = _job_id(queued)
+        if not job_id:
+            # Surface the backend's real reason instead of an opaque failure — the
+            # tool answered but with no job id, which almost always carries an
+            # error/status field explaining why (bad workflow, model not ready…).
+            reason = ""
+            failure = None
+            if isinstance(queued, dict):
+                job = queued.get("job") if isinstance(queued.get("job"), dict) else {}
+                reason = str(
+                    queued.get("error")
+                    or queued.get("detail")
+                    or queued.get("message")
+                    or job.get("error")
+                    or _generation_status(queued)
+                    or ""
+                ).strip()[:400]
+                # The MCP classifies a refusal it can name without naming the
+                # work (a missing custom node, a graph the lane's models cannot
+                # validate) and sends the classification alongside, redacted or
+                # not. It is identifiers only, so it is kept and recorded.
+                failure = safe_failure(queued.get("failure"))
+            hint = failure_hint(failure)
+            if hint:
+                # The classification has a sentence of its own that already
+                # names the fix; it beats both a raw ComfyUI body and the
+                # "redacted" fallback below.
+                raise MediaStudioStartError(hint, failure=failure)
+            if reason in {"", "MediaStudioError"}:
+                # The backend runs machine-private, which redacts a job-specific
+                # failure down to its class name. That is right for a shared
+                # machine and useless to the owner staring at it, so say where
+                # the real reason is instead of repeating the class name.
+                reason = (
+                    "the backend redacted the reason (machine-private mode). "
+                    "Re-run with MEDIA_STUDIO_MCP_MACHINE_PRIVATE=0 on the gateway, "
+                    "or read the gateway log, to see which workflow or input it refused"
+                )
+            raise MediaStudioStartError(f"Media Studio did not return a job id: {reason}", failure=failure)
+        return {"job_id": job_id, "uploaded_names": list(uploaded_names), "provider": descriptor.app_name}
+    except BaseException:
+        for uploaded_name in uploaded_names:
+            with contextlib.suppress(Exception):
+                _delete_uploaded_image(descriptor, uploaded_name)
+        raise
+
+
+def _looks_like_e2e_envelope(path: Path) -> bool:
+    """True when a downloaded 'video' is actually the gateway's client-only E2E
+    envelope (JSON sealed to the owner vault): this process holds no key for it."""
+    try:
+        with path.open("rb") as handle:
+            if handle.read(1) != b"{":
+                return False
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return bool(payload.get("wrapped_dek")) and bool(payload.get("ciphertext"))
+
+
+def _job_step_counts(payload: Any) -> tuple[int | None, int | None]:
+    candidates = (payload, payload.get("job"), payload.get("result")) if isinstance(payload, dict) else ()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        step, total = candidate.get("progress_step"), candidate.get("progress_total")
+        if isinstance(step, int) and isinstance(total, int) and total > 0:
+            return max(0, min(step, total)), total
+    return None, None
+
+
+def _job_progress(payload: Any) -> float | None:
+    """A fraction 0..1 from a job record whose `progress` is a PERCENT.
+
+    The media gateway writes 0-100 everywhere it reports progress at all —
+    `graphs.poll_local_comfy_progress`, `graphs.poll_swift_flux2_progress`,
+    every phase marker in `native_mlx.py`. This clamped into [0, 1] instead of
+    dividing, so the FIRST reading of any run arrived as 1.0: 5% into an LTX
+    render, 12% into a Z-Image one, the studio's bar jumped to its cap and sat
+    there for the rest of the job. Reported on an LTX 2.3 IC-LoRA run showing
+    99% at six seconds with 2:35 still to go.
+    """
+    candidates = (payload, payload.get("job"), payload.get("result")) if isinstance(payload, dict) else ()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        value = candidate.get("progress")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        return max(0.0, min(1.0, float(value) / 100.0))
+    return None
+
+
+_TERMINAL_STATUS_RE = re.compile(r"\b(success|succeeded|complete|completed|error|failed|cancelled|canceled|running|queued)\b")
+
+
+def check_video(job_id: str, *, requester_pub: str = "", owner_pub: str = "") -> dict[str, Any]:
+    """One non-blocking status poll for a started job.
+
+    The key must be the SAME one the job was started with: the gateway scopes
+    reads on a keyed job to its requester, so polling as anyone else answers as
+    though the job did not exist."""
+    descriptor = _required_descriptor()
+    client = _client(descriptor, requester_pub, owner_pub)
+    payload = _result_json(client.call_tool(descriptor.job_tool, {"id": job_id, "include_urls": True}))
+
+    cached: dict[str, Any] = {}
+
+    def private_job() -> dict[str, Any]:
+        """The gateway's own record, over the trusted channel. MCP receipts are
+        machine-redacted (no progress, no error, no URLs), and for a prompt on a
+        remote lane the MCP has nothing at all until the job ends — it answers
+        404 for the entire generation. This is what the studio actually runs on."""
+        if not cached:
+            with contextlib.suppress(Exception):
+                cached.update(_private_json(descriptor, f"/api/job/{quote(job_id, safe='')}", requester_pub) or {})
+        return cached
+
+    status = _generation_status(payload)
+    if not _TERMINAL_STATUS_RE.search(status):
+        # e.g. the MCP's '404' for an in-flight remote prompt.
+        status = _generation_status(private_job()) or status
+    failed = bool(re.search(r"\b(error|failed|cancelled|canceled)\b", status))
+    error = ""
+    if failed:
+        error = _generation_error(payload) or _generation_error(private_job())
+        if not error:
+            with contextlib.suppress(Exception):
+                error = _comfy_history_error(
+                    _private_json(descriptor, f"/comfy/api/history/{quote(job_id, safe='')}")
+                )
+    video_url = _first_video_url(payload)
+    if not video_url and re.search(r"\b(success|succeeded|complete|completed)\b", status):
+        with contextlib.suppress(Exception):
+            video_url = _private_video_url(descriptor, job_id)
+    progress = _job_progress(payload)
+    if progress is None:
+        progress = _job_progress(private_job())
+    state = {
+        "status": status or "running",
+        "failed": failed,
+        "error": error,
+        "video_url": video_url,
+        "progress": progress,
+    }
+    # Step counters when the backend has them: a bar that says "step 6 of 15"
+    # is legible in a way a percentage alone is not, especially across the
+    # long tail after the last step where the bar stops moving.
+    step, total = _job_step_counts(private_job())
+    if step is not None and total:
+        state["progress_step"], state["progress_total"] = step, total
+    # Waiting for the machine's one GPU slot rather than rendering. Passed on so
+    # the studio can say how many renders are ahead instead of showing a bar
+    # that never moves.
+    with contextlib.suppress(TypeError, ValueError):
+        position = private_job().get("queue_position")
+        if position is not None and int(position) > 0:
+            state["queue_position"] = int(position)
+    return state
+
+
+def video_job_record(job_id: str, *, requester_pub: str = "") -> dict[str, Any] | None:
+    """The gateway's own record for a job, or None when it knows nothing of it.
+
+    check_video() is deliberately optimistic — a status it cannot read defaults
+    to "running" — which is right while a job is in flight and wrong as an
+    answer to "is anything still working on this?". This is that second
+    question, and the gateway answers it honestly: /api/job/<id> serves the
+    live record, falls back to history (where an interrupted job is written at
+    shutdown), and synthesises a record for a prompt routed to a remote lane,
+    so an empty answer means no lane, no watcher and no history entry — nothing
+    is rendering it. Used to re-adopt a job after a studio restart, and to stop
+    polling a backend that has forgotten it.
+    """
+    descriptor = discover_media_studio()
+    if descriptor is None:
+        return None
+    try:
+        record = _private_json(descriptor, f"/api/job/{quote(job_id, safe='')}", requester_pub)
+    except (RuntimeError, OSError):
+        return None
+    return record if isinstance(record, dict) and record else None
+
+
+def finish_video(
+    job_id: str,
+    *,
+    uploaded_names: list[str] | None = None,
     output_dir: str | Path | None = None,
     poll_interval_seconds: float = 6,
-    max_polls: int = 90,
+    # 3 hours at the default interval. This is a backstop, not an estimate: a
+    # failed job is reported by check_video long before it, so the only thing
+    # the cap can do is give up on a job that is still rendering. It did
+    # exactly that at 45 minutes on 2026-08-22 — a 32-step refinement run of a
+    # 208k-row H3 reference job on a rented RTX PRO 6000 (16 real steps at
+    # ~216 s each ≈ 62 min) was declared failed by the studio while the box
+    # finished it; the clip reached History anyway. Multi-reference runs on a
+    # 96 GB card can take longer still.
+    max_polls: int = 1800,
+    requester_pub: str = "",
+    owner_pub: str = "",
 ) -> dict[str, Any]:
+    """Wait for a started job to complete, then download + QA the result and
+    delete the uploaded inputs from the gateway."""
     descriptor = _required_descriptor()
-    image = Path(image_path).expanduser().resolve()
-    if not image.is_file():
-        raise FileNotFoundError(f"Input image not found: {image}")
-    width, height = _video_dimensions(image)
-    uploaded_name = _upload_image(descriptor, image)
-    duration = max(1.0, min(30.0, float(duration_seconds)))
-    frame_rate = 24
-    frames = max(9, min(721, round(duration * frame_rate) + 1))
-    client = _client(descriptor)
-    queued = _result_json(
+    try:
+        video_url = ""
+        for index in range(max_polls):
+            state = check_video(job_id, requester_pub=requester_pub, owner_pub=owner_pub)
+            if state["failed"]:
+                raise RuntimeError(state["error"] or "Media Studio reported a failed generation")
+            if state["video_url"]:
+                video_url = state["video_url"]
+                break
+            if index < max_polls - 1:
+                time.sleep(max(0.1, poll_interval_seconds))
+        if not video_url:
+            hours = max_polls * max(0.1, poll_interval_seconds) / 3600
+            raise TimeoutError(
+                "Media Studio did not return a finished video before the poll limit "
+                f"({hours:.1f} h) — the machine may still be rendering it; a finished clip lands in History "
+                "without this wait"
+            )
+
+        reachable_url = _rewrite_local_url(video_url, descriptor.upload_base)
+        destination_root = Path(output_dir).expanduser().resolve() if output_dir else load_config().data_dir / "generated" / "media-studio"
+        destination_root.mkdir(parents=True, exist_ok=True)
+        destination = destination_root / f"media-studio-{job_id}-{int(time.time())}.mp4"
+        local_token = _token(descriptor) if _same_origin(reachable_url, descriptor.upload_base) else ""
+        _download(reachable_url, destination, token=local_token)
+        # The size of what came back, for telemetry: it is the one fact about
+        # the output that says "a real clip" versus "nothing" without being
+        # the output (or its name) — see studio_telemetry.
+        output_bytes = 0
+        with contextlib.suppress(OSError):
+            output_bytes = destination.stat().st_size
+        if _looks_like_e2e_envelope(destination):
+            # The gateway sealed the output to the owner vault and served the
+            # envelope. Server-side QA and a local re-encrypted copy are
+            # impossible BY DESIGN — return the gateway output name so the
+            # studio proxies the envelope and the browser decrypts it.
+            with contextlib.suppress(OSError):
+                destination.unlink()
+            return {
+                "job_id": job_id,
+                "provider": descriptor.app_name,
+                "gateway_output": Path(urlparse(video_url).path).name,
+                "output_bytes": output_bytes,
+                "qa": {"ok": True, "visual_inspection_required": True},
+            }
+        qa = qa_video(destination, output_dir=destination_root / "qa", require_audio=False)
+        qa = _remove_qa_frame(qa, destination_root)
+        if not qa["ok"]:
+            raise RuntimeError("Media Studio output failed technical QA: " + "; ".join(qa["failures"]))
+        return {
+            "job_id": job_id, "output": str(destination), "output_bytes": output_bytes, "qa": qa,
+            "provider": descriptor.app_name,
+        }
+    finally:
+        for uploaded_name in (uploaded_names or []):
+            with contextlib.suppress(Exception):
+                _delete_uploaded_image(descriptor, uploaded_name)
+
+
+def cancel_video(job_id: str, *, requester_pub: str = "", owner_pub: str = "") -> dict[str, Any]:
+    """Ask the backend to stop a running video job, and report how far that got.
+
+    Two different facts come back, and conflating them is what made cancelling
+    feel broken:
+      interrupted — the backend ACCEPTED the request to stop.
+      stopped     — the job is verifiably no longer holding the backend.
+
+    A Comfy prompt inside a long non-interruptible stretch (loading a video
+    model) stays on the GPU until it reaches a checkpoint, so `interrupted`
+    can be True while `stopped` is False for minutes. The next generation
+    queues behind it during that window, which the caller needs to be able to
+    say out loud rather than reporting a clean cancel.
+    """
+    unavailable = {"interrupted": False, "stopped": False, "backend_state": None}
+    descriptor = discover_media_studio()
+    if descriptor is None:
+        return dict(unavailable)
+    token = _token(descriptor)
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    headers.update(_requester_headers(requester_pub))
+    base = descriptor.upload_base.rstrip("/")
+    for path in (f"/api/job/{quote(job_id, safe='')}/cancel", f"/api/cancel/{quote(job_id, safe='')}"):
+        try:
+            request = urllib.request.Request(f"{base}{path}", data=b"{}", method="POST", headers=headers)
+            # Longer than the gateway's own verification window, so the honest
+            # "did it actually stop" answer gets back instead of timing out and
+            # being reported as a failed cancel.
+            with urllib.request.urlopen(request, timeout=30) as response:
+                if not 200 <= int(getattr(response, "status", 200)) < 300:
+                    continue
+                try:
+                    payload = json.loads(response.read().decode("utf-8") or "{}")
+                except Exception:
+                    return {"interrupted": True, "stopped": True, "backend_state": None}
+                if not isinstance(payload, dict):
+                    return {"interrupted": True, "stopped": True, "backend_state": None}
+                # Older gateways answer with a bare 200 and no `stopped` field;
+                # only a reply that explicitly says nothing happened counts as
+                # False, and an unstated `stopped` follows `interrupted` so an
+                # old backend keeps behaving exactly as it used to.
+                interrupted = bool(payload.get("interrupted", True))
+                return {
+                    "interrupted": interrupted,
+                    "stopped": bool(payload.get("stopped", interrupted)),
+                    "backend_state": payload.get("backend_state"),
+                }
+        except Exception:
+            continue
+    return dict(unavailable)
+
+
+def generate_video(
+    *,
+    image_path: str | Path | None = None,
+    middle_image_path: str | Path | None = None,
+    end_image_path: str | Path | None = None,
+    video_path: str | Path | None = None,
+    motion_context_path: str | Path | None = None,
+    video_mode: str = "extend",
+    # Hand back only the frames the extension ADDED, not the source it grew.
+    # `video_mode` says how the source clip is used; this says what comes back.
+    # A sequence wants one shot per press; the standalone "extend this clip"
+    # surface wants the grown clip, and is the default.
+    extend_return_tail: bool = False,
+    task: str = "generate",
+    prompt: str,
+    reference_description: str = "",
+    ingredient_images: list[dict[str, Any]] | None = None,
+    reference_images: list[str | Path] | None = None,
+    reference_audios: list[str | Path] | None = None,
+    reference_videos: list[dict[str, Any]] | None = None,
+    # Head replacement (workflow minimax-h3-inpaint). The clip BEING INPAINTED,
+    # which is neither a source video (that means "extend this shot") nor a
+    # reference (that is conditioning): its pixels outside the mask, and its
+    # whole soundtrack, are what the result is made of. `mask_image_path` is the
+    # hand-painted region, white where the head is replaced; with
+    # mask_source="sam3" it is unused and the subject is tracked instead.
+    source_video_path: str | Path | None = None,
+    mask_image_path: str | Path | None = None,
+    mask_video_path: str | Path | None = None,
+    mask_source: str = "",
+    inpaint_options: dict[str, Any] | None = None,
+    duration_seconds: float = 4,
+    aspect_ratio: str = "",
+    resolution: str = "",
+    workflow_id: str | None = None,
+    studio_lane: str = "",
+    run_on: str = "",
+    loras: list[dict[str, Any]] | None = None,
+    head_swap_lora_strength: float | None = None,
+    head_swap_backend: str | None = None,
+    head_swap_face_enhancer: bool = False,
+    output_dir: str | Path | None = None,
+    poll_interval_seconds: float = 6,
+    # 3 hours at the default interval (see finish_video): 45 minutes was set
+    # for high-resolution LTX and lost a 62-minute PRO 6000 H3 run live.
+    max_polls: int = 1800,
+    spectrum: bool | None = None,
+    fast_high_res: bool | None = None,
+    steps: int | None = None,
+    interpolate: int | None = None,
+    requester_pub: str = "",
+) -> dict[str, Any]:
+    started = start_video(
+        requester_pub=requester_pub,
+        task=task,
+        image_path=image_path,
+        middle_image_path=middle_image_path,
+        end_image_path=end_image_path,
+        video_path=video_path,
+        motion_context_path=motion_context_path,
+        video_mode=video_mode,
+        extend_return_tail=extend_return_tail,
+        prompt=prompt,
+        reference_description=reference_description,
+        ingredient_images=ingredient_images,
+        reference_images=reference_images,
+        reference_audios=reference_audios,
+        reference_videos=reference_videos,
+        source_video_path=source_video_path,
+        mask_image_path=mask_image_path,
+        mask_video_path=mask_video_path,
+        mask_source=mask_source,
+        inpaint_options=inpaint_options,
+        duration_seconds=duration_seconds,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+        workflow_id=workflow_id,
+        studio_lane=studio_lane,
+        run_on=run_on,
+        loras=loras,
+        head_swap_lora_strength=head_swap_lora_strength,
+        head_swap_backend=head_swap_backend,
+        head_swap_face_enhancer=head_swap_face_enhancer,
+        spectrum=spectrum,
+        fast_high_res=fast_high_res,
+        steps=steps,
+        interpolate=interpolate,
+    )
+    return finish_video(
+        started["job_id"],
+        uploaded_names=started["uploaded_names"],
+        output_dir=output_dir,
+        poll_interval_seconds=poll_interval_seconds,
+        max_polls=max_polls,
+        requester_pub=requester_pub,
+    )
+
+
+def generate_image(
+    *,
+    prompt: str,
+    workflow_id: str | None = None,
+    backend: str = "",
+    width: int | None = None,
+    height: int | None = None,
+    aspect_ratio: str = "",
+    resolution: str = "",
+    negative_prompt: str = "",
+    seed: int | None = None,
+    steps: int | None = None,
+    loras: list[dict[str, Any]] | None = None,
+    image_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    timeout_seconds: float = 180,
+    poll_interval_seconds: float = 4,
+    max_polls: int = 150,
+    requester_pub: str = "",
+) -> dict[str, Any]:
+    """Render one still through the Media Studio MCP and return its local path.
+
+    The video tools split start/check/finish because a clip can run for tens of
+    minutes. A still does not need that: the MCP can wait on the job itself, so
+    the common case is one call. `timeout_seconds` stays inside the 190s
+    Hivemind Link proxy leg, and anything still running when the wait returns
+    falls back to polling `media_get_job` the same way check_video does — a
+    cold local model loading weights is slow once, not broken.
+    """
+    if not str(prompt or "").strip():
+        raise ValueError("Image generation requires a prompt")
+    descriptor = _required_descriptor()
+    client = _client(descriptor, requester_pub)
+
+    # "workflow-default" is a catalog placeholder, not a registered workflow id;
+    # forwarding it makes the MCP reject the job (same trap as start_video).
+    if str(workflow_id or "").strip().lower() == "workflow-default":
+        workflow_id = None
+
+    arguments: dict[str, Any] = {
+        "prompt": str(prompt).strip(),
+        "wait": True,
+        "timeout_s": int(max(1, min(1800, timeout_seconds))),
+        "include_urls": True,
+    }
+    if workflow_id:
+        arguments["workflow_id"] = str(workflow_id).strip()
+    if backend.strip():
+        arguments["backend"] = backend.strip()
+    dimensions = (width, height) if width and height else image_dimensions_for_request(
+        aspect_ratio=aspect_ratio, resolution=resolution
+    )
+    if dimensions:
+        arguments["width"], arguments["height"] = int(dimensions[0]), int(dimensions[1])
+    if negative_prompt.strip():
+        arguments["negative_prompt"] = negative_prompt.strip()[:2000]
+    if isinstance(seed, int):
+        arguments["seed"] = seed
+    if isinstance(steps, int) and steps > 0:
+        arguments["steps"] = steps
+    if image_path:
+        arguments["image_path"] = str(Path(image_path).expanduser().resolve())
+    if loras:
+        arguments["loras"] = [
+            {"id": str(item.get("id") or "").strip(), "strength": float(item.get("strength", 1.0))}
+            for item in loras
+            if str(item.get("id") or "").strip()
+        ]
+
+    payload = _result_json(
         client.call_tool(
-            descriptor.tool,
-            {
-                **({"workflow_id": workflow_id or descriptor.workflow_id} if workflow_id or descriptor.workflow_id else {}),
-                "image_path": uploaded_name,
-                "prompt": prompt.strip(),
-                "width": width,
-                "height": height,
-                "frames": frames,
-                "frame_rate": frame_rate,
-                "wait": False,
-                "include_urls": True,
-            },
+            os.environ.get("MEDIA_STUDIO_IMAGE_TOOL", "media_generate_image").strip(),
+            arguments,
+            timeout=_VIDEO_START_TIMEOUT_SECONDS,
         )
     )
-    job_id = _job_id(queued)
-    if not job_id:
-        raise RuntimeError("Media Studio did not return a job id")
-    payload = queued
-    video_url = _first_video_url(payload)
-    for _ in range(max_polls):
-        if video_url:
-            break
-        time.sleep(max(0.1, poll_interval_seconds))
-        payload = _result_json(client.call_tool(descriptor.job_tool, {"id": job_id, "include_urls": True}))
-        video_url = _first_video_url(payload)
-        status = str(payload.get("status") or payload.get("state") or "").lower()
-        if re.search(r"\b(error|failed|cancelled|canceled)\b", status):
-            raise RuntimeError("Media Studio reported a failed generation")
-    if not video_url:
-        raise TimeoutError("Media Studio did not return a finished video before the poll limit")
+    job_id = _job_id(payload)
+    image_url = _first_image_url(payload)
 
-    reachable_url = _rewrite_local_url(video_url, descriptor.upload_base)
-    destination_root = Path(output_dir).expanduser().resolve() if output_dir else load_config().data_dir / "generated" / "media-studio"
+    if not image_url and job_id:
+        for index in range(max_polls):
+            state = _result_json(client.call_tool(descriptor.job_tool, {"id": job_id, "include_urls": True}))
+            status = _generation_status(state)
+            if re.search(r"\b(error|failed|cancelled|canceled)\b", status):
+                raise RuntimeError(_generation_error(state) or "Media Studio reported a failed image generation")
+            image_url = _first_image_url(state)
+            if not image_url and re.search(r"\b(success|succeeded|complete|completed)\b", status):
+                with contextlib.suppress(Exception):
+                    image_url = _private_image_url(descriptor, job_id)
+            if image_url:
+                break
+            if index < max_polls - 1:
+                time.sleep(max(0.1, poll_interval_seconds))
+    if not image_url and job_id:
+        with contextlib.suppress(Exception):
+            image_url = _private_image_url(descriptor, job_id)
+    if not image_url:
+        raise TimeoutError("Media Studio did not return a finished image before the poll limit")
+
+    reachable_url = _rewrite_local_url(image_url, descriptor.upload_base)
+    destination_root = (
+        Path(output_dir).expanduser().resolve()
+        if output_dir
+        else load_config().data_dir / "generated" / "media-studio"
+    )
     destination_root.mkdir(parents=True, exist_ok=True)
-    destination = destination_root / f"media-studio-{job_id}-{int(time.time())}.mp4"
-    _download(reachable_url, destination)
-    qa = qa_video(destination, output_dir=destination_root / "qa")
-    if not qa["ok"]:
-        raise RuntimeError("Media Studio output failed technical QA: " + "; ".join(qa["failures"]))
-    return {"job_id": job_id, "output": str(destination), "qa": qa, "provider": descriptor.app_name}
+    suffix = Path(urlparse(reachable_url).path).suffix.lower() or ".png"
+    destination = destination_root / f"media-studio-{job_id or 'image'}-{int(time.time())}{suffix}"
+    local_token = _token(descriptor) if _same_origin(reachable_url, descriptor.upload_base) else ""
+    _download(reachable_url, destination, token=local_token)
+    if _looks_like_e2e_envelope(destination):
+        # Sealed to a vault this process holds no key for. Unlike a video result,
+        # there is no useful degraded mode here: the caller wants the pixels.
+        with contextlib.suppress(OSError):
+            destination.unlink()
+        raise RuntimeError(
+            "Media Studio sealed this image to an end-to-end vault, so the server cannot read it. "
+            "Generate with the requester key that owns the run, or disable sealing for this lane."
+        )
+    return {
+        "job_id": job_id,
+        "output": str(destination),
+        "provider": descriptor.app_name,
+        "model": str(workflow_id or backend or ""),
+    }
 
 
-def _client(descriptor: MediaStudioDescriptor) -> McpHttpClient:
+def _remove_qa_frame(qa: dict[str, Any], destination_root: Path) -> dict[str, Any]:
+    sanitized = dict(qa)
+    raw = sanitized.get("representative_frame")
+    if raw:
+        frame = Path(str(raw)).expanduser().resolve()
+        qa_root = (destination_root / "qa").resolve()
+        if frame.is_relative_to(qa_root):
+            with contextlib.suppress(FileNotFoundError):
+                frame.unlink()
+            with contextlib.suppress(OSError):
+                frame.parent.rmdir()
+    sanitized["representative_frame"] = None
+    return sanitized
+
+
+def _delete_uploaded_image(descriptor: MediaStudioDescriptor, name: str) -> None:
+    body = json.dumps({"filename": Path(name).name}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _token(descriptor)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        f"{descriptor.upload_base}/api/delete-input",
+        data=body,
+        method="POST",
+        headers=headers,
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if response.status >= 400:
+            raise RuntimeError(f"Media Studio private input cleanup failed with HTTP {response.status}")
+
+
+# base64url DER SPKI, mirroring the gateway's validator. A malformed key is
+# dropped here rather than travelling on to be rejected at the far end.
+_SPKI_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]{100,4000}$")
+
+
+def normalized_requester_pub(value: str | None) -> str:
+    text = str(value or "").strip()
+    return text if _SPKI_B64URL_RE.match(text) else ""
+
+
+def _requester_headers(requester_pub: str = "") -> dict[str, str]:
+    """The caller's own E2E public key, forwarded verbatim.
+
+    This is what makes a generation belong to the browser that asked for it:
+    the MCP sidecar and gateway seal remote outputs to the presented key, and
+    scope status reads on a keyed job to the same presenter. Omitting it means
+    "seal to whoever this process is", which for a browser-initiated job is the
+    wrong identity entirely.
+    """
+    pub = normalized_requester_pub(requester_pub)
+    return {"X-E2E-Requester-Pub": pub} if pub else {}
+
+
+# The signed-in account's vault public key, resolved per request.
+#
+# The gateway seals harvested media to whoever asked for it, and until now that
+# was ONLY the browser's device key — a non-extractable, origin-scoped key the
+# browser may evict without warning. Fifteen of the owner's clips were lost that
+# way. The vault has to be a second recipient, and the gateway cannot work out
+# which vault: it knows one path, this process knows the scoped account. So the
+# control API installs a provider here and every gateway call carries the answer.
+_owner_spki_provider: Any = None
+
+
+def set_owner_spki_provider(provider) -> None:
+    """Install the callable that returns the scoped account's vault SPKI."""
+    global _owner_spki_provider
+    _owner_spki_provider = provider
+
+
+def current_owner_spki() -> str:
+    """The signed-in account's vault public key, resolved through the provider.
+
+    Callable only inside a request — the provider reads the account in scope.
+    A background task must therefore CAPTURE this at start and carry it, the
+    way the job entry already carries `requester_pub`; asking again from a
+    finisher answers "" and the gateway falls back to whichever account is
+    is_owner on the machine, which is how a workspace-2 user's video came back
+    sealed to workspace 1 (2026-09-12).
+    """
+    provider = _owner_spki_provider
+    if provider is None:
+        return ""
+    try:
+        return normalized_requester_pub(provider() or "")
+    except Exception:
+        return ""
+
+
+def _owner_headers(owner_pub: str = "") -> dict[str, str]:
+    """`X-E2E-Owner-Pub` for the account in scope, or nothing.
+
+    Never raises and never blocks a generation: an account with no vault yet, or
+    a caller outside a request, simply gets no header and the old single-recipient
+    behaviour — which is worse, but is not a reason to refuse to generate.
+    """
+    # An explicitly carried key wins: it is the one the request that STARTED
+    # this job resolved, and it is the only thing a background finisher has.
+    pub = normalized_requester_pub(owner_pub or "") or current_owner_spki()
+    if not pub:
+        # Whose vault seals the output is decided here. Silence at this point is
+        # how a workspace's clips end up sealed to a different account, so it is
+        # said out loud rather than shrugged off.
+        # Name the caller. "Something left without a key" is not actionable;
+        # "start_video left without a key" versus "the background finisher did"
+        # are different bugs with different fixes, and reading the wrong one
+        # cost an afternoon.
+        import traceback
+        callers = " <- ".join(
+            frame.name for frame in reversed(traceback.extract_stack(limit=6)[:-1])
+        )
+        print(
+            "[e2e-media] media-studio call is leaving with NO X-E2E-Owner-Pub "
+            f"(caller: {callers}): no key was carried and no account is in "
+            "scope. The gateway will fall back to this machine's default vault.",
+            file=sys.stderr, flush=True,
+        )
+    return {"X-E2E-Owner-Pub": pub} if pub else {}
+
+
+def _client(descriptor: MediaStudioDescriptor, requester_pub: str = "", owner_pub: str = "") -> McpHttpClient:
     token = _token(descriptor)
     if descriptor.auth_env_key and not token:
         raise RuntimeError(f"Missing {descriptor.auth_env_key} for Media Studio")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers.update(_requester_headers(requester_pub))
+    headers.update(_owner_headers(owner_pub))
     return McpHttpClient(descriptor.mcp_url, headers=headers)
 
 
@@ -179,24 +1257,233 @@ def _required_descriptor() -> MediaStudioDescriptor:
 
 
 def _token(descriptor: MediaStudioDescriptor) -> str:
-    return os.environ.get(descriptor.auth_env_key, "").strip() if descriptor.auth_env_key else ""
+    if not descriptor.auth_env_key:
+        return ""
+    direct = os.environ.get(descriptor.auth_env_key, "").strip()
+    if direct:
+        return direct
+    if descriptor.auth_env_key in {"MEDIA_STUDIO_TOKEN", "ZIMG_TOKEN"}:
+        return local_gateway_token()
+    return ""
+
+
+def local_gateway_token() -> str:
+    """The loopback secret this machine's studio shares with its own services.
+
+    The gateway on 8787 holds it, the Canvas surface and the local-inference
+    bridge both accept it, and the control API presents it when it proxies to
+    either of them. One value, read from the same file every one of those reads.
+
+    This token is not a credential anyone issues — it is a local secret shared
+    between the studio and its own gateway, and the only thing that ever created
+    one was a one-off migration script. So a machine that never ran that
+    migration had no token, the gateway read "", and the entirely LOCAL image
+    and video lanes reported themselves unavailable. Mint it here instead of
+    asking the user for a secret that is ours to generate.
+    """
+    for path in _token_paths():
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return _provision_gateway_token()
+
+
+def _provision_gateway_token() -> str:
+    """Create the local gateway token if this machine has none.
+
+    Exclusive-create, so two processes racing at first launch end with one token
+    rather than two halves of a handshake.
+    """
+    candidates = _token_paths()
+    if not candidates:
+        return ""
+    path = candidates[-1]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileExistsError):
+            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write(secrets.token_urlsafe(48) + "\n")
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def _reachable(url: str, token: str) -> bool:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    request = urllib.request.Request(url, method="GET", headers=headers)
+    if token:
+        headers.update({
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": PROTOCOL_VERSION,
+        })
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "hivemind-content-studio", "version": "0.1.0"},
+            },
+        }).encode("utf-8")
+        request = urllib.request.Request(url, data=body, method="POST", headers=headers)
+    else:
+        request = urllib.request.Request(url, method="GET", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=3) as response:
             return response.status < 500
     except urllib.error.HTTPError as exc:
-        return exc.code < 500
+        return exc.code < 500 and exc.code not in {401, 403}
     except OSError:
         return False
 
 
+# The head-replacement dials, as a whitelist with the range each one means.
+#
+# A whitelist rather than a passthrough because this dict arrives from the
+# browser: an unknown key would reach the MCP as an unknown argument and be
+# refused there, where the message is redacted and reads as a generic failure.
+# Clamped rather than rejected for the same reason a slider has ends — every
+# value in range is a legal choice, and the workflow's own default covers the
+# ones nobody set, which is why an unset dial is OMITTED rather than defaulted
+# here (two places holding the same default is one place to forget).
+_INPAINT_NUMERIC_DIALS: dict[str, tuple[type, float, float]] = {
+    "sam3_detection_threshold": (float, 0.05, 0.95),
+    "sam3_max_objects": (int, 0, 64),
+    "sam3_detect_interval": (int, 1, 64),
+    "mask_expand": (int, -512, 512),
+    "mask_feather": (int, 0, 256),
+    "mask_despeckle": (int, 0, 256),
+    "mask_temporal_expand": (int, 0, 64),
+    # 0 means "no crop, the whole frame"; below 1 would be a window smaller than
+    # the subject, which the node refuses. Checked, not clamped, so the refusal
+    # can say what the number means.
+    "crop_scale": (float, 0, 4),
+    "crop_megapixels": (float, 0.1, 2),
+    "paste_expand": (int, -512, 512),
+    "paste_feather": (int, 0, 256),
+    "paste_edge_feather": (int, 0, 256),
+}
+_INPAINT_CROP_MODES = ("combined", "tracked", "zoomed")
+
+
+def _inpaint_arguments(options: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(options, dict):
+        return {}
+    arguments: dict[str, Any] = {}
+    for key, (kind, low, high) in _INPAINT_NUMERIC_DIALS.items():
+        if options.get(key) is None:
+            continue
+        try:
+            value = kind(options[key])
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number") from None
+        if key == "crop_scale" and 0 < value < 1:
+            raise ValueError(
+                "crop_scale is a multiple of the subject's own extent: 0 for the whole frame, "
+                "or 1.0-4.0 to crop around it"
+            )
+        arguments[key] = max(low, min(high, value))
+    prompt = str(options.get("sam3_prompt") or "").strip()
+    if prompt:
+        arguments["sam3_prompt"] = prompt[:200]
+    indices = str(options.get("sam3_object_indices") or "").strip()
+    if indices:
+        arguments["sam3_object_indices"] = indices[:100]
+    crop_mode = str(options.get("crop_mode") or "").strip().lower()
+    if crop_mode:
+        if crop_mode not in _INPAINT_CROP_MODES:
+            raise ValueError(f"crop_mode must be one of {', '.join(_INPAINT_CROP_MODES)}")
+        arguments["crop_mode"] = crop_mode
+    return arguments
+
+
+# The h3.c dials and their engine ranges (h3.c: h3_valid_params). Values are
+# clamped rather than refused: every one is a speed/fidelity trade with no
+# cliff, so the nearest legal setting is what the caller meant.
+_H3_NATIVE_NUMERIC_DIALS = {
+    "steps": (int, 2, 1000),
+    "layers": (int, 35, 50),
+    "reuse": (int, 1, 3),
+    "core_reuse": (int, 1, 6),
+    "render_scale": (float, 0.25, 1.0),
+}
+_H3_NATIVE_SWITCHES = ("token_reduction", "ssd_streaming", "int8_row_fc2")
+_H3_NATIVE_PRESETS = ("draft", "fast", "balanced", "reference")
+
+
+def _slot_params(*, steps: int | None = None, interpolate: int | None = None) -> dict[str, Any]:
+    """The registry-slot overrides a request actually set, as the MCP's own
+    `params` record.
+
+    The MCP reads every mapped slot through argOrDefault(args, defaults, key),
+    which looks in args.params before falling back to the workflow's registered
+    default — so this is the one channel a slot override travels on, and an
+    absent key is what leaves the registered graph alone.
+
+    A `params` record with no keys is dropped rather than sent empty: the two
+    mean the same thing to the compiler, and the noisier one shows up in every
+    recorded request.
+    """
+    params: dict[str, Any] = {}
+    if isinstance(steps, int) and steps > 0:
+        params["steps"] = int(steps)
+    # Below 2 there is nothing to interpolate: the compiler bypasses the node
+    # and prunes its model loader, which is exactly what sending nothing does.
+    if isinstance(interpolate, int) and interpolate >= 2:
+        params["interpolate"] = int(interpolate)
+    return {"params": params} if params else {}
+
+
+def _h3_native_arguments(options: dict[str, Any] | None) -> dict[str, Any]:
+    """The MiniMax H3 (Apple Silicon) dials a request actually set.
+
+    Returns at most one key, `h3_native`, so the MCP's schema sees the whole
+    lane's settings as the single object it declares. An empty bag is dropped
+    entirely: "no dials" and "every dial at its default" reach the gateway the
+    same way, which is what lets the machine's own recommendation apply.
+    """
+    if not isinstance(options, dict):
+        return {}
+    dials: dict[str, Any] = {}
+    preset = str(options.get("preset") or "").strip().lower()
+    if preset:
+        if preset not in _H3_NATIVE_PRESETS:
+            raise ValueError(f"preset must be one of {', '.join(_H3_NATIVE_PRESETS)}")
+        dials["preset"] = preset
+    for key, (kind, low, high) in _H3_NATIVE_NUMERIC_DIALS.items():
+        if options.get(key) is None:
+            continue
+        try:
+            value = kind(options[key])
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number") from None
+        dials[key] = max(low, min(high, value))
+    for key in _H3_NATIVE_SWITCHES:
+        if isinstance(options.get(key), bool):
+            dials[key] = options[key]
+    return {"h3_native": dials} if dials else {}
+
+
 def _upload_image(descriptor: MediaStudioDescriptor, image: Path) -> str:
+    return _upload_input(descriptor, image, "image")
+
+
+def _upload_video(descriptor: MediaStudioDescriptor, video: Path) -> str:
+    return _upload_input(descriptor, video, "video")
+
+
+def _upload_audio(descriptor: MediaStudioDescriptor, audio: Path) -> str:
+    return _upload_input(descriptor, audio, "audio")
+
+
+def _upload_input(descriptor: MediaStudioDescriptor, media: Path, label: str) -> str:
     token = _token(descriptor)
-    body, content_type = encode_multipart([("overwrite", "true")], [("image", image)])
+    body, content_type = encode_multipart([("overwrite", "true")], [("image", media)])
     headers = {"Content-Type": content_type}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -205,18 +1492,366 @@ def _upload_image(descriptor: MediaStudioDescriptor, image: Path) -> str:
         with urllib.request.urlopen(request, timeout=90) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"Media Studio image upload failed with HTTP {exc.code}") from None
+        raise RuntimeError(f"Media Studio {label} upload failed with HTTP {exc.code}") from None
     name = str(payload.get("name") or "").strip()
     if not name:
-        raise RuntimeError("Media Studio image upload returned no input filename")
+        raise RuntimeError(f"Media Studio {label} upload returned no input filename")
     return name
 
 
-def _video_dimensions(image: Path) -> tuple[int, int]:
+def _video_dimensions(image: Path, tier: str = "standard") -> tuple[int, int]:
+    # Derive LTX-valid output dimensions that preserve the source image's exact
+    # aspect ratio (so a start frame is never cropped to a fixed tier). Targets the
+    # same pixel budget as the aspect tiers so render time stays comparable.
     with Image.open(image) as opened:
         width, height = opened.size
-    clamp = lambda value: max(384, min(1024, round(value / 32) * 32))
-    return clamp(width), clamp(height)
+    ratio = width / max(1, height)
+    target_area, max_dim = _VIDEO_TIER_AREAS.get(tier, _VIDEO_TIER_AREAS["standard"])
+    target_width = math.sqrt(target_area * ratio)
+    target_height = target_width / ratio
+    if max(target_width, target_height) > max_dim:
+        scale = max_dim / max(target_width, target_height)
+        target_width *= scale
+        target_height *= scale
+    # Multiples of 64, not 32: the two-stage LTX pipelines generate stage 1 at
+    # half resolution, so a 32-aligned request such as 928 is silently floored
+    # to 896 by the runtime after the job is recorded. Snapping to 64 keeps the
+    # requested size equal to what actually renders.
+    def snap(value: float) -> int:
+        return max(256, min(max_dim, round(value / 64) * 64))
+
+    return snap(target_width), snap(target_height)
+
+
+def video_dimensions_for_request(
+    *,
+    image: Path | None = None,
+    aspect_ratio: str = "",
+    resolution: str = "",
+) -> tuple[int, int] | None:
+    tier_name = str(resolution or "").strip().lower()
+    if tier_name not in _VIDEO_TIER_AREAS:
+        tier_name = "standard"
+    tier = {
+        "high": _VIDEO_ASPECT_DIMENSIONS_HIGH,
+        "max": _VIDEO_ASPECT_DIMENSIONS_MAX,
+    }.get(tier_name, _VIDEO_ASPECT_DIMENSIONS)
+    selected = tier.get(str(aspect_ratio or "").strip())
+    if selected:
+        return selected
+    # No fixed aspect requested: match the source frame's aspect ratio exactly.
+    return _video_dimensions(image, tier=tier_name) if image is not None else None
+
+
+_VIDEO_TIER_DIMENSIONS = {
+    "standard": _VIDEO_ASPECT_DIMENSIONS,
+    "high": _VIDEO_ASPECT_DIMENSIONS_HIGH,
+    "max": _VIDEO_ASPECT_DIMENSIONS_MAX,
+}
+
+# Stills are cheap next to a clip, and a faceless short upscales them into a
+# 1080x1920 timeline, so the default tier here is deliberately larger than the
+# video default — a 448px still would visibly soften once MPT scales it.
+_IMAGE_ASPECT_DIMENSIONS = {
+    "16:9": (1344, 768),
+    "9:16": (768, 1344),
+    "4:3": (1152, 864),
+    "3:4": (864, 1152),
+    "1:1": (1024, 1024),
+}
+_IMAGE_ASPECT_DIMENSIONS_DRAFT = {
+    "16:9": (896, 512),
+    "9:16": (512, 896),
+    "4:3": (768, 576),
+    "3:4": (576, 768),
+    "1:1": (704, 704),
+}
+
+
+def image_dimensions_for_request(
+    *,
+    aspect_ratio: str = "",
+    resolution: str = "",
+) -> tuple[int, int] | None:
+    """Pixel dimensions for a still, or None to let the workflow decide."""
+    tier = (
+        _IMAGE_ASPECT_DIMENSIONS_DRAFT
+        if str(resolution or "").strip().lower() in {"draft", "low"}
+        else _IMAGE_ASPECT_DIMENSIONS
+    )
+    return tier.get(str(aspect_ratio or "").strip())
+
+
+def _grid_frames_at_most(grid: dict[str, Any] | None, value: float) -> int | None:
+    """Largest frame count the graph can sample without exceeding `value`.
+
+    Mirrors gridFrameCountAtMost in media-studio-mcp.mjs: the graph only accepts
+    counts on a `modulus * k + offset` lattice (MiniMax H3 is 17k+5), and a CAP
+    has to snap DOWN — snapping up would quote a length that does not fit.
+    Returns None when nothing on the lattice fits, so the caller can say the
+    canvas is unusable rather than quoting a ceiling that still fails.
+    """
+    try:
+        modulus = int(round(float((grid or {}).get("modulus"))))
+    except (TypeError, ValueError):
+        return None
+    if modulus <= 0:
+        return None
+    try:
+        offset = int(round(float((grid or {}).get("offset", 1)))) % modulus
+    except (TypeError, ValueError):
+        offset = 1 % modulus
+    first = offset if offset > 0 else modulus
+    if value < first:
+        return None
+    return first + int((int(value) - first) // modulus) * modulus
+
+
+# MiniMax H3's packed-sequence geometry, mirrored from
+# comfy_extras/nodes_minimax_h3.py and from packedSequenceRows() in
+# media-studio-mcp.mjs. The MCP guard and this picker ceiling have to price a
+# run identically or the studio offers a length the lane then refuses;
+# test_media_studio_mcp_contract pins the two together.
+_H3_CANVAS_MULTIPLE = 32
+_H3_REFERENCE_BASE_SHORT_EDGE = 768
+_H3_REFERENCE_MAX_PIXELS = 768 * 1344
+_H3_VAE_STRIDE = 16
+_H3_LATENT_PIXELS_PER_ROW = 4
+_H3_AUDIO_LATENT_FPS = 40
+_H3_AUDIO_LATENT_ROWS_PER_FRAME = 2
+# The MCP stages a reference video to at most this long (the model card's
+# ceiling), so no clip can ever carry more than gridAtMost(15 x 24) frames.
+_H3_REFERENCE_VIDEO_MAX_SECONDS = 15.0
+# The most rows one latent frame of reference video can cost: adapt_canvas()
+# at its worst aspect (a ~7.6:1 panorama rounds to 2816x384). The picker cannot
+# see the clip's dimensions, so it prices every reference at this.
+_H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX = 1056
+# What the picker assumes is attached alongside the motion clip: every picture
+# slot filled, and the card's full 15s of voice reference. It cannot know, and
+# guessing less would quote a length the guard then refuses.
+_H3_REFERENCE_PICTURE_SLOTS = 9
+_H3_REFERENCE_AUDIO_MAX_SECONDS = 15.0
+
+
+def _h3_video_latent_frames(frame_count: int) -> int:
+    """video_latent_t() in comfy_extras/nodes_minimax_h3.py."""
+    frames = max(0, int(round(frame_count)))
+    return 2 if frames <= 5 else ((frames - 5) // 17) * 5 + 2
+
+
+def _h3_rows_per_latent_frame(width: int, height: int) -> float:
+    """Packed rows per latent frame: a /16 VAE packed 1x2x2."""
+    return (int(width) // _H3_VAE_STRIDE) * (int(height) // _H3_VAE_STRIDE) / _H3_LATENT_PIXELS_PER_ROW
+
+
+def _h3_audio_latent_rows(seconds: float) -> int:
+    return int(round(max(0.0, float(seconds)) * _H3_AUDIO_LATENT_FPS)) * _H3_AUDIO_LATENT_ROWS_PER_FRAME
+
+
+def _h3_reference_canvas(width: int, height: int) -> tuple[int, int]:
+    """adapt_canvas() plus the never-upscale rule in MiniMaxH3ReferenceToVideo."""
+    def snap(value: float) -> int:
+        return max(_H3_CANVAS_MULTIPLE, int(round(value / _H3_CANVAS_MULTIPLE)) * _H3_CANVAS_MULTIPLE)
+    ratio = width / height
+    if ratio >= 1.0:
+        nominal_w, nominal_h = _H3_REFERENCE_BASE_SHORT_EDGE * ratio, float(_H3_REFERENCE_BASE_SHORT_EDGE)
+    else:
+        nominal_w, nominal_h = float(_H3_REFERENCE_BASE_SHORT_EDGE), _H3_REFERENCE_BASE_SHORT_EDGE / ratio
+    if nominal_w * nominal_h > _H3_REFERENCE_MAX_PIXELS:
+        scale = math.sqrt(_H3_REFERENCE_MAX_PIXELS / (nominal_w * nominal_h))
+        nominal_w, nominal_h = nominal_w * scale, nominal_h * scale
+    canvas_w, canvas_h = snap(nominal_w), snap(nominal_h)
+    if width * height < canvas_w * canvas_h:
+        canvas_w, canvas_h = snap(width), snap(height)
+    return canvas_w, canvas_h
+
+
+def _h3_packed_rows(
+    grid: dict[str, Any] | None,
+    rate: float,
+    width: int,
+    height: int,
+    clip_frames: int,
+    *,
+    reference_seconds: float,
+    reference_rows_per_latent_frame: float = _H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX,
+    reference_audio: bool = True,
+    pictures: int = _H3_REFERENCE_PICTURE_SLOTS,
+    voice_seconds: float = _H3_REFERENCE_AUDIO_MAX_SECONDS,
+) -> float:
+    """packedSequenceRows() in media-studio-mcp.mjs for one motion clip.
+
+    The clip is aligned UP to the lattice (the node does that before encoding);
+    the reference is trimmed to min(its own length, the clip's) and DOWN to it.
+    """
+    frames = _grid_frames_at_least(grid, clip_frames)
+    out_rows = _h3_rows_per_latent_frame(width, height)
+    total = _h3_video_latent_frames(frames) * out_rows + _h3_audio_latent_rows(frames / rate)
+    seconds = min(float(reference_seconds), _H3_REFERENCE_VIDEO_MAX_SECONDS)
+    effective = _grid_frames_at_most(grid, min(int(round(seconds * rate)), frames)) or 0
+    total += _h3_video_latent_frames(effective) * reference_rows_per_latent_frame
+    if reference_audio:
+        total += _h3_audio_latent_rows(seconds)
+    total += pictures * out_rows
+    total += _h3_audio_latent_rows(voice_seconds)
+    return total
+
+
+def _grid_frames_at_least(grid: dict[str, Any] | None, value: float) -> int:
+    """Mirrors normalizedGridFrameCount: the smallest lattice point >= value."""
+    try:
+        modulus = int(round(float((grid or {}).get("modulus"))))
+    except (TypeError, ValueError):
+        return max(1, int(round(value)))
+    if modulus <= 0:
+        return max(1, int(round(value)))
+    try:
+        offset = int(round(float((grid or {}).get("offset", 1)))) % modulus
+    except (TypeError, ValueError):
+        offset = 1 % modulus
+    floor = offset if offset > 0 else modulus
+    raw = max(floor, int(round(value)))
+    return raw + ((offset - (raw % modulus)) % modulus)
+
+
+# "compact" staging fits a motion clip inside 384x1152 (either orientation),
+# never upscaled — the MCP's REF_VIDEO_COMPACT_* box — so its worst case is
+# (1152/16 * 384/16) / 4 rows per latent frame. Mirrors
+# H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX in media-studio-mcp.mjs.
+_H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX = 432
+
+
+def motion_reference_pricing(workflow: dict[str, Any]) -> dict[str, Any]:
+    """The facts the studio needs to price a run's packed rows ITSELF.
+
+    `motion_reference_duration_limits` below publishes one pessimistic ceiling
+    per canvas (a reference as long as the clip, at the node's largest
+    reference canvas, every picture slot filled, the full voice allowance).
+    That is the right number to refuse an impossible run, but it is the wrong
+    number to show on the duration slider once the user has done the things
+    that make a run fit — staged the clip compact, trimmed it, left the
+    soundtrack out, attached three pictures instead of nine. So the studio
+    gets the inputs and prices the run it is actually about to send, with the
+    same arithmetic as `_h3_packed_rows` / packedSequenceRows() in the MCP:
+    the budget, the frame lattice, the output rows per latent frame for each
+    canvas, the reference rows per latent frame for full vs compact staging,
+    and the audio row rate. The guard at submit stays the authority.
+
+    Empty when the workflow has no measured budget — unmeasured is not the
+    same as impossible.
+    """
+    try:
+        budget = float(workflow.get("motion_reference_max_packed_rows"))
+    except (TypeError, ValueError):
+        return {}
+    if budget <= 0:
+        return {}
+    grid = workflow.get("frame_grid") if isinstance(workflow.get("frame_grid"), dict) else None
+    defaults = workflow.get("defaults") if isinstance(workflow.get("defaults"), dict) else {}
+    try:
+        rate = float(defaults.get("frame_rate") or 24)
+    except (TypeError, ValueError):
+        rate = 24.0
+    if rate <= 0:
+        rate = 24.0
+    output_rows = {
+        f"{tier_name}|{aspect}": _h3_rows_per_latent_frame(width, height)
+        for tier_name, dimensions in _VIDEO_TIER_DIMENSIONS.items()
+        for aspect, (width, height) in dimensions.items()
+    }
+    # The same budget per card size ("32": the 5090 the base was measured on,
+    # "96": the RTX PRO 6000), so the studio can price against the machine the
+    # run will actually land on. Keys stay strings (JSON), values are rows.
+    by_vram: dict[str, float] = {}
+    raw_table = workflow.get("motion_reference_max_packed_rows_by_vram_gb")
+    if isinstance(raw_table, dict):
+        for key, value in raw_table.items():
+            try:
+                size = float(key)
+                rows = float(value)
+            except (TypeError, ValueError):
+                continue
+            if size > 0 and rows > 0:
+                by_vram[str(int(size)) if float(size).is_integer() else str(size)] = rows
+    return {
+        "max_packed_rows": budget,
+        "max_packed_rows_by_vram_gb": by_vram,
+        "frame_grid": dict(grid) if grid else None,
+        "frame_rate": rate,
+        "output_rows_per_latent_frame": output_rows,
+        "reference_rows_per_latent_frame": {
+            "full": _H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX,
+            "compact": _H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX,
+        },
+        "audio_rows_per_second": _H3_AUDIO_LATENT_FPS * _H3_AUDIO_LATENT_ROWS_PER_FRAME,
+        "reference_video_max_seconds": _H3_REFERENCE_VIDEO_MAX_SECONDS,
+        "reference_audio_max_seconds": _H3_REFERENCE_AUDIO_MAX_SECONDS,
+        "reference_picture_slots": _H3_REFERENCE_PICTURE_SLOTS,
+    }
+
+
+def motion_reference_duration_limits(workflow: dict[str, Any]) -> dict[str, float]:
+    """Longest clip each canvas can render with a MOTION REFERENCE at least as long.
+
+    Comfy's memory planner is blind to every reference row (MiniMaxH3 sets no
+    memory_usage_factor_conds), so what has to fit is the activations of the
+    whole packed sequence — the clip, each motion clip at the node's own
+    reference canvas plus its soundtrack, the pictures, the voice clips — against
+    the budget the lane measured (`max_packed_rows`). The node trims a reference
+    to min(its own length, the clip's) — `frames[:frame_count]` in
+    comfy_extras/nodes_minimax_h3.py — so a reference at or beyond the clip's
+    length makes the CLIP the expensive thing and caps the duration range, and
+    the ceiling here is for that case: the picker drops the durations past it
+    when the attached reference is longer. A shorter reference keeps its own
+    length and costs only that, so the full range stays open (the guard prices
+    the real files at submit and is the backstop). Reference PICTURES cost a
+    flat amount however long the clip is and never narrow anything.
+
+    Published as a capability keyed "<tier>|<aspect>" so the studio can drop the
+    unreachable durations from its picker. This is machine capacity — a budget,
+    a canvas, a frame count — and describes no job: it is computed from the
+    registry and the tier tables alone, with nothing about what anyone rendered.
+    """
+    budget = workflow.get("motion_reference_max_packed_rows")
+    try:
+        budget = float(budget)
+    except (TypeError, ValueError):
+        return {}
+    if budget <= 0:
+        return {}
+    grid = workflow.get("frame_grid") if isinstance(workflow.get("frame_grid"), dict) else None
+    defaults = workflow.get("defaults") if isinstance(workflow.get("defaults"), dict) else {}
+    try:
+        rate = float(defaults.get("frame_rate") or 24)
+    except (TypeError, ValueError):
+        rate = 24.0
+    if rate <= 0:
+        rate = 24.0
+    limits: dict[str, float] = {}
+    longest = _grid_frames_at_least(grid, _H3_REFERENCE_VIDEO_MAX_SECONDS * rate)
+    for tier_name, dimensions in _VIDEO_TIER_DIMENSIONS.items():
+        for aspect, (width, height) in dimensions.items():
+            frames = longest
+            ceiling = None
+            while frames >= 1:
+                rows = _h3_packed_rows(grid, rate, width, height, frames, reference_seconds=frames / rate)
+                if rows <= budget:
+                    ceiling = frames
+                    break
+                below = _grid_frames_at_most(grid, frames - 1)
+                if below is None or below >= frames:
+                    break
+                frames = below
+            if ceiling is None:
+                # No legal frame count fits: the canvas cannot take a motion
+                # reference at all. Zero says that plainly; omitting the key
+                # would read as "unlimited".
+                limits[f"{tier_name}|{aspect}"] = 0.0
+                continue
+            # Rounded to whole frames at the workflow's rate, so the studio and
+            # the guard quote the same lattice point.
+            limits[f"{tier_name}|{aspect}"] = round(ceiling / rate, 3)
+    return limits
 
 
 def _result_json(result: dict[str, Any]) -> dict[str, Any]:
@@ -242,9 +1877,318 @@ def _job_id(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _generation_status(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    job = payload.get("job") if isinstance(payload.get("job"), dict) else {}
+    for source in (payload, job):
+        value = source.get("status") or source.get("state")
+        if value:
+            return str(value).lower()
+    return ""
+
+
+def _comfy_history_error(payload: Any) -> str:
+    """The failure reason a Comfy-shaped history carries in status.messages.
+
+    MCP receipts are machine-redacted (machineOperationReceipt keeps only an
+    allow-list, and a failure reason is not on it), so a remote-lane failure
+    reaches this process as a bare status with no text. Read it the same way
+    output URLs are read: over the trusted server-side channel. Only the
+    gateway's already-sanitised hivemind_remote_error and the node identity
+    from a native execution_error are taken — never current_inputs, which
+    carries the prompt."""
+    record = payload if isinstance(payload, dict) else {}
+    if not isinstance(record.get("status"), dict):
+        record = next((value for value in record.values() if isinstance(value, dict)), {})
+    for message in (record.get("status") or {}).get("messages") or []:
+        if not (isinstance(message, (list, tuple)) and len(message) >= 2):
+            continue
+        kind, detail = message[0], message[1]
+        if not isinstance(detail, dict):
+            continue
+        if kind == "hivemind_remote_error":
+            text = str(detail.get("error") or "").strip()
+            if text:
+                return text[:400]
+        if kind == "execution_error":
+            where = " ".join(
+                part for part in (
+                    str(detail.get("node_type") or "").strip(),
+                    f"node {detail.get('node_id')}" if detail.get("node_id") else "",
+                ) if part
+            )
+            reason = " ".join(
+                str(detail.get("exception_message") or detail.get("exception_type") or "failed").split()
+            )
+            translated = _out_of_memory_advice(reason)
+            if translated:
+                return translated
+            return (f"{where} failed — {reason}" if where else reason)[:400]
+    return ""
+
+
+def _out_of_memory_advice(reason: str) -> str:
+    """Turn a CUDA allocator dump into the thing the user can actually change.
+
+    The raw text is a wall of allocator bookkeeping that gets truncated at 400
+    characters mid-sentence, and its own advice ("you might have accidentally
+    set the batch_size to a large number") is about a control this studio does
+    not expose. What actually blows the budget is clip LENGTH: measured
+    2026-08-13 on a 5090 in MiniMax H3 reference mode at 1216x704 with nine
+    pictures, a motion clip and a voice clip, 141 frames (5.9s) peaked at
+    29.63GiB of 31.36 and 158 frames (6.6s) ran out — while the studio offers
+    the duration slider all the way to 15s.
+    """
+    if "out of memory" not in reason.lower():
+        return ""
+    wanted = re.search(r"Requested\s*:\s*([\d.]+\s*[KMG]iB)", reason)
+    short = f" It needed another {wanted.group(1)}." if wanted else ""
+    return (
+        "The GPU ran out of memory part-way through this generation." + short
+        + " Longer clips cost the most, and in reference mode every picture, motion clip and"
+        " voice clip adds to the same budget — a motion clip is trimmed to the clip's own"
+        " length, so it grows as the clip does. Try a shorter duration first, then a lower"
+        " resolution, then fewer references."
+    )
+
+
+# What Python says when nothing is listening on the other end. The first line
+# of a URLError is `<urlopen error [Errno 61] Connection refused>` — a sentence
+# about a library, kept verbatim by the sanitizer below and shown to a person
+# with a Try-again button beside it. This is the same failure said in words.
+_UNREACHABLE_RE = re.compile(
+    r"urlopen error|connection refused|errno 61|errno 111|\[winerror 10061\]"
+    r"|connection reset|remote end closed connection|expecting value: line 1 column 1",
+    re.IGNORECASE,
+)
+_TIMEOUT_RE = re.compile(r"timed out|timeout", re.IGNORECASE)
+
+
+def _lane_unreachable_advice(reason: str) -> str:
+    """"The lane stopped answering", when that is what the error means.
+
+    A render that dies because its ComfyUI went away is not a bad request and
+    not a bug in the graph — it is a machine that is no longer there, and the
+    only useful thing to say is that, plus what to try.
+    """
+    if not _UNREACHABLE_RE.search(reason or ""):
+        return ""
+    if _TIMEOUT_RE.search(reason):
+        return (
+            "The ComfyUI lane stopped answering part-way through this render. "
+            "Check it is still running, then try again."
+        )
+    return (
+        "The ComfyUI lane is not answering. Check it is running on this machine "
+        "(or that the rented one is still connected), then try again."
+    )
+
+
+# Where a path names the person or the machine: home directories, temp
+# staging, rental workspaces and mounted volumes. Only these roots are
+# reduced to basenames, so an API route like /api/generate in an HTTP error
+# still reads as the route it was.
+# Inner segments may carry single spaces ("Application Support"); the last
+# one may not, so "x.gguf is missing" keeps its sentence.
+_PRIVATE_PATH_RE = re.compile(
+    r"(?<![\w/])/(?:Users|home|private|tmp|var|opt|root|workspace|Volumes|mnt|srv)"
+    r"(?:/[\w.@+%~-]+(?: [\w.@+%~-]+)*)*/[\w.@+%~-]+/?"
+)
+_URL_TOKEN_RE = re.compile(r"([?&](?:token|api_key|key)=)[^&\s]+", re.IGNORECASE)
+
+
+def _private_path_basename(match: "re.Match[str]") -> str:
+    parts = [part for part in match.group(0).split("/") if part]
+    # "/Users/liam" on its own: the basename IS the user name. Say nothing.
+    if len(parts) <= 2:
+        return "…"
+    return parts[-1]
+
+
+def sanitize_error_detail(text: object, limit: int = 300) -> str:
+    """A runner/gateway error as one sentence the owner may be shown.
+
+    What arrives here is whatever a failed lane wrote: a RuntimeError with
+    4 KB of STDOUT/STDERR pasted under it, a Python traceback, an absolute
+    path under the owner's home directory, a URL carrying the gateway token.
+    The toast keeps the FIRST informative line (the last line of a traceback,
+    since that is the exception), the last non-empty stderr line when a dump
+    is attached, absolute private paths reduced to basenames, tokens
+    redacted, and the whole thing capped — while the out-of-memory
+    translation stays first, because that one already says the useful thing.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    advice = _out_of_memory_advice(raw)
+    if advice:
+        return advice
+    # A lane that went away says so in words rather than in urllib's.
+    advice = _lane_unreachable_advice(raw)
+    if advice:
+        return advice
+    head, stderr_section = raw, ""
+    if "STDERR:" in head:
+        head, _, stderr_section = head.partition("STDERR:")
+        stderr_section = stderr_section.partition("STDOUT:")[0]
+    if "STDOUT:" in head:
+        head = head.partition("STDOUT:")[0]
+    lines = [line.strip() for line in head.splitlines() if line.strip()]
+    if not lines:
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    chosen = lines[-1] if lines[0].lower().startswith("traceback") else lines[0]
+    stderr_lines = [line.strip() for line in stderr_section.splitlines() if line.strip()]
+    if stderr_lines and stderr_lines[-1] != chosen:
+        chosen = f"{chosen} — {stderr_lines[-1]}"
+    chosen = " ".join(chosen.split())
+    chosen = _URL_TOKEN_RE.sub(r"\1[redacted]", chosen)
+    chosen = _PRIVATE_PATH_RE.sub(_private_path_basename, chosen)
+    if len(chosen) > limit:
+        chosen = chosen[: max(1, limit - 1)].rstrip() + "…"
+    return chosen
+
+
+def _generation_error(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    job = payload.get("job") if isinstance(payload.get("job"), dict) else {}
+    for source in (payload, job):
+        value = source.get("error") or source.get("detail") or source.get("message")
+        if value:
+            return str(value)
+    return ""
+
+
 def _first_video_url(payload: Any) -> str:
     match = re.search(r"https?://[^\"'\s]+\.(?:mp4|m4v|mov|webm)(?:\?[^\"'\s]*)?", json.dumps(payload), re.IGNORECASE)
     return match.group(0) if match else ""
+
+
+def _private_video_url(descriptor: MediaStudioDescriptor, job_id: str) -> str:
+    """Resolve output only inside the trusted server process, never through MCP receipts."""
+    job = _private_json(descriptor, f"/api/job/{quote(job_id, safe='')}")
+    reference = _first_video_reference(job)
+    if reference:
+        return urljoin(descriptor.upload_base.rstrip("/") + "/", reference)
+
+    history = _private_json(descriptor, f"/comfy/api/history/{quote(job_id, safe='')}")
+    record = history.get(job_id) if isinstance(history.get(job_id), dict) else next(
+        (value for value in history.values() if isinstance(value, dict)),
+        {},
+    )
+    for item in _comfy_output_items(record):
+        filename = str(item.get("filename") or "").strip()
+        if not _is_video_reference(filename):
+            continue
+        query = urlencode({
+            "filename": filename,
+            "subfolder": str(item.get("subfolder") or ""),
+            "type": str(item.get("type") or "output"),
+        })
+        return f"{descriptor.upload_base.rstrip('/')}/comfy/view?{query}"
+    return ""
+
+
+def _private_json(descriptor: MediaStudioDescriptor, path: str, requester_pub: str = "") -> dict[str, Any]:
+    headers = {"Accept": "application/json"}
+    token = _token(descriptor)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    headers.update(_requester_headers(requester_pub))
+    request = urllib.request.Request(
+        urljoin(descriptor.upload_base.rstrip("/") + "/", path.lstrip("/")),
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {}
+        raise RuntimeError(f"Media Studio private output lookup failed with HTTP {exc.code}") from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Media Studio private output lookup failed") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _first_video_reference(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("video_urls", "media_urls", "image_urls", "output_urls"):
+        values = payload.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if isinstance(value, str) and _is_video_reference(value):
+                return value
+    for key in ("video_url", "media_url", "output_url", "url"):
+        value = payload.get(key)
+        if isinstance(value, str) and _is_video_reference(value):
+            return value
+    return ""
+
+
+def _comfy_output_items(value: object):
+    if isinstance(value, dict):
+        if value.get("filename"):
+            yield value
+        for child in value.values():
+            yield from _comfy_output_items(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _comfy_output_items(child)
+
+
+def _is_video_reference(value: str) -> bool:
+    return Path(urlparse(value).path).suffix.lower() in {".mp4", ".m4v", ".mov", ".webm"}
+
+
+def _is_image_reference(value: str) -> bool:
+    return Path(urlparse(value).path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _first_image_url(payload: Any) -> str:
+    match = re.search(
+        r"https?://[^\"'\s]+\.(?:png|jpg|jpeg|webp)(?:\?[^\"'\s]*)?",
+        json.dumps(payload),
+        re.IGNORECASE,
+    )
+    return match.group(0) if match else ""
+
+
+def _private_image_url(descriptor: MediaStudioDescriptor, job_id: str) -> str:
+    """Image twin of _private_video_url — resolve the output inside the trusted
+    server process rather than from a machine-redacted MCP receipt."""
+    job = _private_json(descriptor, f"/api/job/{quote(job_id, safe='')}")
+    for key in ("image_urls", "media_urls", "output_urls"):
+        values = job.get(key) if isinstance(job, dict) else None
+        for value in values if isinstance(values, list) else []:
+            if isinstance(value, str) and _is_image_reference(value):
+                return urljoin(descriptor.upload_base.rstrip("/") + "/", value)
+    for key in ("image_url", "media_url", "output_url", "url"):
+        value = job.get(key) if isinstance(job, dict) else None
+        if isinstance(value, str) and _is_image_reference(value):
+            return urljoin(descriptor.upload_base.rstrip("/") + "/", value)
+
+    history = _private_json(descriptor, f"/comfy/api/history/{quote(job_id, safe='')}")
+    record = history.get(job_id) if isinstance(history.get(job_id), dict) else next(
+        (value for value in history.values() if isinstance(value, dict)),
+        {},
+    )
+    for item in _comfy_output_items(record):
+        filename = str(item.get("filename") or "").strip()
+        if not _is_image_reference(filename):
+            continue
+        query = urlencode({
+            "filename": filename,
+            "subfolder": str(item.get("subfolder") or ""),
+            "type": str(item.get("type") or "output"),
+        })
+        return f"{descriptor.upload_base.rstrip('/')}/comfy/view?{query}"
+    return ""
 
 
 def _rewrite_local_url(url: str, upload_base: str) -> str:
@@ -255,9 +2199,17 @@ def _rewrite_local_url(url: str, upload_base: str) -> str:
     return urlunparse((base.scheme, base.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 
-def _download(url: str, destination: Path) -> None:
+def _same_origin(left: str, right: str) -> bool:
+    first = urlparse(left)
+    second = urlparse(right)
+    return first.scheme == second.scheme and first.netloc == second.netloc
+
+
+def _download(url: str, destination: Path, *, token: str = "") -> None:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(url, timeout=180) as response:
+        with urllib.request.urlopen(request, timeout=180) as response:
             data = response.read()
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Media Studio output download failed with HTTP {exc.code}") from None
@@ -272,3 +2224,139 @@ def _http_url(value: str, label: str) -> str:
         raise ValueError(f"{label} must be an HTTP(S) URL")
     return value.strip()
 
+
+def _local_managed_descriptor() -> MediaStudioDescriptor:
+    port = os.environ.get("MEDIA_STUDIO_MCP_PORT", "").strip()
+    return MediaStudioDescriptor(
+        app_id="managed:media-studio-mcp",
+        app_name="Managed Media Studio MCP",
+        mcp_url=_http_url(
+            f"http://127.0.0.1:{port}/mcp" if port else settings().network.mcp_url,
+            "MEDIA_STUDIO_MCP_PORT",
+        ),
+        upload_base=_http_url(_local_upload_base(), "MEDIA_STUDIO_UPLOAD_BASE").rstrip("/"),
+        auth_env_key=os.environ.get("MEDIA_STUDIO_AUTH_ENV_KEY", "ZIMG_TOKEN").strip() or None,
+        tool=os.environ.get("MEDIA_STUDIO_VIDEO_TOOL", "media_generate_video").strip(),
+        job_tool=os.environ.get("MEDIA_STUDIO_JOB_TOOL", "media_get_job").strip(),
+        workflow_id=os.environ.get("MEDIA_STUDIO_WORKFLOW_ID", "").strip() or None,
+    )
+
+
+def _local_upload_base() -> str:
+    # network.upload_base reads MEDIA_STUDIO_UPLOAD_BASE, MEDIA_STUDIO_STUDIO_URL
+    # and ZIMG_STUDIO_URL in that order, then the document, then the default.
+    # The MCP-scoped alias is the one name it does not carry, so it keeps its
+    # place in the middle of the chain rather than moving.
+    return (
+        os.environ.get("MEDIA_STUDIO_UPLOAD_BASE")
+        or os.environ.get("MEDIA_STUDIO_MCP_STUDIO_URL")
+        or settings().network.upload_base
+    ).strip()
+
+
+def _token_paths() -> list[Path]:
+    media_state = Path(os.environ.get("HIVEMIND_MEDIA_STATE_DIR", Path.home() / ".hivemindos" / "media-studio")).expanduser()
+    candidates = [
+        os.environ.get("MEDIA_STUDIO_TOKEN_FILE", ""),
+        os.environ.get("ZIMG_TOKEN_FILE", ""),
+        str(media_state / "secure" / "zimg-token"),
+    ]
+    return [Path(value).expanduser() for value in candidates if value.strip()]
+
+
+# ── SAM3 matte (sprite sheet background removal) ────────────────────────────
+#
+# The gateway already owns a SAM3 selection route (/api/smart-mask): name an
+# object, get its silhouette back inline. The sprite pipeline needs exactly
+# that, once per extracted frame, so this is a proxy and not a second
+# implementation — the mask never touches disk on either side, and the frame
+# arrives already decrypted from the browser, so the vault key is not involved.
+#
+# A warm run is ~20s per frame and the first one loads a 3.45 GB checkpoint,
+# so the caller drives frames one at a time and shows progress. Batching them
+# into one request would only move the wait somewhere the user cannot see it.
+_SMART_MASK_POLL_SECONDS = 2.0
+
+
+def smart_mask(
+    image_base64: str,
+    *,
+    subject: str = "",
+    points: list[dict[str, Any]] | None = None,
+    confidence: float | None = None,
+    timeout_seconds: float = 240.0,
+    requester_pub: str = "",
+) -> dict[str, Any]:
+    """Segment one subject out of one frame and return its mask inline.
+
+    Either `subject` (text grounding: "the pink dragon") or `points` (taps) is
+    required — the gateway refuses a request with neither, and so does this,
+    before spending a round-trip on it.
+    """
+    if not str(image_base64 or "").strip():
+        raise ValueError("A frame is required")
+    if not str(subject or "").strip() and not points:
+        raise ValueError("Name the sprite or tap it so SAM3 knows what to keep")
+    descriptor = _required_descriptor()
+    body: dict[str, Any] = {"image_base64": image_base64}
+    if str(subject or "").strip():
+        body["prompt"] = str(subject).strip()[:400]
+    if points:
+        body["points"] = points
+    if confidence is not None:
+        body["confidence"] = float(confidence)
+    queued = _gateway_post_json(descriptor, "/api/smart-mask", body, requester_pub=requester_pub, timeout=60)
+    job_id = str(queued.get("id") or "").strip()
+    if not job_id:
+        raise RuntimeError("The mask service did not return a job id")
+
+    deadline = time.monotonic() + max(30.0, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        time.sleep(_SMART_MASK_POLL_SECONDS)
+        record = _private_json(descriptor, f"/api/job/{quote(job_id)}", requester_pub)
+        status = str(record.get("status") or "").strip().lower()
+        if status in {"success", "completed", "done"}:
+            mask = str(record.get("mask_base64") or "")
+            if not mask:
+                raise RuntimeError("The mask service returned no silhouette — try naming the sprite differently")
+            return {"mask_base64": mask, "elapsed_seconds": record.get("elapsed_seconds")}
+        if status in {"error", "failed", "cancelled"}:
+            raise RuntimeError(sanitize_error_detail(record.get("error")) or "Background removal failed")
+    raise TimeoutError("Background removal timed out")
+
+
+def _gateway_post_json(
+    descriptor: MediaStudioDescriptor,
+    path: str,
+    body: dict[str, Any],
+    *,
+    requester_pub: str = "",
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """POST JSON to one of the gateway's own HTTP routes (not the MCP).
+
+    The MCP speaks tools; a handful of gateway capabilities — smart-select
+    among them — are plain routes on the same origin as the upload base.
+    """
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    token = _token(descriptor)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    headers.update(_requester_headers(requester_pub))
+    request = urllib.request.Request(
+        urljoin(descriptor.upload_base.rstrip("/") + "/", path.lstrip("/")),
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        with contextlib.suppress(Exception):
+            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+        raise RuntimeError(sanitize_error_detail(detail) or f"The media gateway refused the request (HTTP {exc.code})") from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("The media gateway did not answer") from exc
+    return payload if isinstance(payload, dict) else {}

@@ -1,26 +1,56 @@
 import asyncio
+import base64
+import io
 import inspect
+import json
 import math
 import os
 import queue
 import re
+import subprocess
+import tempfile
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from typing import Union
-from xml.sax.saxutils import unescape
+from urllib.parse import urlparse
+from xml.sax.saxutils import escape, unescape
 
 import edge_tts
 import requests
-from edge_tts import SubMaker, submaker
+from edge_tts import SubMaker
 from loguru import logger
 from moviepy.video.tools import subtitles
 from moviepy.audio.io.AudioFileClip import AudioFileClip
+from openai import OpenAI
 
 from app.config import config
 from app.utils import utils
 
 _DEFAULT_EDGE_TTS_TIMEOUT_SECONDS = 30.0
+_MIMO_DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
+_MIMO_DEFAULT_TTS_MODEL = "mimo-v2.5-tts"
+MINIMAX_TTS_GLOBAL_URL = "https://api.minimax.io/v1/t2a_v2"
+MINIMAX_TTS_CN_URL = "https://api.minimaxi.com/v1/t2a_v2"
+MINIMAX_TTS_DEFAULT_MODEL = "speech-2.8-hd"
+MINIMAX_TTS_DEFAULT_VOICE = "English_expressive_narrator"
+MINIMAX_TTS_MODELS = (
+    "speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo",
+    "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo",
+)
+_MINIMAX_TTS_MAX_AUDIO_HEX_CHARS = 100 * 1024 * 1024
+NO_VOICE_NAME = "no-voice"
+# `none` 是 PR #981 里曾使用过的无配音标识。这里短期兼容这个值，避免
+# 已经手动调用过该分支的 API 用户升级后立即失效；WebUI 和新代码统一使用
+# 更明确的 `no-voice`。
+_NO_VOICE_ALIASES = {NO_VOICE_NAME, "none"}
+
+
+def _configure_pydub_ffmpeg(audio_segment_cls):
+    configured_ffmpeg = utils.get_ffmpeg_binary()
+    if configured_ffmpeg:
+        audio_segment_cls.converter = configured_ffmpeg
 
 
 def mktimestamp(time_unit: float) -> str:
@@ -131,1009 +161,107 @@ def get_gemini_voices() -> list[str]:
     ]
 
 
+def get_mimo_voices() -> list[str]:
+    """
+    获取 Xiaomi MiMo V2.5 TTS 的预置音色列表。
+
+    当前只接入官方文档里的 `mimo-v2.5-tts` 预置音色模式。音色设计
+    `mimo-v2.5-tts-voicedesign` 和音色复刻 `mimo-v2.5-tts-voiceclone`
+    需要额外的输入表单和素材上传流程，先不混入普通 TTS 下拉框，避免
+    用户误以为选择一个 voice id 就能完成所有高级能力。
+    """
+    voices_with_gender = [
+        ("mimo_default", "Female"),
+        ("冰糖", "Female"),
+        ("茉莉", "Female"),
+        ("苏打", "Male"),
+        ("白桦", "Male"),
+        ("Mia", "Female"),
+        ("Chloe", "Female"),
+        ("Milo", "Male"),
+        ("Dean", "Male"),
+    ]
+
+    return [f"mimo:{voice}-{gender}" for voice, gender in voices_with_gender]
+
+
+def get_minimax_voices(voice_id: str | None = None) -> list[str]:
+    """返回当前配置的 MiniMax 音色，供统一的 TTS 调度格式使用。"""
+    voice_id = str(
+        voice_id
+        or config.minimax_tts.get("voice_id", MINIMAX_TTS_DEFAULT_VOICE)
+        or MINIMAX_TTS_DEFAULT_VOICE
+    ).strip()
+    return [f"minimax:{voice_id}"]
+
+
+def get_elevenlabs_voices(api_key: str) -> list[str]:
+    if not api_key:
+        return []
+    try:
+        url = "https://api.elevenlabs.io/v2/voices"
+        params = {"is_favorite": "true", "page_size": 100}
+        headers = {"xi-api-key": api_key}
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.warning(
+                f"ElevenLabs voices fetch failed with status {response.status_code}: {response.text}"
+            )
+            return []
+        data = response.json()
+        voices = data.get("voices", [])
+        return [
+            f"elevenlabs:{v['voice_id']}:{v['name']}"
+            for v in voices
+            if v.get("voice_id") and v.get("name") and v.get("status") != "disabled"
+        ]
+    except Exception as e:
+        logger.warning(f"ElevenLabs voices fetch failed: {str(e)}")
+        return []
+
+
+def get_chatterbox_voices() -> list[str]:
+    """Return the configured Chatterbox voices.
+
+    Chatterbox is self-hosted, so there is no global voice catalog. Operators
+    list the voice names exposed by their server via ``[chatterbox] voices``
+    (a TOML array, or a comma-separated string). Each entry is normalised to
+    the ``chatterbox:<name>`` format used by the TTS dispatcher.
+    """
+    voices = config.chatterbox.get("voices", []) or []
+    if isinstance(voices, str):
+        voices = [v.strip() for v in voices.split(",") if v.strip()]
+    result = []
+    for v in voices:
+        v = str(v).strip()
+        if not v:
+            continue
+        result.append(v if v.startswith("chatterbox:") else f"chatterbox:{v}")
+    if not result:
+        # keep the dropdown usable even before any voice is configured
+        result = ["chatterbox:default-Female"]
+    return result
+
+
+_AZURE_VOICES_DATA_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "azure_voices.json"
+)
+_azure_voices_cache = None
+
+
+def _load_azure_voices() -> list[dict]:
+    global _azure_voices_cache
+    if _azure_voices_cache is None:
+        with open(_AZURE_VOICES_DATA_FILE, "r", encoding="utf-8") as f:
+            _azure_voices_cache = json.load(f)
+    return _azure_voices_cache
+
+
 def get_all_azure_voices(filter_locals=None) -> list[str]:
-    azure_voices_str = """
-Name: af-ZA-AdriNeural
-Gender: Female
-
-Name: af-ZA-WillemNeural
-Gender: Male
-
-Name: am-ET-AmehaNeural
-Gender: Male
-
-Name: am-ET-MekdesNeural
-Gender: Female
-
-Name: ar-AE-FatimaNeural
-Gender: Female
-
-Name: ar-AE-HamdanNeural
-Gender: Male
-
-Name: ar-BH-AliNeural
-Gender: Male
-
-Name: ar-BH-LailaNeural
-Gender: Female
-
-Name: ar-DZ-AminaNeural
-Gender: Female
-
-Name: ar-DZ-IsmaelNeural
-Gender: Male
-
-Name: ar-EG-SalmaNeural
-Gender: Female
-
-Name: ar-EG-ShakirNeural
-Gender: Male
-
-Name: ar-IQ-BasselNeural
-Gender: Male
-
-Name: ar-IQ-RanaNeural
-Gender: Female
-
-Name: ar-JO-SanaNeural
-Gender: Female
-
-Name: ar-JO-TaimNeural
-Gender: Male
-
-Name: ar-KW-FahedNeural
-Gender: Male
-
-Name: ar-KW-NouraNeural
-Gender: Female
-
-Name: ar-LB-LaylaNeural
-Gender: Female
-
-Name: ar-LB-RamiNeural
-Gender: Male
-
-Name: ar-LY-ImanNeural
-Gender: Female
-
-Name: ar-LY-OmarNeural
-Gender: Male
-
-Name: ar-MA-JamalNeural
-Gender: Male
-
-Name: ar-MA-MounaNeural
-Gender: Female
-
-Name: ar-OM-AbdullahNeural
-Gender: Male
-
-Name: ar-OM-AyshaNeural
-Gender: Female
-
-Name: ar-QA-AmalNeural
-Gender: Female
-
-Name: ar-QA-MoazNeural
-Gender: Male
-
-Name: ar-SA-HamedNeural
-Gender: Male
-
-Name: ar-SA-ZariyahNeural
-Gender: Female
-
-Name: ar-SY-AmanyNeural
-Gender: Female
-
-Name: ar-SY-LaithNeural
-Gender: Male
-
-Name: ar-TN-HediNeural
-Gender: Male
-
-Name: ar-TN-ReemNeural
-Gender: Female
-
-Name: ar-YE-MaryamNeural
-Gender: Female
-
-Name: ar-YE-SalehNeural
-Gender: Male
-
-Name: az-AZ-BabekNeural
-Gender: Male
-
-Name: az-AZ-BanuNeural
-Gender: Female
-
-Name: bg-BG-BorislavNeural
-Gender: Male
-
-Name: bg-BG-KalinaNeural
-Gender: Female
-
-Name: bn-BD-NabanitaNeural
-Gender: Female
-
-Name: bn-BD-PradeepNeural
-Gender: Male
-
-Name: bn-IN-BashkarNeural
-Gender: Male
-
-Name: bn-IN-TanishaaNeural
-Gender: Female
-
-Name: bs-BA-GoranNeural
-Gender: Male
-
-Name: bs-BA-VesnaNeural
-Gender: Female
-
-Name: ca-ES-EnricNeural
-Gender: Male
-
-Name: ca-ES-JoanaNeural
-Gender: Female
-
-Name: cs-CZ-AntoninNeural
-Gender: Male
-
-Name: cs-CZ-VlastaNeural
-Gender: Female
-
-Name: cy-GB-AledNeural
-Gender: Male
-
-Name: cy-GB-NiaNeural
-Gender: Female
-
-Name: da-DK-ChristelNeural
-Gender: Female
-
-Name: da-DK-JeppeNeural
-Gender: Male
-
-Name: de-AT-IngridNeural
-Gender: Female
-
-Name: de-AT-JonasNeural
-Gender: Male
-
-Name: de-CH-JanNeural
-Gender: Male
-
-Name: de-CH-LeniNeural
-Gender: Female
-
-Name: de-DE-AmalaNeural
-Gender: Female
-
-Name: de-DE-ConradNeural
-Gender: Male
-
-Name: de-DE-FlorianMultilingualNeural
-Gender: Male
-
-Name: de-DE-KatjaNeural
-Gender: Female
-
-Name: de-DE-KillianNeural
-Gender: Male
-
-Name: de-DE-SeraphinaMultilingualNeural
-Gender: Female
-
-Name: el-GR-AthinaNeural
-Gender: Female
-
-Name: el-GR-NestorasNeural
-Gender: Male
-
-Name: en-AU-NatashaNeural
-Gender: Female
-
-Name: en-AU-WilliamNeural
-Gender: Male
-
-Name: en-CA-ClaraNeural
-Gender: Female
-
-Name: en-CA-LiamNeural
-Gender: Male
-
-Name: en-GB-LibbyNeural
-Gender: Female
-
-Name: en-GB-MaisieNeural
-Gender: Female
-
-Name: en-GB-RyanNeural
-Gender: Male
-
-Name: en-GB-SoniaNeural
-Gender: Female
-
-Name: en-GB-ThomasNeural
-Gender: Male
-
-Name: en-HK-SamNeural
-Gender: Male
-
-Name: en-HK-YanNeural
-Gender: Female
-
-Name: en-IE-ConnorNeural
-Gender: Male
-
-Name: en-IE-EmilyNeural
-Gender: Female
-
-Name: en-IN-NeerjaExpressiveNeural
-Gender: Female
-
-Name: en-IN-NeerjaNeural
-Gender: Female
-
-Name: en-IN-PrabhatNeural
-Gender: Male
-
-Name: en-KE-AsiliaNeural
-Gender: Female
-
-Name: en-KE-ChilembaNeural
-Gender: Male
-
-Name: en-NG-AbeoNeural
-Gender: Male
-
-Name: en-NG-EzinneNeural
-Gender: Female
-
-Name: en-NZ-MitchellNeural
-Gender: Male
-
-Name: en-NZ-MollyNeural
-Gender: Female
-
-Name: en-PH-JamesNeural
-Gender: Male
-
-Name: en-PH-RosaNeural
-Gender: Female
-
-Name: en-SG-LunaNeural
-Gender: Female
-
-Name: en-SG-WayneNeural
-Gender: Male
-
-Name: en-TZ-ElimuNeural
-Gender: Male
-
-Name: en-TZ-ImaniNeural
-Gender: Female
-
-Name: en-US-AnaNeural
-Gender: Female
-
-Name: en-US-AndrewMultilingualNeural
-Gender: Male
-
-Name: en-US-AndrewNeural
-Gender: Male
-
-Name: en-US-AriaNeural
-Gender: Female
-
-Name: en-US-AvaMultilingualNeural
-Gender: Female
-
-Name: en-US-AvaNeural
-Gender: Female
-
-Name: en-US-BrianMultilingualNeural
-Gender: Male
-
-Name: en-US-BrianNeural
-Gender: Male
-
-Name: en-US-ChristopherNeural
-Gender: Male
-
-Name: en-US-EmmaMultilingualNeural
-Gender: Female
-
-Name: en-US-EmmaNeural
-Gender: Female
-
-Name: en-US-EricNeural
-Gender: Male
-
-Name: en-US-GuyNeural
-Gender: Male
-
-Name: en-US-JennyNeural
-Gender: Female
-
-Name: en-US-MichelleNeural
-Gender: Female
-
-Name: en-US-RogerNeural
-Gender: Male
-
-Name: en-US-SteffanNeural
-Gender: Male
-
-Name: en-ZA-LeahNeural
-Gender: Female
-
-Name: en-ZA-LukeNeural
-Gender: Male
-
-Name: es-AR-ElenaNeural
-Gender: Female
-
-Name: es-AR-TomasNeural
-Gender: Male
-
-Name: es-BO-MarceloNeural
-Gender: Male
-
-Name: es-BO-SofiaNeural
-Gender: Female
-
-Name: es-CL-CatalinaNeural
-Gender: Female
-
-Name: es-CL-LorenzoNeural
-Gender: Male
-
-Name: es-CO-GonzaloNeural
-Gender: Male
-
-Name: es-CO-SalomeNeural
-Gender: Female
-
-Name: es-CR-JuanNeural
-Gender: Male
-
-Name: es-CR-MariaNeural
-Gender: Female
-
-Name: es-CU-BelkysNeural
-Gender: Female
-
-Name: es-CU-ManuelNeural
-Gender: Male
-
-Name: es-DO-EmilioNeural
-Gender: Male
-
-Name: es-DO-RamonaNeural
-Gender: Female
-
-Name: es-EC-AndreaNeural
-Gender: Female
-
-Name: es-EC-LuisNeural
-Gender: Male
-
-Name: es-ES-AlvaroNeural
-Gender: Male
-
-Name: es-ES-ElviraNeural
-Gender: Female
-
-Name: es-ES-XimenaNeural
-Gender: Female
-
-Name: es-GQ-JavierNeural
-Gender: Male
-
-Name: es-GQ-TeresaNeural
-Gender: Female
-
-Name: es-GT-AndresNeural
-Gender: Male
-
-Name: es-GT-MartaNeural
-Gender: Female
-
-Name: es-HN-CarlosNeural
-Gender: Male
-
-Name: es-HN-KarlaNeural
-Gender: Female
-
-Name: es-MX-DaliaNeural
-Gender: Female
-
-Name: es-MX-JorgeNeural
-Gender: Male
-
-Name: es-NI-FedericoNeural
-Gender: Male
-
-Name: es-NI-YolandaNeural
-Gender: Female
-
-Name: es-PA-MargaritaNeural
-Gender: Female
-
-Name: es-PA-RobertoNeural
-Gender: Male
-
-Name: es-PE-AlexNeural
-Gender: Male
-
-Name: es-PE-CamilaNeural
-Gender: Female
-
-Name: es-PR-KarinaNeural
-Gender: Female
-
-Name: es-PR-VictorNeural
-Gender: Male
-
-Name: es-PY-MarioNeural
-Gender: Male
-
-Name: es-PY-TaniaNeural
-Gender: Female
-
-Name: es-SV-LorenaNeural
-Gender: Female
-
-Name: es-SV-RodrigoNeural
-Gender: Male
-
-Name: es-US-AlonsoNeural
-Gender: Male
-
-Name: es-US-PalomaNeural
-Gender: Female
-
-Name: es-UY-MateoNeural
-Gender: Male
-
-Name: es-UY-ValentinaNeural
-Gender: Female
-
-Name: es-VE-PaolaNeural
-Gender: Female
-
-Name: es-VE-SebastianNeural
-Gender: Male
-
-Name: et-EE-AnuNeural
-Gender: Female
-
-Name: et-EE-KertNeural
-Gender: Male
-
-Name: fa-IR-DilaraNeural
-Gender: Female
-
-Name: fa-IR-FaridNeural
-Gender: Male
-
-Name: fi-FI-HarriNeural
-Gender: Male
-
-Name: fi-FI-NooraNeural
-Gender: Female
-
-Name: fil-PH-AngeloNeural
-Gender: Male
-
-Name: fil-PH-BlessicaNeural
-Gender: Female
-
-Name: fr-BE-CharlineNeural
-Gender: Female
-
-Name: fr-BE-GerardNeural
-Gender: Male
-
-Name: fr-CA-AntoineNeural
-Gender: Male
-
-Name: fr-CA-JeanNeural
-Gender: Male
-
-Name: fr-CA-SylvieNeural
-Gender: Female
-
-Name: fr-CA-ThierryNeural
-Gender: Male
-
-Name: fr-CH-ArianeNeural
-Gender: Female
-
-Name: fr-CH-FabriceNeural
-Gender: Male
-
-Name: fr-FR-DeniseNeural
-Gender: Female
-
-Name: fr-FR-EloiseNeural
-Gender: Female
-
-Name: fr-FR-HenriNeural
-Gender: Male
-
-Name: fr-FR-RemyMultilingualNeural
-Gender: Male
-
-Name: fr-FR-VivienneMultilingualNeural
-Gender: Female
-
-Name: ga-IE-ColmNeural
-Gender: Male
-
-Name: ga-IE-OrlaNeural
-Gender: Female
-
-Name: gl-ES-RoiNeural
-Gender: Male
-
-Name: gl-ES-SabelaNeural
-Gender: Female
-
-Name: gu-IN-DhwaniNeural
-Gender: Female
-
-Name: gu-IN-NiranjanNeural
-Gender: Male
-
-Name: he-IL-AvriNeural
-Gender: Male
-
-Name: he-IL-HilaNeural
-Gender: Female
-
-Name: hi-IN-MadhurNeural
-Gender: Male
-
-Name: hi-IN-SwaraNeural
-Gender: Female
-
-Name: hr-HR-GabrijelaNeural
-Gender: Female
-
-Name: hr-HR-SreckoNeural
-Gender: Male
-
-Name: hu-HU-NoemiNeural
-Gender: Female
-
-Name: hu-HU-TamasNeural
-Gender: Male
-
-Name: id-ID-ArdiNeural
-Gender: Male
-
-Name: id-ID-GadisNeural
-Gender: Female
-
-Name: is-IS-GudrunNeural
-Gender: Female
-
-Name: is-IS-GunnarNeural
-Gender: Male
-
-Name: it-IT-DiegoNeural
-Gender: Male
-
-Name: it-IT-ElsaNeural
-Gender: Female
-
-Name: it-IT-GiuseppeMultilingualNeural
-Gender: Male
-
-Name: it-IT-IsabellaNeural
-Gender: Female
-
-Name: iu-Cans-CA-SiqiniqNeural
-Gender: Female
-
-Name: iu-Cans-CA-TaqqiqNeural
-Gender: Male
-
-Name: iu-Latn-CA-SiqiniqNeural
-Gender: Female
-
-Name: iu-Latn-CA-TaqqiqNeural
-Gender: Male
-
-Name: ja-JP-KeitaNeural
-Gender: Male
-
-Name: ja-JP-NanamiNeural
-Gender: Female
-
-Name: jv-ID-DimasNeural
-Gender: Male
-
-Name: jv-ID-SitiNeural
-Gender: Female
-
-Name: ka-GE-EkaNeural
-Gender: Female
-
-Name: ka-GE-GiorgiNeural
-Gender: Male
-
-Name: kk-KZ-AigulNeural
-Gender: Female
-
-Name: kk-KZ-DauletNeural
-Gender: Male
-
-Name: km-KH-PisethNeural
-Gender: Male
-
-Name: km-KH-SreymomNeural
-Gender: Female
-
-Name: kn-IN-GaganNeural
-Gender: Male
-
-Name: kn-IN-SapnaNeural
-Gender: Female
-
-Name: ko-KR-HyunsuMultilingualNeural
-Gender: Male
-
-Name: ko-KR-InJoonNeural
-Gender: Male
-
-Name: ko-KR-SunHiNeural
-Gender: Female
-
-Name: lo-LA-ChanthavongNeural
-Gender: Male
-
-Name: lo-LA-KeomanyNeural
-Gender: Female
-
-Name: lt-LT-LeonasNeural
-Gender: Male
-
-Name: lt-LT-OnaNeural
-Gender: Female
-
-Name: lv-LV-EveritaNeural
-Gender: Female
-
-Name: lv-LV-NilsNeural
-Gender: Male
-
-Name: mk-MK-AleksandarNeural
-Gender: Male
-
-Name: mk-MK-MarijaNeural
-Gender: Female
-
-Name: ml-IN-MidhunNeural
-Gender: Male
-
-Name: ml-IN-SobhanaNeural
-Gender: Female
-
-Name: mn-MN-BataaNeural
-Gender: Male
-
-Name: mn-MN-YesuiNeural
-Gender: Female
-
-Name: mr-IN-AarohiNeural
-Gender: Female
-
-Name: mr-IN-ManoharNeural
-Gender: Male
-
-Name: ms-MY-OsmanNeural
-Gender: Male
-
-Name: ms-MY-YasminNeural
-Gender: Female
-
-Name: mt-MT-GraceNeural
-Gender: Female
-
-Name: mt-MT-JosephNeural
-Gender: Male
-
-Name: my-MM-NilarNeural
-Gender: Female
-
-Name: my-MM-ThihaNeural
-Gender: Male
-
-Name: nb-NO-FinnNeural
-Gender: Male
-
-Name: nb-NO-PernilleNeural
-Gender: Female
-
-Name: ne-NP-HemkalaNeural
-Gender: Female
-
-Name: ne-NP-SagarNeural
-Gender: Male
-
-Name: nl-BE-ArnaudNeural
-Gender: Male
-
-Name: nl-BE-DenaNeural
-Gender: Female
-
-Name: nl-NL-ColetteNeural
-Gender: Female
-
-Name: nl-NL-FennaNeural
-Gender: Female
-
-Name: nl-NL-MaartenNeural
-Gender: Male
-
-Name: pl-PL-MarekNeural
-Gender: Male
-
-Name: pl-PL-ZofiaNeural
-Gender: Female
-
-Name: ps-AF-GulNawazNeural
-Gender: Male
-
-Name: ps-AF-LatifaNeural
-Gender: Female
-
-Name: pt-BR-AntonioNeural
-Gender: Male
-
-Name: pt-BR-FranciscaNeural
-Gender: Female
-
-Name: pt-BR-ThalitaMultilingualNeural
-Gender: Female
-
-Name: pt-PT-DuarteNeural
-Gender: Male
-
-Name: pt-PT-RaquelNeural
-Gender: Female
-
-Name: ro-RO-AlinaNeural
-Gender: Female
-
-Name: ro-RO-EmilNeural
-Gender: Male
-
-Name: ru-RU-DmitryNeural
-Gender: Male
-
-Name: ru-RU-SvetlanaNeural
-Gender: Female
-
-Name: si-LK-SameeraNeural
-Gender: Male
-
-Name: si-LK-ThiliniNeural
-Gender: Female
-
-Name: sk-SK-LukasNeural
-Gender: Male
-
-Name: sk-SK-ViktoriaNeural
-Gender: Female
-
-Name: sl-SI-PetraNeural
-Gender: Female
-
-Name: sl-SI-RokNeural
-Gender: Male
-
-Name: so-SO-MuuseNeural
-Gender: Male
-
-Name: so-SO-UbaxNeural
-Gender: Female
-
-Name: sq-AL-AnilaNeural
-Gender: Female
-
-Name: sq-AL-IlirNeural
-Gender: Male
-
-Name: sr-RS-NicholasNeural
-Gender: Male
-
-Name: sr-RS-SophieNeural
-Gender: Female
-
-Name: su-ID-JajangNeural
-Gender: Male
-
-Name: su-ID-TutiNeural
-Gender: Female
-
-Name: sv-SE-MattiasNeural
-Gender: Male
-
-Name: sv-SE-SofieNeural
-Gender: Female
-
-Name: sw-KE-RafikiNeural
-Gender: Male
-
-Name: sw-KE-ZuriNeural
-Gender: Female
-
-Name: sw-TZ-DaudiNeural
-Gender: Male
-
-Name: sw-TZ-RehemaNeural
-Gender: Female
-
-Name: ta-IN-PallaviNeural
-Gender: Female
-
-Name: ta-IN-ValluvarNeural
-Gender: Male
-
-Name: ta-LK-KumarNeural
-Gender: Male
-
-Name: ta-LK-SaranyaNeural
-Gender: Female
-
-Name: ta-MY-KaniNeural
-Gender: Female
-
-Name: ta-MY-SuryaNeural
-Gender: Male
-
-Name: ta-SG-AnbuNeural
-Gender: Male
-
-Name: ta-SG-VenbaNeural
-Gender: Female
-
-Name: te-IN-MohanNeural
-Gender: Male
-
-Name: te-IN-ShrutiNeural
-Gender: Female
-
-Name: th-TH-NiwatNeural
-Gender: Male
-
-Name: th-TH-PremwadeeNeural
-Gender: Female
-
-Name: tr-TR-AhmetNeural
-Gender: Male
-
-Name: tr-TR-EmelNeural
-Gender: Female
-
-Name: uk-UA-OstapNeural
-Gender: Male
-
-Name: uk-UA-PolinaNeural
-Gender: Female
-
-Name: ur-IN-GulNeural
-Gender: Female
-
-Name: ur-IN-SalmanNeural
-Gender: Male
-
-Name: ur-PK-AsadNeural
-Gender: Male
-
-Name: ur-PK-UzmaNeural
-Gender: Female
-
-Name: uz-UZ-MadinaNeural
-Gender: Female
-
-Name: uz-UZ-SardorNeural
-Gender: Male
-
-Name: vi-VN-HoaiMyNeural
-Gender: Female
-
-Name: vi-VN-NamMinhNeural
-Gender: Male
-
-Name: zh-CN-XiaoxiaoNeural
-Gender: Female
-
-Name: zh-CN-XiaoyiNeural
-Gender: Female
-
-Name: zh-CN-YunjianNeural
-Gender: Male
-
-Name: zh-CN-YunxiNeural
-Gender: Male
-
-Name: zh-CN-YunxiaNeural
-Gender: Male
-
-Name: zh-CN-YunyangNeural
-Gender: Male
-
-Name: zh-CN-liaoning-XiaobeiNeural
-Gender: Female
-
-Name: zh-CN-shaanxi-XiaoniNeural
-Gender: Female
-
-Name: zh-HK-HiuGaaiNeural
-Gender: Female
-
-Name: zh-HK-HiuMaanNeural
-Gender: Female
-
-Name: zh-HK-WanLungNeural
-Gender: Male
-
-Name: zh-TW-HsiaoChenNeural
-Gender: Female
-
-Name: zh-TW-HsiaoYuNeural
-Gender: Female
-
-Name: zh-TW-YunJheNeural
-Gender: Male
-
-Name: zu-ZA-ThandoNeural
-Gender: Female
-
-Name: zu-ZA-ThembaNeural
-Gender: Male
-
-
-Name: en-US-AvaMultilingualNeural-V2
-Gender: Female
-
-Name: en-US-AndrewMultilingualNeural-V2
-Gender: Male
-
-Name: en-US-EmmaMultilingualNeural-V2
-Gender: Female
-
-Name: en-US-BrianMultilingualNeural-V2
-Gender: Male
-
-Name: de-DE-FlorianMultilingualNeural-V2
-Gender: Male
-
-Name: de-DE-SeraphinaMultilingualNeural-V2
-Gender: Female
-
-Name: fr-FR-RemyMultilingualNeural-V2
-Gender: Male
-
-Name: fr-FR-VivienneMultilingualNeural-V2
-Gender: Female
-
-Name: zh-CN-XiaoxiaoMultilingualNeural-V2
-Gender: Female
-    """.strip()
     voices = []
-    # 定义正则表达式模式，用于匹配 Name 和 Gender 行
-    pattern = re.compile(r"Name:\s*(.+)\s*Gender:\s*(.+)\s*", re.MULTILINE)
-    # 使用正则表达式查找所有匹配项
-    matches = pattern.findall(azure_voices_str)
-
-    for name, gender in matches:
+    for item in _load_azure_voices():
+        name = item["name"]
+        gender = item["gender"]
         # 应用过滤条件
         if filter_locals and any(
             name.lower().startswith(fl.lower()) for fl in filter_locals
@@ -1176,6 +304,133 @@ def is_gemini_voice(voice_name: str):
     return voice_name.startswith("gemini:")
 
 
+def is_mimo_voice(voice_name: str):
+    """检查是否是 Xiaomi MiMo TTS 的声音"""
+    return voice_name.startswith("mimo:")
+
+
+def is_minimax_voice(voice_name: str | None) -> bool:
+    return (voice_name or "").startswith("minimax:")
+
+
+def is_elevenlabs_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith("elevenlabs:")
+
+
+def get_elevenlabs_api_key() -> str:
+    """
+    读取 ElevenLabs TTS 使用的 API Key。
+
+    配置文件优先，环境变量仅作为未配置时的后备来源。WebUI 和配乐功能已经
+    支持 ``ELEVENLABS_API_KEY``，TTS 必须使用相同规则，否则仅通过容器环境
+    变量部署时，音色列表可正常加载，真正合成语音却会误报未配置 Key。
+    """
+    configured_key = str(config.elevenlabs.get("api_key", "") or "").strip()
+    return configured_key or os.getenv("ELEVENLABS_API_KEY", "").strip()
+
+
+def is_chatterbox_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith("chatterbox:")
+
+
+def is_no_voice(voice_name: str | None) -> bool:
+    """
+    判断用户是否明确选择了“无配音”模式。
+
+    这里刻意不把空字符串当成无配音：空 voice 更可能是配置损坏、旧版本
+    WebUI 状态丢失或接口参数缺失。只有明确的 sentinel 才进入静音分支，
+    这样可以避免把真实错误伪装成正常生成。
+    """
+    return str(voice_name or "").strip().lower() in _NO_VOICE_ALIASES
+
+
+def estimate_no_voice_duration(text: str) -> float:
+    """
+    为无配音模式估算一个稳定的视频时间轴长度。
+
+    无配音仍需要一个音频占位来驱动现有素材裁剪、字幕时间轴和最终合成。
+    估算策略尽量简单：
+    1. 中文等 CJK 字符按约 4.2 字/秒估算；
+    2. 英文/数字按约 2.7 词/秒估算；
+    3. 其他语种文字按约 4.0 字符/秒兜底估算，覆盖俄语、阿拉伯语、
+       日文假名、韩文等非 ASCII 文本；
+    4. 每个断句补一点停顿，让字幕切换不至于过于紧凑；
+    5. 最少 3 秒，避免极短脚本生成 0 秒音频。
+    """
+    normalized_text = (text or "").strip()
+    if not normalized_text:
+        return 3.0
+
+    cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", normalized_text))
+    words = len(re.findall(r"[A-Za-z0-9]+", normalized_text))
+    ascii_word_chars = sum(len(word) for word in re.findall(r"[A-Za-z0-9]+", normalized_text))
+    other_text_chars = 0
+    for char in normalized_text:
+        # Unicode category 以 L 开头表示各语种字母，N 表示数字。前面已经单独
+        # 统计了 CJK 和 ASCII 单词，这里只统计剩余文字，避免英文被重复计时。
+        category = unicodedata.category(char)
+        if category.startswith(("L", "N")):
+            other_text_chars += 1
+    other_text_chars = max(other_text_chars - cjk_chars - ascii_word_chars, 0)
+    sentence_count = max(len(utils.split_string_by_punctuations(normalized_text)), 1)
+
+    cjk_duration = cjk_chars / 4.2
+    word_duration = words / 2.7
+    other_text_duration = other_text_chars / 4.0
+    pause_duration = max(sentence_count - 1, 0) * 0.35
+    return max(3.0, cjk_duration + word_duration + other_text_duration + pause_duration)
+
+
+def generate_silent_audio(duration_seconds: float, output_file: str) -> bool:
+    """
+    生成 MP3 静音音频，作为“无配音”模式的时间轴占位。
+
+    使用 FFmpeg 的 anullsrc 直接生成静音，比先构造临时 WAV 再转码更少中间
+    文件。失败时返回 False，让上层按普通 TTS 失败路径处理并记录日志。
+    """
+    ensure_file_path_exists(output_file)
+    duration_seconds = max(float(duration_seconds or 0), 0.1)
+    ffmpeg_binary = utils.get_ffmpeg_binary()
+    command = [
+        ffmpeg_binary,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=44100:cl=mono",
+        "-t",
+        f"{duration_seconds:.3f}",
+        "-codec:a",
+        "libmp3lame",
+        "-q:a",
+        "4",
+        output_file,
+    ]
+
+    logger.info(
+        f"generating silent audio for no-voice mode, duration: {duration_seconds:.2f}s"
+    )
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        logger.error(
+            "failed to generate silent audio: "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
+        return False
+    if not os.path.exists(output_file) or os.path.getsize(output_file) <= 0:
+        logger.error(
+            "silent audio output file is missing or empty, "
+            f"file: {output_file}, duration: {duration_seconds:.2f}s"
+        )
+        return False
+    return True
+
+
 def tts(
     text: str,
     voice_name: str,
@@ -1183,8 +438,25 @@ def tts(
     voice_file: str,
     voice_volume: float = 1.0,
 ) -> Union[SubMaker, None]:
+    if is_no_voice(voice_name):
+        duration_seconds = estimate_no_voice_duration(text)
+        if not generate_silent_audio(duration_seconds, voice_file):
+            return None
+
+        sub_maker = ensure_legacy_submaker_fields(SubMaker())
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=sub_maker,
+            text=text,
+            audio_duration_seconds=duration_seconds,
+        )
+
     if is_azure_v2_voice(voice_name):
-        return azure_tts_v2(text, voice_name, voice_file)
+        return azure_tts_v2(
+            text,
+            voice_name,
+            voice_file,
+            voice_rate=voice_rate,
+        )
     elif is_siliconflow_voice(voice_name):
         # 从voice_name中提取模型和声音
         # 格式: siliconflow:model:voice-Gender
@@ -1230,17 +502,67 @@ def tts(
         else:
             logger.error(f"Invalid gemini voice name format: {voice_name}")
             return None
+    elif is_mimo_voice(voice_name):
+        # 从voice_name中提取声音名称
+        # 格式: mimo:voice-Gender；如果调用方已执行 parse_voice_name，
+        # 则可能是 mimo:voice。两种格式都兼容。
+        parts = voice_name.split(":")
+        if len(parts) >= 2:
+            voice_with_gender = parts[1]
+            voice = voice_with_gender.split("-")[0]
+            return mimo_tts(text, voice, voice_rate, voice_file, voice_volume)
+        else:
+            logger.error(f"Invalid mimo voice name format: {voice_name}")
+            return None
+    elif is_minimax_voice(voice_name):
+        voice_id = voice_name.split(":", 1)[1].strip()
+        if voice_id:
+            return minimax_tts(text, voice_id, voice_rate, voice_file, voice_volume)
+        logger.error(f"Invalid MiniMax voice name format: {voice_name}")
+        return None
+    elif is_elevenlabs_voice(voice_name):
+        # 格式: elevenlabs:{voice_id}:{name}
+        parts = voice_name.split(":")
+        if len(parts) >= 2:
+            voice_id = parts[1]
+            return elevenlabs_tts(text, voice_id, voice_file, voice_rate, voice_volume)
+        else:
+            logger.error(f"Invalid elevenlabs voice name format: {voice_name}")
+            return None
+    elif is_chatterbox_voice(voice_name):
+        # 格式: chatterbox:<voice>，voice 可带显示用的 -Female/-Male 后缀
+        parts = voice_name.split(":", 1)
+        if len(parts) >= 2 and parts[1].strip():
+            chatterbox_voice = parts[1].strip()
+            if chatterbox_voice.endswith(("-Female", "-Male")):
+                chatterbox_voice = chatterbox_voice.rsplit("-", 1)[0]
+            return chatterbox_tts(
+                text, chatterbox_voice, voice_file, voice_rate, voice_volume
+            )
+        else:
+            logger.error(f"Invalid chatterbox voice name format: {voice_name}")
+            return None
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
 
 def convert_rate_to_percent(rate: float) -> str:
-    if rate == 1.0:
-        return "+0%"
+    # edge-tts requires a sign-prefixed percentage (e.g. "+0%", "-20%").
+    # Rounding can yield 0 for rates near but not equal to 1.0 (e.g. 1.004,
+    # 0.997); those must still be returned as "+0%", not the unsigned "0%"
+    # which edge-tts rejects with ValueError: Invalid rate '0%'.
+    # API 或批处理调用可能传入 0、0.0、None 或无法转换的空值；这些值不代表
+    # 合法语速，直接计算会变成 -100% 或抛异常。这里统一回退到正常语速，
+    # 避免生成极慢音频或让 TTS 流程在边界输入下失败。
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError):
+        rate = 1.0
+    if rate <= 0:
+        rate = 1.0
     percent = round((rate - 1.0) * 100)
-    if percent > 0:
+    if percent >= 0:
         return f"+{percent}%"
-    else:
-        return f"{percent}%"
+    return f"{percent}%"
 
 
 def ensure_file_path_exists(file_path: str) -> None:
@@ -1747,12 +1069,43 @@ def localtts_tts(
         return None
 
 
-def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker, None]:
+def _build_azure_v2_ssml(text: str, voice_name: str, voice_rate: float) -> str:
+    """构造 Azure Speech V2 使用的 SSML，并安全规范化语速参数。"""
+    try:
+        normalized_rate = float(voice_rate)
+    except (TypeError, ValueError):
+        normalized_rate = 1.0
+    normalized_rate = max(0.25, min(4.0, normalized_rate))
+
+    voice_locale_parts = voice_name.split("-", 2)
+    voice_locale = (
+        "-".join(voice_locale_parts[:2])
+        if len(voice_locale_parts) >= 2
+        else "en-US"
+    )
+    escaped_text = escape(text)
+    escaped_voice_name = escape(voice_name, {'"': "&quot;"})
+    return (
+        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xml:lang="{voice_locale}">'
+        f'<voice name="{escaped_voice_name}">'
+        f'<prosody rate="{normalized_rate:g}">{escaped_text}</prosody>'
+        "</voice></speak>"
+    )
+
+
+def azure_tts_v2(
+    text: str,
+    voice_name: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+) -> Union[SubMaker, None]:
     voice_name = is_azure_v2_voice(voice_name)
     if not voice_name:
         logger.error(f"invalid voice name: {voice_name}")
         raise ValueError(f"invalid voice name: {voice_name}")
     text = text.strip()
+    ssml = _build_azure_v2_ssml(text, voice_name, voice_rate)
 
     def _format_duration_to_offset(duration) -> int:
         if isinstance(duration, str):
@@ -1772,7 +1125,9 @@ def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker,
 
     for i in range(3):
         try:
-            logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
+            logger.info(
+                f"start, voice name: {voice_name}, rate: {voice_rate}, try: {i + 1}"
+            )
 
             import azure.cognitiveservices.speech as speechsdk
 
@@ -1823,7 +1178,9 @@ def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker,
                 speech_synthesizer_word_boundary_cb
             )
 
-            result = speech_synthesizer.speak_text_async(text).get()
+            # speak_text_async() 不支持语速参数。使用 SSML prosody 后，试听和
+            # 正式生成都会按 WebUI/API 传入的 voice_rate 调整语速。
+            result = speech_synthesizer.speak_ssml_async(ssml).get()
             if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
                 logger.success(f"azure v2 speech synthesis succeeded: {voice_file}")
                 return sub_maker
@@ -1863,41 +1220,40 @@ def gemini_tts(
         SubMaker对象或None
     """
     import base64
-    import json
     import io
     from pydub import AudioSegment
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
+    _configure_pydub_ffmpeg(AudioSegment)
     
     try:
-        # 配置Gemini API
         api_key = config.app.get("gemini_api_key", "")
         if not api_key:
             logger.error("Gemini API key is not set")
             return None
-            
-        genai.configure(api_key=api_key)
-        
+
         logger.info(f"start, voice name: {voice_name}, try: 1")
-        
-        # 使用Gemini TTS API
-        model = genai.GenerativeModel("gemini-2.5-flash-preview-tts")
-        
-        generation_config = {
-            "response_modalities": ["AUDIO"],
-            "speech_config": {
-                "voice_config": {
-                    "prebuilt_voice_config": {
-                        "voice_name": voice_name
-                    }
-                }
-            }
-        }
-        
-        response = model.generate_content(
-            contents=text,
-            generation_config=generation_config
+
+        generation_config = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice_name
+                    )
+                )
+            ),
         )
-        
+
+        # google-genai 使用统一 Client 调用文本和 TTS 模型。上下文管理器确保
+        # 请求结束后释放 HTTP 连接，同时保留原有 PCM 转码和字幕时间轴逻辑。
+        with genai.Client(api_key=api_key) as client:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-preview-tts",
+                contents=text,
+                config=generation_config,
+            )
+
         # 检查响应
         if not response.candidates or not response.candidates[0].content:
             logger.error("No audio content received from Gemini TTS")
@@ -1938,8 +1294,15 @@ def gemini_tts(
             logger.error(f"Failed to load PCM audio: {e}")
             return None
         
-        # 导出为MP3格式
-        audio_segment.export(voice_file, format="mp3")
+        # API、CLI 或测试可以直接把尚不存在的嵌套目录作为输出位置。这里在
+        # 真正写文件前统一创建父目录，避免一次成功的 Gemini 请求最后因为
+        # 本地路径不存在而丢失结果，也让该 provider 与其他 TTS 实现行为一致。
+        ensure_file_path_exists(voice_file)
+
+        # pydub 会返回打开的输出文件对象。批量生成时若不主动关闭，文件描述符
+        # 会持续累积，并在 Windows 上增加后续覆盖或删除音频文件失败的概率。
+        exported_audio = audio_segment.export(voice_file, format="mp3")
+        exported_audio.close()
         
         logger.info(f"completed, output file: {voice_file}")
         
@@ -1962,16 +1325,530 @@ def gemini_tts(
         return None
 
 
+def mimo_tts(
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """
+    使用 Xiaomi MiMo V2.5 TTS 生成语音。
+
+    官方接口兼容 OpenAI Chat Completions，但 TTS 有两个关键差异：
+    1. 待合成文本必须放在 `assistant` 消息里；
+    2. 音频以 `message.audio.data` 的 base64 字符串返回。
+
+    MiMo 当前没有返回逐词时间轴，因此这里复用项目已有的 legacy
+    SubMaker 兜底方案：根据最终音频时长和脚本文本断句生成字幕时间轴。
+    """
+    from pydub import AudioSegment
+
+    text = (text or "").strip()
+    if not text:
+        logger.error("MiMo TTS text is empty")
+        return None
+
+    api_key = config.app.get("mimo_api_key", "")
+    if not api_key:
+        logger.error("MiMo API key is not set")
+        return None
+
+    base_url = config.app.get("mimo_base_url", "") or _MIMO_DEFAULT_BASE_URL
+    model_name = config.app.get("mimo_tts_model_name", "") or _MIMO_DEFAULT_TTS_MODEL
+    style_prompt = config.app.get(
+        "mimo_tts_style_prompt",
+        "请用自然、清晰、适合短视频旁白的语气朗读。",
+    )
+
+    _configure_pydub_ffmpeg(AudioSegment)
+
+    for i in range(3):
+        try:
+            logger.info(
+                f"start mimo tts, model: {model_name}, voice: {voice_name}, try: {i + 1}"
+            )
+            ensure_file_path_exists(voice_file)
+
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "user", "content": style_prompt},
+                    {"role": "assistant", "content": text},
+                ],
+                audio={
+                    "format": "wav",
+                    "voice": voice_name,
+                },
+            )
+
+            if not completion or not getattr(completion, "choices", None):
+                raise ValueError("MiMo TTS returned empty response")
+
+            message = completion.choices[0].message
+            audio = getattr(message, "audio", None)
+            audio_data = None
+            if isinstance(audio, dict):
+                audio_data = audio.get("data")
+            elif audio is not None:
+                audio_data = getattr(audio, "data", None)
+
+            if not audio_data:
+                raise ValueError("MiMo TTS returned empty audio data")
+
+            audio_bytes = base64.b64decode(audio_data)
+            audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format="wav")
+
+            output_format = utils.parse_extension(voice_file) or "mp3"
+            if output_format == "wav":
+                with open(voice_file, "wb") as f:
+                    f.write(audio_bytes)
+            else:
+                audio_segment.export(voice_file, format=output_format)
+
+            audio_duration = len(audio_segment) / 1000.0
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            logger.success(f"mimo tts succeeded: {voice_file}")
+            logger.debug(
+                "mimo subtitle timeline generated, "
+                f"duration: {audio_duration:.3f}s, output_format: {output_format}"
+            )
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=sub_maker,
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"mimo tts failed: {str(e)}")
+
+    return None
+
+
+def _resolve_minimax_tts_url(configured_url: str) -> str:
+    configured_url = (configured_url or "").strip().rstrip("/")
+    if not configured_url:
+        return MINIMAX_TTS_GLOBAL_URL
+    if configured_url in {MINIMAX_TTS_GLOBAL_URL, MINIMAX_TTS_CN_URL}:
+        return configured_url
+    if configured_url.endswith("/v1"):
+        return f"{configured_url}/t2a_v2"
+    return configured_url
+
+
+def get_minimax_tts_api_key() -> str:
+    """返回 MiniMax TTS 的有效密钥，专用配置优先于 LLM 共享配置。"""
+    return str(
+        config.minimax_tts.get("api_key", "")
+        or config.app.get("minimax_api_key", "")
+        or os.getenv("MINIMAX_API_KEY", "")
+        or ""
+    ).strip()
+
+
+def _infer_minimax_tts_url(base_url: str) -> str:
+    """根据 MiniMax LLM 地址推断同区域的 TTS 地址，无法识别时返回空值。"""
+    normalized_url = str(base_url or "").strip()
+    if not normalized_url:
+        return ""
+
+    parse_target = normalized_url if "://" in normalized_url else f"//{normalized_url}"
+    host = (urlparse(parse_target).hostname or "").lower()
+    if host == "minimaxi.com" or host.endswith(".minimaxi.com"):
+        return MINIMAX_TTS_CN_URL
+    if host == "minimax.io" or host.endswith(".minimax.io"):
+        return MINIMAX_TTS_GLOBAL_URL
+    return ""
+
+
+def get_minimax_tts_endpoint() -> str:
+    """
+    返回与当前有效密钥匹配的 MiniMax TTS 地址。
+
+    独立配置 TTS Key 时尊重用户选择的 TTS 地址；复用 MiniMax LLM Key 时，
+    优先跟随 LLM Base URL 的区域，避免中国站 Key 被发送到国际站而返回 401。
+    """
+    dedicated_key = str(config.minimax_tts.get("api_key", "") or "").strip()
+    if not dedicated_key:
+        inferred_url = _infer_minimax_tts_url(config.app.get("minimax_base_url", ""))
+        if inferred_url:
+            return inferred_url
+    return _resolve_minimax_tts_url(config.minimax_tts.get("base_url", ""))
+
+
+def get_minimax_voice_catalog(
+    api_key: str = "",
+    endpoint: str = "",
+    voice_type: str = "all",
+) -> list[dict[str, str]]:
+    """
+    查询当前 MiniMax 账号可用的系统、克隆和生成音色。
+
+    返回值统一为 voice_id、voice_name、voice_type 三个字段，调用方无需了解
+    MiniMax 按音色来源拆分数组的响应结构。查询失败时抛出异常，让 WebUI、
+    API 或 CLI 可以按各自交互方式展示明确错误，而不是静默返回空列表。
+    """
+    if voice_type not in {"system", "voice_cloning", "voice_generation", "all"}:
+        raise ValueError(f"Unsupported MiniMax voice type: {voice_type}")
+
+    effective_api_key = str(api_key or get_minimax_tts_api_key()).strip()
+    if not effective_api_key:
+        raise ValueError("MiniMax TTS API key is not set")
+
+    tts_endpoint = (
+        _resolve_minimax_tts_url(endpoint)
+        if endpoint
+        else get_minimax_tts_endpoint()
+    )
+    voice_endpoint = (
+        f"{tts_endpoint[:-len('/t2a_v2')]}/get_voice"
+        if tts_endpoint.endswith("/t2a_v2")
+        else f"{tts_endpoint.rstrip('/')}/get_voice"
+    )
+    response = requests.post(
+        voice_endpoint,
+        json={"voice_type": voice_type},
+        headers={
+            "Authorization": f"Bearer {effective_api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=30,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"MiniMax get_voice failed with status {response.status_code}: "
+            f"{response.text[:200]}"
+        )
+
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise RuntimeError("MiniMax get_voice returned invalid JSON") from exc
+
+    base_resp = body.get("base_resp") or {}
+    if base_resp.get("status_code") not in {0, "0"}:
+        status_message = str(base_resp.get("status_msg") or "unknown error")
+        raise RuntimeError(f"MiniMax get_voice failed: {status_message}")
+
+    catalog = []
+    seen_voice_ids = set()
+    response_groups = (
+        ("system", "system_voice"),
+        ("voice_cloning", "voice_cloning"),
+        ("voice_generation", "voice_generation"),
+    )
+    for normalized_type, response_key in response_groups:
+        for item in body.get(response_key) or []:
+            voice_id = str(item.get("voice_id") or "").strip()
+            if not voice_id or voice_id in seen_voice_ids:
+                continue
+            seen_voice_ids.add(voice_id)
+            catalog.append(
+                {
+                    "voice_id": voice_id,
+                    "voice_name": str(item.get("voice_name") or voice_id).strip(),
+                    "voice_type": normalized_type,
+                }
+            )
+
+    logger.info(f"loaded MiniMax voices: count={len(catalog)}, type={voice_type}")
+    return catalog
+
+
+def _write_validated_minimax_audio(audio_bytes: bytes, voice_file: str) -> float:
+    """
+    将 MiniMax 音频原子写入目标路径，并返回时长。
+
+    远端返回成功状态不代表音频一定完整。先在同目录临时文件中验证，再使用
+    os.replace 原子替换，可以避免解码失败或 MoviePy 无法读取时留下半成品。
+    """
+    ensure_file_path_exists(voice_file)
+    output_dir = os.path.dirname(os.path.abspath(voice_file))
+    output_suffix = os.path.splitext(voice_file)[1] or ".mp3"
+    temp_fd, temp_path = tempfile.mkstemp(
+        prefix=".minimax-tts-", suffix=output_suffix, dir=output_dir
+    )
+    os.close(temp_fd)
+
+    try:
+        with open(temp_path, "wb") as output:
+            output.write(audio_bytes)
+
+        audio_clip = AudioFileClip(temp_path)
+        try:
+            audio_duration = float(audio_clip.duration)
+        finally:
+            audio_clip.close()
+
+        if not math.isfinite(audio_duration) or audio_duration <= 0:
+            raise ValueError("MiniMax TTS returned audio with an invalid duration")
+
+        os.replace(temp_path, voice_file)
+        return audio_duration
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def minimax_tts(text: str, voice_id: str, voice_rate: float, voice_file: str, voice_volume: float = 1.0) -> Union[SubMaker, None]:
+    """Generate speech with the synchronous MiniMax T2A HTTP API."""
+    text, voice_id = (text or "").strip(), (voice_id or "").strip()
+    if not text or not voice_id:
+        logger.error("MiniMax TTS requires text and a voice ID")
+        return None
+    settings = config.minimax_tts
+    api_key = get_minimax_tts_api_key()
+    if not api_key:
+        logger.error("MiniMax TTS API key is not set")
+        return None
+    url = get_minimax_tts_endpoint()
+    model = str(settings.get("model_id", MINIMAX_TTS_DEFAULT_MODEL) or MINIMAX_TTS_DEFAULT_MODEL).strip()
+    if model not in MINIMAX_TTS_MODELS:
+        logger.error(f"Unsupported MiniMax TTS model: {model}")
+        return None
+    try:
+        speed = max(0.5, min(2.0, float(voice_rate or 1.0)))
+        volume = max(0.0, min(10.0, float(voice_volume or 1.0)))
+        pitch = max(-12, min(12, int(settings.get("pitch", 0) or 0)))
+        sample_rate = int(settings.get("sample_rate", 32000) or 32000)
+        bitrate = int(settings.get("bitrate", 128000) or 128000)
+        channel = int(settings.get("channel", 1) or 1)
+    except (TypeError, ValueError) as exc:
+        logger.error(f"Invalid MiniMax TTS audio setting: {str(exc)}")
+        return None
+    audio_format = str(settings.get("audio_format", "mp3") or "mp3").strip()
+    if audio_format not in {"mp3", "wav", "flac", "pcm"}:
+        logger.error(f"Unsupported MiniMax TTS audio format: {audio_format}")
+        return None
+    payload = {
+        "model": model, "text": text, "stream": False, "language_boost": "auto", "output_format": "hex",
+        "voice_setting": {"voice_id": voice_id, "speed": speed, "vol": volume, "pitch": pitch},
+        "audio_setting": {"sample_rate": sample_rate, "bitrate": bitrate, "format": audio_format, "channel": channel},
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    for attempt in range(3):
+        try:
+            logger.info(f"start MiniMax TTS, model: {model}, voice: {voice_id}, try: {attempt + 1}")
+            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            if response.status_code != 200:
+                logger.error(f"MiniMax TTS failed with status {response.status_code}: {response.text[:200]}")
+                continue
+            body = response.json()
+            data = body.get("data") or {}
+            base_resp = body.get("base_resp") or {}
+            if base_resp.get("status_code") != 0 or data.get("status") != 2:
+                logger.error(f"MiniMax TTS returned an unsuccessful response: status_code={base_resp.get('status_code')}, audio_status={data.get('status')}")
+                continue
+            audio_hex = data.get("audio")
+            if not isinstance(audio_hex, str) or not audio_hex:
+                logger.error("MiniMax TTS returned empty audio data")
+                continue
+            if len(audio_hex) > _MINIMAX_TTS_MAX_AUDIO_HEX_CHARS:
+                logger.error("MiniMax TTS returned audio data exceeding the supported size")
+                continue
+            audio_duration = _write_validated_minimax_audio(bytes.fromhex(audio_hex), voice_file)
+            logger.success(f"MiniMax TTS succeeded: {voice_file}")
+            return populate_legacy_submaker_with_full_text(
+                ensure_legacy_submaker_fields(SubMaker()), text, audio_duration
+            )
+        except (OSError, ValueError, requests.RequestException) as exc:
+            logger.error(f"MiniMax TTS failed: {str(exc)}")
+    return None
+
+
+def elevenlabs_tts(
+    text: str,
+    voice_id: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+    model_id: str = "",
+) -> Union[SubMaker, None]:
+    text = (text or "").strip()
+    if not text:
+        logger.error("ElevenLabs TTS text is empty")
+        return None
+
+    api_key = get_elevenlabs_api_key()
+    if not api_key:
+        logger.error("ElevenLabs API key is not set")
+        return None
+
+    if not model_id:
+        model_id = config.elevenlabs.get("model_id", "eleven_multilingual_v2")
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "xi-api-key": api_key,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": True,
+        },
+    }
+
+    # Errors where retrying will never help (auth/access/validation failures).
+    _NON_RETRYABLE_CODES = {401, 403, 422}
+    _NON_RETRYABLE_STATUSES = {"voice_disabled", "voice_access_denied", "unauthorized"}
+
+    for i in range(3):
+        try:
+            logger.info(f"start elevenlabs tts, voice_id: {voice_id}, try: {i + 1}")
+            ensure_file_path_exists(voice_file)
+
+            response = requests.post(url, json=payload, headers=headers, timeout=60)
+            if response.status_code != 200:
+                error_status = ""
+                try:
+                    detail = response.json().get("detail", {})
+                    if isinstance(detail, dict):
+                        error_status = detail.get("status", "")
+                except Exception:
+                    pass
+
+                if response.status_code in _NON_RETRYABLE_CODES or error_status in _NON_RETRYABLE_STATUSES:
+                    logger.error(
+                        f"ElevenLabs TTS failed (non-retryable) — voice_id: {voice_id}, "
+                        f"status: {response.status_code}, error: {error_status or response.text[:200]}. "
+                        "Please select a different ElevenLabs voice."
+                    )
+                    return None
+
+                logger.error(
+                    f"elevenlabs tts failed with status {response.status_code}: {response.text[:200]}"
+                )
+                continue
+
+            with open(voice_file, "wb") as f:
+                f.write(response.content)
+
+            audio_clip = AudioFileClip(voice_file)
+            audio_duration = audio_clip.duration
+            audio_clip.close()
+
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            logger.success(f"elevenlabs tts succeeded: {voice_file}")
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=sub_maker,
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"elevenlabs tts failed: {str(e)}")
+
+    return None
+
+
+def chatterbox_tts(
+    text: str,
+    voice: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+    model_id: str = "",
+) -> Union[SubMaker, None]:
+    """Generate speech with a self-hosted Chatterbox TTS server.
+
+    Chatterbox (Resemble AI, MIT) is an open-source, locally hosted TTS model
+    with zero-shot voice cloning — a self-hostable alternative to ElevenLabs.
+    This talks to an OpenAI-compatible ``/audio/speech`` endpoint, so it works
+    with the common community servers (e.g. devnen/Chatterbox-TTS-Server,
+    travisvn/chatterbox-tts-api). Configure ``[chatterbox] base_url`` (and an
+    optional ``api_key``).
+
+    Like ElevenLabs, Chatterbox does not return word-level timestamps, so the
+    subtitle path falls back to the full-text SubMaker. For tighter subtitle
+    sync set ``subtitle_provider = "whisper"``.
+    """
+    text = (text or "").strip()
+    if not text:
+        logger.error("Chatterbox TTS text is empty")
+        return None
+
+    base_url = (config.chatterbox.get("base_url", "") or "").strip().rstrip("/")
+    if not base_url:
+        logger.error(
+            "Chatterbox base_url is not set, please configure [chatterbox] base_url in config.toml"
+        )
+        return None
+
+    api_key = config.chatterbox.get("api_key", "")
+    if not model_id:
+        model_id = config.chatterbox.get("model_id", "chatterbox") or "chatterbox"
+
+    url = f"{base_url}/audio/speech"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {
+        "model": model_id,
+        "input": text,
+        "voice": voice,
+        "response_format": "mp3",
+        # OpenAI speech API accepts speed 0.25-4.0; MoneyPrinterTurbo's rate is a
+        # 1.0-centred multiplier, so it maps directly (clamped to the valid range).
+        "speed": max(0.25, min(4.0, float(voice_rate or 1.0))),
+    }
+    # voice_volume is accepted for parity with the other TTS providers but is
+    # intentionally not sent: the OpenAI /audio/speech contract has no volume
+    # field, so Chatterbox servers ignore it. Adjust loudness via voice_rate
+    # (speed) or in post-processing instead.
+
+    for i in range(3):
+        try:
+            logger.info(f"start chatterbox tts, voice: {voice}, try: {i + 1}")
+            ensure_file_path_exists(voice_file)
+
+            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            if response.status_code != 200:
+                logger.error(
+                    f"chatterbox tts failed with status {response.status_code}: {response.text[:200]}"
+                )
+                continue
+
+            with open(voice_file, "wb") as f:
+                f.write(response.content)
+
+            audio_clip = AudioFileClip(voice_file)
+            audio_duration = audio_clip.duration
+            audio_clip.close()
+
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            logger.success(f"chatterbox tts succeeded: {voice_file}")
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=sub_maker,
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"chatterbox tts failed: {str(e)}")
+
+    return None
+
+
 def _format_text(text: str) -> str:
-    # text = text.replace("\n", " ")
+    """
+    清理字幕对齐前的脚本文本。
+
+    这里不能只在 LLM 生成阶段处理，因为用户也可能手动粘贴脚本，或通过
+    API 直接传入包含 Markdown 标记的文本。TTS 通常不会朗读 `---`、
+    `___`、`***` 这类分隔符行，也不会朗读 `_` 这种强调标记；如果字幕
+    对齐仍保留这些字符，`create_subtitle()` 会一直等待不存在的 cue，
+    最终导致字幕文件缺失并在 Whisper fallback 校正时补出全 0 时间轴。
+    """
     text = text.replace("[", " ")
     text = text.replace("]", " ")
     text = text.replace("(", " ")
     text = text.replace(")", " ")
     text = text.replace("{", " ")
     text = text.replace("}", " ")
-    text = text.strip()
-    return text
+    return utils.normalize_script_for_subtitle_matching(text)
 
 
 def _build_subtitle_formatter():
@@ -1991,14 +1868,38 @@ def _build_subtitle_formatter():
     return formatter
 
 
+# 阿拉伯语变音符号和 Tatweel 拉长符在 edge-tts 返回文本中可能出现，
+# 这些字符不影响语义，但会导致脚本文本和字幕 cue 字符串精确匹配失败。
+_ARABIC_DIACRITICS = re.compile("[\u0610-\u061A\u064B-\u065F\u0670\u0640\u06D6-\u06ED]")
+
+
+def _normalize_arabic(text: str) -> str:
+    """统一阿拉伯语常见字母变体，提升字幕 cue 与脚本行的匹配容错率。
+
+    edge-tts 对阿拉伯语可能返回与原脚本不同的字母形态，例如把 أ/إ/آ
+    归一成 ا，或者携带变音符号。这里仅在最后一层匹配兜底中使用，
+    不改变原始字幕文本，避免影响最终展示内容。
+    """
+    text = _ARABIC_DIACRITICS.sub("", text)
+    for src, dst in (
+        ("أإآٱ", "ا"),
+        ("ىئ", "ي"),
+        ("ة", "ه"),
+        ("ؤ", "و"),
+    ):
+        for ch in src:
+            text = text.replace(ch, dst)
+    return text
+
+
 def _match_script_line(script_lines: list[str], current_text: str, sub_index: int) -> str:
     """
     尝试把当前累计的字幕文本，与脚本中的某一条标准断句匹配起来。
 
     这里复用了项目原有的“按标点拆脚本，再逐段比对”的思路：
     1. 优先精确匹配；
-    2. 再做一次去常规标点后的匹配；
-    3. 最后做一次更激进的非单词字符清洗匹配。
+    2. 再做一次去标点和 Markdown `_` 格式符后的匹配；
+    3. 最后做一次阿拉伯语字符形态归一化匹配。
 
     这样可以兼容：
     - TTS 返回里可能缺失或单独拆分的标点；
@@ -2011,14 +1912,16 @@ def _match_script_line(script_lines: list[str], current_text: str, sub_index: in
     if current_text == target_line:
         return target_line.strip()
 
-    current_text_normalized = re.sub(r"[^\w\s]", "", current_text)
-    target_line_normalized = re.sub(r"[^\w\s]", "", target_line)
+    current_text_normalized = re.sub(r"[_\W]+", "", current_text)
+    target_line_normalized = re.sub(r"[_\W]+", "", target_line)
     if current_text_normalized == target_line_normalized:
         return target_line.strip()
 
-    current_text_normalized = re.sub(r"\W+", "", current_text)
-    target_line_normalized = re.sub(r"\W+", "", target_line)
-    if current_text_normalized == target_line_normalized:
+    # 最后一层阿拉伯语容错：edge-tts 返回的字母形态、变音符号或 Tatweel
+    # 可能和脚本不同。只在常规匹配失败后归一化比较，非阿拉伯语文本不会受影响。
+    current_ar = re.sub(r"[_\W]+", "", _normalize_arabic(current_text))
+    target_ar = re.sub(r"[_\W]+", "", _normalize_arabic(target_line))
+    if current_ar and current_ar == target_ar:
         return target_line.strip()
 
     return ""
@@ -2194,32 +2097,32 @@ def _get_audio_duration_from_submaker(sub_maker: SubMaker):
         return 0.0
     return legacy_offsets[-1][1] / 10000000
 
-def _get_audio_duration_from_mp3(mp3_file: str) -> float:
+def _get_audio_duration_from_file(audio_file: str) -> float:
     """
-    获取MP3音频时长
+    获取音频文件时长（支持 mp3/m4a/wav/aac 等 ffmpeg 可解码的格式）
     """
-    if not os.path.exists(mp3_file):
-        logger.error(f"MP3 file does not exist: {mp3_file}")
+    if not os.path.exists(audio_file):
+        logger.error(f"audio file does not exist: {audio_file}")
         return 0.0
 
     try:
-        # Use moviepy to get the duration of the MP3 file
-        with AudioFileClip(mp3_file) as audio:
+        # Use moviepy (ffmpeg) to read the duration of any supported audio format
+        with AudioFileClip(audio_file) as audio:
             return audio.duration  # Duration in seconds
     except Exception as e:
-        logger.error(f"Failed to get audio duration from MP3: {str(e)}")
+        logger.error(f"Failed to get audio duration from file: {str(e)}")
         return 0.0
 
 def get_audio_duration(target: Union[str, SubMaker]) -> float:
     """
     获取音频时长
     如果是SubMaker对象，则从SubMaker中获取时长
-    如果是MP3文件，则从MP3文件中获取时长
+    如果是音频文件路径，则从音频文件中获取时长（支持 mp3/m4a/wav 等格式）
     """
     if isinstance(target, SubMaker):
         return _get_audio_duration_from_submaker(target)
-    elif isinstance(target, str) and target.endswith(".mp3"):
-        return _get_audio_duration_from_mp3(target)
+    elif isinstance(target, str):
+        return _get_audio_duration_from_file(target)
     else:
         logger.error(f"Invalid target type: {type(target)}")
         return 0.0

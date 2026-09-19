@@ -2,6 +2,7 @@ import type { HistoryOutputImage } from '@/api/types';
 import { getHistoryImagePreviewUrl, getHistoryImageUrl } from '@/utils/historyImageUrls';
 import { isVideoFilename } from '@/utils/media';
 import { getQueueImageKey } from './queueUtils';
+import { resolveMediaSrc } from '@/utils/e2eMedia';
 
 export function getQueueMediaSignature(images: readonly HistoryOutputImage[]): string {
   return images.map(getQueueImageKey).join('\0');
@@ -69,10 +70,14 @@ function preloadImage(image: HistoryOutputImage): Promise<void> {
         }
         retryTimer = setTimeout(attempt, PRELOAD_RETRY_MS);
       };
-      preload.src = url;
-      if (preload.complete && preload.naturalWidth > 0) {
-        onReady();
-      }
+      // Resolving also primes the shared decrypt cache the visible E2EImage
+      // reads from, so sealed outputs swap in without a second decrypt.
+      void resolveMediaSrc(url).then((resolved) => {
+        preload.src = resolved;
+        if (preload.complete && preload.naturalWidth > 0) {
+          onReady();
+        }
+      });
     };
     attempt();
   });
@@ -115,8 +120,10 @@ function preloadVideo(video: HistoryOutputImage): Promise<void> {
       preload.preload = 'auto';
       preload.addEventListener('loadeddata', onReady);
       preload.addEventListener('error', onError);
-      preload.src = url;
-      preload.load();
+      void resolveMediaSrc(url).then((resolved) => {
+        preload.src = resolved;
+        preload.load();
+      });
     };
     attempt();
   });

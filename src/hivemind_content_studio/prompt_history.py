@@ -2,12 +2,33 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from collections.abc import Callable
+
+from .private_access import (
+    ENCRYPTED_PREFIX,
+    PrivateFieldCipher,
+    is_vault_sealed_text,
+    seal_text_to_vault,
+)
+from .sqlite_migrations import migrate
+
+
+def _add_late_columns(connection: sqlite3.Connection) -> None:
+    """Columns added after the table shipped. Column-probed because files that
+    predate the version stamp may already carry one of them."""
+    columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(prompts)").fetchall()}
+    if "composer_json" not in columns:
+        connection.execute("ALTER TABLE prompts ADD COLUMN composer_json TEXT NOT NULL DEFAULT '{}'")
+    if "prompt_digest" not in columns:
+        connection.execute("ALTER TABLE prompts ADD COLUMN prompt_digest TEXT NOT NULL DEFAULT ''")
 
 
 def _now() -> str:
@@ -22,16 +43,53 @@ class PromptHistoryStore:
     either can be reused from the composer.
     """
 
-    def __init__(self, path: str | Path):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        cipher: PrivateFieldCipher | None = None,
+        vault_key: Callable[[], str | None] | None = None,
+    ):
         self.path = Path(path).expanduser().resolve()
+        self.cipher = cipher
+        # When present, prompt text is sealed to the owner vault (client-only E2E)
+        # instead of the server Keychain cipher — the server can never read it back.
+        self.vault_key = vault_key
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        if self.cipher:
+            self._migrate_private_fields()
+
+    def _seal_field(self, text: str) -> str:
+        spki = self.vault_key() if self.vault_key else None
+        if spki:
+            return seal_text_to_vault(text, spki)
+        return self.cipher.encrypt(text) if self.cipher else text
+
+    def _reveal_field(self, value: str) -> str:
+        # Vault-sealed fields are opaque to the server — the browser decrypts them.
+        if is_vault_sealed_text(value):
+            return value
+        return self.cipher.decrypt(value) if self.cipher else value
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
+
+    def close(self) -> None:
+        """Checkpoint the WAL and let SQLite drop its sidecars.
+
+        A caller that deletes this database's directory (account_scope.destroy)
+        otherwise races SQLite for the `-wal` file: the walk lists it, SQLite
+        removes it when the last connection goes, and the unlink then fails with
+        FileNotFoundError on a workspace that was in fact deleted.
+        """
+        if not self.path.exists():
+            return
+        with contextlib.closing(self._connect()) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -47,6 +105,7 @@ class PromptHistoryStore:
                     source TEXT NOT NULL DEFAULT 'simple',
                     run_id TEXT NOT NULL DEFAULT '',
                     composer_json TEXT NOT NULL DEFAULT '{}',
+                    prompt_digest TEXT NOT NULL DEFAULT '',
                     favorite INTEGER NOT NULL DEFAULT 0,
                     use_count INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
@@ -55,9 +114,44 @@ class PromptHistoryStore:
                 CREATE INDEX IF NOT EXISTS idx_prompts_updated ON prompts(updated_at DESC);
                 """
             )
-            columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(prompts)").fetchall()}
-            if "composer_json" not in columns:
-                connection.execute("ALTER TABLE prompts ADD COLUMN composer_json TEXT NOT NULL DEFAULT '{}'")
+            migrate(connection, [_add_late_columns])
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_prompts_digest ON prompts(prompt_digest)")
+
+    def _migrate_private_fields(self) -> None:
+        assert self.cipher is not None
+        changed = False
+        with self._connect() as connection:
+            rows = connection.execute("SELECT prompt_id, prompt, user_prompt, title, prompt_digest FROM prompts").fetchall()
+            for row in rows:
+                # Vault-sealed rows are already client-only E2E — never touch them
+                # (the server holds no key to decrypt/re-encrypt them).
+                if any(is_vault_sealed_text(str(row[field])) for field in ("prompt", "user_prompt", "title")):
+                    continue
+                prompt = self.cipher.decrypt(str(row["prompt"]))
+                user_prompt = self.cipher.decrypt(str(row["user_prompt"]))
+                title = self.cipher.decrypt(str(row["title"]))
+                digest = self.cipher.digest(prompt)
+                if (
+                    not str(row["prompt"]).startswith(ENCRYPTED_PREFIX)
+                    or (str(row["user_prompt"]) and not str(row["user_prompt"]).startswith(ENCRYPTED_PREFIX))
+                    or (str(row["title"]) and not str(row["title"]).startswith(ENCRYPTED_PREFIX))
+                    or row["prompt_digest"] != digest
+                ):
+                    connection.execute(
+                        "UPDATE prompts SET prompt=?, user_prompt=?, title=?, prompt_digest=? WHERE prompt_id=?",
+                        (
+                            self.cipher.encrypt(prompt),
+                            self.cipher.encrypt(user_prompt),
+                            self.cipher.encrypt(title),
+                            digest,
+                            row["prompt_id"],
+                        ),
+                    )
+                    changed = True
+        if changed:
+            with self._connect() as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                connection.execute("VACUUM")
 
     def record(
         self,
@@ -75,10 +169,13 @@ class PromptHistoryStore:
             raise ValueError("A history entry requires a prompt")
         now = _now()
         composer_json = json.dumps(composer or {}, separators=(",", ":"), sort_keys=True)
+        prompt_digest = self.cipher.digest(text) if self.cipher else ""
         with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT prompt_id FROM prompts WHERE prompt = ? LIMIT 1", (text,)
-            ).fetchone()
+            existing = (
+                connection.execute("SELECT prompt_id FROM prompts WHERE prompt_digest = ? LIMIT 1", (prompt_digest,)).fetchone()
+                if self.cipher
+                else connection.execute("SELECT prompt_id FROM prompts WHERE prompt = ? LIMIT 1", (text,)).fetchone()
+            )
             if existing:
                 connection.execute(
                     "UPDATE prompts SET use_count = use_count + 1, updated_at = ?, run_id = ?, composer_json = ? WHERE prompt_id = ?",
@@ -87,17 +184,18 @@ class PromptHistoryStore:
                 return self.get(existing["prompt_id"])
             prompt_id = f"ph_{uuid.uuid4().hex[:12]}"
             connection.execute(
-                "INSERT INTO prompts (prompt_id, prompt, user_prompt, title, lane, source, run_id, composer_json, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO prompts (prompt_id, prompt, user_prompt, title, lane, source, run_id, composer_json, prompt_digest, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     prompt_id,
-                    text,
-                    user_prompt.strip()[:20_000],
-                    title.strip()[:180],
+                    self._seal_field(text),
+                    self._seal_field(user_prompt.strip()[:20_000]),
+                    self._seal_field(title.strip()[:180]),
                     lane.strip()[:80],
                     source.strip()[:40] or "simple",
                     run_id,
                     composer_json,
+                    prompt_digest,
                     now,
                     now,
                 ),
@@ -136,17 +234,16 @@ class PromptHistoryStore:
             if deleted.rowcount == 0:
                 raise KeyError(f"Unknown prompt {prompt_id!r}")
 
-    @staticmethod
-    def _entry(row: sqlite3.Row) -> dict[str, Any]:
+    def _entry(self, row: sqlite3.Row) -> dict[str, Any]:
         try:
             composer = json.loads(row["composer_json"])
         except (json.JSONDecodeError, TypeError):
             composer = {}
         return {
             "prompt_id": row["prompt_id"],
-            "prompt": row["prompt"],
-            "user_prompt": row["user_prompt"],
-            "title": row["title"],
+            "prompt": self._reveal_field(row["prompt"]),
+            "user_prompt": self._reveal_field(row["user_prompt"]),
+            "title": self._reveal_field(row["title"]),
             "lane": row["lane"],
             "source": row["source"],
             "run_id": row["run_id"],

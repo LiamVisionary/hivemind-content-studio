@@ -1,29 +1,70 @@
-@import './styles/global.css';
-@import './styles/studio.css';
+@import './styles/variables.css';
+@import './styles/base.css';
 
-/* App-specific layout */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Shell frame — sidebar | (topbar / content) */
 #app {
-  display: flex;
-  flex-direction: column;
-  width: 100vw;
+  /* 100% rather than 100vw: 100vw counts the scrollbar's width, which put a
+     few dead pixels of horizontal scroll under every page on a desktop browser
+     that draws one. */
+  width: 100%;
   height: 100vh;
+  /* dvh second so an engine that knows it wins: the shell does not scroll, so
+     it wants the viewport as it IS under a mobile browser's chrome, not the
+     taller one 100vh reports. */
+  height: 100dvh;
   overflow: hidden;
-  background: var(--bg-app);
+  /* The app owns the whole screen, so a drag that reaches the end of a scroller
+     inside it must not rubber-band the page behind it or trigger the browser's
+     pull-to-refresh. */
+  overscroll-behavior: none;
+  background: var(--bg-0);
 }
 
-main {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-  display: flex;
+/* Scene timeline — the joined episode tile.
+   The shots are parts; the joined cut is the deliverable, so it wears the one
+   accent as a static border (and the overlay shadow, because it sits above its
+   parts). The border only MOVES while the cut is being built — a progress
+   indicator, the one kind of motion allowed to loop — and it stays inside the
+   honey family: no cyan/violet, no ambient spin. The gradient sits in the
+   tile's own padding box (the inner panel covers the middle), which keeps it a
+   border rather than a glow that would tint the video. */
+.chain-combined-tile {
+  background:
+    linear-gradient(var(--bg-2), var(--bg-2)) padding-box,
+    linear-gradient(var(--honey), var(--honey)) border-box;
+  border: 2px solid transparent;
+  box-shadow: var(--shadow-card);
 }
 
-/* Utilities */
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
+.chain-combined-tile--building {
+  background:
+    linear-gradient(var(--bg-2), var(--bg-2)) padding-box,
+    conic-gradient(
+      from var(--chain-cut-angle, 0deg),
+      var(--honey), var(--honey-bright, var(--honey)), var(--honey-deep, var(--honey)), var(--honey)
+    ) border-box;
+  animation: chain-cut-spin 2.4s linear infinite;
 }
 
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
+.chain-combined-tile--active {
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--honey);
+}
+
+@property --chain-cut-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes chain-cut-spin {
+  to { --chain-cut-angle: 360deg; }
+}
+
+/* Reduced motion: the build indicator holds still (same colours). */
+@media (prefers-reduced-motion: reduce) {
+  .chain-combined-tile--building { animation: none; }
 }

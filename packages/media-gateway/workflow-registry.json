@@ -1,0 +1,2990 @@
+{
+  "workflows": [
+    {
+      "id": "flux2-klein-9b",
+      "media_type": "image",
+      "routing_only": true,
+      "title": "Flux.2 Klein 9B (shared weights)",
+      "description": "Where the Flux.2 Klein 9B weights are declared, so the lanes that share them \u2014 the model itself and the direction tools \u2014 install one download between them. Not a lane; pick 'Flux.2 Klein 9B'.",
+      "family": "flux-2-klein",
+      "compatible_base_models": [
+        "Flux.2 Klein 9B"
+      ],
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "flux-2-klein-9b.safetensors",
+          "required": true,
+          "bytes": 18157185168,
+          "sha256": "0975d6b77b5f510b99547d6724a208e36527df654e8f6134f59ece3f9f30da58",
+          "note": "Flux.2 Klein 9B is gated: accept Black Forest Labs' licence at huggingface.co/black-forest-labs/FLUX.2-klein-9B, then put flux-2-klein-9b.safetensors in ComfyUI/models/diffusion_models. It is the same file the native MLX engine loads for klein9b-bf16, so one download serves both lanes."
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "qwen_3_8b_fp8mixed.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors",
+          "required": true
+        },
+        {
+          "folder": "vae",
+          "relativePath": "flux2-vae.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/vae/flux2-vae.safetensors",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "z-image-turbo",
+      "media_type": "image",
+      "title": "Z-Image Turbo LoRA Optimizer",
+      "description": "Fast local text-to-image generation through the optimized Z-Image Turbo route.",
+      "family": "z-image",
+      "builder": "image-backend",
+      "backend": "",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "ZImageTurbo"
+      ],
+      "default": true,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "width",
+        "height",
+        "steps",
+        "cfg",
+        "seed",
+        "loras"
+      ],
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "cfg": 1.0,
+        "seed": -1
+      },
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "tags": [
+        "text-to-image",
+        "turbo",
+        "local"
+      ],
+      "featured": true
+    },
+    {
+      "id": "comfy-krea2-turbo-identity-edit",
+      "media_type": "image",
+      "title": "Krea 2 Turbo - Identity Optional",
+      "description": "Krea 2 Turbo text-to-image with an optional identity reference. Apple Silicon uses the optimized ASFP8/ConvRot path; Windows and CUDA use the portable ComfyUI path.",
+      "family": "krea-2",
+      "builder": "image-backend",
+      "backend": "comfy-krea2-turbo-identity-edit",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "Krea 2"
+      ],
+      "prompt_helper": {
+        "profile": "swarm_krea2_photo_json",
+        "label": "Krea photo prompt",
+        "helper_mode": "None",
+        "timeout_seconds": 60
+      },
+      "default": false,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "width",
+        "height",
+        "steps",
+        "cfg",
+        "seed",
+        "sampler_name",
+        "scheduler",
+        "ref_boost",
+        "identity_strength",
+        "grounding_px",
+        "loras"
+      ],
+      "max_reference_images": 1,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 10,
+        "cfg": 1.0,
+        "seed": -1
+      },
+      "samplers": [
+        "euler_ancestral",
+        "deis_3m",
+        "deis_2m",
+        "res_2s",
+        "res_2m",
+        "res_3m",
+        "dpmpp_2m",
+        "dpmpp_2m_sde",
+        "euler",
+        "uni_pc",
+        "ddim"
+      ],
+      "schedulers": [
+        "beta",
+        "bong_tangent",
+        "simple",
+        "sgm_uniform",
+        "karras",
+        "exponential",
+        "normal",
+        "linear_quadratic",
+        "kl_optimal",
+        "beta57"
+      ],
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "tags": [
+        "text-to-image",
+        "image-edit",
+        "identity",
+        "turbo",
+        "local"
+      ],
+      "featured": true
+    },
+    {
+      "id": "comfy-bigloves-klein3-edit",
+      "media_type": "image",
+      "title": "BigLove Klein 3",
+      "description": "Flux.2 Klein 9B finetuned by BigLove. Writes a picture from a prompt, and edits or restyles up to four reference images when you attach them \u2014 the same model either way. Apple Silicon runs it natively on MLX; Windows and CUDA fall back to the portable ComfyUI graph.",
+      "family": "flux-2-klein",
+      "builder": "image-backend",
+      "backend": "comfy-bigloves-klein3-edit",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "Flux.2 Klein 9B"
+      ],
+      "default": false,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_paths",
+        "image_base64",
+        "images_base64",
+        "image_url",
+        "width",
+        "height",
+        "steps",
+        "guidance",
+        "seed",
+        "loras"
+      ],
+      "max_reference_images": 4,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 4,
+        "guidance": 3.5,
+        "seed": -1
+      },
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "tags": [
+        "image",
+        "image-edit",
+        "mlx",
+        "local"
+      ],
+      "featured": true
+    },
+    {
+      "id": "comfy-flux2-klein-9b",
+      "inherits": "flux2-klein-9b",
+      "inherit_model_dependencies": true,
+      "media_type": "image",
+      "title": "Flux.2 Klein 9B",
+      "description": "Black Forest Labs' Klein 9B, unmodified. Writes a picture from a prompt, and edits or restyles reference images when you attach them. The same weights the Klein direction tools use, so installing it once serves both.",
+      "family": "flux-2-klein",
+      "builder": "image-backend",
+      "backend": "comfy-flux2-klein-9b",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "Flux.2 Klein 9B"
+      ],
+      "default": false,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "images_base64",
+        "image_url",
+        "width",
+        "height",
+        "steps",
+        "guidance",
+        "seed",
+        "loras"
+      ],
+      "max_reference_images": 4,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 4,
+        "guidance": 3.5,
+        "seed": -1
+      },
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "tags": [
+        "image",
+        "image-edit",
+        "local"
+      ],
+      "featured": false
+    },
+    {
+      "id": "flux2-klein-eyes-direction",
+      "inherits": "flux2-klein-9b",
+      "inherit_model_dependencies": true,
+      "media_type": "image",
+      "title": "Klein Eyes Direction",
+      "description": "Point a subject's gaze anywhere with Eric Venti's Eyes Direction LoRA for Flux.2 Klein 9B. The studio renders the red-dot reference the LoRA reads, so the gaze is picked on the picture rather than described in words. Works on anything eye-shaped in any style; it was not trained on animals.",
+      "family": "flux-2-klein",
+      "builder": "comfy-api-image",
+      "backend": "comfy-api-image",
+      "workflow_file": "flux2-klein-eyes-direction.api.json",
+      "supports_loras": false,
+      "default": false,
+      "requires": {
+        "prompt": false,
+        "image": true
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "seed",
+        "steps",
+        "direction"
+      ],
+      "max_reference_images": 1,
+      "defaults": {
+        "steps": 4,
+        "seed": -1
+      },
+      "model_dependencies": [
+        {
+          "folder": "loras",
+          "relativePath": "Eyes_direction_Lora_Flux2Klein_9B_v1.safetensors",
+          "url": "https://huggingface.co/eric-venti-seeds/Eyes_Direction_Lora_Flux2Klein9B/resolve/main/Eyes_direction_Lora_Flux2Klein_9B_v1.safetensors",
+          "required": true,
+          "bytes": 82866888,
+          "sha256": "c15422126ac1664dd03d788b6d822d67dbdd80fa8777781f57127558654641e5"
+        }
+      ],
+      "tags": [
+        "image-edit",
+        "direction",
+        "gaze",
+        "local"
+      ],
+      "featured": false,
+      "action_only": true,
+      "action_label": "Point eyes"
+    },
+    {
+      "id": "flux2-klein-sun-direction",
+      "inherits": "flux2-klein-9b",
+      "inherit_model_dependencies": true,
+      "media_type": "image",
+      "title": "Klein Sun Direction",
+      "description": "Move the sun with Eric Venti's Sun Direction LoRA for Flux.2 Klein 9B. The studio renders the lit reference sphere the LoRA reads, and flattens the picture's existing light on a first pass the way his workflow does. It was trained on exteriors only.",
+      "family": "flux-2-klein",
+      "builder": "comfy-api-image",
+      "backend": "comfy-api-image",
+      "workflow_file": "flux2-klein-sun-direction.api.json",
+      "supports_loras": false,
+      "default": false,
+      "requires": {
+        "prompt": false,
+        "image": true
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "seed",
+        "steps",
+        "direction"
+      ],
+      "max_reference_images": 1,
+      "defaults": {
+        "steps": 4,
+        "seed": -1
+      },
+      "model_dependencies": [
+        {
+          "folder": "loras",
+          "relativePath": "Sun_direction_LoRA_Flux_2_Klein_9b_v1.safetensors",
+          "url": "https://huggingface.co/eric-venti-seeds/Sun-Direction-Lora-Flux2Klein9B/resolve/main/Sun_direction_LoRA_Flux_2_Klein_9b_v1.safetensors",
+          "required": true,
+          "bytes": 331379712,
+          "sha256": "e2c027cf06066fa3e1799de14a063e1f20e2bdf438c73f5c46a509ce95f9e5e9"
+        }
+      ],
+      "tags": [
+        "image-edit",
+        "direction",
+        "lighting",
+        "local"
+      ],
+      "featured": false,
+      "action_only": true,
+      "action_label": "Move sun"
+    },
+    {
+      "id": "ltx23-regular-fp8",
+      "media_type": "video",
+      "title": "LTX 2.3 Regular FP8",
+      "description": "Regular LTX 2.3 image-to-video and source-video extension workflow. Apple Silicon uses the regular q8 distilled MLX model; Windows/CUDA uses the official Lightricks FP8 ComfyUI graph. This workflow never selects an Eros checkpoint.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "LTXV"
+      ],
+      "api_workflow": "comfy:workflows/civitai/ltx23-regular-anchor/ltx23-regular-anchor.user-image-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 Regular FP8 Mobile.json",
+      "default": true,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "title": "LTX 2.3 regular q8 distilled",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23"
+      },
+      "lora_injection": {
+        "class_type": "LTX2LoraLoaderAdvanced",
+        "targets": [
+          {
+            "node": "719",
+            "input": "model"
+          },
+          {
+            "node": "722",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model",
+        "static_inputs": {
+          "video": 1,
+          "video_to_audio": 0,
+          "audio": 0,
+          "audio_to_video": 0,
+          "other": 1
+        }
+      },
+      "requires": {
+        "prompt": false,
+        "image": false
+      },
+      "prompt_contract": {
+        "native_mlx_distilled_extension": "positive-only",
+        "negative_prompt_behavior": "The native MLX distilled extension path does not consume negative conditioning. Windows/CUDA Comfy generation still maps negative_prompt through the registered slot.",
+        "guidance": "For native Regular Fast extension, describe the desired continuous state affirmatively. Do not place unwanted concepts such as fade, darkness, dimming, or exposure ramp in the positive prompt, even inside a phrase beginning with no."
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "video_path",
+        "video_base64",
+        "video_url",
+        "video_mode",
+        "middle_image_path",
+        "middle_image_base64",
+        "middle_image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "keyframes",
+        "loras",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg",
+        "transition_lora",
+        "transition_lora_strength",
+        "transition_trigger",
+        "append_transition_trigger"
+      ],
+      "defaults": {
+        "image": "e39e3b884e724eb8bb19e6176a408f42.png",
+        "prompt": "cinematic photorealistic image-to-video shot of an adult subject, natural facial expression, subtle head movement, natural blinking, realistic skin texture, soft sunlight, handheld phone camera, smooth natural motion, high quality, realistic lighting\n\n",
+        "negative_prompt": "child, teen, underage, minor, cartoon, anime, illustration, doll, plastic skin, deformed face, warped eyes, bad teeth, low quality, blur, text, watermark, captions, subtitles, logo, wordmark, nudity, explicit sexual content, censoring, bleep, VR, game, static, noise",
+        "width": 480,
+        "height": 832,
+        "frame_rate": 24,
+        "seed": -1
+      },
+      "slots": {
+        "prompt": {
+          "node": "824",
+          "input": "value"
+        },
+        "negative_prompt": {
+          "node": "825",
+          "input": "value"
+        },
+        "image_path": {
+          "node": "773",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "542",
+          "input": "value"
+        },
+        "duration_seconds": {
+          "node": "852",
+          "input": "end_time"
+        },
+        "seed": {
+          "node": "812",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "583",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        }
+      ]
+    },
+    {
+      "id": "ltx23-transition-lora",
+      "media_type": "video",
+      "title": "LTX 2.3 Transition LoRA",
+      "description": "First-frame/last-frame LTX 2.3 transition workflow using joyfox's Apache-2.0 Transition LoRA, with the same Apple Silicon MLX fast lane as regular LTX 2.3.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "LTXV"
+      ],
+      "api_workflow": "comfy:workflows/civitai/ltx23-transition-lora/ltx23-transition-lora.user-image-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 Transition LoRA Mobile.json",
+      "default": false,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "title": "LTX 2.3 regular q8 distilled + Transition LoRA",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23"
+      },
+      "lora_injection": {
+        "class_type": "LTX2LoraLoaderAdvanced",
+        "targets": [
+          {
+            "node": "719",
+            "input": "model"
+          },
+          {
+            "node": "722",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model",
+        "static_inputs": {
+          "video": 1,
+          "video_to_audio": 0,
+          "audio": 0,
+          "audio_to_video": 0,
+          "other": 1
+        }
+      },
+      "transition_lora": {
+        "enabled": true,
+        "name": "ltx/2.3/ltx2.3-transition.safetensors",
+        "repo": "joyfox/LTX-2.3-Transition-LORA",
+        "url": "https://huggingface.co/joyfox/LTX-2.3-Transition-LORA/resolve/main/ltx2.3-transition.safetensors",
+        "license": "Apache-2.0",
+        "baseModel": "Lightricks/LTX-2.3",
+        "trigger": "zhuanchang",
+        "strength": 1.0,
+        "cfg": 1.0,
+        "guidance": 1.0,
+        "append_trigger": true
+      },
+      "requires": {
+        "prompt": false,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "video_path",
+        "video_base64",
+        "video_url",
+        "video_mode",
+        "middle_image_path",
+        "middle_image_base64",
+        "middle_image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "keyframes",
+        "loras",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg",
+        "transition_lora",
+        "transition_lora_strength",
+        "transition_trigger",
+        "append_transition_trigger"
+      ],
+      "defaults": {
+        "image": "e39e3b884e724eb8bb19e6176a408f42.png",
+        "prompt": "cinematic photorealistic first-frame to last-frame transition video, preserve subject identity and composition while smoothly transforming from the starting image into the final image, natural continuous motion, realistic lighting, detailed skin and fabric texture, high quality, zhuanchang\n\n",
+        "negative_prompt": "child, teen, underage, minor, cartoon, anime, illustration, doll, plastic skin, deformed face, warped eyes, bad teeth, low quality, blur, text, watermark, captions, subtitles, VR, game, static, noise",
+        "width": 480,
+        "height": 832,
+        "frame_rate": 24,
+        "seed": -1,
+        "cfg": 4.0,
+        "guidance": 1.0,
+        "transition_lora": true,
+        "transition_lora_strength": 1.0,
+        "transition_trigger": "zhuanchang",
+        "append_transition_trigger": true
+      },
+      "slots": {
+        "prompt": {
+          "node": "824",
+          "input": "value"
+        },
+        "negative_prompt": {
+          "node": "825",
+          "input": "value"
+        },
+        "image_path": {
+          "node": "773",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "542",
+          "input": "value"
+        },
+        "duration_seconds": {
+          "node": "852",
+          "input": "end_time"
+        },
+        "seed": {
+          "node": "812",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "583",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx2.3-transition.safetensors",
+          "url": "https://huggingface.co/joyfox/LTX-2.3-Transition-LORA/resolve/main/ltx2.3-transition.safetensors",
+          "required": true,
+          "bytes": 390229424,
+          "sha256": "ba420d6fefafced8e317e2d6ff951b312b52f534377d016b491877a00b830d33"
+        }
+      ]
+    },
+    {
+      "id": "ltx23-better-motion-lora",
+      "media_type": "video",
+      "title": "LTX 2.3 Better Motion LoRA",
+      "description": "Regular LTX 2.3 image-to-video workflow with Better Motion LTX 2.3 T2V/I2V LoRA at the recommended 0.3 strength, using the same Apple Silicon MLX fast lane as regular LTX 2.3 while preserving the normal ComfyUI path for Windows and non-native users.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "LTXV"
+      ],
+      "api_workflow": "comfy:workflows/civitai/ltx23-better-motion-lora/ltx23-better-motion-lora.user-image-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 Better Motion LoRA Mobile.json",
+      "default": false,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "title": "LTX 2.3 regular q8 distilled + Better Motion LoRA",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23",
+        "loras": [
+          {
+            "name": "mvmt_lora_v2_600.safetensors",
+            "strength": 0.3,
+            "repo": "civitai:2734359@3087364"
+          }
+        ]
+      },
+      "lora_injection": {
+        "class_type": "LTX2LoraLoaderAdvanced",
+        "targets": [
+          {
+            "node": "719",
+            "input": "model"
+          },
+          {
+            "node": "722",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model",
+        "static_inputs": {
+          "video": 1,
+          "video_to_audio": 0,
+          "audio": 0,
+          "audio_to_video": 0,
+          "other": 1
+        }
+      },
+      "requires": {
+        "prompt": false,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "video_path",
+        "video_base64",
+        "video_url",
+        "video_mode",
+        "middle_image_path",
+        "middle_image_base64",
+        "middle_image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "keyframes",
+        "loras",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg"
+      ],
+      "defaults": {
+        "image": "e39e3b884e724eb8bb19e6176a408f42.png",
+        "prompt": "cinematic photorealistic image-to-video shot, natural subject motion, clear camera movement, smooth body movement, realistic lighting, high quality\n\n",
+        "negative_prompt": "child, teen, underage, minor, cartoon, anime, illustration, doll, plastic skin, deformed face, warped eyes, bad teeth, low quality, blur, text, watermark, captions, subtitles, logo, wordmark, nudity, explicit sexual content, censoring, bleep, VR, game, static, noise",
+        "width": 480,
+        "height": 832,
+        "frame_rate": 24,
+        "seed": -1
+      },
+      "slots": {
+        "prompt": {
+          "node": "824",
+          "input": "value"
+        },
+        "negative_prompt": {
+          "node": "825",
+          "input": "value"
+        },
+        "image_path": {
+          "node": "773",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "542",
+          "input": "value"
+        },
+        "duration_seconds": {
+          "node": "852",
+          "input": "end_time"
+        },
+        "seed": {
+          "node": "812",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "583",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "mvmt_lora_v2_600.safetensors",
+          "url": "https://civitai.com/api/download/models/3087364?type=Model&format=SafeTensor",
+          "required": true,
+          "bytes": 674249616,
+          "sha256": "3cd5aeeff4e079510527650af4c45c1ec8a51495996de34c8d155fe35b6ed6a5",
+          "modelVersionId": 3087364,
+          "fileId": 2966847
+        }
+      ]
+    },
+    {
+      "id": "ltx23-ic-dual-character-lora",
+      "media_type": "video",
+      "title": "LTX 2.3 IC Dual Character LoRA",
+      "description": "Regular LTX 2.3 image-to-video workflow with MaqueAI's IC dual-character multi-shot dialogue LoRA at 0.8 strength. It is tuned for storyboarded two-shots, over-the-shoulder coverage, and identity retention across angle changes. Apple Silicon uses the native MLX fast lane; Windows and non-native users stay on the normal ComfyUI path.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "LTXV"
+      ],
+      "api_workflow": "comfy:workflows/civitai/ltx23-ic-dual-character-lora/ltx23-ic-dual-character-lora.user-image-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 IC Dual Character LoRA Mobile.json",
+      "default": false,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "title": "LTX 2.3 regular q8 distilled + IC Dual Character LoRA",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23",
+        "loras": [
+          {
+            "name": "LTX2.3-IC-LORA-Dual-Character.safetensors",
+            "strength": 0.8,
+            "repo": "civitai:2500098@2810376"
+          }
+        ]
+      },
+      "lora_injection": {
+        "class_type": "LTX2LoraLoaderAdvanced",
+        "targets": [
+          {
+            "node": "719",
+            "input": "model"
+          },
+          {
+            "node": "722",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model",
+        "static_inputs": {
+          "video": 1,
+          "video_to_audio": 0,
+          "audio": 0,
+          "audio_to_video": 0,
+          "other": 1
+        }
+      },
+      "requires": {
+        "prompt": false,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "video_path",
+        "video_base64",
+        "video_url",
+        "video_mode",
+        "middle_image_path",
+        "middle_image_base64",
+        "middle_image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "keyframes",
+        "loras",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg"
+      ],
+      "defaults": {
+        "image": "ltx23_ic_dual_character_storyboard_reference.png",
+        "prompt": "[Scene] Cinematic two-person dialogue in a stable location with consistent lighting. [Characters] Character A and Character B retain the exact faces, hair, accessories, and wardrobe established by the reference image. [Shot 1, wide two-shot, 0-3.3s] Both characters face each other with subtle natural dialogue motion. [Shot 2, hard cut to over-the-shoulder close-up on Character A, 3.3-6.6s] Character B's shoulder is soft foreground while Character A speaks; preserve Character A's identity exactly. [Shot 3, hard cut to reverse over-the-shoulder close-up on Character B, 6.6-10.0s] Character A's shoulder is soft foreground while Character B responds; preserve Character B's identity exactly. True editorial hard cuts, coherent eyelines, stable wardrobe and environment, natural blinking and lip movement, constant exposure, high quality.\n\n",
+        "negative_prompt": "extra person, third person, merged faces, fused bodies, duplicated limbs, identity swap, character drift, inconsistent faces, changed ethnicity, changed hairstyle, missing accessories, changed wardrobe, face morphing, continuous morph between shot angles, dissolve, incoherent eyeline, flicker, exposure ramp, blown highlights, child, teen, underage, minor, cartoon, anime, illustration, doll, plastic skin, deformed face, warped eyes, bad teeth, low quality, blur, text, watermark, captions, subtitles, logo, wordmark, nudity, explicit sexual content, censoring, bleep, VR, game, static, noise",
+        "width": 1024,
+        "height": 576,
+        "duration_seconds": 10,
+        "frame_rate": 24,
+        "seed": -1,
+        "cfg": 1.0
+      },
+      "slots": {
+        "prompt": {
+          "node": "824",
+          "input": "value"
+        },
+        "negative_prompt": {
+          "node": "825",
+          "input": "value"
+        },
+        "image_path": {
+          "node": "773",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "542",
+          "input": "value"
+        },
+        "duration_seconds": {
+          "node": "852",
+          "input": "end_time"
+        },
+        "seed": {
+          "node": "812",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "583",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "LTX2.3-IC-LORA-Dual-Character.safetensors",
+          "url": "https://civitai.com/api/download/models/2810376?type=Model&format=SafeTensor",
+          "required": true,
+          "bytes": 327287347,
+          "sha256": "b6c3199e2c95eb0aad0cea4f3e8dfa33e8f6966d85bc79e3994faf5a57406103",
+          "modelVersionId": 2810376,
+          "fileId": 2696156
+        }
+      ]
+    },
+    {
+      "id": "ltx23-ic-ingredients-lora",
+      "media_type": "video",
+      "title": "LTX 2.3 IC-LoRA Ingredients",
+      "text_to_video_workflow": "ltx23-regular-fp8",
+      "description": "Lightricks' official Ingredients IC-LoRA for generating a coherent shot from characters, props, wardrobe, and locations. Supply one finished reference sheet or up to 12 independent references that the server assembles into a black, unlabeled conditioning-only sheet. Apple Silicon uses the native MLX IC-LoRA reference-latent lane; Windows and CUDA use the equivalent ComfyUI IC guide graph.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "LTXV"
+      ],
+      "api_workflow": "comfy:workflows/huggingface/ltx23-ic-ingredients-lora/ltx23-ic-ingredients-lora.user-reference-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 IC LoRA Ingredients Mobile.json",
+      "default": false,
+      "benchmark_seconds": 270.75,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-dev-ic",
+        "pipeline": "ic-lora",
+        "title": "LTX 2.3 regular q8 distilled + Ingredients IC-LoRA",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-dev-ic",
+        "output_subdir": "LTX23",
+        "ic_lora": {
+          "single_stage": true,
+          "reference_min_frames": 121,
+          "target_min_frames": 121,
+          "image_crf": 0,
+          "conditioning_strength": 1.0,
+          "reference_strength": 1.0,
+          "dev_transformer": "transformer-dev.safetensors",
+          "distilled_lora": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "distilled_lora_strength": 0.5,
+          "guided_dev": false,
+          "stage1_steps": 8,
+          "cfg_scale": 1.0,
+          "stg_scale": 0.0,
+          "runtime_timeout_seconds": 2400
+        },
+        "loras": [
+          {
+            "name": "ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+            "strength": 1.4,
+            "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients"
+          }
+        ]
+      },
+      "lora_injection": {
+        "class_type": "LoraLoaderModelOnly",
+        "targets": [
+          {
+            "node": "5011",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model"
+      },
+      "prompt_contract": {
+        "type": "ltx23-ingredients",
+        "reference_heading": "### Reference Sheet Description",
+        "target_heading": "### Target Description",
+        "reference_description_param": "reference_description"
+      },
+      "ingredient_inputs": {
+        "max_images": 12,
+        "layout": "adaptive-pack",
+        "conditioning_only": true,
+        "preserve_aspect_ratio": true,
+        "render_labels": false
+      },
+      "timeline_anchor_preparation": {
+        "mode": "generative-outpaint",
+        "preserve_source_aspect_ratio": true,
+        "preserve_source_pixels": true,
+        "apple": "native-preflight",
+        "windows_cuda": "embedded-comfy-graph",
+        "cache": true
+      },
+      "aspect_ratios": [
+        "16:9",
+        "9:16",
+        "4:3",
+        "3:4",
+        "1:1"
+      ],
+      "requires": {
+        "prompt": true,
+        "image": true
+      },
+      "accepts": [
+        "prompt",
+        "reference_description",
+        "ingredient_images",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "loras",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg"
+      ],
+      "defaults": {
+        "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted, identity drift, changed wardrobe, missing prop, duplicate character, text, watermark",
+        "width": 768,
+        "height": 448,
+        "duration_seconds": 5,
+        "frames": 121,
+        "frame_rate": 24,
+        "seed": -1,
+        "cfg": 1.0,
+        "ingredients_lora_strength": 1.4,
+        "reference_strength": 1.0
+      },
+      "slots": {
+        "prompt": {
+          "node": "2483",
+          "input": "text"
+        },
+        "negative_prompt": {
+          "node": "2612",
+          "input": "text"
+        },
+        "image_path": {
+          "node": "2004",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frames": {
+          "node": "5072",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "5098",
+          "input": "value"
+        },
+        "seed": {
+          "node": "4832",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "4828",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "required": true,
+          "bytes": 7605507256,
+          "sha256": "f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients/resolve/main/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+          "required": true,
+          "gated": true,
+          "auth_env": [
+            "HF_TOKEN",
+            "HUGGING_FACE_HUB_TOKEN",
+            "HUGGINGFACE_TOKEN",
+            "HUGGINGFACE_READ_WRITE_KEY"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ltx23-eros-ic-ingredients-lora",
+      "inherits": "ltx23-ic-ingredients-lora",
+      "title": "LTX 2.3 Eros IC-LoRA Ingredients",
+      "text_to_video_workflow": "ltx23-eros-v14-comfy",
+      "description": "The same official Ingredients IC-LoRA reference-sheet workflow as the regular lane, using the 10Eros v1 dev-family checkpoint instead. Apple Silicon uses the native MLX Eros q8 dev IC-LoRA lane; Windows and CUDA use the equivalent Eros FP8 ComfyUI graph. Reference assembly, timeline anchors, prompt contract, audio, frame bucket, LoRA strengths, and generation controls remain inherited from the regular workflow.",
+      "benchmark_seconds": null,
+      "native_mlx": {
+        "variant": "eros-q8-dev-ic",
+        "title": "LTX 2.3 10Eros v1 q8 dev + Ingredients IC-LoRA",
+        "marker": "Eros/native_mlx_ltx__eros-q8-dev-ic",
+        "output_subdir": "Eros"
+      },
+      "workflow_overrides": {
+        "api_inputs": {
+          "3940": {
+            "ckpt_name": "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+          },
+          "4010": {
+            "ckpt_name": "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+          }
+        },
+        "editor_widgets": {
+          "3940": [
+            "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+          ],
+          "4010": [
+            "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+          ]
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx/10Eros_v1-fp8mixed_learned.safetensors",
+          "url": "https://civitai.com/api/download/models/2892069?type=Model&format=SafeTensor&size=full&fp=fp8",
+          "required": true,
+          "bytes": 29161842950,
+          "sha256": "5c00038d4f1527e9842a832eb35192990de410ed2dd722c70aaf0f23cb3c9fd6",
+          "modelVersionId": 2892069,
+          "fileId": 2794413
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "required": true,
+          "bytes": 7605507256,
+          "sha256": "f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients/resolve/main/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+          "required": true,
+          "gated": true,
+          "auth_env": [
+            "HF_TOKEN",
+            "HUGGING_FACE_HUB_TOKEN",
+            "HUGGINGFACE_TOKEN",
+            "HUGGINGFACE_READ_WRITE_KEY"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ltx23-eros-v14-ic-ingredients-lora",
+      "inherits": "ltx23-eros-ic-ingredients-lora",
+      "title": "LTX 2.3 Eros v1.4 IC-LoRA Ingredients",
+      "description": "The Ingredients IC-LoRA reference-sheet workflow on the 10Eros v1.4 fine-tune, converted locally from TenStrip's bf16 with mlx-forge (int8, group 64) because no MLX v1.4 build is published upstream. This is a dev package like the v1 lane, so it keeps the same Comfy dev recipe: dev transformer plus the generic LTX distilled LoRA fused at 0.5 alongside the IC-LoRA. Everything else is inherited from the v1 lane, making this an apples-to-apples fine-tune comparison against it.",
+      "native_mlx": {
+        "variant": "eros-v14-q8-dev-ic",
+        "title": "LTX 2.3 10Eros v1.4 q8 dev + Ingredients IC-LoRA",
+        "marker": "Eros/native_mlx_ltx__eros-v14-q8-dev-ic",
+        "output_subdir": "Eros"
+      }
+    },
+    {
+      "id": "ltx23-eros-dmd-ic-ingredients-lora",
+      "inherits": "ltx23-eros-ic-ingredients-lora",
+      "title": "LTX 2.3 Eros DMD IC-LoRA Ingredients",
+      "description": "The Ingredients IC-LoRA reference-sheet workflow on the 10Eros v1.3 DMD checkpoint. The v1 lane runs the Comfy dev recipe: a dev transformer with the generic LTX distilled LoRA fused at 0.5 alongside the IC-LoRA. A DMD build has the distillation merged into its weights and ships no dev transformer, so this lane clears both and runs ic-lora's plain distilled mode with the Ingredients IC-LoRA as the only adapter. Everything else \u2014 reference assembly, timeline anchors, prompt contract, audio, frame bucket, IC-LoRA strength, generation controls \u2014 is inherited unchanged, so this is an apples-to-apples sibling of the v1 lane.",
+      "native_mlx": {
+        "variant": "eros-dmd-v13-ic",
+        "title": "LTX 2.3 10Eros v1.3 DMD q8 + Ingredients IC-LoRA",
+        "marker": "Eros/native_mlx_ltx__eros-dmd-v13-ic",
+        "output_subdir": "Eros",
+        "ic_lora": {
+          "dev_transformer": "",
+          "distilled_lora": ""
+        }
+      }
+    },
+    {
+      "id": "ltx23-eros-v14-comfy",
+      "media_type": "video",
+      "title": "10Eros v1.4 \u00b7 Comfy lane",
+      "description": "LTX 2.3 10Eros v1.4 with the author's DMD LoRA on the Comfy-graph path (8 steps, cfg 1, joint audio+video latent, and the mp4 carries the generated audio). References the exact files the GPU-rental video tier provisions (ltx2310eros_v14 + DMD LoRA + Gemma 3 12B fp8), so the same workflow runs on the local Comfy lane or routes to an attached rented machine via the gateway's lane rules with requester-sealed fetch-back. CUDA-validated 2026-07-31 (48s per 4s clip @768x512 on an RTX 5090).",
+      "family": "ltx",
+      "builder": "comfy-api",
+      "supports_loras": false,
+      "api_workflow": "workflows/ltx23-eros-v14.api.json",
+      "default": false,
+      "frame_grid": {
+        "modulus": 8,
+        "offset": 1
+      },
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "prompt_contract": {
+        "guidance": "Scene-script prompting: describe the subject, action, camera, and lighting affirmatively in one block. v1.4 is base-aligned and NEEDS the DMD LoRA baked into this graph; do not disable it."
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "seed",
+        "steps"
+      ],
+      "defaults": {
+        "width": 768,
+        "height": 512,
+        "frame_rate": 25,
+        "duration_seconds": 4,
+        "seed": -1,
+        "steps": 8
+      },
+      "slots": {
+        "prompt": {
+          "node": "4",
+          "input": "text"
+        },
+        "negative_prompt": {
+          "node": "5",
+          "input": "text"
+        },
+        "width": {
+          "node": "7",
+          "input": "width"
+        },
+        "height": {
+          "node": "7",
+          "input": "height"
+        },
+        "frames": [
+          {
+            "node": "7",
+            "input": "length"
+          },
+          {
+            "node": "9",
+            "input": "frames_number"
+          }
+        ],
+        "seed": {
+          "node": "13",
+          "input": "noise_seed"
+        },
+        "steps": {
+          "node": "11",
+          "input": "steps"
+        }
+      }
+    },
+    {
+      "id": "minimax-h3-turbo",
+      "inherits": "minimax-h3",
+      "custom_node_dependencies": [
+        {
+          "name": "ComfyUI-MiniMax-H3-Turbo",
+          "repo": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo",
+          "commit": "55fee864dd7b2976b1c4ce3c3d5f7968f181409f",
+          "class_types": [
+            "MiniMaxH3TurboLoRA"
+          ]
+        },
+        {
+          "name": "ComfyUI-Spectrum-MiniMax-H3",
+          "repo": "https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3",
+          "commit": "9395bf98fc60a04c5f588de7b2bb33516a0b622f",
+          "class_types": [
+            "SpectrumApplyMiniMaxH3"
+          ]
+        },
+        {
+          "name": "comfyui-kjnodes",
+          "repo": "https://github.com/kijai/ComfyUI-KJNodes",
+          "commit": "35e5956193769d18a13136cdedb73a36a05c73e6",
+          "class_types": [
+            "PathchSageAttentionKJ"
+          ]
+        },
+        {
+          "name": "ComfyUI-SolAttn_triton",
+          "repo": "https://github.com/kijai/ComfyUI-SolAttn_triton",
+          "commit": "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc",
+          "class_types": [
+            "SolAttnPatch"
+          ]
+        }
+      ],
+      "model_dependencies": [
+        {
+          "folder": "loras",
+          "relativePath": "loras/minimax_h3_turbo_v4_step600_ema.safetensors",
+          "url": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/resolve/main/minimax_h3_turbo_v4_step600_ema.safetensors",
+          "required": true,
+          "bytes": 0,
+          "sha256": ""
+        },
+        {
+          "folder": "diffusion_models",
+          "relativePath": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 20970379616,
+          "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 2811065184,
+          "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_audio_vae_fp32.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+          "required": true,
+          "bytes": 605254808,
+          "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+        }
+      ],
+      "title": "MiniMax H3 Turbo",
+      "beta": true,
+      "description": "MiniMax H3 with larryvrh's experimental 4-step Turbo distill LoRA (drbaph ckpt500 pruned-ComfyUI conversion): the same joint video+stereo-audio generation at 6 sampling steps with Spectrum forecasting, benchmarked on a rented RTX 5090 at 68s for a 5s 960x544 clip against 98s for MiniMax H3 \u2014 about 30% faster end to end, and 21s of sampling against 49s. Preview-quality weights from an in-progress training run: keep MiniMax H3 as the quality tier and A/B anything that matters. Runs on the SAME rented machine as MiniMax H3 with no re-provisioning \u2014 the tier ships both the full DiT and this LoRA.",
+      "api_workflow": "workflows/minimax-h3-turbo.api.json",
+      "defaults": {
+        "steps": 6
+      }
+    },
+    {
+      "id": "minimax-h3-reference",
+      "inherits": "minimax-h3",
+      "title": "MiniMax H3 Reference",
+      "beta": true,
+      "description": "MiniMax H3 conditioned on up to nine reference pictures, three reference videos and three reference audio clips instead of a start/end frame \u2014 the model's Reference mode. Subjects, clothing, environments and styles are carried across from the pictures \u2014 or, with no pictures attached, from the first reference video, which then carries identity as well; otherwise a reference video carries MOTION \u2014 how a body moves, gesticulates and holds its mannerisms and expressions \u2014 and how literally it is copied is set by the prompt's retention_analysis tag for that <Video k>, from fully_preserved (reproduce this motion) down through attribute_transfer (a different action performed in this performer's manner) to weak_reference (loose pacing cue); each reference video may also carry its own soundtrack. A reference audio clip clones a VOICE (or music) \u2014 either reperforming its exact dialogue or lending only its timbre and delivery to new lines. Audio clips must be 2-15s each, 15s combined, and always ride alongside at least one picture or video. Reference videos are read as 24 fps, are trimmed to the generated clip's own length, and their tokens ride through every sampling step, so they cost real time. The prompt follows MiniMax's full-reference format (subject_definitions, retention_analysis, <Subject N>/<Picture N>/<Video N>/<Audio N> labels). Same weights and same rented lane as MiniMax H3, so no re-provisioning.",
+      "api_workflow": "workflows/minimax-h3-reference.api.json",
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "reference_images",
+        "reference_audios",
+        "reference_videos",
+        "motion_context_path",
+        "motion_context_base64",
+        "motion_context_url",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "seed",
+        "steps",
+        "spectrum",
+        "loras",
+        "easycache",
+        "solattn_tau",
+        "interpolate"
+      ],
+      "reference_image_slots": [
+        {
+          "node": "120",
+          "input": "image"
+        },
+        {
+          "node": "121",
+          "input": "image"
+        },
+        {
+          "node": "122",
+          "input": "image"
+        },
+        {
+          "node": "123",
+          "input": "image"
+        },
+        {
+          "node": "124",
+          "input": "image"
+        },
+        {
+          "node": "125",
+          "input": "image"
+        },
+        {
+          "node": "126",
+          "input": "image"
+        },
+        {
+          "node": "127",
+          "input": "image"
+        },
+        {
+          "node": "128",
+          "input": "image"
+        }
+      ],
+      "reference_audio_slots": [
+        {
+          "node": "129",
+          "input": "audio"
+        },
+        {
+          "node": "130",
+          "input": "audio"
+        },
+        {
+          "node": "131",
+          "input": "audio"
+        }
+      ],
+      "reference_video_slots": [
+        {
+          "node": "140",
+          "input": "file",
+          "audio_link": {
+            "node": "104",
+            "input": "ref_video_audios.ref_video_audio_0"
+          }
+        },
+        {
+          "node": "141",
+          "input": "file",
+          "audio_link": {
+            "node": "104",
+            "input": "ref_video_audios.ref_video_audio_1"
+          }
+        },
+        {
+          "node": "142",
+          "input": "file",
+          "audio_link": {
+            "node": "104",
+            "input": "ref_video_audios.ref_video_audio_2"
+          }
+        }
+      ],
+      "prompt_contract": {
+        "guidance": "Reference mode uses MiniMax's full-reference rewrite format (ref_en): six sections in order \u2014 subject_definitions (label every reference as <Subject N> / <Picture N> / <Video N>), summary, retention_analysis (fully_preserved | partially_preserved | attribute_transfer | weak_reference per label), detailed_description (shots, <d>[English] \u2026</d> speech, (S1) ids), overall_soundscape, non_diegetic_music. Reference pictures are supplied in order, so <Picture 1> is the first image sent. Reference videos are labeled <Video N> in their own supplied order. A reference video is a MOTION reference when pictures are attached \u2014 with NO pictures, the first video is also the identity reference: bind <Subject 1> to it ('<Subject 1> is the man in <Video 1>, with \u2026') and tag it fully_preserved so face, hair, build, wardrobe and manner all carry. Otherwise retention_analysis decides how literally it binds \u2014 fully_preserved reproduces the movement itself, partially_preserved keeps its broad shape, attribute_transfer performs a DIFFERENT action in that performer's manner (gesticulation style, posture, mannerisms, facial expressiveness), weak_reference is a loose pacing or rhythm cue. Say which subject inherits it ('<Subject 1> (S1) moves with the gesture style of <Video 1>.'). Reference audio clips are labeled <Audio N>, numbered independently of pictures and videos \u2014 but a reference video's OWN soundtrack also takes an <Audio N> label, emitted before its <Video N>, so a video-with-sound plus one standalone voice clip numbers as <Audio 1> (the video's track), <Video 1>, then <Audio 2> (the voice clip). Define each in subject_definitions ('<Audio 1> is the voice-timbre reference for <Subject 1> (S1).'), tag the summary [audio reuse] when the source words are reperformed verbatim (keep them, original language, inside <d>\u2026</d>) or [audio reference] when only timbre/rhythm/emotion carries (then the source's own words must NOT appear), and mark each <Audio N> in retention_analysis with fully_copy | partially_copy | reference | weak_reference."
+      },
+      "routing_only": true
+    },
+    {
+      "id": "minimax-h3-inpaint",
+      "media_type": "video",
+      "title": "MiniMax H3 Head Replacement",
+      "beta": true,
+      "family": "minimax",
+      "builder": "comfy-api",
+      "hardware": {
+        "accelerator": "cuda",
+        "reason": "MiniMax H3 needs an NVIDIA card: its nvfp4 text encoder only runs on Blackwell (RTX 5090 class), so this machine's ComfyUI cannot run it. Run it on a rented machine instead."
+      },
+      "description": "Head replacement in an existing clip, by inpainting. A region of the source footage is masked and ONLY that region is denoised: the rest of every frame, and the entire soundtrack, are held exactly as shot. Identity for the new head comes from reference pictures, the same <Picture N> slots and the same rewrite grammar as MiniMax H3 Reference.\n\nWhy the audio is held rather than regenerated: H3 denoises picture and sound JOINTLY in one pass, so a kept audio latent is still VISIBLE to the model while it paints the face. The new head therefore lip-syncs to the original speech without a separate lip-sync stage. Setting the audio to regenerate would resample the voice and break that.\n\nTWO WAYS TO SAY WHICH PIXELS: mask_source 'manual' takes one painted PNG, white where the head should be replaced -- it is conformed to the footage and repeated across every frame, so a STATIC region is legal and is usually the right answer. A static region is not a compromise: the mask is a permission area, not a stencil, and a generous one lets the model place a differently-shaped head naturally where a tight per-frame silhouette would force the new head into the old head's outline. It must cover the head's whole travel through the clip, which is the one thing the studio's scrub-through check is for. mask_source 'sequence' takes a mask CLIP through mask_video_* \u2014 one white-on-black frame per source frame, tracked somewhere else (the hosted SAM3 service, or any tool that writes one), which is how a lane with no SAM3 checkpoint still gets a tracked mask. mask_source 'sam3' instead tracks the subject with comfy-core's native SAM3 video tracker (checkpoints/sam3.1_multiplex_fp16.safetensors), which is worth its ~3.4GB load and its per-frame compute when the shot moves far enough that a static box would swallow most of the frame.\n\nEither way the mask is only the beginning: mask_expand grows it (30px by default -- the donor workflow's own value, and deliberately far wider than any silhouette), and the subject crop then cuts a window around it at crop_scale and resamples that window to crop_megapixels. The model runs on the CROP, not the frame, which is what makes this affordable: a 0.8MP crop of a 1080p clip is a quarter of the rows. crop_mode 'combined' plans one static window around the subject's whole travel; 'tracked' holds a constant-size window that moves only when the subject would leave it; 'zoomed' also follows the subject's size. The result is feathered back into the untouched frames.\n\nTRAP: width, height and length are NOT settable. They are read off the crop at runtime (GetImageSize on the cropped batch) because the crop's size is decided by the mask, which the caller cannot know in advance. duration_seconds and frames instead TRIM the source clip, and the trim is snapped down to H3's 17n+5 frame grid at 24 fps before staging -- an unsnapped length is rejected by the model, not silently rounded.\n\nBeyond an ordinary H3 lane this needs two pinned node packs: Nekodificador/ComfyUI-NKD-Basic-Tools (MIT) for the masked joint AV latent and the mask ops, and drozbay/MaskVidExperiments (GPL-3.0) for the subject crop and uncrop. Both are installed as separate ComfyUI custom nodes, not vendored. See packages/gpu-rentals provisioning.",
+      "api_workflow": "workflows/minimax-h3-inpaint.api.json",
+      "default": false,
+      "supports_loras": true,
+      "compatible_base_models": [
+        "MiniMax H3"
+      ],
+      "lora_injection": {
+        "class_type": "LoraLoaderModelOnly",
+        "targets": [
+          {
+            "node": "31",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model"
+      },
+      "frame_grid": {
+        "modulus": 17,
+        "offset": 5
+      },
+      "motion_reference_budget": {
+        "max_packed_rows": 76000,
+        "vram_headroom_gb": 12,
+        "max_packed_rows_without_vram_headroom": 76000,
+        "max_packed_rows_by_vram_gb": {
+          "32": 76000,
+          "96": 161000
+        },
+        "measured": "2026-08-23 RECALIBRATED DOWN, and the rule changed with it: a budget is now the largest run PROVEN to complete on that card, never a midpoint between a success and a failure. The previous 85,000 was exactly that midpoint \u2014 76,600 rows had run clean (48.5s a step, torch 23.34GiB) and 95,092 had thrashed and died, so 85,000 was interpolated between them and shipped as if measured. On 2026-08-23 a job priced at ~80,400 counted rows (80,890 including text) died on a 32GB 5090 inside that band: 'Currently allocated 24.75 GiB, Requested 4.32 GiB, Device limit 31.36 GiB', in the MLP of block 0 (comfy_kitchen quantization.py:1051, fc1 = ffn*2 = 28,672 wide at bf16 = 57,344 bytes a row; 4.32GiB / 57,344 = 80,890). Every duration the picker offered between ~77k and 85k rows was therefore a coin flip, which is why the same OOM kept arriving. 32GB is now 76,000 (the proven-clean 76,600, rounded down). 96GB is now 161,000 for the same reason: the ONLY thing proven on a PRO 6000 is that the ~161k-row as-sent job ran (134s a step, 64.5GB of 95GB by nvidia-smi, job 185f117f 2026-08-22); 240,000 was another interpolation and would have reproduced this failure on the bigger card. Raise either number only on a clean reference-mode run AT that size \u2014 normal step times, no thrash \u2014 and never above it. UNIT + arithmetic unchanged: packed rows of the whole DiT sequence, priced by packedSequenceRows() in media-studio-mcp.mjs and mirrored by _h3_packed_rows() in media_studio.py; output video+audio latents, each motion clip at the node's adapt_canvas() of its STAGED dims plus its soundtrack when use_audio, each picture at most the output's rows per latent frame, each voice clip 2 x round(s x 40); text is not counted, which is why a counted figure runs a few hundred rows under the allocator's. ANCHORS on a 32GB 5090, reference mode: 34k clean (15.1s/step, 14.91GiB); 66,900 clean (42.0s/step, 22.97GiB); 76,600 clean (48.5s/step, 23.34GiB, job 69a108a5) <- the budget; 80,890 OOM (2026-08-23); 95,092 thrash then OOM (73s/step, b2f76185); 97,710 OOM (2026-08-22); 142,366/155,006 OOM three times (34a722c2, b9f5b32d at --vram-headroom 12, 103f6173 at 20 - the flag is inert for this). A PLAIN text-to-video carries no references and is not priced here at all: 90,658 rows (15s @1216x704) ran at 27.16GiB, which is ABOVE this budget and is not a contradiction - reference mode pays for the reference encode on the same card. Read torch's own peak or the OOM summary, never nvidia-smi under cudaMallocAsync, and always probe with workflow_id minimax-h3-reference."
+      },
+      "requires": {
+        "prompt": true,
+        "image": false,
+        "source_video": true
+      },
+      "accepts": [
+        "prompt",
+        "source_video_path",
+        "source_video_base64",
+        "source_video_url",
+        "mask_source",
+        "mask_image_path",
+        "mask_image_base64",
+        "mask_image_url",
+        "mask_video_path",
+        "mask_video_base64",
+        "mask_video_url",
+        "sam3_prompt",
+        "sam3_detection_threshold",
+        "sam3_max_objects",
+        "sam3_detect_interval",
+        "sam3_object_indices",
+        "mask_expand",
+        "mask_feather",
+        "mask_despeckle",
+        "mask_temporal_expand",
+        "crop_mode",
+        "crop_scale",
+        "crop_megapixels",
+        "paste_expand",
+        "paste_feather",
+        "paste_edge_feather",
+        "reference_images",
+        "ref_image_size",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "steps",
+        "spectrum",
+        "easycache",
+        "solattn_tau",
+        "interpolate",
+        "loras"
+      ],
+      "reference_image_slots": [
+        {
+          "node": "120",
+          "input": "image"
+        },
+        {
+          "node": "121",
+          "input": "image"
+        },
+        {
+          "node": "122",
+          "input": "image"
+        },
+        {
+          "node": "123",
+          "input": "image"
+        },
+        {
+          "node": "124",
+          "input": "image"
+        },
+        {
+          "node": "125",
+          "input": "image"
+        },
+        {
+          "node": "126",
+          "input": "image"
+        },
+        {
+          "node": "127",
+          "input": "image"
+        },
+        {
+          "node": "128",
+          "input": "image"
+        }
+      ],
+      "mask_sources": {
+        "manual": {
+          "from": [
+            "153",
+            0
+          ],
+          "prune": [
+            "154",
+            "155",
+            "156",
+            "157",
+            "168",
+            "169",
+            "170",
+            "171"
+          ]
+        },
+        "sam3": {
+          "from": [
+            "157",
+            0
+          ],
+          "prune": [
+            "152",
+            "153",
+            "166",
+            "167",
+            "168",
+            "169",
+            "170",
+            "171"
+          ]
+        },
+        "sequence": {
+          "from": [
+            "171",
+            0
+          ],
+          "prune": [
+            "152",
+            "153",
+            "154",
+            "155",
+            "156",
+            "157",
+            "166",
+            "167"
+          ]
+        }
+      },
+      "mask_input": {
+        "node": "159",
+        "input": "masks"
+      },
+      "crop_mode_input": {
+        "node": "159",
+        "input": "mode"
+      },
+      "defaults": {
+        "frame_rate": 24,
+        "duration_seconds": 5,
+        "seed": -1,
+        "steps": 15,
+        "spectrum": true,
+        "easycache": 0,
+        "solattn_tau": 0,
+        "interpolate": 1,
+        "mask_source": "manual",
+        "sam3_prompt": "head",
+        "sam3_detection_threshold": 0.5,
+        "sam3_max_objects": 1,
+        "sam3_detect_interval": 1,
+        "sam3_object_indices": "",
+        "mask_expand": 30,
+        "mask_feather": 0,
+        "mask_despeckle": 2,
+        "mask_temporal_expand": 1,
+        "crop_mode": "tracked",
+        "crop_scale": 1.75,
+        "crop_megapixels": 0.8,
+        "paste_expand": 10,
+        "paste_feather": 20,
+        "paste_edge_feather": 16,
+        "ref_image_size": "match",
+        "width": 896,
+        "height": 896
+      },
+      "slots": {
+        "prompt": {
+          "node": "104",
+          "input": "prompt"
+        },
+        "ref_image_size": {
+          "node": "104",
+          "input": "ref_image_size"
+        },
+        "source_video_path": {
+          "node": "150",
+          "input": "file"
+        },
+        "mask_image_path": {
+          "node": "152",
+          "input": "image"
+        },
+        "sam3_prompt": {
+          "node": "155",
+          "input": "text"
+        },
+        "sam3_detection_threshold": {
+          "node": "156",
+          "input": "detection_threshold"
+        },
+        "sam3_max_objects": {
+          "node": "156",
+          "input": "max_objects"
+        },
+        "sam3_detect_interval": {
+          "node": "156",
+          "input": "detect_interval"
+        },
+        "sam3_object_indices": {
+          "node": "157",
+          "input": "object_indices"
+        },
+        "mask_expand": {
+          "node": "162",
+          "input": "expand"
+        },
+        "mask_feather": {
+          "node": "162",
+          "input": "feather"
+        },
+        "mask_despeckle": {
+          "node": "162",
+          "input": "despeckle"
+        },
+        "mask_temporal_expand": {
+          "node": "162",
+          "input": "temporal_expand"
+        },
+        "crop_megapixels": {
+          "node": "159",
+          "input": "upscale_megapixels"
+        },
+        "paste_expand": {
+          "node": "164",
+          "input": "expand"
+        },
+        "paste_feather": {
+          "node": "164",
+          "input": "feather"
+        },
+        "paste_edge_feather": {
+          "node": "163",
+          "input": "feather"
+        },
+        "seed": {
+          "node": "15",
+          "input": "noise_seed"
+        },
+        "steps": {
+          "node": "9",
+          "input": "steps"
+        },
+        "spectrum": {
+          "node": "30",
+          "input": "enabled"
+        },
+        "easycache": {
+          "node": "32",
+          "input": "reuse_threshold"
+        },
+        "solattn_tau": {
+          "node": "33",
+          "input": "tau"
+        },
+        "interpolate": {
+          "node": "35",
+          "input": "multiplier"
+        },
+        "frame_rate": {
+          "node": "91",
+          "input": "fps"
+        },
+        "mask_video_path": {
+          "node": "168",
+          "input": "file"
+        }
+      },
+      "prompt_contract": {
+        "guidance": "Head replacement uses the same reference grammar as MiniMax H3 Reference, narrowed to one job. Bind the new identity to the pictures in subject_definitions (\"<Subject 1> is the character represented in <Picture 1>\"), tag it fully_preserved in retention_analysis so the face carries, and describe the SHOT rather than the action -- the action is already in the footage and is being preserved by the mask. Do not write dialogue: the soundtrack is held, so speech comes from the source clip and the model is matching lips to it. Do not describe the body, the background or the camera move for the same reason.",
+        "default": "<Subject 1> is the character represented in <Picture 1>. The video is a close up face of <Subject 1>."
+      },
+      "routing_only": true
+    },
+    {
+      "id": "minimax-h3",
+      "hardware": {
+        "accelerator": "cuda",
+        "reason": "MiniMax H3 needs an NVIDIA card: its nvfp4 text encoder only runs on Blackwell (RTX 5090 class), so this machine's ComfyUI cannot run it. Run it on a rented machine instead."
+      },
+      "core_node_classes": [
+        "MiniMaxH3ImageToVideo",
+        "MiniMaxH3TextToVideo",
+        "MiniMaxH3ReferenceToVideo",
+        "MiniMaxH3SigmaShift",
+        "MiniMaxH3Conditioning",
+        "MiniMaxH3TextEncode",
+        "VAEDecodeAudio",
+        "EasyCache",
+        "FrameInterpolationModelLoader",
+        "FrameInterpolate"
+      ],
+      "custom_node_dependencies": [
+        {
+          "name": "ComfyUI-Spectrum-MiniMax-H3",
+          "repo": "https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3",
+          "commit": "9395bf98fc60a04c5f588de7b2bb33516a0b622f",
+          "class_types": [
+            "SpectrumApplyMiniMaxH3"
+          ]
+        },
+        {
+          "name": "comfyui-kjnodes",
+          "repo": "https://github.com/kijai/ComfyUI-KJNodes",
+          "commit": "35e5956193769d18a13136cdedb73a36a05c73e6",
+          "class_types": [
+            "PathchSageAttentionKJ"
+          ]
+        },
+        {
+          "name": "ComfyUI-SolAttn_triton",
+          "repo": "https://github.com/kijai/ComfyUI-SolAttn_triton",
+          "commit": "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc",
+          "class_types": [
+            "SolAttnPatch"
+          ]
+        },
+        {
+          "name": "ComfyUI-H3-Motion-Context",
+          "repo": "https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context",
+          "commit": "c140ae99b8c38f782ebd8564c267b42aacade6a4",
+          "class_types": [
+            "MiniMaxH3MotionContext"
+          ]
+        },
+        {
+          "name": "Comfyui_Minimax_h3_latent_Upscaler",
+          "repo": "https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler",
+          "commit": "",
+          "class_types": [
+            "MiniMaxH3LatentUpscaler"
+          ]
+        }
+      ],
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 20970379616,
+          "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 2811065184,
+          "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_audio_vae_fp32.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+          "required": true,
+          "bytes": 605254808,
+          "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+        },
+        {
+          "folder": "latent_upscale_models",
+          "relativePath": "latent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors",
+          "url": "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/minimax_h3_latent_upscaler_3d_conv_v1/minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
+          "required": false,
+          "bytes": 690592992,
+          "sha256": "4f57821f5837f32f7142b67d815606dbd7550f194e5c769f7d6c3f83b146a5e6"
+        }
+      ],
+      "media_type": "video",
+      "title": "MiniMax H3",
+      "description": "MiniMax H3 omni-modal video generation: video and native stereo audio (voice, SFX, music) are denoised jointly in one pass. Text-to-video by default; supply a start image for image-to-video. Runs on an H3-capable CUDA Comfy lane (pruned int8_convrot DiT + Qwen3-VL 32B nvfp4 encoder, ComfyUI >= v0.31.0 for the int8_convrot video VAE, with the Spectrum forecaster node \u2014 see packages/gpu-rentals). Native canvas is a 768px short edge at 24 fps, up to ~15s on the 17k+5 frame grid. Spectrum forecasting is on by default and can be switched off per generation: it predicts about half the transformer steps instead of computing them, which roughly halves sampling time but softens fine detail. Three optional accelerators ride the same graph, all OFF by default and lifted out of the chain entirely when unset, so the default path is unchanged. Measured on a rented RTX 5090 (5s @ 960x544, warm, fixed seed, ComfyUI's own per-prompt timing): no acceleration 60.3s; spectrum (the default) 39.1s; solattn_tau 1.3 34.3s \u2014 NVlabs sparse attention chained onto sage, 11% faster than spectrum at equal-or-better detail and the same take, needs the pinned SolAttn Triton node and pays ~6s of kernel autotune on the first run of a process; easycache 0.2-0.3 41.9s. easycache and spectrum CANNOT combine \u2014 the forecaster disables itself whenever a cache wrapper patches the same model \u2014 and the choice between them is about fidelity, not speed: easycache lands 28-35 dB from the unaccelerated render where spectrum lands ~20 dB, i.e. spectrum reaches a visibly different take at the same seed. fast_high_res is the two-pass lane: sample the first pass at 0.2MP, lift the video latent to the full canvas with a trained H3 latent upscaler (no VAE round trip) and spend only the last 3 sigmas at full size. Off by default; the studio calls it \"Fast high-res\". interpolate 2 runs core RIFE over the decoded frames for 24 -> 48 fps at +2.9s (3 gives 72 fps at +4.0s), leaving clip duration and the sampled frame count alone.",
+      "family": "minimax",
+      "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "MiniMax H3"
+      ],
+      "lora_injection": {
+        "class_type": "LoraLoaderModelOnly",
+        "targets": [
+          {
+            "node": "31",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model"
+      },
+      "api_workflow": "workflows/minimax-h3.api.json",
+      "default": false,
+      "frame_grid": {
+        "modulus": 17,
+        "offset": 5
+      },
+      "motion_reference_budget": {
+        "max_packed_rows": 76000,
+        "vram_headroom_gb": 12,
+        "max_packed_rows_without_vram_headroom": 76000,
+        "max_packed_rows_by_vram_gb": {
+          "32": 76000,
+          "96": 161000
+        },
+        "measured": "2026-08-23 RECALIBRATED DOWN, and the rule changed with it: a budget is now the largest run PROVEN to complete on that card, never a midpoint between a success and a failure. The previous 85,000 was exactly that midpoint \u2014 76,600 rows had run clean (48.5s a step, torch 23.34GiB) and 95,092 had thrashed and died, so 85,000 was interpolated between them and shipped as if measured. On 2026-08-23 a job priced at ~80,400 counted rows (80,890 including text) died on a 32GB 5090 inside that band: 'Currently allocated 24.75 GiB, Requested 4.32 GiB, Device limit 31.36 GiB', in the MLP of block 0 (comfy_kitchen quantization.py:1051, fc1 = ffn*2 = 28,672 wide at bf16 = 57,344 bytes a row; 4.32GiB / 57,344 = 80,890). Every duration the picker offered between ~77k and 85k rows was therefore a coin flip, which is why the same OOM kept arriving. 32GB is now 76,000 (the proven-clean 76,600, rounded down). 96GB is now 161,000 for the same reason: the ONLY thing proven on a PRO 6000 is that the ~161k-row as-sent job ran (134s a step, 64.5GB of 95GB by nvidia-smi, job 185f117f 2026-08-22); 240,000 was another interpolation and would have reproduced this failure on the bigger card. Raise either number only on a clean reference-mode run AT that size \u2014 normal step times, no thrash \u2014 and never above it. UNIT + arithmetic unchanged: packed rows of the whole DiT sequence, priced by packedSequenceRows() in media-studio-mcp.mjs and mirrored by _h3_packed_rows() in media_studio.py; output video+audio latents, each motion clip at the node's adapt_canvas() of its STAGED dims plus its soundtrack when use_audio, each picture at most the output's rows per latent frame, each voice clip 2 x round(s x 40); text is not counted, which is why a counted figure runs a few hundred rows under the allocator's. ANCHORS on a 32GB 5090, reference mode: 34k clean (15.1s/step, 14.91GiB); 66,900 clean (42.0s/step, 22.97GiB); 76,600 clean (48.5s/step, 23.34GiB, job 69a108a5) <- the budget; 80,890 OOM (2026-08-23); 95,092 thrash then OOM (73s/step, b2f76185); 97,710 OOM (2026-08-22); 142,366/155,006 OOM three times (34a722c2, b9f5b32d at --vram-headroom 12, 103f6173 at 20 - the flag is inert for this). A PLAIN text-to-video carries no references and is not priced here at all: 90,658 rows (15s @1216x704) ran at 27.16GiB, which is ABOVE this budget and is not a contradiction - reference mode pays for the reference encode on the same card. Read torch's own peak or the OOM summary, never nvidia-smi under cudaMallocAsync, and always probe with workflow_id minimax-h3-reference."
+      },
+      "image_clear": "prune",
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "prompt_contract": {
+        "guidance": "H3 was trained on the structured rewrite its authors' pipeline emits (docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md), so the format is part of the interface. Send three fields in order, blank-line separated: 'integrated_multimodal_description:' (open with one style/composition sentence, then numbered shots \u2014 '[Shot 1]' with no timestamp, later shots '[Shot N] At MM:SS.mmm,'; stable speaker ids (S1),(S2); speech in <d>[English] the exact words</d>, marked <cutoff> if still running at the end; camera moves as prose naming move, distance and speed), 'overall_soundscape:' (1-4 sentences of ambience and action sound, never dialogue), 'non_diegetic_music:' (1-3 sentences or N/A). With a start image, open with the anchor line 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.' H3 has no negative conditioning: state everything affirmatively."
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "end_image_url",
+        "end_image_base64",
+        "end_image_path",
+        "motion_context_path",
+        "motion_context_base64",
+        "motion_context_url",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "seed",
+        "steps",
+        "spectrum",
+        "fast_high_res",
+        "loras",
+        "easycache",
+        "solattn_tau",
+        "interpolate"
+      ],
+      "defaults": {
+        "width": 1216,
+        "height": 704,
+        "frame_rate": 24,
+        "duration_seconds": 5,
+        "seed": -1,
+        "steps": 15,
+        "spectrum": true,
+        "fast_high_res": false,
+        "easycache": 0,
+        "solattn_tau": 0,
+        "interpolate": 1
+      },
+      "slots": {
+        "prompt": {
+          "node": "104",
+          "input": "prompt"
+        },
+        "image_path": {
+          "node": "70",
+          "input": "image"
+        },
+        "width": {
+          "node": "104",
+          "input": "width"
+        },
+        "height": {
+          "node": "104",
+          "input": "height"
+        },
+        "frames": {
+          "node": "104",
+          "input": "length"
+        },
+        "seed": {
+          "node": "15",
+          "input": "noise_seed"
+        },
+        "steps": {
+          "node": "9",
+          "input": "steps"
+        },
+        "spectrum": {
+          "node": "30",
+          "input": "enabled"
+        },
+        "end_image_path": {
+          "node": "71",
+          "input": "image"
+        },
+        "easycache": {
+          "node": "32",
+          "input": "reuse_threshold"
+        },
+        "solattn_tau": {
+          "node": "33",
+          "input": "tau"
+        },
+        "interpolate": {
+          "node": "35",
+          "input": "multiplier"
+        },
+        "frame_rate": {
+          "node": "91",
+          "input": "fps"
+        }
+      },
+      "fast_high_res": {
+        "first_pass_megapixels": 0.2,
+        "refine_steps": 3,
+        "min_upscale_factor": 1.3,
+        "model_name": "minimax_h3_latent_upscaler_3d_bf16.safetensors",
+        "precision": "bf16",
+        "align": 32,
+        "notes": "Two-pass latent upscale, compiled by the MCP when fast_high_res is on. The graph samples the first pass on a first_pass_megapixels canvas at the requested aspect, takes the sampler's denoised_output (the x0 estimate) at step steps-refine_steps, splits the joint A/V latent, runs the video half through MinimaxH3LatentUpscaler3D to the full canvas, re-joins the audio latent untouched, and finishes the remaining refine_steps sigmas at full size. Total steps are unchanged \u2014 they just move to a canvas with a fraction of the rows. Below min_upscale_factor the two passes are not worth their overhead, so the compiler leaves the single-pass graph alone and records fast_high_res:false. Needs Comfyui_Minimax_h3_latent_Upscaler and latent_upscale_models/<model_name> on the lane (see packages/gpu-rentals)."
+      }
+    },
+    {
+      "id": "minimax-h3-native",
+      "media_type": "video",
+      "title": "MiniMax H3 (Apple Silicon)",
+      "family": "minimax-h3-native",
+      "builder": "h3-native",
+      "beta": true,
+      "hardware": {
+        "accelerator": "mps",
+        "reason": "This lane is antirez/h3.c, a Metal engine: it runs on an Apple-silicon Mac and nowhere else. On an NVIDIA machine use the MiniMax H3 lanes, which are the same model through ComfyUI."
+      },
+      "description": "MiniMax H3 rendered on this Mac's own GPU, with no ComfyUI and nothing rented. The engine is antirez/h3.c: it reads MiniMax's ORIGINAL BF16 checkpoint \u2014 Qwen3-VL text encoder, the 50-block DiT, both VAEs \u2014 and runs all of it on Metal, so video and native stereo audio come out of one joint pass exactly as they do on the CUDA lanes. Same 17k+5 frame lattice, same ~15s ceiling, 24 fps; the canvas ceiling is the engine's released 768x1344 PIXEL budget rather than the CUDA lane's 768px short edge. The dials are completely different, because this engine's speed comes from skipping work rather than from a forecaster: an Effort ladder (Draft / Fast / Balanced / Reference) moves sampling steps, how many of the 50 transformer blocks run, how often the denoiser's velocity is recomputed, and how large the internal sampling canvas is. Each of those makes a DIFFERENT take rather than the same take faster, which is why they are one ladder and not four checkboxes. Two more settings are read off the machine instead of asked: the transformer streams from SSD on a Mac with under 48 GB of memory (26% slower, ~34 GB less resident), and the M5's int8 FC2 kernel is used where there is an M5. Token reduction is available and OFF: upstream measures it 28% faster, and it is also the one setting with a standing artefact report \u2014 doubled images and garbled audio, reproducibly, on a 128 GB M4 Max \u2014 so it is a switch you turn on knowing that, not a default. Before each render the lane checks that every transformer shard starts its payload on the 8-byte boundary the safetensors format requires; a snapshot re-saved by a writer that skipped the header padding is mapped WRONG by the engine's M5 file-backed weight path (4-byte GPU loads at a 2-mod-4 address read the wrong bytes: a black render, byte-identical across seeds), so such a snapshot is run with H3_ZERO_COPY_WEIGHTS=0 (copied buffers) and the profile says so with the fix, scripts/assemble_h3c_model.py --realign. An aligned snapshot keeps the engine's own file-backed default; an operator's value in stack-local.env wins either way. Reference mode (up to 9 ordered pictures, 3 clips, 3 voices) needs MiniMax's separate Ref2VA checkpoint, a further ~62 GiB; without it the lane still does text-to-video and first/last-frame. LoRAs are fused into the transformer's BF16 weights as it loads, in the layouts ComfyUI reads for H3 (lora_A/lora_B, or kohya lora_down/lora_up with an alpha), so every speed kernel still applies to them; an adapter whose shape does not fit the original checkpoint (the AdaLN adapters some LoRAs carry for the pruned ComfyUI transformer) is skipped and counted on the job, and LoRAs cannot be combined with SSD streaming, which never loads those weights.",
+      "supports_loras": true,
+      "compatible_base_models": [
+        "MiniMax H3"
+      ],
+      "default": false,
+      "frame_grid": {
+        "modulus": 17,
+        "offset": 5
+      },
+      "default_duration_seconds": 4,
+      "default_steps": 20,
+      "aspect_ratios": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4"
+      ],
+      "reference_slots": {
+        "images": 9,
+        "videos": 3,
+        "audios": 3
+      },
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "prompt_contract": {
+        "guidance": "The same structured rewrite the CUDA H3 lanes take \u2014 this is the same model, so the format it was trained on is the same. Three fields in order, blank-line separated: 'integrated_multimodal_description:' (one style/composition sentence, then numbered shots, stable speaker ids (S1)/(S2), speech in <d>[English] the exact words</d>), 'overall_soundscape:' (ambience and action sound, never dialogue), 'non_diegetic_music:' (or N/A). H3 has no negative conditioning: state everything affirmatively."
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "reference_images",
+        "reference_videos",
+        "reference_audios",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "seed",
+        "loras",
+        "h3_native"
+      ],
+      "defaults": {
+        "width": 864,
+        "height": 480,
+        "frame_rate": 24,
+        "duration_seconds": 4,
+        "seed": -1
+      },
+      "h3_native": {
+        "engine": "https://github.com/antirez/h3.c",
+        "commit": "8974cc055ea9c02fcd14cc27dfda3e1027c05153",
+        "patches": [
+          "patches/h3c-lora.patch"
+        ],
+        "license": "MIT",
+        "install": "scripts/install_h3c.sh",
+        "model_setup": "scripts/assemble_h3c_model.py",
+        "profile_endpoint": "/api/h3-native/profile",
+        "preset_order": [
+          "draft",
+          "fast",
+          "balanced",
+          "reference"
+        ],
+        "default_preset": "balanced",
+        "presets": {
+          "draft": {
+            "label": "Draft",
+            "steps": 4,
+            "layers": 40,
+            "reuse": 3,
+            "core_reuse": 1,
+            "render_scale": 0.5,
+            "description": "A look at the framing and the motion in seconds, at half the internal size."
+          },
+          "fast": {
+            "label": "Fast",
+            "steps": 20,
+            "layers": 45,
+            "reuse": 2,
+            "core_reuse": 1,
+            "render_scale": 1.0,
+            "description": "Upstream's fast recipe: five blocks dropped, velocity reused every other step."
+          },
+          "balanced": {
+            "label": "Balanced",
+            "steps": 20,
+            "layers": 50,
+            "reuse": 2,
+            "core_reuse": 1,
+            "render_scale": 1.0,
+            "description": "Every transformer block, still reusing velocity. The best take per minute."
+          },
+          "reference": {
+            "label": "Reference",
+            "steps": 50,
+            "layers": 50,
+            "reuse": 1,
+            "core_reuse": 1,
+            "render_scale": 1.0,
+            "description": "Nothing skipped and nothing reused \u2014 the model's own output, and much slower."
+          }
+        },
+        "dials": {
+          "steps": {
+            "min": 2,
+            "max": 1000,
+            "label": "Sampling steps"
+          },
+          "layers": {
+            "min": 35,
+            "max": 50,
+            "label": "Transformer blocks"
+          },
+          "reuse": {
+            "min": 1,
+            "max": 3,
+            "label": "Velocity reuse"
+          },
+          "core_reuse": {
+            "min": 1,
+            "max": 6,
+            "label": "Core refresh"
+          },
+          "render_scale": {
+            "min": 0.25,
+            "max": 1.0,
+            "label": "Internal canvas"
+          }
+        },
+        "machine_derived": [
+          "ssd_streaming",
+          "int8_row_fc2"
+        ],
+        "token_reduction": {
+          "default": false,
+          "note": "About 28% faster denoising, by pairing horizontal video tokens in the middle transformer blocks. It is also the one setting here with a standing artefact report \u2014 doubled images and garbled audio on every render, measured on a 128 GB M4 Max \u2014 and upstream warns against combining it with the thinned, reused transformer the Draft preset uses. Off by default, and the lane refuses that combination outright."
+        },
+        "limits": {
+          "max_pixels": 1032192,
+          "canvas_multiple": 32,
+          "fps": 24,
+          "min_frames": 22,
+          "max_frames": 362,
+          "min_render_edge": 256
+        },
+        "reference_mode": {
+          "checkpoint": "Ref2VA",
+          "bytes": 66571993088,
+          "note": "Ordered reference pictures, clips and voices run MiniMax's separate Ref2VA transformer, which is not part of the FL2VA download. Without it this lane still does text-to-video and first/last-frame: hf download MiniMaxAI/MiniMax-H3 --include 'Ref2VA/*'"
+        }
+      }
+    },
+    {
+      "id": "minimax-h3-image",
+      "media_type": "image",
+      "title": "MiniMax H3 Image",
+      "beta": true,
+      "description": "MiniMax H3 as a STILL image generator, through H3 Studio's FL2VA/REF2VA paths. H3 was never released as an image model: it decodes a short clip and a frame selector picks the still out of it, which is why the graph carries seconds/fps it cannot change. Text-to-image by default; attach up to nine ordered references (addressed @Image1..@Image9, the same grammar the video reference lane already speaks) to run the REF2VA path. Runs on the same rented H3 box as the video lanes \u2014 lane_needles already match its weights.",
+      "family": "minimax-h3",
+      "builder": "comfy-api-image",
+      "workflow_file": "minimax-h3-image.api.json",
+      "supports_loras": false,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "width",
+        "height",
+        "seed",
+        "aspect_ratio",
+        "megapixels",
+        "sampling_profile",
+        "frame_profile",
+        "route",
+        "adherence",
+        "reference_images"
+      ],
+      "max_reference_images": 9,
+      "reference_slots": {
+        "images": 9,
+        "videos": 0,
+        "audios": 0
+      },
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 8
+      },
+      "hardware": {
+        "accelerator": "cuda",
+        "reason": "MiniMax H3 Image runs H3's own weights: its nvfp4 text encoder only runs on Blackwell (RTX 5090 class), so this machine's ComfyUI cannot run it. Run it on a rented machine \u2014 the same box the H3 video lanes use already carries these files."
+      },
+      "custom_node_dependencies": [
+        {
+          "name": "ComfyUI-MiniMax-H3-Studio",
+          "repo": "https://github.com/thaakeno/ComfyUI-MiniMax-H3-Studio",
+          "commit": "a6a392f9c71b255dd530750ed9fc1f6455db2b80",
+          "class_types": [
+            "H3StudioLoader",
+            "H3StudioDirector",
+            "H3StudioCondition",
+            "H3StudioDecode",
+            "H3StudioFrameSelector",
+            "H3StudioSaveImage",
+            "H3StudioContextSamplingPreset"
+          ]
+        }
+      ],
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+          "url": "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+          "required": true,
+          "bytes": 12540858008,
+          "sha256": "01aa7b92c007c599890461c325f9b7e3c96fb06c36f242f95b62f7f20e538dec"
+        },
+        {
+          "folder": "diffusion_models",
+          "relativePath": "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
+          "url": "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
+          "required": true,
+          "bytes": 11770657048,
+          "sha256": "de2c6c29c4ee702b45e48e40daae3834aeee58ab681c732d9152589a87c89910"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 2811065184,
+          "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+        }
+      ],
+      "aspect_ratios": [
+        "1:1",
+        "4:5",
+        "3:4",
+        "16:9",
+        "9:16",
+        "4:3"
+      ]
+    },
+    {
+      "id": "minimax-h3-eros",
+      "inherits": "minimax-h3",
+      "media_type": "video",
+      "title": "MiniMax H3 Eros Max",
+      "beta": true,
+      "family": "minimax-eros",
+      "description": "MiniMax H3 with the Eros Max beta5 transformer: the same joint video+stereo-audio model, the same graph and the same prompt format as MiniMax H3, uncensored. Text-to-video, or start and end frames. The weights are H3 Eros Max beta5 TURBO-hybrid int8 (HF TenStrip/10Eros-Max, the same file as Civitai 2851079 version 3294059) \u2014 an int8_convrot graft merge over H3 itself, so it loads through the same plain UNETLoader and the official text encoder and both VAEs are used unchanged. The turbo deltas are fused into the transformer, so this lane loads no turbo LoRA and samples at 8 steps with res_multistep/simple (the author's own go-to; er_sde, LCM and euler at 4-8 also work). Spectrum defaults OFF here where the official lane has it on: it costs accuracy on this model and has almost no history to forecast from at 8 steps. It also keeps H3's AdaLN pair, which our pruned official base has stripped, so concept LoRAs apply through the plain loader \u2014 usually at 0.2-0.6. Rents as its own machine tier (Video \u00b7 H3 Eros), which carries the official H3 serving set as well.",
+      "license": {
+        "code": "n/a \u2014 no code is vendored; the graph names ComfyUI's own H3 nodes",
+        "weights": "MiniMax H3 Community License, plus the LTX 2.3, Wan 2.2 and Krea 2 community licences",
+        "note": "H3 Eros Max is a graft merge, and its author states that because character was transferred in from LTX 2.3, Wan 2.2 and Krea 2, those models' community licences apply alongside MiniMax H3's own (https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE). That is a stack of four sets of terms, none of them read here \u2014 review them before relying on output commercially."
+      },
+      "api_workflow": "workflows/minimax-h3-eros.api.json",
+      "defaults": {
+        "steps": 8,
+        "spectrum": false
+      },
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "diffusion_models/10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+          "url": "https://huggingface.co/TenStrip/10Eros-Max/resolve/main/10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+          "required": true,
+          "bytes": 20970414464,
+          "sha256": "4dd965496e5b1b83cd13c65cbe7a535b8a4d94ae768a7646b4e336d52c4781cf"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 2811065184,
+          "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_audio_vae_fp32.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+          "required": true,
+          "bytes": 605254808,
+          "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+        },
+        {
+          "folder": "latent_upscale_models",
+          "relativePath": "latent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors",
+          "url": "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/minimax_h3_latent_upscaler_3d_conv_v1/minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
+          "required": false,
+          "bytes": 690592992,
+          "sha256": "4f57821f5837f32f7142b67d815606dbd7550f194e5c769f7d6c3f83b146a5e6"
+        }
+      ],
+      "prompt_contract": {
+        "guidance": "H3 was trained on the structured rewrite its authors' pipeline emits (docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md), so the format is part of the interface. Send three fields in order, blank-line separated: 'integrated_multimodal_description:' (open with one style/composition sentence, then numbered shots \u2014 '[Shot 1]' with no timestamp, later shots '[Shot N] At MM:SS.mmm,'; stable speaker ids (S1),(S2); speech in <d>[English] the exact words</d>, marked <cutoff> if still running at the end; camera moves as prose naming move, distance and speed), 'overall_soundscape:' (1-4 sentences of ambience and action sound, never dialogue), 'non_diegetic_music:' (1-3 sentences or N/A). With a start image, open with the anchor line 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.' H3 has no negative conditioning: state everything affirmatively. ON THE EROS MAX WEIGHTS, the prompt is the quality: write literally rather than in shorthand (name which part moves, where it goes, what it touches and what that does to the rest of the body -- never name a category like \"make hot sex\" and leave the motion to the model), use plain anatomical and explicit words rather than euphemism, order every beat in temporal sequence on a linear time flow, and write long: more embellishment is reliably better output here. The trained format above is unchanged."
+      }
+    },
+    {
+      "id": "minimax-h3-eros-reference",
+      "inherits": "minimax-h3-reference",
+      "title": "MiniMax H3 Eros Max Reference",
+      "beta": true,
+      "family": "minimax-eros",
+      "routing_only": true,
+      "description": "The reference mode of MiniMax H3 Eros Max \u2014 up to nine reference pictures, three reference videos and three reference audio clips, addressed by the same <Picture N>/<Video N>/<Audio N> grammar and the same retention_analysis tags as MiniMax H3 Reference, which this lane is a copy of. Reached by attaching references to MiniMax H3 Eros Max, never picked directly. The weights are H3 Eros Max beta5 TURBO-hybrid int8 (HF TenStrip/10Eros-Max, the same file as Civitai 2851079 version 3294059) \u2014 an int8_convrot graft merge over H3 itself, so it loads through the same plain UNETLoader and the official text encoder and both VAEs are used unchanged. The turbo deltas are fused into the transformer, so this lane loads no turbo LoRA and samples at 8 steps with res_multistep/simple (the author's own go-to; er_sde, LCM and euler at 4-8 also work). Spectrum defaults OFF here where the official lane has it on: it costs accuracy on this model and has almost no history to forecast from at 8 steps. It also keeps H3's AdaLN pair, which our pruned official base has stripped, so concept LoRAs apply through the plain loader \u2014 usually at 0.2-0.6. Rents as its own machine tier (Video \u00b7 H3 Eros), which carries the official H3 serving set as well.",
+      "license": {
+        "code": "n/a \u2014 no code is vendored; the graph names ComfyUI's own H3 nodes",
+        "weights": "MiniMax H3 Community License, plus the LTX 2.3, Wan 2.2 and Krea 2 community licences",
+        "note": "H3 Eros Max is a graft merge, and its author states that because character was transferred in from LTX 2.3, Wan 2.2 and Krea 2, those models' community licences apply alongside MiniMax H3's own (https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE). That is a stack of four sets of terms, none of them read here \u2014 review them before relying on output commercially."
+      },
+      "api_workflow": "workflows/minimax-h3-eros-reference.api.json",
+      "defaults": {
+        "steps": 8,
+        "spectrum": false
+      },
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "diffusion_models/10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+          "url": "https://huggingface.co/TenStrip/10Eros-Max/resolve/main/10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+          "required": true,
+          "bytes": 20970414464,
+          "sha256": "4dd965496e5b1b83cd13c65cbe7a535b8a4d94ae768a7646b4e336d52c4781cf"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 2811065184,
+          "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_audio_vae_fp32.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+          "required": true,
+          "bytes": 605254808,
+          "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+        }
+      ],
+      "prompt_contract": {
+        "guidance": "Reference mode uses MiniMax's full-reference rewrite format (ref_en): six sections in order \u2014 subject_definitions (label every reference as <Subject N> / <Picture N> / <Video N>), summary, retention_analysis (fully_preserved | partially_preserved | attribute_transfer | weak_reference per label), detailed_description (shots, <d>[English] \u2026</d> speech, (S1) ids), overall_soundscape, non_diegetic_music. Reference pictures are supplied in order, so <Picture 1> is the first image sent. Reference videos are labeled <Video N> in their own supplied order. A reference video is a MOTION reference when pictures are attached \u2014 with NO pictures, the first video is also the identity reference: bind <Subject 1> to it ('<Subject 1> is the man in <Video 1>, with \u2026') and tag it fully_preserved so face, hair, build, wardrobe and manner all carry. Otherwise retention_analysis decides how literally it binds \u2014 fully_preserved reproduces the movement itself, partially_preserved keeps its broad shape, attribute_transfer performs a DIFFERENT action in that performer's manner (gesticulation style, posture, mannerisms, facial expressiveness), weak_reference is a loose pacing or rhythm cue. Say which subject inherits it ('<Subject 1> (S1) moves with the gesture style of <Video 1>.'). Reference audio clips are labeled <Audio N>, numbered independently of pictures and videos \u2014 but a reference video's OWN soundtrack also takes an <Audio N> label, emitted before its <Video N>, so a video-with-sound plus one standalone voice clip numbers as <Audio 1> (the video's track), <Video 1>, then <Audio 2> (the voice clip). Define each in subject_definitions ('<Audio 1> is the voice-timbre reference for <Subject 1> (S1).'), tag the summary [audio reuse] when the source words are reperformed verbatim (keep them, original language, inside <d>\u2026</d>) or [audio reference] when only timbre/rhythm/emotion carries (then the source's own words must NOT appear), and mark each <Audio N> in retention_analysis with fully_copy | partially_copy | reference | weak_reference. ON THE EROS MAX WEIGHTS, the prompt is the quality: write literally rather than in shorthand (name which part moves, where it goes, what it touches and what that does to the rest of the body -- never name a category like \"make hot sex\" and leave the motion to the model), use plain anatomical and explicit words rather than euphemism, order every beat in temporal sequence on a linear time flow, and write long: more embellishment is reliably better output here. The trained format above is unchanged."
+      }
+    },
+    {
+      "id": "minimax-h3-eros-inpaint",
+      "inherits": "minimax-h3-inpaint",
+      "title": "MiniMax H3 Eros Max Head Replacement",
+      "beta": true,
+      "family": "minimax-eros",
+      "hardware": {
+        "accelerator": "cuda",
+        "reason": "MiniMax H3 needs an NVIDIA card: its nvfp4 text encoder only runs on Blackwell (RTX 5090 class), so this machine's ComfyUI cannot run it. Run it on a rented machine instead."
+      },
+      "routing_only": true,
+      "description": "Head replacement by masked inpainting on the Eros Max transformer \u2014 the same masking, cropping and audio-held contract as MiniMax H3 Head Replacement, which this lane is a copy of. The weights are H3 Eros Max beta5 TURBO-hybrid int8 (HF TenStrip/10Eros-Max, the same file as Civitai 2851079 version 3294059) \u2014 an int8_convrot graft merge over H3 itself, so it loads through the same plain UNETLoader and the official text encoder and both VAEs are used unchanged. The turbo deltas are fused into the transformer, so this lane loads no turbo LoRA and samples at 8 steps with res_multistep/simple (the author's own go-to; er_sde, LCM and euler at 4-8 also work). Spectrum defaults OFF here where the official lane has it on: it costs accuracy on this model and has almost no history to forecast from at 8 steps. It also keeps H3's AdaLN pair, which our pruned official base has stripped, so concept LoRAs apply through the plain loader \u2014 usually at 0.2-0.6. Rents as its own machine tier (Video \u00b7 H3 Eros), which carries the official H3 serving set as well.",
+      "license": {
+        "code": "n/a \u2014 no code is vendored; the graph names ComfyUI's own H3 nodes",
+        "weights": "MiniMax H3 Community License, plus the LTX 2.3, Wan 2.2 and Krea 2 community licences",
+        "note": "H3 Eros Max is a graft merge, and its author states that because character was transferred in from LTX 2.3, Wan 2.2 and Krea 2, those models' community licences apply alongside MiniMax H3's own (https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE). That is a stack of four sets of terms, none of them read here \u2014 review them before relying on output commercially."
+      },
+      "api_workflow": "workflows/minimax-h3-eros-inpaint.api.json",
+      "defaults": {
+        "steps": 8,
+        "spectrum": false
+      },
+      "model_dependencies": [
+        {
+          "folder": "diffusion_models",
+          "relativePath": "diffusion_models/10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+          "url": "https://huggingface.co/TenStrip/10Eros-Max/resolve/main/10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+          "required": true,
+          "bytes": 20970414464,
+          "sha256": "4dd965496e5b1b83cd13c65cbe7a535b8a4d94ae768a7646b4e336d52c4781cf"
+        },
+        {
+          "folder": "text_encoders",
+          "relativePath": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "required": true,
+          "bytes": 15687142551,
+          "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+          "required": true,
+          "bytes": 2811065184,
+          "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
+        },
+        {
+          "folder": "vae",
+          "relativePath": "vae/minimax_h3_audio_vae_fp32.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+          "required": true,
+          "bytes": 605254808,
+          "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+        }
+      ],
+      "prompt_contract": {
+        "guidance": "Head replacement uses the same reference grammar as MiniMax H3 Reference, narrowed to one job. Bind the new identity to the pictures in subject_definitions (\"<Subject 1> is the character represented in <Picture 1>\"), tag it fully_preserved in retention_analysis so the face carries, and describe the SHOT rather than the action -- the action is already in the footage and is being preserved by the mask. Do not write dialogue: the soundtrack is held, so speech comes from the source clip and the model is matching lips to it. Do not describe the body, the background or the camera move for the same reason. ON THE EROS MAX WEIGHTS, the prompt is the quality: write literally rather than in shorthand (name which part moves, where it goes, what it touches and what that does to the rest of the body -- never name a category like \"make hot sex\" and leave the motion to the model), use plain anatomical and explicit words rather than euphemism, order every beat in temporal sequence on a linear time flow, and write long: more embellishment is reliably better output here. The trained format above is unchanged."
+      }
+    },
+    {
+      "id": "ace-step-1.5-turbo",
+      "media_type": "audio",
+      "title": "ACE-Step 1.5 Turbo",
+      "description": "Local text-to-music with real sung vocals. Describe the style, optionally write lyrics, and get a finished track up to ten minutes long. Code and weights are both MIT, so the music is yours to use commercially. Measured warm on an Apple Silicon M5 Max, server-side, with a fresh seed each run: a 60-second track in about 13 seconds (~4.6x realtime). Turning off \"write audio codes\" skips the language model that plans the arrangement and drops the same render to about 2.7 seconds (~22x realtime) at a quality cost - it is the draft/final lever, and it is about four fifths of the render time.",
+      "family": "ace-step",
+      "builder": "comfy-api-audio",
+      "backend": "comfy-api-audio",
+      "workflow_file": "ace-step-1.5-turbo.api.json",
+      "supports_loras": false,
+      "compatible_base_models": [
+        "ACEStep15"
+      ],
+      "default": true,
+      "featured": true,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "lyrics",
+        "seconds",
+        "bpm",
+        "timesignature",
+        "language",
+        "keyscale",
+        "seed",
+        "steps",
+        "cfg",
+        "sampler_name",
+        "scheduler",
+        "generate_audio_codes"
+      ],
+      "defaults": {
+        "seconds": 60,
+        "bpm": 92,
+        "timesignature": "4",
+        "language": "en",
+        "keyscale": "C major",
+        "seed": -1,
+        "steps": 8,
+        "cfg": 1.0,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "generate_audio_codes": true
+      },
+      "slots": {
+        "prompt": {
+          "node": "2",
+          "input": "tags"
+        },
+        "lyrics": {
+          "node": "2",
+          "input": "lyrics"
+        },
+        "bpm": {
+          "node": "2",
+          "input": "bpm"
+        },
+        "timesignature": {
+          "node": "2",
+          "input": "timesignature"
+        },
+        "language": {
+          "node": "2",
+          "input": "language"
+        },
+        "keyscale": {
+          "node": "2",
+          "input": "keyscale"
+        },
+        "generate_audio_codes": {
+          "node": "2",
+          "input": "generate_audio_codes"
+        },
+        "seconds": [
+          {
+            "node": "2",
+            "input": "duration"
+          },
+          {
+            "node": "5",
+            "input": "seconds"
+          }
+        ],
+        "seed": [
+          {
+            "node": "2",
+            "input": "seed"
+          },
+          {
+            "node": "6",
+            "input": "seed"
+          }
+        ],
+        "steps": {
+          "node": "6",
+          "input": "steps"
+        },
+        "cfg": {
+          "node": "6",
+          "input": "cfg"
+        },
+        "sampler_name": {
+          "node": "6",
+          "input": "sampler_name"
+        },
+        "scheduler": {
+          "node": "6",
+          "input": "scheduler"
+        }
+      },
+      "progress_phases": [
+        {
+          "node": "2",
+          "label": "writing the music",
+          "share": 0.81,
+          "note": "TextEncodeAceStepAudio1.5 runs an LM that writes the audio codes. MEASURED on an M5 Max: 19.4s of a 24.1s 60-second render, 300 steps. This is the job, not a preamble."
+        },
+        {
+          "node": "6",
+          "label": "rendering the audio",
+          "share": 0.15,
+          "note": "KSampler, 8 turbo steps. MEASURED at 3.6s of the same render."
+        }
+      ],
+      "limits": {
+        "seconds": {
+          "min": 10,
+          "max": 600
+        }
+      },
+      "samplers": [
+        "euler",
+        "dpmpp_2m",
+        "ddim",
+        "uni_pc",
+        "heun"
+      ],
+      "schedulers": [
+        "simple",
+        "normal",
+        "sgm_uniform",
+        "beta",
+        "karras"
+      ],
+      "benchmark_seconds": 13,
+      "license": {
+        "code": "MIT",
+        "weights": "MIT",
+        "commercial": true,
+        "note": "ACE-Step 1.5 ships MIT code and MIT weights; generated audio is yours."
+      },
+      "tags": [
+        "text-to-music",
+        "music",
+        "vocals",
+        "turbo",
+        "local"
+      ],
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ace_step_1.5_turbo_aio.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/main/checkpoints/ace_step_1.5_turbo_aio.safetensors",
+          "required": true,
+          "bytes": 10025478736,
+          "sha256": "67b0f43aa5c51c840bd0228e6a935d8ff416ec87e5df2fc0637da17a561252bc",
+          "note": "All-in-one build: carries the DiT, both Qwen3 text encoders (0.6B + 2B) and the VAE, so one download and one CheckpointLoaderSimple covers the whole lane."
+        }
+      ],
+      "benchmark_note": "13s for 60s of audio, warm, server-reported execution time (ComfyUI's own execution_start -> execution_success), mean of three runs at 12.42/12.81/13.43s with distinct seeds. Measure this way or not at all: identical seeds hit ComfyUI's per-node cache and return a previous render in ~1s, which reads as a 60x speedup. Client wall-clock adds poll interval, and a cold run adds the 10GB load."
+    },
+    {
+      "id": "yue2-3b",
+      "media_type": "audio",
+      "title": "YuE2 3B",
+      "description": "Full-song generation that writes a SCORE first: YuE2 drafts the song in ABC notation, then performs it. That intermediate is the point - the melody and chords exist as notation you can read and edit before a single sample is rendered, which no other local music model here offers. Slower than ACE-Step and NOT licensed for commercial use: the weights are CC BY-NC 4.0, so tracks made here are for personal and non-commercial work only.",
+      "family": "yue2",
+      "builder": "comfy-api-audio",
+      "backend": "comfy-api-audio",
+      "workflow_file": "yue2-3b.api.json",
+      "supports_loras": false,
+      "compatible_base_models": [
+        "YuE2"
+      ],
+      "default": false,
+      "featured": false,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "lyrics",
+        "seconds",
+        "mode",
+        "seed",
+        "steps",
+        "cfg",
+        "sampler_name",
+        "scheduler"
+      ],
+      "defaults": {
+        "seconds": 60,
+        "mode": "full",
+        "seed": -1,
+        "steps": 32,
+        "cfg": 1.0,
+        "sampler_name": "heun",
+        "scheduler": "simple"
+      },
+      "slots": {
+        "prompt": [
+          {
+            "node": "2",
+            "input": "style"
+          },
+          {
+            "node": "3",
+            "input": "style"
+          }
+        ],
+        "lyrics": [
+          {
+            "node": "2",
+            "input": "lyrics"
+          },
+          {
+            "node": "3",
+            "input": "lyrics"
+          }
+        ],
+        "mode": [
+          {
+            "node": "2",
+            "input": "mode"
+          },
+          {
+            "node": "3",
+            "input": "mode"
+          }
+        ],
+        "seed": [
+          {
+            "node": "2",
+            "input": "seed"
+          },
+          {
+            "node": "3",
+            "input": "seed"
+          },
+          {
+            "node": "6",
+            "input": "seed"
+          }
+        ],
+        "seconds": {
+          "node": "3",
+          "input": "max_duration"
+        },
+        "steps": {
+          "node": "6",
+          "input": "steps"
+        },
+        "cfg": {
+          "node": "6",
+          "input": "cfg"
+        },
+        "sampler_name": {
+          "node": "6",
+          "input": "sampler_name"
+        },
+        "scheduler": {
+          "node": "6",
+          "input": "scheduler"
+        }
+      },
+      "progress_phases": [
+        {
+          "node": "2",
+          "label": "writing the score",
+          "share": 0.52,
+          "note": "YuE2GenerateABC writes the song out in ABC notation first. MEASURED on an M5 Max: 38.6s of a 73.8s 30-second render, up to 8192 tokens. It is the single largest phase, and it is the part that makes this model different."
+        },
+        {
+          "node": "3",
+          "label": "performing it",
+          "share": 0.31,
+          "note": "YuE2GenerateMusic turns the score into music tokens. MEASURED at 23.2s of the same render, max 750."
+        },
+        {
+          "node": "6",
+          "label": "rendering the audio",
+          "share": 0.14,
+          "note": "KSampler. MEASURED at 10.6s, 32 steps."
+        }
+      ],
+      "limits": {
+        "seconds": {
+          "min": 10,
+          "max": 600
+        }
+      },
+      "modes": [
+        {
+          "id": "full",
+          "label": "Melody and chords"
+        },
+        {
+          "id": "melody",
+          "label": "Melody only (better for covers)"
+        }
+      ],
+      "samplers": [
+        "heun",
+        "euler",
+        "dpmpp_2m",
+        "ddim",
+        "uni_pc"
+      ],
+      "schedulers": [
+        "simple",
+        "normal",
+        "sgm_uniform",
+        "beta",
+        "karras"
+      ],
+      "license": {
+        "code": "Apache-2.0",
+        "weights": "CC-BY-NC-4.0",
+        "commercial": false,
+        "note": "YuE2's WEIGHTS are CC BY-NC 4.0 - non-commercial only - even though the upstream code is Apache-2.0. Music made with this model must not be sold or used to promote a business. For commercial work use ACE-Step 1.5, whose code and weights are both MIT."
+      },
+      "tags": [
+        "text-to-music",
+        "music",
+        "vocals",
+        "score",
+        "local",
+        "non-commercial"
+      ],
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "yue2_3b_bf16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/YuE2/resolve/main/checkpoints/yue2_3b_bf16.safetensors",
+          "required": true,
+          "bytes": 7799983228,
+          "sha256": "33765adbf9813c9a50318218760b2fd819a319862460a04884607581961c6fee",
+          "note": "bf16 ON PURPOSE. The same repo ships yue2_3b_int8_convrot.safetensors, which is smaller and faster on CUDA and CANNOT RUN HERE: MPS cannot cast int8/fp8 tensors at all (pytorch#132624). Do not 'optimise' this to the int8 build on an Apple machine."
+        }
+      ]
+    },
+    {
+      "id": "yue2-3b-instrumental",
+      "inherits": "yue2-3b",
+      "title": "YuE2 3B Instrumental",
+      "description": "YuE2 with a community LoRA that makes it write instrumentals to a SECTION PLAN. Base YuE2 wants to sing; this one was trained on about 2,700 instrumental tracks across 100+ genres, each paired with a chord-annotated score, so it plays instead - and you can hand it the order of the sections, and roughly how long each runs. It still writes the score first, which is what makes it end a song on purpose rather than run to the cap. Same non-commercial terms as YuE2: the LoRA derives from those weights.",
+      "workflow_file": "yue2-3b-instrumental.api.json",
+      "lyrics_format": "section-plan",
+      "section_tags": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "outro"
+      ],
+      "empty_lyrics": "[instrumental]",
+      "accepts": [
+        "prompt",
+        "lyrics",
+        "seconds",
+        "seed",
+        "steps",
+        "cfg",
+        "sampler_name",
+        "scheduler"
+      ],
+      "defaults": {
+        "seconds": 150
+      },
+      "tags": [
+        "text-to-music",
+        "music",
+        "instrumental",
+        "score",
+        "local",
+        "non-commercial"
+      ],
+      "license": {
+        "note": "Both the YuE2 weights and this LoRA (Mothersuperior/YuE2-instrumental-cot-full-loras, which derives from them) are CC BY-NC 4.0 - non-commercial only. Music made with this model must not be sold or used to promote a business. For commercial work use ACE-Step 1.5, whose code and weights are both MIT."
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "yue2_3b_bf16.safetensors",
+          "url": "https://huggingface.co/Comfy-Org/YuE2/resolve/main/checkpoints/yue2_3b_bf16.safetensors",
+          "required": true,
+          "bytes": 7799983228,
+          "sha256": "33765adbf9813c9a50318218760b2fd819a319862460a04884607581961c6fee",
+          "note": "The same checkpoint the YuE2 3B lane installs. Named again here, first, because a child's model_dependencies REPLACES its parent's and this lane cannot run without it."
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ar_lora_inst_v3abc_comfyui.safetensors",
+          "url": "https://huggingface.co/Mothersuperior/YuE2-instrumental-cot-full-loras/resolve/main/ar_lora_inst_v3abc_comfyui.safetensors",
+          "required": true,
+          "bytes": 212891736,
+          "sha256": "de6a11d5701df103a191c87dc73115266e2420f3834739319dec5c24d2119f31",
+          "note": "The ComfyUI-layout build ON PURPOSE. The repo's other two files (ar_lora_inst_v3abc[.bf16].safetensors) name separate q/k/v and gate/up projections; ComfyUI fuses those into qkv_proj and gate_up_proj, so the plain files match no key and load as a silent no-op. This one packs the same deltas into the fused keys. It is an AR-planner LoRA and the planner lives in ComfyUI's CLIP slot - the graph loads it with strength_model 0 / strength_clip 1 and the sampler keeps the untouched model. `mode` is not accepted on this lane: the LoRA is meant to run score-first (mode full), which the graph pins."
+        }
+      ]
+    }
+  ]
+}

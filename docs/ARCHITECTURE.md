@@ -55,26 +55,99 @@ Manifest schema v2 assigns every artifact a stable id, SHA-256, byte size, MIME 
 | Module | Owns | Does not own |
 |---|---|---|
 | `hivemind_content_studio` | durable runs, manifests, intents, providers, planning, MCP adapters, approvals, evaluation, experiments, publishing | donor rendering internals |
-| `app` | faceless scripts, LocalTTS adapter, stock retrieval, subtitles, MoviePy/FFmpeg rendering | publishing or global provider selection |
+| `app` | faceless scripts, LocalTTS adapter, stock retrieval, subtitles, MoviePy/FFmpeg rendering | publishing, global provider selection, or which models render the visuals |
 | `auto_clipper` | long-form ingestion, clipping, clip-specific rights data, monetization matches | global publisher implementation |
 | `skills/shared` | Shared Brain agent playbooks and provider operating knowledge | executable business logic |
 | `skills/vendor/clueso-ai` | pinned upstream Clueso workflows, audit provenance, and namespaced policy adapters | provider selection, approvals, credentials, or publishing authority |
-| `packages/media-gateway` | local media gateway, ComfyUI proxy, model manager, Media Studio MCP, native-sidecar routing | canonical content runs, approvals, publishing, or metrics |
+| `packages/media-gateway` | local media gateway, ComfyUI proxy, model manager, Media Studio MCP, native-sidecar routing, SeedVR2 restoration projects | canonical content runs, approvals, publishing, or metrics |
 | `packages/open-generative-ai` | embedded Explore UI, model catalog, local inference, desktop IPC bridge | canonical run state, approvals, or publishing |
 | `packages/comfyui-mobile` | embedded Canvas workflow editor, queue, output browser, and model manager | canonical run state or direct publishing |
 | `engines/flux-2-swift-mlx` and `engines/z-image-swift` | native Apple Silicon generation engines | browser shell, orchestration, approval, or distribution |
-| `packages/unified-studio-launcher` | portable service manifest, workflow installers, tests, and launcher patterns | a second production dashboard or runtime state machine |
+
+## Where settings live
+
+Five stores, each with one job. Nothing belongs in two of them.
+
+| Store | Holds | Read by |
+|---|---|---|
+| `<media state>/content-studio/settings.json` | the machine's typed settings — folders, optional engines, the loopback addresses, encryption at rest, the rental reaper. One document, one schema (`settings.py`), never a secret. | the control API, and the bash supervisor, which exports it for the servers that only read environment variables |
+| Environment variables | installer and developer knobs, and an escape hatch over the document above (it wins, and the Settings page says which key it is winning over). `stack-local.env` is where a developer sets them so they survive a launchd restart. | every process |
+| PassBook (`~/.hivemindos/.env`) | every credential. The settings document structurally cannot hold one. | the control API, the gateway, the engines |
+| `hive.prefs.v1` in the browser | small non-sensitive preferences — language, the completion chime, the prompt helper's last model, model-use counts, collapsed sections, Inspo and Discover filters. One versioned document (`src/lib/prefs.js`), plus one blob per studio for its saved generation defaults. | the frontend only |
+| The account vault | anything a person typed — prompts, references, composer state. Client-encrypted; the server stores ciphertext it cannot read. | the owner's unlocked browser |
+
+[`SETTINGS.md`](SETTINGS.md) is generated from the schema and lists every key, its default, whether it needs a restart, and which environment variable overrides it — along with the knobs that stay environment-only, marked installer or developer.
 
 ## Unified all-in-one Studio
 
-The browser exposes one shell with Create, Edit, Animate, Workflow, Explore,
-Canvas, Models, Runs, History, Telemetry, and Providers. Creation modes share
+The browser exposes one shell with Create, Edit, Animate, Restore, Workflow,
+Explore, Canvas, Models, Runs, History, Telemetry, and Providers. Creation modes share
 the composer, model router, reference-image intake, durable run, artifact
 library, prompt history, approval gates, and telemetry. Explore and Canvas are
 full-height embedded package surfaces; they do not own a second canonical run
 store. The desktop shell forwards only the allowlisted OpenGen local-inference
 IPC methods to the Explore frame. Browser mode reaches the same local engine
 through the loopback OpenGen bridge without exposing the gateway token.
+
+### Restoration is a project, not a generation
+
+The Restore studio (SeedVR2 video restoration and upscaling) is the one surface
+whose unit of work is longer than a request. A render is a sequence of chunks,
+each a separate ComfyUI submit, and the chunk loop lives in the media gateway
+rather than the browser: every finished chunk is written to
+`<gateway state>/restore/<id>/` and recorded in its manifest before the next one
+starts, so a stop, a crash or a closed tab costs the chunk in flight and nothing
+else. The studio is a view onto that project — it polls, stops and resumes.
+
+There are THREE places a render can run, and what separates them is one
+question: who may read a finished chunk. On a LOCAL lane the gateway can read
+the restored frames, so it assembles and finishes them itself and seals only the
+master. On a RENTED lane every output is sealed to the owner's vault as it is
+harvested and the gateway holds no readable copy, so each chunk is trimmed to
+its body inside the graph, and the join happens in the browser (the existing
+`clipJoiner` packet-copy concat) before the joined clip comes back for its
+finishing pass. That is also why a rented render hard-cuts its chunk seams while
+a local one can cross-dissolve them. On the HOSTED lane a serverless GPU returns
+the chunk as ordinary bytes, so from the gateway's side it behaves exactly like
+a local one — dissolve, assembly and re-finish all unchanged.
+
+The hosted lane is the studio's only pay-per-use rail, and the two consequences
+worth knowing here are structural. Its container builds its graph from
+`packages/media-gateway/video_restore.py` itself — copied into the image, not
+reimplemented — so the paid rail cannot drift into different pixels than the
+free one. And the owner's credit token, which only the control API can read, is
+attached to the start request and held in the gateway's memory for that render
+alone: it is removed from `options` before the project manifest is written,
+because `options` goes to disk verbatim.
+
+Finishing — sharpening, flat-detail softening, grain, reframe — is decided at
+assembly time from the saved chunks, so changing it costs one ffmpeg pass rather
+than another hour of diffusion. See `docs/RESTORE_STUDIO.md`.
+
+### Faceless visuals come from the same routes as the studios
+
+A faceless short can source its visuals three ways: a stock library (Pexels,
+Pixabay, Coverr), a folder of owned media, or **our own connected models**. The
+last option is what makes the lane a first-class studio surface rather than a
+stock-footage tool, and it reuses existing machinery end to end rather than
+adding a parallel path:
+
+1. The Planner's media source offers `studio-image` and `studio-video`. Picking
+   either reveals the same route picker the Image and Video studios use, so
+   local ComfyUI, a fleet machine, an attached rental, a cloud API, and an OAuth
+   account all appear with their real availability.
+2. `studio_drafts` records the choice as `media_route` and mirrors the model into
+   `provider_options[provider][keyframe|motion]`, the contract the executors
+   already read. It is deliberately **not** written to `providers["stock"]`: an
+   image or video model does not fill the stock-library role.
+3. `faceless_media` turns the brief into beats (scenes, then search terms, then
+   the narration split into sentences), writes them as the standard
+   `keyframe-requests` / `motion-requests` artifacts, and runs them through
+   `ProviderExecutors`. No per-provider code lives in the faceless path.
+4. Rendered assets are staged into `storage/local_videos`, the only directory
+   `video.preprocess_video` will resolve, and handed to the engine as
+   `video_source="local"` with `video_materials`. Nothing upstream is modified,
+   which is what keeps the engine mergeable with `harry0703/MoneyPrinterTurbo`.
 
 `GET /api/runtime` remains a bounded operator diagnostic. It reports the one
 native surface, internal engines/gateways, and Liam-fork/upstream provenance.

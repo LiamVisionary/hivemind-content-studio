@@ -1,0 +1,70 @@
+{
+  "created_at": "2026-09-06T13:06:51.310378+00:00",
+  "request": "Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio",
+  "custom_code_assessment": "balanced",
+  "entries": [
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/media-gateway/gateway/models.py",
+      "target_path": "packages/media-gateway/gateway/dependencies.py",
+      "reuse_type": "adapted_code",
+      "note": "download job records (history.download_jobs, progress_cb, cancel flag, .part then rename) reused as the installer's job system; transfer loop adapted with Range resume and SHA-256"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/media-gateway/gateway/models.py",
+      "target_path": "packages/media-gateway/gateway/dependencies.py",
+      "reuse_type": "adapted_code",
+      "note": "object_info/<class_type> combo-option lookup (_model_catalog) reused as the installed-model oracle per loader input"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/media-gateway/bin/media-studio-mcp.mjs",
+      "target_path": "packages/media-gateway/gateway/dependencies.py",
+      "reuse_type": "translated_code",
+      "note": "registry inherits resolution (mergeWorkflowDefinition/resolveDefinition) translated to Python load_registry"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/open-generative-ai/src/lib/civitaiDownloadStore.js",
+      "target_path": "packages/open-generative-ai/src/lib/workflowDependencies.js",
+      "reuse_type": "adapted_code",
+      "note": "keyed concurrent job store with per-job poll loops, subscribe/emit, cancel flagging"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/open-generative-ai/src/studios/image/PendingLoraCard.jsx",
+      "target_path": "packages/open-generative-ai/src/components/WorkflowDependencyPrompt.jsx",
+      "reuse_type": "style_adapted",
+      "note": "progress row (indeterminate until a size is known, tone by status, cancel on the row)"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/open-generative-ai/hosted-server.js",
+      "target_path": "packages/open-generative-ai/hosted-server.js",
+      "reuse_type": "adapted_code",
+      "note": "civitai-download route trio (POST start / GET job / DELETE cancel) adapted for workflow-dependencies"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:src/hivemind_content_studio/gpu_rentals.py",
+      "target_path": "packages/media-gateway/workflow-registry.json",
+      "reuse_type": "config_adapted",
+      "note": "H3 node-pack repos + commit pins and public HF weight URLs/sizes/sha256 (relay-minimax-h3-to-r2.py) copied into custom_node_dependencies/model_dependencies"
+    },
+    {
+      "source_repo": "ComfyUI-Manager",
+      "source_path": "extension-node-map.json",
+      "target_path": "packages/media-gateway/gateway/dependencies.py",
+      "reuse_type": "config_adapted",
+      "note": "node class to repo map read from the installed Manager as the fallback source for unregistered node classes"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/media-gateway/test_app.py",
+      "target_path": "packages/media-gateway/test_app.py",
+      "reuse_type": "test_adapted",
+      "note": "live-server route test and FakeResponse transfer tests adapted for the dependency routes and downloader"
+    }
+  ]
+}

@@ -17,8 +17,73 @@ def _now() -> str:
 class RunStore:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser().resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Runs are addressed RELATIVE to the directory this database lives in,
+        # which is the studio's data root. An absolute path in the row survives
+        # only as long as the folder never moves: a checkout that moved out of
+        # ~/comfy left a July run pointing at a manifest that is now somewhere
+        # else, and the whole run list answered 500 because of it.
+        self.root = self.path.parent
+        self.root.mkdir(parents=True, exist_ok=True)
         self._initialize()
+
+    def _stored_manifest_path(self, manifest_path: str | Path) -> str:
+        """How a manifest path is written to the row: portable when it can be."""
+        resolved = Path(manifest_path).expanduser().resolve()
+        try:
+            return resolved.relative_to(self.root).as_posix()
+        except ValueError:
+            # A runs folder pointed outside the data root (CONTENT_STUDIO_RUNS_DIR)
+            # has no portable form; it stays absolute and keeps working as before.
+            return str(resolved)
+
+    def _rehomed_manifest_path(self, absolute: Path) -> Path | None:
+        """The same run under THIS data root, when the recorded root has moved.
+
+        A run directory is named by the opaque run id and holds manifest.json,
+        so `<root>/runs/<run_id>/manifest.json` is the one place to look. Only
+        returned when that file is really there — a guess that does not exist
+        would replace a truthful "missing" with a misleading one.
+        """
+        if absolute.name != "manifest.json" or absolute.parent == absolute.parent.parent:
+            return None
+        candidate = self.root / "runs" / absolute.parent.name / "manifest.json"
+        return candidate if candidate.is_file() else None
+
+    def _resolved_manifest_path(self, stored: str) -> str:
+        """How a row's manifest path is read back: always absolute, always here."""
+        raw = str(stored or "")
+        if not raw:
+            return raw
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            return str((self.root / candidate).resolve())
+        if candidate.is_file():
+            return str(candidate)
+        return str(self._rehomed_manifest_path(candidate) or candidate)
+
+    def _migrate_manifest_paths(self, connection: sqlite3.Connection) -> None:
+        """Rewrite absolute rows written before manifests were stored relative.
+
+        Only rows whose portable form can be PROVEN — the path is under this
+        root, or the run directory is found under it — are touched; anything
+        else keeps the absolute path it has and the read side still resolves it.
+        """
+        try:
+            rows = connection.execute("SELECT run_id, manifest_path FROM runs").fetchall()
+        except sqlite3.Error:
+            return
+        for row in rows:
+            raw = str(row["manifest_path"] or "")
+            if not raw or not Path(raw).is_absolute():
+                continue
+            absolute = Path(raw)
+            portable = absolute if absolute.is_relative_to(self.root) else self._rehomed_manifest_path(absolute)
+            if portable is None:
+                continue
+            connection.execute(
+                "UPDATE runs SET manifest_path=? WHERE run_id=?",
+                (portable.relative_to(self.root).as_posix(), row["run_id"]),
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -73,6 +138,7 @@ class RunStore:
                 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
                 """
             )
+            self._migrate_manifest_paths(connection)
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -103,7 +169,7 @@ class RunStore:
         with self._transaction() as connection:
             connection.execute(
                 "INSERT INTO runs(run_id, manifest_path, lane, status, current_step, policy_json, budget_json, created_at, updated_at) VALUES(?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
-                (run_id, str(Path(manifest_path).expanduser().resolve()), lane, steps[0], json.dumps(policy), json.dumps(budget), now, now),
+                (run_id, self._stored_manifest_path(manifest_path), lane, steps[0], json.dumps(policy), json.dumps(budget), now, now),
             )
             connection.executemany(
                 "INSERT INTO steps(run_id, step_id, position, status, idempotency_key, updated_at) VALUES(?, ?, ?, 'pending', ?, ?)",
@@ -255,7 +321,7 @@ class RunStore:
             events = connection.execute("SELECT * FROM events WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
         return {
             "run_id": run["run_id"],
-            "manifest_path": run["manifest_path"],
+            "manifest_path": self._resolved_manifest_path(run["manifest_path"]),
             "lane": run["lane"],
             "status": run["status"],
             "current_step": run["current_step"],

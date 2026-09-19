@@ -1,0 +1,63 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "waiANIMA_v10Base10.safetensors", "weight_dtype": "default" },
+    "_meta": { "title": "Anima UNET (WAI v1.0)" }
+  },
+  "11": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": { "model": ["1", 0], "lora_name": "anima-turbo-lora-v0.2.safetensors", "strength_model": 0.85 },
+    "_meta": { "title": "Anima turbo LoRA (8-step)" }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "waiANIMA_v10Base10_txt.safetensors", "type": "stable_diffusion", "device": "default" },
+    "_meta": { "title": "Native Qwen3 0.6B text encoder" }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "qwen_image_vae.safetensors" },
+    "_meta": { "title": "Anima VAE" }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "1girl, solo, looking at viewer, upper body, anime coloring", "clip": ["2", 0] },
+    "_meta": { "title": "Positive" }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia", "clip": ["2", 0] },
+    "_meta": { "title": "Negative (inert at CFG 1.0)" }
+  },
+  "6": {
+    "class_type": "EmptyQwenImageLayeredLatentImage",
+    "inputs": { "width": 1024, "height": 1344, "layers": 0, "batch_size": 1 },
+    "_meta": { "title": "Empty Anima latent" }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["11", 0],
+      "positive": ["4", 0],
+      "negative": ["5", 0],
+      "latent_image": ["6", 0],
+      "seed": 0,
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0
+    },
+    "_meta": { "title": "KSampler (turbo, 8-step)" }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["7", 0], "vae": ["3", 0] },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["8", 0], "filename_prefix": "anima_native06b_turbo" },
+    "_meta": { "title": "Save" }
+  }
+}

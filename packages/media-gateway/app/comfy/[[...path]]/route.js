@@ -28,9 +28,8 @@ function nativeApiToken() {
   return cachedNativeToken;
 }
 
-// Comfy can only serve plaintext outputs; once the encryption sweeper replaces
-// a PNG with its .zenc sidecar, Comfy's /view 404s. The native API decrypts on
-// demand, so view lookups that miss in Comfy retry there instead of failing.
+// Private output views go through the native API first so plaintext is replaced
+// by its encrypted sidecar before any browser response is produced.
 async function nativeViewFallback(source) {
   const token = nativeApiToken();
   if (!token) return null;
@@ -45,7 +44,8 @@ async function nativeViewFallback(source) {
     const headers = new Headers(upstream.headers);
     headers.delete('content-encoding');
     headers.delete('set-cookie');
-    headers.set('cache-control', 'private, max-age=10800, stale-while-revalidate=300');
+    headers.set('cache-control', 'private, no-store, max-age=0');
+    headers.set('pragma', 'no-cache');
     return new Response(upstream.body, { status: 200, headers });
   } catch {
     return null;
@@ -147,6 +147,11 @@ async function proxyComfy(request, context) {
   const init = { method: request.method, headers: sanitizeHeaders(request), cache: 'no-store' };
   if (!['GET', 'HEAD'].includes(request.method)) init.body = await request.arrayBuffer();
 
+  if (['GET', 'HEAD'].includes(request.method) && path.replace(/^api\//, '') === 'view') {
+    const privateView = await nativeViewFallback(source);
+    if (privateView) return privateView;
+  }
+
   const upstream = await fetch(target, init);
   const cleanPath = path.replace(/^api\//, '');
   if (
@@ -160,7 +165,8 @@ async function proxyComfy(request, context) {
   const responseHeaders = new Headers(upstream.headers);
   responseHeaders.delete('content-encoding');
   if (['GET', 'HEAD'].includes(request.method) && path === 'view' && upstream.ok) {
-    responseHeaders.set('cache-control', 'private, max-age=10800, stale-while-revalidate=300');
+    responseHeaders.set('cache-control', 'private, no-store, max-age=0');
+    responseHeaders.set('pragma', 'no-cache');
   } else {
     responseHeaders.set('cache-control', 'no-store, max-age=0');
   }

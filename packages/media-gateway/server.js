@@ -1,5 +1,4 @@
 const http = require('http');
-const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -67,6 +66,27 @@ function readWrapperToken() {
   try { return fs.readFileSync(tokenPath, 'utf8').trim(); } catch { return ''; }
 }
 const comfyPrivateViewToken = (process.env.COMFY_PRIVATE_VIEW_TOKEN || '').trim();
+
+// Everything below this line proxies with the gateway's own capability token
+// attached, so the port has to say who is asking before it forwards anything.
+// See lib/canvas-gate.js for the two credentials it accepts and why.
+const canvasGateModule = require('./lib/canvas-gate');
+// One session probe for every gated Node surface — this one and the bridge.
+const studioSession = require('./lib/studio-session');
+
+const studioTarget = studioSession.studioTarget();
+const verifyAccountCookie = (cookieValue) => studioSession.verifyAccountCookie(cookieValue, studioTarget);
+
+const canvasGate = canvasGateModule.createCanvasGate({
+  readGatewayToken: readWrapperToken,
+  verifyAccountCookie,
+});
+
+function refuseCanvasRequest(req, res) {
+  const answer = canvasGateModule.refusal(req, studioTarget);
+  res.writeHead(answer.status, answer.headers);
+  res.end(answer.body);
+}
 
 const app = next({ dev, hostname: '127.0.0.1', port: internalPort });
 const handle = app.getRequestHandler();
@@ -1225,6 +1245,18 @@ function proxyPromptToNativeApi(req, res) {
       'x-token': token,
       'accept': req.headers.accept || 'application/json',
     };
+    // WHO asked, carried across the hop. The gateway already reads both of these
+    // off a prompt (see promptroutes: requester_spki decides who may read the
+    // job, owner_spki decides whose vault the output is sealed to) — this proxy
+    // just never passed them on, so every video render arrived anonymous and
+    // the gateway sealed to whichever account is is_owner. On a machine with
+    // two workspaces that is the wrong one, and the clip came back "Can't
+    // decrypt — Sealed for a different key" in the library of the workspace
+    // that made it (2026-09-12).
+    for (const name of ['x-e2e-requester-pub', 'x-e2e-owner-pub']) {
+      const value = req.headers[name];
+      if (typeof value === 'string' && value.trim()) headers[name] = value.trim();
+    }
     const upstreamReq = http.request(target, { method: req.method, headers }, (upstream) => {
       const responseChunks = [];
       upstream.on('data', (chunk) => responseChunks.push(chunk));
@@ -1428,20 +1460,26 @@ function repairMissingSamplerNegativeConditioning(payload) {
   return repairCount;
 }
 
-app.prepare().then(() => {
+/** Bring the Canvas surface up and hand back its request/upgrade handlers.
+ *
+ *  The collapsed Node service (node-services.mjs) mounts these behind a path
+ *  prefix on the shared port; running this file directly still listens on PORT,
+ *  which is what keeps 8788 answering during the transition. Both callers get
+ *  the same handlers, so there is one dispatch table and not two. */
+async function createCanvasSurface() {
+  await app.prepare();
   const nextServer = http.createServer((req, res) => handle(req, res));
-  nextServer.listen(internalPort, '127.0.0.1', () => {
-    console.log(`Next internal server listening on http://127.0.0.1:${internalPort}`);
+  await new Promise((resolve, reject) => {
+    nextServer.once('error', reject);
+    nextServer.listen(internalPort, '127.0.0.1', () => {
+      console.log(`Next internal server listening on http://127.0.0.1:${internalPort}`);
+      resolve();
+    });
   });
 
-  const publicServer = http.createServer((req, res) => {
-    let pathname = '';
-    try {
-      pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
-    } catch {
-      pathname = req.url || '';
-    }
-
+  // Every branch below forwards with the gateway's capability token attached,
+  // so none of it runs until the gate above has said who is asking.
+  function dispatchPublicRequest(req, res, pathname) {
     if ((pathname === '/comfy/api/queue' || pathname === '/comfy/queue' || pathname === '/api/queue' || pathname === '/queue') && (req.method === 'GET' || req.method === 'HEAD')) {
       sendRedactedComfyJson(req, res, '/queue', sanitizeQueuePayload);
       return;
@@ -1557,28 +1595,90 @@ app.prepare().then(() => {
     }
 
     httpToNext.web(req, res);
-  });
+  }
 
-  publicServer.on('upgrade', (req, socket, head) => {
-    let pathname = '';
+  function pathnameOf(req) {
     try {
-      pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+      return new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
     } catch {
-      pathname = req.url || '';
+      return req.url || '';
     }
+  }
 
-    if (pathname === '/ws' || pathname === '/comfy/ws' || pathname === '/mobile/api/comfy/ws') {
-      proxyComfyWebSocket(req, socket, head);
+  function handleCanvasRequest(req, res) {
+    const pathname = pathnameOf(req);
+
+    // The one route with no credential: the supervisor has to be able to tell
+    // whether this child is alive before anyone has signed in. It says that and
+    // nothing else.
+    if (canvasGateModule.isHealthProbe(pathname, req.method)) {
+      const body = JSON.stringify(canvasHealth());
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'content-length': Buffer.byteLength(body),
+      });
+      res.end(req.method === 'HEAD' ? undefined : body);
       return;
     }
 
-    socket.destroy();
-  });
+    canvasGate.authorize(req, pathname).then((decision) => {
+      if (!decision.allowed) { refuseCanvasRequest(req, res); return; }
+      dispatchPublicRequest(req, res, pathname);
+    }).catch(() => refuseCanvasRequest(req, res));
+  }
 
-  publicServer.listen(port, hostname, () => {
-    console.log(`Media Studio public frontend listening on http://${hostname}:${port}`);
-    console.log(`Proxying HTTP to ${nextTarget}`);
-    console.log(`Bridging ComfyUI WebSocket /ws to lanes: ${comfyLaneTargets.map(([lane, target]) => `${lane}=${target}`).join(", ")}`);
-    console.log(`Comfy lanes: ${comfyLaneTargets.map(([lane, target]) => `${lane}=${target}`).join(", ")}`);
+  function handleCanvasUpgrade(req, socket, head) {
+    const pathname = pathnameOf(req);
+
+    if (pathname !== '/ws' && pathname !== '/comfy/ws' && pathname !== '/mobile/api/comfy/ws') {
+      socket.destroy();
+      return;
+    }
+
+    // A WebSocket carries the same cookie as the page that opened it, so the
+    // Canvas frame's socket is authorised by the same session as its fetches.
+    // A browser cannot read a failed handshake's body, so the refusal is the
+    // status line — the page's own reconnect surfaces the signed-out state.
+    canvasGate.authorize(req, pathname).then((decision) => {
+      if (!decision.allowed) {
+        if (!socket.destroyed) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        }
+        socket.destroy();
+        return;
+      }
+      proxyComfyWebSocket(req, socket, head);
+    }).catch(() => socket.destroy());
+  }
+
+  return { handleRequest: handleCanvasRequest, handleUpgrade: handleCanvasUpgrade, health: canvasHealth };
+}
+
+/** What this surface says about itself, on its own /healthz and in the
+ *  collapsed service's one health endpoint. */
+function canvasHealth() {
+  return { ok: true, service: 'media-studio-canvas' };
+}
+
+function laneSummary() {
+  return comfyLaneTargets.map(([lane, target]) => `${lane}=${target}`).join(', ');
+}
+
+module.exports = { createCanvasSurface, canvasHealth, laneSummary, DEFAULT_HOST: hostname, DEFAULT_PORT: port };
+
+if (require.main === module) {
+  createCanvasSurface().then((surface) => {
+    const publicServer = http.createServer(surface.handleRequest);
+    publicServer.on('upgrade', surface.handleUpgrade);
+    publicServer.listen(port, hostname, () => {
+      console.log(`Media Studio public frontend listening on http://${hostname}:${port}`);
+      console.log(`Proxying HTTP to ${nextTarget}`);
+      console.log(`Bridging ComfyUI WebSocket /ws to lanes: ${laneSummary()}`);
+      console.log(`Comfy lanes: ${laneSummary()}`);
+    });
+  }).catch((error) => {
+    console.error('Canvas surface failed to start:', error);
+    process.exit(1);
   });
-});
+}

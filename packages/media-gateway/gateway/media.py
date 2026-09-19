@@ -1,0 +1,1202 @@
+"""Private media: staged inputs and their sweeper, output encryption, the E2E
+vault identity and the sealed-envelope helpers that serve a file back."""
+import base64
+import binascii
+import getpass
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from gateway import config, history, promptroutes, util, workflow_index
+
+
+# Every extension the gateway treats as generated media. This set is what turns
+# sealing ON: `is_encryptable_output` refuses anything not named here, while
+# `find_output_logical_path` — which backs `/image/<name>` — has no extension
+# gate at all. So a suffix missing from this set is not merely "unsupported",
+# it is served in the clear. Audio was missing until the music lane landed; a
+# generated song would have sat in OUT_DIR as a plaintext .wav that anyone who
+# could guess its name could fetch. The crypto itself is byte-oriented and
+# format-blind (`media_seal.seal`), and the envelope's media_type comes from
+# `mimetypes`, so adding a suffix here is the whole change.
+OUTPUT_MEDIA_EXTS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif",
+    ".mp4", ".mov", ".webm", ".m4v", ".mkv",
+    ".wav", ".mp3", ".flac", ".m4a", ".opus", ".ogg",
+}
+OUTPUT_ENCRYPTION_ENABLED = os.environ.get("ZIMG_OUTPUT_ENCRYPTION", "1") != "0"
+OUTPUT_ENCRYPTION_SERVICE = os.environ.get("ZIMG_OUTPUT_KEYCHAIN_SERVICE", "zimage-output-encryption")
+OUTPUT_ENCRYPTION_ITER = int(os.environ.get("ZIMG_OUTPUT_ENCRYPTION_ITER", "50000"))
+OUTPUT_PLAINTEXT_GRACE_SECONDS = int(os.environ.get("ZIMG_OUTPUT_PLAINTEXT_GRACE", "0"))
+# The backstop for a plaintext output that nobody ever came back for — a crashed
+# runner, a render driven straight from ComfyUI's own UI. Below this age the
+# sweeper defers to the idle check instead, because a fresh output is normally
+# being read back by the job that just made it.
+OUTPUT_PLAINTEXT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_OUTPUT_PLAINTEXT_MAX_AGE", "900"))
+OUTPUT_ENCRYPTION_SUFFIX = ".zenc"
+# Phase-2 client-side E2E media (off by default; coexists with legacy .zenc).
+# When on AND the owner has created a vault (public key present), new output is
+# sealed to that public key so the gateway can encrypt but never decrypt — only
+# the browser holding the passphrase-derived private key can. See media_seal.py.
+E2E_MEDIA_ENABLED = os.environ.get("ZIMG_E2E_MEDIA", "0") == "1"
+E2E_MEDIA_SUFFIX = ".e2e"
+def _default_vault_db() -> Path:
+    """Where the owner vault lives, on both sides of the accounts migration.
+
+    Until 2026-08-21 this was data/owner-vault.sqlite3. The migration moved it
+    to data/accounts/<id>/vault.sqlite3 and this default did not follow, so
+    vault_public_key_spki() answered None for sixteen days and every harvested
+    clip was sealed to the submitting browser's device key ALONE -- no copy any
+    vault could open. Nothing said so until the media would not decrypt.
+
+    Prefer the legacy path while it exists, then a single account vault, then
+    the OWNER account's vault.
+
+    Refusing to choose between several accounts was the earlier answer here,
+    on the grounds that picking one would seal one workspace's media to
+    another workspace's key. That reasoning had the trade backwards. This path
+    is only ever the FALLBACK -- the studio sends the submitting account's own
+    key as X-E2E-Owner-Pub per job, and that still decides every job it starts
+    -- so what "no owner to guess" actually produced was no key at all, and a
+    key-less seal falls through to the legacy `.zenc` path whose Keychain
+    secret every process running as this user can read. Sealing an unclaimed
+    output to the owner's vault is the same answer the LISTING already gives
+    it (claim_visible hands everything unclaimed to the owner), and it is the
+    only one of the two that no agent can open.
+    """
+    # parents[3], not [2]: this line moved from packages/media-gateway/app.py
+    # into packages/media-gateway/gateway/, one directory deeper, and the index
+    # did not move with it -- it pointed at packages/ instead of the repo root.
+    data = Path(os.environ.get(
+        "CONTENT_STUDIO_DATA_DIR",
+        str(Path(__file__).resolve().parents[3] / "data"),
+    ))
+    legacy = data / "owner-vault.sqlite3"
+    if legacy.is_file():
+        return legacy
+    def _account_number(vault: Path) -> tuple[int, str]:
+        # accounts/10 must not sort before accounts/2.
+        try:
+            return (int(vault.parent.name), "")
+        except ValueError:
+            return (1 << 30, vault.parent.name)
+
+    vaults = sorted(data.glob("accounts/*/vault.sqlite3"), key=_account_number)
+    if not vaults:
+        # Nothing yet. Return the legacy path so the warning names a sensible
+        # location for someone to create one.
+        return legacy
+    if len(vaults) == 1:
+        return vaults[0]
+    accounts_db = data / "accounts.sqlite3"
+    if accounts_db.is_file():
+        try:
+            connection = sqlite3.connect(f"file:{accounts_db}?mode=ro", uri=True, timeout=10)
+            try:
+                row = connection.execute(
+                    "SELECT id FROM accounts WHERE is_owner = 1 ORDER BY id LIMIT 1"
+                ).fetchone()
+            finally:
+                connection.close()
+        except Exception:
+            row = None
+        if row:
+            owner_vault = data / "accounts" / str(int(row[0])) / "vault.sqlite3"
+            if owner_vault.is_file():
+                return owner_vault
+    # No accounts table, or an owner with no vault yet: the lowest-numbered
+    # account is the owner on every machine this studio has ever created.
+    return vaults[0]
+
+
+_ENV_VAULT_DB = os.environ.get("ZIMG_VAULT_DB", "").strip()
+VAULT_DB = Path(_ENV_VAULT_DB) if _ENV_VAULT_DB else _default_vault_db().expanduser()
+PRIVATE_INPUT_PREFIXES = (
+    "media-studio-inline-",
+    "media-studio-input-",
+    "media-studio-reference-",
+    "mcp_inline_",
+    "mcp_ingredients_",
+    "mcp_ltx_",
+    "mcp_video_",
+    # Staged by the MCP and the restore runner exactly like the four above.
+    # Their absence from this list was not cosmetic: it put the owner's audio,
+    # reference video, inpaint source/mask and restore chunks on the 24-hour
+    # upload budget instead of the pipeline one, AND made them undeletable
+    # through /api/delete-input, which refuses any name that is not here.
+    "mcp_audio_",
+    "mcp_refvideo_",
+    "mcp_inpaint_",
+    "restore-",
+)
+# Directories under the input root that hold pipeline-generated plaintext
+# rather than something a person uploaded: keyframe caches, the composed
+# head-swap guide, LTX reference clips. Machine-made and content-addressed, so
+# deleting one costs a re-encode and nothing else.
+PRIVATE_INPUT_PIPELINE_DIRS = (".ltx-anchor-cache", ".ltx-anchor-sources", ".ltx-reference")
+PRIVATE_INPUT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_MAX_AGE", "7200"))
+# The ceiling above cannot come down on its own. A staged input is read when
+# its graph EXECUTES, which on a busy lane is many minutes after staging, so a
+# timer short enough to matter would delete inputs out from under running
+# generations. Idleness is the honest signal instead: once no job is in flight
+# anywhere on this machine, no plaintext input is owed to anyone, and one this
+# old can go. Two minutes, not zero, so a job that has just been accepted but
+# not yet recorded is never raced.
+PRIVATE_INPUT_IDLE_GRACE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_IDLE_GRACE", "120"))
+# Uploads that arrive through the generic ComfyUI upload route keep the caller's
+# own filename, so they match none of the staging prefixes above and used to sit
+# in the input directory as plaintext forever. The local generator has to read
+# these pixels, so they cannot be sealed to the owner vault the way outputs are —
+# bounded retention is what keeps the exposure window short. Durable references
+# live sealed in the owner reference store (data/uploads), never here.
+PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_UPLOAD_MAX_AGE", "86400"))
+encryption_lock = threading.Lock()
+active_output_paths = set()
+active_output_paths_lock = threading.Lock()
+_output_encryption_password = None
+
+
+def delete_private_input(name):
+    raw = str(name or "").strip()
+    if not raw or Path(raw).name != raw or not raw.startswith(PRIVATE_INPUT_PREFIXES):
+        raise ValueError("invalid private input filename")
+    # NB: the prefix tuple above is the allowlist for this route as well as the
+    # sweeper's budget, so a staging prefix missing from it cannot be deleted
+    # on demand either.
+    root = config.COMFY_INPUT_DIR.expanduser().resolve()
+    candidate = (root / raw).resolve()
+    if not util._is_under(candidate, root):
+        raise ValueError("private input path escaped the input directory")
+    if not candidate.exists():
+        return False
+    if not candidate.is_file():
+        raise ValueError("private input is not a file")
+    candidate.unlink()
+    return True
+
+
+def _staged_by_the_pipeline(candidate, root):
+    """Machine-staged plaintext, as opposed to something a person uploaded.
+
+    The distinction decides the budget: pipeline staging goes the moment the
+    machine is idle, while a file the owner uploaded to the Canvas themselves
+    is theirs to come back to and keeps the longer upload budget.
+    """
+    if candidate.name.startswith(PRIVATE_INPUT_PREFIXES):
+        return True
+    try:
+        first = candidate.relative_to(root).parts[0]
+    except (ValueError, IndexError):
+        return False
+    return first in PRIVATE_INPUT_PIPELINE_DIRS
+
+
+def _nothing_can_be_reading_staged_inputs():
+    """True when no job on this machine could still open a staged input.
+
+    The output sweeper asks the same question about a file it is about to seal,
+    because the two sides fail the same way: a running job is the one thing that
+    still needs plaintext on disk.
+
+    Anything unknown counts as busy: a lane that will not answer, an import
+    that fails, a queue shape we do not recognise. The cost of being wrong in
+    that direction is one more sweep of delay; the cost of being wrong in the
+    other is a generation that dies on a missing file.
+    """
+    try:
+        from gateway import jobs as _jobs
+
+        if _jobs.active_jobs():
+            return False
+    except Exception:
+        return False
+    try:
+        from gateway import lanes as _lanes, net as _net
+    except Exception:
+        return False
+    for lane, url in list(getattr(_lanes, "COMFY_LANES", {}).items()):
+        try:
+            if _lanes.comfy_lane_is_remote(lane):
+                # A remote lane reads inputs PUSHED to it, never this dir.
+                continue
+            payload = json.loads(_net.urlopen(f"{url}/queue", timeout=5).read().decode("utf-8"))
+        except Exception:
+            return False
+        if payload.get("queue_running") or payload.get("queue_pending"):
+            return False
+    return True
+
+
+def cleanup_staged_private_inputs_once(
+    max_age_seconds=PRIVATE_INPUT_MAX_AGE_SECONDS,
+    upload_max_age_seconds=None,
+    idle_grace_seconds=PRIVATE_INPUT_IDLE_GRACE_SECONDS,
+):
+    """Expire plaintext inputs. Pipeline staging (the known prefixes) is short
+    lived; anything else — user-named uploads, keyframes, nested reference
+    folders — expires on the longer upload budget instead of living forever."""
+    upload_age = (
+        PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS if upload_max_age_seconds is None else upload_max_age_seconds
+    )
+    root = config.COMFY_INPUT_DIR.expanduser().resolve()
+    if not root.exists():
+        return 0
+    now = time.time()
+    deleted = 0
+    # Resolved at most once per sweep, and only if some file is old enough for
+    # the answer to change anything.
+    idle = None
+    for candidate in root.rglob("*"):
+        if not candidate.is_file():
+            continue
+        # Already-sealed envelopes are client-only; nothing to expire for privacy.
+        if candidate.suffix in (OUTPUT_ENCRYPTION_SUFFIX, E2E_MEDIA_SUFFIX):
+            continue
+        pipeline = _staged_by_the_pipeline(candidate, root)
+        limit = max_age_seconds if pipeline else upload_age
+        try:
+            age = now - candidate.stat().st_mtime
+        except OSError:
+            continue
+        if age < limit:
+            # Not yet at the ceiling — but pipeline staging does not have to
+            # wait for it once the machine has gone quiet.
+            if not pipeline or age < idle_grace_seconds:
+                continue
+            if idle is None:
+                idle = _nothing_can_be_reading_staged_inputs()
+            if not idle:
+                continue
+        try:
+            candidate.unlink()
+            deleted += 1
+        except OSError:
+            continue
+    return deleted
+
+
+def private_input_sweeper():
+    while True:
+        cleanup_staged_private_inputs_once()
+        # Once a minute, not once every five: the ceiling is a backstop now and
+        # the real deletion happens on the idle check above, which is only as
+        # timely as this loop.
+        time.sleep(60)
+
+
+def output_encryption_password(create=True):
+    """Return the output encryption secret: macOS Keychain, else a 0600 key file.
+
+    The secret is intentionally not stored in project files or logs. This is
+    encryption-at-rest against filesystem browsing/copying; the running wrapper
+    process can still decrypt in order to serve authenticated app requests.
+    """
+    global _output_encryption_password
+    if _output_encryption_password:
+        return _output_encryption_password
+    if not OUTPUT_ENCRYPTION_ENABLED:
+        return None
+    account = getpass.getuser()
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/security", "find-generic-password", "-s", OUTPUT_ENCRYPTION_SERVICE, "-a", account, "-w"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            _output_encryption_password = proc.stdout.strip()
+            return _output_encryption_password
+    except Exception:
+        pass
+    # A machine that already fell back to a key file keeps using it. Reversing
+    # that order would mean the day the Keychain starts answering again, every
+    # output encrypted since becomes undecryptable.
+    from_file = _output_encryption_key_file_read()
+    if from_file:
+        _output_encryption_password = from_file
+        return from_file
+    if not create:
+        return None
+    secret = base64.urlsafe_b64encode(os.urandom(48)).decode("ascii")
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/security", "add-generic-password", "-U", "-s", OUTPUT_ENCRYPTION_SERVICE, "-a", account, "-w", secret],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        stored = proc.returncode == 0
+    except Exception:
+        stored = False
+    if not stored:
+        # Linux, Windows, a locked keychain, no `security` binary: a 0600 key
+        # file under the gateway state dir, so the gateway starts instead of
+        # aborting before it ever listens.
+        secret = _output_encryption_key_file_write(secret)
+        if not secret:
+            raise RuntimeError("could not create the output encryption key")
+    _output_encryption_password = secret
+    return secret
+
+
+OUTPUT_ENCRYPTION_KEY_FILE = config.GATEWAY_STATE_DIR / "secure" / f"{OUTPUT_ENCRYPTION_SERVICE}.key"
+
+
+def _output_encryption_key_file_read():
+    try:
+        if OUTPUT_ENCRYPTION_KEY_FILE.is_file():
+            return OUTPUT_ENCRYPTION_KEY_FILE.read_text(encoding="ascii").strip() or None
+    except OSError:
+        pass
+    return None
+
+
+def _output_encryption_key_file_write(secret):
+    """Write the key 0600, or return the one that beat us to it."""
+    try:
+        OUTPUT_ENCRYPTION_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(OUTPUT_ENCRYPTION_KEY_FILE.parent, 0o700)
+        descriptor = os.open(str(OUTPUT_ENCRYPTION_KEY_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(secret)
+        return secret
+    except FileExistsError:
+        return _output_encryption_key_file_read()
+    except OSError:
+        return None
+
+
+def encrypted_path_for(path):
+    path = Path(path)
+    return path.with_name(path.name + OUTPUT_ENCRYPTION_SUFFIX)
+
+
+def logical_path_for_encrypted(path):
+    path = Path(path)
+    if path.name.endswith(OUTPUT_ENCRYPTION_SUFFIX):
+        return path.with_name(path.name[:-len(OUTPUT_ENCRYPTION_SUFFIX)])
+    if path.name.endswith(E2E_MEDIA_SUFFIX):
+        return path.with_name(path.name[:-len(E2E_MEDIA_SUFFIX)])
+    return path
+
+
+def mark_output_active(path):
+    with active_output_paths_lock:
+        active_output_paths.add(str(Path(path).resolve()))
+
+
+def mark_output_inactive(path):
+    with active_output_paths_lock:
+        active_output_paths.discard(str(Path(path).resolve()))
+
+
+def output_path_is_active(path):
+    with active_output_paths_lock:
+        return str(Path(path).resolve()) in active_output_paths
+
+
+def is_encryptable_output(path, ignore_active=False):
+    """`ignore_active` is for the JOB THAT MADE THE FILE.
+
+    The active guard exists to stop the sweeper sealing a file that is still
+    being written. But a runner marks its output active for the whole render and
+    then seals it INSIDE that window (native_mlx.py: mirror_output_to_comfy_output
+    sits in the try, mark_output_inactive in the finally) — so the guard rejected
+    the one seal that carries the job's own recipients. The job silently no-oped,
+    and the sweeper sealed it seconds later to this machine's default vault with
+    no recipients at all. Every LTX clip a second workspace made was unopenable
+    by the person who made it, and no image ever was, because images never take
+    this guard (2026-09-12).
+    """
+    path = Path(path)
+    if not OUTPUT_ENCRYPTION_ENABLED:
+        return False
+    if not ignore_active and output_path_is_active(path):
+        return False
+    if path.name.endswith(OUTPUT_ENCRYPTION_SUFFIX) or path.name.endswith(E2E_MEDIA_SUFFIX):
+        return False
+    if path.suffix.lower() not in OUTPUT_MEDIA_EXTS:
+        return False
+    if util._is_under(path, config.DEBUG_OUTPUT_DIR):
+        return False
+    return util._is_under(path, config.OUT_DIR) or util._is_under(path, config.COMFY_OUTPUT_DIR)
+
+
+_vault_public_key_cache = {"mtime": None, "spki": None}
+
+
+def e2e_envelope_path_for(path):
+    path = Path(path)
+    return path.with_name(path.name + E2E_MEDIA_SUFFIX)
+
+
+def existing_output_path(logical):
+    """The physical file for a logical output: plaintext, legacy .zenc, or E2E
+    .e2e envelope. Returns None if none exists. Used so history/gallery listing
+    finds E2E outputs (whose only on-disk form is the .e2e envelope)."""
+    logical = Path(logical)
+    for candidate in (logical, encrypted_path_for(logical), e2e_envelope_path_for(logical)):
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+# --- Agent dual-recipient sealing -------------------------------------------
+#
+# An agent driving the gateway generates the pixels but cannot read them back:
+# every output is sealed to the OWNER's vault key and the plaintext is deleted,
+# by design. The old workaround was to run a second gateway with
+# ZIMG_OUTPUT_ENCRYPTION=0 writing plaintext into a scratch directory — an
+# unaudited hole, and the results never reached the owner's studio at all.
+#
+# Instead, seal the same output twice. The owner's envelope is byte-for-byte
+# what it has always been (same helper, same key, same <name>.e2e path), so the
+# frontend, history and sweeper are untouched. A second envelope is sealed to
+# the requesting agent's PUBLIC key at <name>.agent-<fp>.e2e; the agent holds
+# the matching private key and decrypts it itself. No plaintext is written, no
+# key is shared, and revoking the agent key ends its access to anything new.
+#
+# Off unless ZIMG_AGENT_DUAL_SEAL=1. The recipient is per-job: only jobs whose
+# submit presented X-E2E-Requester-Pub get a second envelope, so the owner's own
+# studio generations stay owner-only.
+# Default ON since 2026-09-06. Off, a harvest gets exactly ONE envelope — the
+# requesting browser's device key — and that key is non-extractable, origin
+# scoped and evictable by the browser at any time. Fifteen of the owner's clips
+# were lost to precisely that combination. A second envelope costs one more RSA
+# wrap of the same DEK and is what makes the media survive losing a browser.
+# ZIMG_AGENT_DUAL_SEAL=0 still turns it off for anyone who wants the old shape.
+AGENT_DUAL_SEAL_ENABLED = os.environ.get("ZIMG_AGENT_DUAL_SEAL", "1") == "1"
+AGENT_ENVELOPE_PREFIX = ".agent-"
+AGENT_SEAL_JOBS_MAX = 256
+_agent_seal_jobs = {}
+_agent_seal_lock = threading.Lock()
+
+
+def agent_envelope_path_for(path, fingerprint):
+    """<name>.agent-<fp>.e2e — one envelope per recipient, alongside the owner's."""
+    path = Path(path)
+    return path.with_name(f"{path.name}{AGENT_ENVELOPE_PREFIX}{fingerprint}{E2E_MEDIA_SUFFIX}")
+
+
+# Rule: an agent generation is workspace-public, so the studio may ask the
+# gateway to serve it decrypted even when no browser key is present. The ONLY
+# file this will ever decrypt is one sealed to the agent key on this machine --
+# <name>.agent-<fp>.e2e. An owner-private clip has only <name>.e2e, sealed to
+# the vault, which no key here opens, so this can never leak private plaintext.
+AGENT_REVEAL_HEADER = "X-E2E-Agent-Reveal"
+AGENT_E2E_KEY_PEM = Path(os.environ.get(
+    "ZIMG_AGENT_E2E_KEY",
+    str(Path.home() / ".hivemindos/media-studio/secure/agent-e2e-key.pem"),
+))
+_agent_private_key_cache = {"mtime": None, "key": None}
+
+
+def _agent_private_key():
+    """The agent private key, cached against the PEM's mtime, or None."""
+    try:
+        mtime = AGENT_E2E_KEY_PEM.stat().st_mtime_ns if AGENT_E2E_KEY_PEM.is_file() else None
+    except OSError:
+        return None
+    if mtime is None:
+        return None
+    if mtime != _agent_private_key_cache["mtime"]:
+        try:
+            import media_seal
+            _agent_private_key_cache["key"] = media_seal.load_private_key(AGENT_E2E_KEY_PEM.read_bytes())
+            _agent_private_key_cache["mtime"] = mtime
+        except Exception as exc:
+            print(f"[agent-reveal] could not load agent key: {exc}", file=sys.stderr)
+            _agent_private_key_cache["key"] = None
+            _agent_private_key_cache["mtime"] = mtime
+    return _agent_private_key_cache["key"]
+
+
+def reveal_agent_plaintext(path):
+    """Plaintext of an agent copy for `path`, decrypted with the agent key, or
+    None when there is no agent copy or no key. Never touches <name>.e2e."""
+    key = _agent_private_key()
+    if key is None:
+        return None
+    path = Path(path)
+    import media_seal
+    for sib in sorted(path.parent.glob(f"{path.name}{AGENT_ENVELOPE_PREFIX}*{E2E_MEDIA_SUFFIX}")):
+        try:
+            envelope = json.loads(sib.read_text())
+            plain = media_seal.unseal(envelope, key)
+        except Exception:
+            continue  # a copy sealed to a DIFFERENT (older) agent key: skip it
+        media_type = envelope.get("media_type") or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return plain, media_type
+    return None
+
+
+def register_agent_seal_recipient(job_id, spki):
+    """Remember that this job's outputs also seal to `spki` (a public SPKI).
+
+    Public material only — safe to hold in memory. Bounded so a long-running
+    gateway cannot grow this map without limit."""
+    if not AGENT_DUAL_SEAL_ENABLED:
+        return None
+    job_id = str(job_id or "")
+    spki = promptroutes.normalized_requester_spki(spki)
+    if not job_id or not spki:
+        return None
+    with _agent_seal_lock:
+        while len(_agent_seal_jobs) >= AGENT_SEAL_JOBS_MAX:
+            _agent_seal_jobs.pop(next(iter(_agent_seal_jobs)))
+        _agent_seal_jobs[job_id] = spki
+    return spki
+
+
+# The SUBMITTING ACCOUNT's vault key for a job, remembered the same way and for
+# the same span as the agent's. Kept separate from AGENT_DUAL_SEAL_ENABLED: that
+# flag governs whether a SECOND recipient is added, whereas this is the owner —
+# the recipient that must always exist. Without it seal_output_to_e2e falls back
+# to the single global VAULT_DB path, which the accounts migration emptied.
+_owner_seal_jobs = {}
+
+
+def register_owner_seal_recipient(job_id, spki):
+    """Remember whose vault this job's outputs must also open. Public material."""
+    job_id = str(job_id or "")
+    spki = promptroutes.normalized_requester_spki(spki)
+    if not job_id or not spki:
+        return None
+    with _agent_seal_lock:
+        while len(_owner_seal_jobs) >= AGENT_SEAL_JOBS_MAX:
+            _owner_seal_jobs.pop(next(iter(_owner_seal_jobs)))
+        _owner_seal_jobs[job_id] = spki
+    return spki
+
+
+def owner_seal_recipient_for(job_id):
+    if not job_id:
+        return None
+    with _agent_seal_lock:
+        return _owner_seal_jobs.get(str(job_id))
+
+
+def agent_seal_recipient_for(job_id):
+    if not AGENT_DUAL_SEAL_ENABLED or not job_id:
+        return None
+    with _agent_seal_lock:
+        return _agent_seal_jobs.get(str(job_id))
+
+
+# The gateway runs on the interpreter the stack pins (STUDIO_PYTHON), which is
+# the one pyproject describes and the one that has `cryptography` — so sealing
+# is an import, not a subprocess per output. The two remaining helpers below
+# that DO need a separate process (the sheet composer, the RIFE pipeline) run on
+# this same interpreter.
+SUBPROCESS_PYTHON = os.environ.get("ZIMG_E2E_PYTHON") or sys.executable
+
+
+_vault_missing_warned = False
+
+
+def _warn_vault_db_missing():
+    """Say it once, loudly, when there is no vault database where we look.
+
+    This failed SILENTLY for sixteen days. On 2026-08-21 the accounts migration
+    moved data/owner-vault.sqlite3 into data/accounts/1/vault.sqlite3 and this
+    default was never updated, so vault_public_key_spki() returned None — which
+    sealing_recipients_for_route reads as "no owner vault yet" and answers with
+    a SINGLE recipient: the submitting browser's per-origin device key. Fifteen
+    of the owner's clips were sealed that way, with no vault-openable copy, and
+    nothing anywhere said so. A missing owner key is not a normal condition on a
+    machine that has a vault; it is a silent data-durability failure.
+    """
+    global _vault_missing_warned
+    if _vault_missing_warned:
+        return
+    _vault_missing_warned = True
+    print(
+        f"[e2e-media] WARNING: no vault database at {VAULT_DB}. Harvested media will be "
+        "sealed ONLY to the submitting browser's device key, with no copy the owner's "
+        "vault can open — losing that browser loses the media. Set ZIMG_VAULT_DB to the "
+        "account vault (data/accounts/<id>/vault.sqlite3); with several accounts, that "
+        "is the one whose workspace submits these jobs.",
+        file=sys.stderr,
+    )
+
+
+def vault_public_key_spki():
+    """The owner vault public key (base64url spki), or None until the browser
+    has created a vault. Read directly from sqlite; cached against the DB mtime."""
+    try:
+        mtime = VAULT_DB.stat().st_mtime_ns if VAULT_DB.is_file() else None
+    except OSError:
+        return None
+    if mtime is None:
+        _warn_vault_db_missing()
+    if mtime == _vault_public_key_cache["mtime"]:
+        return _vault_public_key_cache["spki"]
+    spki = None
+    if mtime is not None:
+        try:
+            connection = sqlite3.connect(VAULT_DB, timeout=10)
+            try:
+                row = connection.execute("SELECT identity_json FROM vault_identity WHERE id = 1").fetchone()
+            finally:
+                connection.close()
+            if row:
+                spki = json.loads(row[0]).get("public_key")
+        except Exception as exc:
+            print(f"[e2e-media] could not read vault public key: {exc}", file=sys.stderr)
+    _vault_public_key_cache.update(mtime=mtime, spki=spki)
+    return spki
+
+
+def vault_identity_json():
+    """The owner vault identity as stored — salt, wrapped keys, public key.
+    Everything in it is public-or-wrapped material (vault_store rejects bare
+    secrets), useless without the owner passphrase or recovery key. Served to
+    token-authed clients (the mobile canvas) so they can unlock in-browser."""
+    if not VAULT_DB.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(VAULT_DB, timeout=10)
+        try:
+            row = connection.execute("SELECT identity_json FROM vault_identity WHERE id = 1").fetchone()
+        finally:
+            connection.close()
+        return json.loads(row[0]) if row else None
+    except Exception as exc:
+        print(f"[e2e-media] could not read vault identity: {exc}", file=sys.stderr)
+        return None
+
+
+def _seal_file_with_helper(spki, source, envelope, media_name):
+    """Seal `source` to the public key `spki`, atomically writing the enc:v1
+    envelope JSON to `envelope`. `media_name` drives the recorded media_type.
+    The caller owns locking and deletion of the plaintext source."""
+    source = Path(source)
+    envelope = Path(envelope)
+    tmp = envelope.with_name(envelope.name + f".{os.getpid()}.tmp")
+    try:
+        import media_seal
+
+        sealed = media_seal.seal(source.read_bytes(), media_seal.load_public_key(spki))
+        sealed["v"] = 1
+        sealed["media_type"] = mimetypes.guess_type(media_name)[0] or "application/octet-stream"
+        tmp.write_text(json.dumps(sealed), encoding="utf-8")
+        os.replace(tmp, envelope)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+# THE one place that answers "whose vault key seals this output".
+#
+# It used to be answered in three, and they disagreed the moment this machine
+# held two workspaces: api/context.py resolved the SIGNED-IN account per request
+# (right), media-studio-mcp.mjs substituted a machine-wide file, and this module
+# fell back to whichever account is `is_owner`. A user working in account 2 got
+# their video sealed to account 1 and read "Can't decrypt — Sealed for a
+# different key" over their own clip (2026-09-12).
+#
+# The precedence, and there is deliberately only one:
+#   1. the key the REQUEST presented, registered at the job's 202
+#   2. this machine's default owner vault — sanctioned for a headless agent run
+#      that presents nothing, but never silent, because every time it fires for
+#      a browser-initiated job it is sealing to the wrong person.
+SEAL_SOURCE_CALLER = "caller"
+SEAL_SOURCE_MACHINE = "machine-default"
+
+_machine_seal_warned = set()
+
+
+def seal_recipient(owner_spki, media_name=""):
+    """`(spki, source)` — the public key this output must be sealed to.
+
+    `spki` is None only when no vault exists on this machine at all, which is
+    the caller's cue to fall back to legacy at-rest encryption.
+    """
+    scoped = promptroutes.normalized_requester_spki(owner_spki)
+    if scoped:
+        return scoped, SEAL_SOURCE_CALLER
+    fallback = vault_public_key_spki()
+    if fallback:
+        name = str(media_name or "")
+        if name not in _machine_seal_warned:
+            if len(_machine_seal_warned) >= 512:
+                _machine_seal_warned.clear()
+            _machine_seal_warned.add(name)
+            print(
+                f"[e2e-media] {name or 'an output'} is being sealed to this machine's DEFAULT owner "
+                "vault: the request presented no X-E2E-Owner-Pub. A browser-initiated job that "
+                "lands here will be unopenable in any other workspace.",
+                file=sys.stderr,
+            )
+    return fallback, SEAL_SOURCE_MACHINE
+
+
+def seal_output_to_e2e(path, agent_spki=None, owner_spki=None):
+    """Seal media to the owner vault public key as <name>.e2e; delete plaintext.
+
+    When `agent_spki` is given, the SAME plaintext is additionally sealed to
+    that public key as <name>.agent-<fp>.e2e before the plaintext is removed.
+    The owner's envelope is unaffected either way. A failure to seal the agent
+    copy is logged and swallowed: the owner's copy must never be lost because a
+    secondary recipient failed.
+
+    Returns True when sealed, False to fall back to legacy encryption (e.g. no
+    vault exists yet). The gateway can encrypt here but can never decrypt.
+    """
+    path = Path(path).resolve()
+    # One question, one answer. See seal_recipient above for the precedence and
+    # for why this is not an inline `or` any more.
+    # The FULL path, not the basename: a job's own copy and ComfyUI's duplicate
+    # share a name, and only one of them carries the job's recipients — reading
+    # a warning about the duplicate as one about the output is a mistake this
+    # already caused once.
+    # Already sealed by whoever got here first — answer before asking who the
+    # recipient would be. Asking first meant a redundant no-op attempt logged a
+    # "falling back to the machine default" warning about a file that had in
+    # fact been sealed correctly, which is a diagnostic that lies.
+    envelope = e2e_envelope_path_for(path)
+    if envelope.exists() and not path.exists():
+        return True
+    spki, _source = seal_recipient(owner_spki, media_name=str(path))
+    if not spki:
+        return False
+    if not path.exists() or not path.is_file():
+        return False
+    with encryption_lock:
+        if envelope.exists() and not path.exists():
+            return True
+        source_stat = path.stat()
+        # Who this envelope is actually readable by, recorded at the moment it
+        # is written. Fingerprints, never key material. Without this the only
+        # evidence of a wrong recipient is a user saying "it will not open".
+        print(
+            f"[e2e-media] sealing {path.name}: owner fp "
+            f"{promptroutes.requester_fingerprint(spki)} ({_source}), agent fp "
+            f"{promptroutes.requester_fingerprint(promptroutes.normalized_requester_spki(agent_spki)) if agent_spki else 'none'}",
+            file=sys.stderr, flush=True,
+        )
+        _seal_file_with_helper(spki, path, envelope, path.name)
+        os.utime(envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+        agent_spki = promptroutes.normalized_requester_spki(agent_spki)
+        if agent_spki and agent_spki != spki:
+            agent_envelope = agent_envelope_path_for(path, promptroutes.requester_fingerprint(agent_spki))
+            try:
+                _seal_file_with_helper(agent_spki, path, agent_envelope, path.name)
+                os.utime(agent_envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+            except Exception as exc:
+                print(f"[agent-seal] second recipient failed for {path.name}: {exc}", file=sys.stderr)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    return True
+
+
+def encrypt_output_file(path, agent_spki=None, owner_spki=None, ignore_active=False):
+    """Encrypt output media in place as <name>.zenc and remove plaintext.
+
+    `agent_spki` (optional) adds a second sealed envelope for that recipient on
+    the E2E path only — the legacy .zenc path is single-key by construction.
+
+    Returns the logical original path (the filename the UI should keep using).
+    """
+    path = Path(path).resolve()
+    if not is_encryptable_output(path, ignore_active=ignore_active):
+        return path
+    # Prefer client-side E2E sealing when enabled and a vault exists; otherwise
+    # fall through to the legacy Keychain-key .zenc path unchanged.
+    if E2E_MEDIA_ENABLED or e2e_envelope_path_for(path).exists():
+        try:
+            if seal_output_to_e2e(path, agent_spki=agent_spki, owner_spki=owner_spki):
+                return path
+        except Exception as exc:
+            print(f"[e2e-media] seal failed for {path.name}; falling back: {exc}", file=sys.stderr)
+    enc = encrypted_path_for(path)
+    if enc.exists() and not path.exists():
+        return path
+    if not path.exists() or not path.is_file():
+        return path
+    password = output_encryption_password(create=True)
+    tmp = enc.with_name(enc.name + f".{os.getpid()}.tmp")
+    with encryption_lock:
+        if enc.exists() and not path.exists():
+            return path
+        source_stat = path.stat()
+        proc = subprocess.run(
+            [
+                "/usr/bin/openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-iter", str(OUTPUT_ENCRYPTION_ITER),
+                "-salt", "-in", str(path), "-out", str(tmp), "-pass", "stdin",
+            ],
+            input=password + "\n",
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 32:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise RuntimeError(f"failed to encrypt output media {path.name}")
+        os.replace(tmp, enc)
+        os.utime(enc, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    return path
+
+
+def decrypt_output_bytes(path):
+    """Read plaintext image bytes from a plaintext path or encrypted sidecar."""
+    path = Path(path).resolve()
+    if path.exists() and path.is_file():
+        return path.read_bytes(), mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    enc = encrypted_path_for(path)
+    if not enc.exists() or not enc.is_file():
+        raise FileNotFoundError(str(path))
+    password = output_encryption_password(create=False)
+    if not password:
+        raise RuntimeError("output encryption key unavailable")
+    proc = subprocess.run(
+        [
+            "/usr/bin/openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", str(OUTPUT_ENCRYPTION_ITER),
+            "-in", str(enc), "-pass", "stdin",
+        ],
+        input=(password + "\n").encode("utf-8"),
+        text=False,
+        capture_output=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError("failed to decrypt output image")
+    return proc.stdout, mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+
+
+def encrypt_outputs(paths, job_id=None):
+    """Seal every output of a finished job.
+
+    `job_id` is what ties an output back to the agent that asked for it: when
+    that job registered a requester key at submit, each output gets a second
+    envelope sealed to it. Without a job id (or without a registered key) this
+    behaves exactly as before — owner-only."""
+    agent_spki = agent_seal_recipient_for(job_id)
+    # …and whose vault must be able to open it. Without this the seal falls back
+    # to the single global VAULT_DB path, which the accounts migration emptied —
+    # so every local generation was written as legacy .zenc instead of an
+    # envelope the owner's vault could open.
+    owner_spki = owner_seal_recipient_for(job_id)
+    out = []
+    for p in paths or []:
+        path = Path(p).expanduser().resolve()
+        try:
+            out.append(str(encrypt_output_file(
+                path, agent_spki=agent_spki, owner_spki=owner_spki).resolve()))
+        except Exception as e:
+            if is_encryptable_output(path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise RuntimeError(f"output encryption failed for {path.name}") from e
+    return out
+
+
+def find_output_logical_path(name):
+    name = util.safe_name(name)
+    if not name:
+        return None
+    for root in [config.OUT_DIR, config.COMFY_OUTPUT_DIR, config.DEBUG_OUTPUT_DIR]:
+        root = root.resolve()
+        candidates = [root / name, root / f"{name}{OUTPUT_ENCRYPTION_SUFFIX}", root / f"{name}{E2E_MEDIA_SUFFIX}"]
+        for candidate in candidates:
+            logical = logical_path_for_encrypted(candidate).resolve()
+            existing = candidate.resolve()
+            if str(logical).startswith(str(root)) and (
+                existing.exists() or encrypted_path_for(logical).exists() or e2e_envelope_path_for(logical).exists()
+            ):
+                return logical
+        try:
+            matches = []
+            for x in root.rglob("*"):
+                if not x.is_file():
+                    continue
+                logical = logical_path_for_encrypted(x).resolve()
+                if logical.name == name:
+                    matches.append(logical)
+            if matches:
+                return matches[0]
+        except Exception:
+            continue
+    return None
+
+
+def find_exact_output_logical_path(value):
+    try:
+        logical = logical_path_for_encrypted(Path(value).expanduser()).resolve()
+    except Exception:
+        return None
+    if logical.suffix.lower() not in OUTPUT_MEDIA_EXTS:
+        return None
+    if not any(util._is_under(logical, root) for root in [config.OUT_DIR, config.COMFY_OUTPUT_DIR]):
+        return None
+    # plaintext, legacy .zenc, or E2E .e2e — an E2E-only output must still
+    # resolve or its history thumbnail 404s.
+    if existing_output_path(logical):
+        return logical
+    return None
+
+
+def send_output_file(handler, path):
+    path = encrypt_output_file(path)
+    # Agent generations are workspace-public: a signed-in workspace can ask for
+    # them decrypted, no browser key required. This serves plaintext ONLY from a
+    # <name>.agent-<fp>.e2e sealed to the agent key here; a private clip has no
+    # such copy and falls straight through to the sealed-envelope path below.
+    if handler.headers.get(AGENT_REVEAL_HEADER) == "1":
+        revealed = reveal_agent_plaintext(Path(path))
+        if revealed is not None:
+            data, ctype = revealed
+            handler.send_response(200)
+            handler.cors_headers()
+            handler.send_header("Content-Type", ctype)
+            handler.send_header("Cache-Control", "private, no-store, max-age=0")
+            handler.send_header("Pragma", "no-cache")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return
+    envelope = e2e_envelope_path_for(Path(path))
+    # Same URL, recipient chosen by the key the caller presents: an agent that
+    # sends its own X-E2E-Requester-Pub gets the envelope sealed to that key.
+    # Serving it leaks nothing — only the matching private key opens it — and
+    # the owner's browser, which presents no such header, is unaffected.
+    agent_spki = promptroutes.normalized_requester_spki(handler.headers.get(promptroutes.REQUESTER_PUB_HEADER))
+    if AGENT_DUAL_SEAL_ENABLED and agent_spki:
+        agent_envelope = agent_envelope_path_for(Path(path), promptroutes.requester_fingerprint(agent_spki))
+        if agent_envelope.is_file():
+            envelope = agent_envelope
+    if envelope.is_file():
+        # Client-side E2E: the gateway holds no key for this file. Hand the
+        # sealed envelope to the browser, which decrypts it with the vault
+        # private key. A legacy client that ignores X-E2E-Media simply can't
+        # render it — by design, only the owner's browser can.
+        data = envelope.read_bytes()
+        handler.send_response(200)
+        handler.cors_headers()
+        handler.send_header("Content-Type", "application/vnd.hivemind.e2e+json")
+        handler.send_header("X-E2E-Media", "1")
+        handler.send_header("Cache-Control", "private, no-store, max-age=0")
+        handler.send_header("Pragma", "no-cache")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+        return
+    data, ctype = decrypt_output_bytes(path)
+    handler.send_response(200)
+    handler.cors_headers()
+    handler.send_header("Content-Type", ctype)
+    handler.send_header("Cache-Control", "private, no-store, max-age=0")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def encrypt_existing_outputs_once(max_age_seconds=3, defer_to_readers=True):
+    """Seal plaintext output the normal path did not get to.
+
+    This is a backstop, not the primary seal: a gateway job seals its own
+    outputs in `encrypt_outputs`, with the job's own owner and agent recipients.
+    Sealing under a job that is still running breaks it twice over — the output
+    loses those recipients, and `run_z_image_turbo.py` reads its image back over
+    HTTP the moment the history entry appears, so deleting the plaintext first
+    404s that fetch and fails the generation AFTER the model has already run.
+    So below the ceiling the sweep waits for the machine to go quiet, exactly as
+    the staged-input sweeper does. `defer_to_readers=False` is for the migration
+    pass at startup, where there is no job of ours to wait for.
+    """
+    if not OUTPUT_ENCRYPTION_ENABLED:
+        return 0
+    now = time.time()
+    changed = 0
+    # Resolved at most once per sweep, and only if some plaintext is actually
+    # sitting there for the answer to change anything.
+    idle = None
+    for root in [config.OUT_DIR, config.COMFY_OUTPUT_DIR]:
+        try:
+            if not root.exists():
+                continue
+            for p in root.rglob("*"):
+                if not p.is_file() or not is_encryptable_output(p):
+                    continue
+                try:
+                    # Avoid racing a writer that is still flushing the file.
+                    age = now - p.stat().st_mtime
+                    if age < max_age_seconds:
+                        continue
+                    if defer_to_readers and age < OUTPUT_PLAINTEXT_MAX_AGE_SECONDS:
+                        if idle is None:
+                            idle = _nothing_can_be_reading_staged_inputs()
+                        if not idle:
+                            continue
+                    encrypt_output_file(p)
+                    changed += 1
+                except Exception as e:
+                    print(f"[output-encryption] sweeper skipped {p.name}: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"[output-encryption] sweeper failed for {root}: {e}", file=sys.stderr)
+    return changed
+
+
+def output_encryption_sweeper():
+    while True:
+        try:
+            encrypt_existing_outputs_once(max_age_seconds=OUTPUT_PLAINTEXT_GRACE_SECONDS)
+        except Exception as e:
+            print(f"[output-encryption] sweeper error: {e}", file=sys.stderr)
+        time.sleep(5)
+
+
+def output_file_records(limit=200):
+    """Fallback history from image files that exist on disk.
+
+    ComfyUI writes current generations to its private output directory, while
+    older wrapper records live in history.jsonl and may point at the wrapper's
+    private copy directory.  The UI should still show past generations when the
+    prompt history is empty/stale, so synthesize redacted records from files.
+    """
+    paths = []
+    for root in [config.COMFY_OUTPUT_DIR, config.OUT_DIR]:
+        try:
+            if root.exists():
+                for p in root.rglob("*"):
+                    if not p.is_file():
+                        continue
+                    logical = logical_path_for_encrypted(p)
+                    if logical.name.startswith("."):
+                        continue
+                    if logical.suffix.lower() in OUTPUT_MEDIA_EXTS:
+                        paths.append(logical)
+        except Exception:
+            continue
+    def _mtime(x):
+        physical = existing_output_path(x)
+        try:
+            return physical.stat().st_mtime if physical else 0
+        except OSError:
+            return 0
+
+    records = []
+    for p in sorted(set(paths), key=_mtime, reverse=True)[:limit]:
+        physical = existing_output_path(p)
+        if physical is None:
+            continue
+        try:
+            st = physical.stat()
+        except Exception:
+            continue
+        indexed = workflow_index.workflow_index_record_for_filename(p.name) or {}
+        indexed_prompt_id = indexed.get("prompt_id") if isinstance(indexed.get("prompt_id"), str) else None
+        indexed_recorded_at = indexed.get("recorded_at") if isinstance(indexed.get("recorded_at"), str) else None
+        timestamp = indexed_recorded_at or datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()
+        records.append({
+            "id": indexed_prompt_id or f"file-{hashlib.sha1(str(p).encode('utf-8')).hexdigest()[:12]}",
+            "prompt": history.PRIVATE_PROMPT_LABEL,
+            "status": "success",
+            "created_at": timestamp,
+            "finished_at": timestamp,
+            "outputs": [str(p.resolve())],
+            "source": "files",
+            **({"lane": indexed.get("lane")} if indexed.get("lane") else {}),
+            **({"indexed_prompt_id": indexed_prompt_id} if indexed_prompt_id else {}),
+        })
+    return records
+
+
+def stage_inline_image_base64(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    encoded = value.strip()
+    extension = ".png"
+    if encoded.startswith("data:"):
+        match = re.match(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.*)$", encoded, flags=re.DOTALL)
+        if not match:
+            raise ValueError("image_base64 must be raw base64 or an image data URL")
+        mime, encoded = match.groups()
+        extension = {
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/webp": ".webp",
+            "image/png": ".png",
+        }.get(mime.lower(), ".png")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("image_base64 is not valid base64") from exc
+    if not payload:
+        raise ValueError("image_base64 decoded to an empty image")
+    if len(payload) > 20 * 1024 * 1024:
+        raise ValueError("decoded inline image exceeds 20MB")
+    config.COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    target = config.COMFY_INPUT_DIR / f"media-studio-inline-{uuid.uuid4().hex[:16]}{extension}"
+    target.write_bytes(payload)
+    return target
+
+
+def _reference_image_path(value):
+    """A caller-named reference path; a bare name is ComfyUI-input-relative."""
+    path = Path(str(value)).expanduser()
+    return path if path.is_absolute() else config.COMFY_INPUT_DIR / str(value)
+
+
+def collect_reference_image_paths(data, uploaded_image=None):
+    """Every reference a generation request attached, in the order it sent them.
+
+    Order is load-bearing for lanes that address references by index (H3 names
+    them <Picture 1>..<Picture N>), so this preserves the caller's sequence:
+    the inline/multipart image first, then image_path, then the images_base64
+    and image_paths lists. Duplicates drop to their first position. Raises
+    ValueError when an inline image cannot be decoded.
+    """
+    paths = [uploaded_image] if uploaded_image is not None else []
+    if isinstance(data, dict):
+        maybe_image = str(data.get('image_path', '') or '')
+        if maybe_image:
+            paths.append(_reference_image_path(maybe_image))
+        extra_b64 = data.get('images_base64')
+        if isinstance(extra_b64, list):
+            for value in extra_b64:
+                staged = stage_inline_image_base64(value)
+                if staged is not None:
+                    paths.append(staged)
+        extra_paths = data.get('image_paths')
+        if isinstance(extra_paths, list):
+            for value in extra_paths:
+                text = str(value or '').strip()
+                if text:
+                    paths.append(_reference_image_path(text))
+    seen = set()
+    deduped = []
+    for path in paths:
+        resolved = str(Path(path).resolve())
+        if resolved not in seen:
+            seen.add(resolved)
+            deduped.append(Path(resolved))
+    return deduped

@@ -1,0 +1,626 @@
+{
+ "UNETLoader": {
+  "input": {
+   "required": {
+    "unet_name": [
+     [
+      "BigLoveKlein2_base_bf16.safetensors",
+      "BigLoveKlein2_bf16.safetensors",
+      "BigLoveKlein2_fp8.safetensors",
+      "BigLoveKlein3_bf16.safetensors",
+      "BigLoveKlein3_convrot_int8mixed.safetensors",
+      "BigLoveKlein3_mxfp8.safetensors",
+      "BigLoveKlein3_mxfp8_swift_mapped_mlx.safetensors",
+      "Krea2RedMix-10Steps-bf16-dequant-ComfyUI.safetensors",
+      "Krea2RedMix-10Steps-fp8-scaled-ComfyUI.safetensors",
+      "Krea2RedMix-10Steps_convrot_int8mixed.safetensors",
+      "Krea2_Turbo_convrot_int8mixed.safetensors",
+      "Krea2_Turbo_identity_v1_2_convrot_int8mixed.safetensors",
+      "Krea2_Turbo_int8mixed.safetensors",
+      "krea2_raw_bf16.safetensors",
+      "krea2_raw_turbo06_bf16.safetensors",
+      "krea2_raw_turbo06_convrot_int8mixed.safetensors",
+      "krea2_turbo_bf16.safetensors",
+      "waiANIMA_v10Base10.safetensors",
+      "waiANIMA_v10Base10_convrot_int8mixed.safetensors",
+      "waiANIMA_v10Base10_turbo085_convrot_int8mixed.safetensors",
+      "z_image_turbo_bf16.safetensors"
+     ]
+    ],
+    "weight_dtype": [
+     [
+      "default",
+      "fp8_e4m3fn",
+      "fp8_e4m3fn_fast",
+      "fp8_e5m2"
+     ],
+     {
+      "advanced": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "unet_name",
+    "weight_dtype"
+   ]
+  },
+  "output": [
+   "MODEL"
+  ],
+  "output_name": [
+   "MODEL"
+  ]
+ },
+ "CLIPLoader": {
+  "input": {
+   "required": {
+    "clip_name": [
+     [
+      "gemma_3_12B_it_fp8_scaled.safetensors",
+      "qwen35_4b.safetensors",
+      "qwen3VL4BAbliteratedComfyui_v10.safetensors",
+      "qwen3vl_4b_bf16.safetensors",
+      "qwen3vl_4b_fp8_scaled.safetensors",
+      "qwen_3_06b_base.safetensors",
+      "qwen_3_4b.safetensors",
+      "qwen_3_8b_fp8mixed.safetensors",
+      "waiANIMA_v10Base10_txt.safetensors"
+     ]
+    ],
+    "type": [
+     [
+      "stable_diffusion",
+      "stable_cascade",
+      "sd3",
+      "stable_audio",
+      "mochi",
+      "ltxv",
+      "pixart",
+      "cosmos",
+      "lumina2",
+      "wan",
+      "hidream",
+      "chroma",
+      "ace",
+      "omnigen2",
+      "qwen_image",
+      "hunyuan_image",
+      "flux2",
+      "ovis",
+      "longcat_image",
+      "cogvideox",
+      "lens",
+      "pixeldit",
+      "ideogram4",
+      "boogu",
+      "krea2"
+     ]
+    ]
+   },
+   "optional": {
+    "device": [
+     [
+      "default",
+      "cpu"
+     ],
+     {
+      "advanced": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "clip_name",
+    "type"
+   ],
+   "optional": [
+    "device"
+   ]
+  },
+  "output": [
+   "CLIP"
+  ],
+  "output_name": [
+   "CLIP"
+  ]
+ },
+ "VAELoader": {
+  "input": {
+   "required": {
+    "vae_name": [
+     [
+      "Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors",
+      "ae.safetensors",
+      "flux2-vae.safetensors",
+      "qwen_image_HDR_vae_fp32_comfy.safetensors",
+      "qwen_image_vae.safetensors",
+      "taeltx2_3.safetensors",
+      "wan21_vae_fp32.safetensors",
+      "pixel_space"
+     ]
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "vae_name"
+   ]
+  },
+  "output": [
+   "VAE"
+  ],
+  "output_name": [
+   "VAE"
+  ]
+ },
+ "CLIPTextEncode": {
+  "input": {
+   "required": {
+    "text": [
+     "STRING",
+     {
+      "multiline": true,
+      "dynamicPrompts": true,
+      "tooltip": "The text to be encoded."
+     }
+    ],
+    "clip": [
+     "CLIP",
+     {
+      "tooltip": "The CLIP model used for encoding the text."
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "text",
+    "clip"
+   ]
+  },
+  "output": [
+   "CONDITIONING"
+  ],
+  "output_name": [
+   "CONDITIONING"
+  ]
+ },
+ "EmptyQwenImageLayeredLatentImage": {
+  "input": {
+   "required": {
+    "width": [
+     "INT",
+     {
+      "default": 640,
+      "min": 16,
+      "max": 16384,
+      "step": 16
+     }
+    ],
+    "height": [
+     "INT",
+     {
+      "default": 640,
+      "min": 16,
+      "max": 16384,
+      "step": 16
+     }
+    ],
+    "layers": [
+     "INT",
+     {
+      "default": 3,
+      "min": 0,
+      "max": 16384,
+      "step": 1
+     }
+    ],
+    "batch_size": [
+     "INT",
+     {
+      "default": 1,
+      "min": 1,
+      "max": 4096
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "width",
+    "height",
+    "layers",
+    "batch_size"
+   ]
+  },
+  "output": [
+   "LATENT"
+  ],
+  "output_name": [
+   "LATENT"
+  ]
+ },
+ "KSampler": {
+  "input": {
+   "required": {
+    "model": [
+     "MODEL",
+     {
+      "tooltip": "The model used for denoising the input latent."
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 18446744073709551615,
+      "control_after_generate": true,
+      "tooltip": "The random seed used for creating the noise."
+     }
+    ],
+    "steps": [
+     "INT",
+     {
+      "default": 20,
+      "min": 1,
+      "max": 10000,
+      "tooltip": "The number of steps used in the denoising process."
+     }
+    ],
+    "cfg": [
+     "FLOAT",
+     {
+      "default": 8.0,
+      "min": 0.0,
+      "max": 100.0,
+      "step": 0.1,
+      "round": 0.01,
+      "tooltip": "The Classifier-Free Guidance scale balances creativity and adherence to the prompt. Higher values result in images more closely matching the prompt however too high values will negatively impact quality."
+     }
+    ],
+    "sampler_name": [
+     [
+      "euler",
+      "euler_cfg_pp",
+      "euler_ancestral",
+      "euler_ancestral_cfg_pp",
+      "heun",
+      "heunpp2",
+      "exp_heun_2_x0",
+      "exp_heun_2_x0_sde",
+      "dpm_2",
+      "dpm_2_ancestral",
+      "lms",
+      "dpm_fast",
+      "dpm_adaptive",
+      "dpmpp_2s_ancestral",
+      "dpmpp_2s_ancestral_cfg_pp",
+      "dpmpp_sde",
+      "dpmpp_sde_gpu",
+      "dpmpp_2m",
+      "dpmpp_2m_cfg_pp",
+      "dpmpp_2m_sde",
+      "dpmpp_2m_sde_gpu",
+      "dpmpp_2m_sde_heun",
+      "dpmpp_2m_sde_heun_gpu",
+      "dpmpp_3m_sde",
+      "dpmpp_3m_sde_gpu",
+      "ddpm",
+      "lcm",
+      "ipndm",
+      "ipndm_v",
+      "deis",
+      "res_multistep",
+      "res_multistep_cfg_pp",
+      "res_multistep_ancestral",
+      "res_multistep_ancestral_cfg_pp",
+      "gradient_estimation",
+      "gradient_estimation_cfg_pp",
+      "er_sde",
+      "seeds_2",
+      "seeds_3",
+      "sa_solver",
+      "sa_solver_pece",
+      "ddim",
+      "uni_pc",
+      "uni_pc_bh2",
+      "legacy_rk",
+      "rk",
+      "rk_beta",
+      "deis_3m_ode",
+      "deis_2m_ode",
+      "deis_3m",
+      "deis_2m",
+      "res_6s_ode",
+      "res_5s_ode",
+      "res_3s_ode",
+      "res_2s_ode",
+      "res_3m_ode",
+      "res_2m_ode",
+      "res_6s",
+      "res_5s",
+      "res_3s",
+      "res_2s",
+      "res_3m",
+      "res_2m"
+     ],
+     {
+      "tooltip": "The algorithm used when sampling, this can affect the quality, speed, and style of the generated output."
+     }
+    ],
+    "scheduler": [
+     [
+      "simple",
+      "sgm_uniform",
+      "karras",
+      "exponential",
+      "ddim_uniform",
+      "beta",
+      "normal",
+      "linear_quadratic",
+      "kl_optimal",
+      "bong_tangent",
+      "beta57"
+     ],
+     {
+      "tooltip": "The scheduler controls how noise is gradually removed to form the image."
+     }
+    ],
+    "positive": [
+     "CONDITIONING",
+     {
+      "tooltip": "The conditioning describing the attributes you want to include in the image."
+     }
+    ],
+    "negative": [
+     "CONDITIONING",
+     {
+      "tooltip": "The conditioning describing the attributes you want to exclude from the image."
+     }
+    ],
+    "latent_image": [
+     "LATENT",
+     {
+      "tooltip": "The latent image to denoise."
+     }
+    ],
+    "denoise": [
+     "FLOAT",
+     {
+      "default": 1.0,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01,
+      "tooltip": "The amount of denoising applied, lower values will maintain the structure of the initial image allowing for image to image sampling."
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "seed",
+    "steps",
+    "cfg",
+    "sampler_name",
+    "scheduler",
+    "positive",
+    "negative",
+    "latent_image",
+    "denoise"
+   ]
+  },
+  "output": [
+   "LATENT"
+  ],
+  "output_name": [
+   "LATENT"
+  ]
+ },
+ "VAEDecode": {
+  "input": {
+   "required": {
+    "samples": [
+     "LATENT",
+     {
+      "tooltip": "The latent to be decoded."
+     }
+    ],
+    "vae": [
+     "VAE",
+     {
+      "tooltip": "The VAE model used for decoding the latent."
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "samples",
+    "vae"
+   ]
+  },
+  "output": [
+   "IMAGE"
+  ],
+  "output_name": [
+   "IMAGE"
+  ]
+ },
+ "SaveImage": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {
+      "tooltip": "The images to save."
+     }
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "ComfyUI",
+      "tooltip": "The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": "PROMPT",
+    "extra_pnginfo": "EXTRA_PNGINFO"
+   }
+  },
+  "input_order": {
+   "required": [
+    "images",
+    "filename_prefix"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "output": [
+   "IMAGE"
+  ],
+  "output_name": [
+   "images"
+  ]
+ },
+ "LoraLoaderModelOnly": {
+  "input": {
+   "required": {
+    "model": [
+     "MODEL"
+    ],
+    "lora_name": [
+     [
+      "A2R_Klein_Standard.safetensors",
+      "BreastSlider-KREA2.safetensors",
+      "DR34ML4Y_LTXXX_PREVIEW_RC1.safetensors",
+      "Disney_IZT_ATK_V1_000000750.safetensors",
+      "FAC1AL_v1_krea2.safetensors",
+      "FK9b_Anime2Photoreal_3_3.safetensors",
+      "FK_armsupdeepthroat.safetensors",
+      "FK_bukkakenew2.safetensors",
+      "FK_cheektonguejob.safetensors",
+      "FK_cuminmouth8.safetensors",
+      "FK_cumstrings.safetensors",
+      "FK_doggypressedtowall.safetensors",
+      "FK_lickinglips.safetensors",
+      "FK_mountedfellatio.safetensors",
+      "FK_pigtailblowjob.safetensors",
+      "FK_ponytaildeepthroat.safetensors",
+      "FK_reversefellatio.safetensors",
+      "FK_reversefellatiopov_epoch_20.safetensors",
+      "FK_teeththroat.safetensors",
+      "FemaleTongueMouthTeeth-Klein.safetensors",
+      "Filipina_Pinay_Women.safetensors",
+      "Flux2-Klein-9b-FlatChested-v1.safetensors",
+      "HimawariUzumaki_AnimaPreview3_byKonan.safetensors",
+      "Jewelry_Bonney.safetensors",
+      "KNPV3_1.safetensors",
+      "KNPV4.1_pre.safetensors",
+      "KishimotoMasashi_AnimaBaseV10_byKonan.safetensors",
+      "Klein9BGeneralPenis-v1-5BETA.safetensors",
+      "Krea-2-Turbo-Projector-Scale-LoRA-Diffusers.safetensors",
+      "Krea2-realism-V2.safetensors",
+      "Krea_2_-_Innie_Vagina.safetensors",
+      "Kuchiki_Rukia_Season_1_Epoch_30_ANI.safetensors",
+      "LTX2.3-IC-LORA-Dual-Character.safetensors",
+      "Monkey_D._Luffy__2_Outfits__-_One_Piece__Anima_.safetensors",
+      "Monkey_D._Luffy___Roronoa_Zoro__Egghead_Outfit_-_One_Piece_-_Anima_Commission.safetensors",
+      "Mystic-XXX-ZIT-V7.safetensors",
+      "NIceAsians_Zimage.safetensors",
+      "NSFW_master_ZIT_000017532.safetensors",
+      "One_Piece_Anima.safetensors",
+      "Professional_studio_quality_epoch_10.safetensors",
+      "RealisticSnapshotKrea2.safetensors",
+      "Sarada_AnimaV10_byKonan.safetensors",
+      "SummerVibesHM_krea2_epoch8.safetensors",
+      "V3_flux_klein.safetensors",
+      "Z-Breast-Slider.safetensors",
+      "Z-Image-fac1al.safetensors",
+      "ZITnsfwLoRAv3.safetensors",
+      "age_krea2_loraholic.safetensors",
+      "anima-turbo-lora-v0.2.safetensors",
+      "anything2real_v1_f2k.safetensors",
+      "ass_krea2_loraholic.safetensors",
+      "bj_20260120_22-22-29epoch15_comfy.safetensors",
+      "bloomgirls-ultrarealism-krea2_4k.safetensors",
+      "blowbang_klein_v1.safetensors",
+      "cum_on_face_v2.safetensors",
+      "f2k_selfies_13400s.safetensors",
+      "himawari_v25-000007.safetensors",
+      "hogtied_krea_2_000003750.safetensors",
+      "klein-69deepthroat-32epoc-k3nk.safetensors",
+      "klein-blowbang-6epoc-k3nk.safetensors",
+      "klein-deepthroat-v2-5epoc-k3nk.safetensors",
+      "klein_slider_bodyweight_50.safetensors",
+      "klein_slider_chiaroscuro.safetensors",
+      "klein_snofs_v1_4.safetensors",
+      "krea2_better_pussy_poses_v2.0.safetensors",
+      "krea2_ichigo.safetensors",
+      "krea2_identity_edit_v1_2.safetensors",
+      "krea2_kamelya.safetensors",
+      "krea2_leya.safetensors",
+      "krea2_mary.safetensors",
+      "krea2_miaki.safetensors",
+      "krea2_nell.safetensors",
+      "krea2_nud3.safetensors",
+      "krea2_turbo_lora_rank_64_bf16.safetensors",
+      "krea2filterbypass.safetensors",
+      "krea2filterbypass3.safetensors",
+      "lenovo_krea2.safetensors",
+      "lipbiting_krea_2.safetensors",
+      "ltx/2.3/LTX-2.3-OmniNFT-RL-Lora_bf16.safetensors",
+      "ltx/2.3/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
+      "ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+      "ltx/2.3/ltx2.3-transition.safetensors",
+      "monolid_krea2_loraholic.safetensors",
+      "mvmt_lora_v2_600.safetensors",
+      "nicegirls_krea2.safetensors",
+      "nipplediffusion-flat-f2-klein-9b_v1.safetensors",
+      "onglass-krea2_v3.safetensors",
+      "penis_size_krea2_loraholic.safetensors",
+      "realism_engine_krea2_v2.safetensors",
+      "skc3vo.safetensors",
+      "snofs_krea_v1.safetensors",
+      "thighgap_k9b.safetensors",
+      "tinytitsV1.safetensors",
+      "too-much-cum-krea2-v1.safetensors",
+      "vslinxbleachtybw_anima_base_1.0.safetensors",
+      "wanostyle_2_offset.safetensors",
+      "xCreampiex_krea2_v1.1_000002500.safetensors"
+     ]
+    ],
+    "strength_model": [
+     "FLOAT",
+     {
+      "default": 1.0,
+      "min": -100.0,
+      "max": 100.0,
+      "step": 0.01
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "lora_name",
+    "strength_model"
+   ]
+  },
+  "output": [
+   "MODEL"
+  ],
+  "output_name": [
+   "MODEL"
+  ]
+ }
+}

@@ -1,15 +1,66 @@
-import { getModelById, getVideoModelById, getI2IModelById, getI2VModelById, getV2VModelById, getLipSyncModelById } from './models.js';
+import { getModelById, getVideoModelById, getI2IModelById, getI2VModelById, getV2VModelById, getLipSyncModelById } from './cloudCatalog.js';
+
+export function applyDeclaredModelInputs(payload, params, modelInfo) {
+    Object.keys(modelInfo?.inputs || {}).forEach((name) => {
+        if (Object.prototype.hasOwnProperty.call(params, name) && params[name] !== undefined && params[name] !== null) {
+            payload[name] = params[name];
+        }
+    });
+    return payload;
+}
 
 export class MuapiClient {
     constructor() {
         // Ideally user provides this in settings
         this.baseUrl = (typeof import.meta !== 'undefined' && import.meta.env?.DEV) ? '' : 'https://api.muapi.ai';
+        this._routePromise = null;
     }
 
     getKey() {
         const key = window.__MUAPI_KEY__ || localStorage.getItem('muapi_key');
-        if (!key) throw new Error('API Key missing. Please set it in Settings.');
+        // Read by lib/muapiErrors.js (`api key missing`), whose toast carries the
+        // "Add key" action — so this names that action, not a Settings page.
+        if (!key) throw new Error('API Key missing. Add your MUAPI key to continue.');
         return key;
+    }
+
+    /**
+     * Where to send, and what to send with it.
+     *
+     * Two routes, resolved once per page and cached:
+     *
+     *   proxied  this machine holds MUAPI_API_KEY (from the shared Hive
+     *            environment, which is where HivemindOS keeps its keys), so the
+     *            call goes to our own origin and the key never enters the
+     *            browser. A machine that has already been given the key stops
+     *            asking for one.
+     *   direct   standalone, or no server key — the original path, with a key
+     *            this browser holds.
+     *
+     * Only the destination and the header change. The endpoint resolution, the
+     * poll cadence, the request-id contract a reload resumes from and MUAPI's
+     * detail-envelope failures are all untouched, because those are exactly the
+     * things a second implementation would get subtly wrong.
+     */
+    async route() {
+        if (!this._routePromise) {
+            this._routePromise = (async () => {
+                try {
+                    const response = await fetch('/api/muapi/status', { credentials: 'same-origin' });
+                    if (response.ok) {
+                        const body = await response.json();
+                        if (body?.server_key) return { base: '/api/muapi', headers: {}, proxied: true };
+                    }
+                } catch { /* standalone, or the studio server is not there */ }
+                return { base: this.baseUrl, headers: { 'x-api-key': this.getKey() }, proxied: false };
+            })();
+        }
+        return this._routePromise;
+    }
+
+    /** Forget the resolved route — after a key is saved, or the server gains one. */
+    resetRoute() {
+        this._routePromise = null;
     }
 
     /**
@@ -25,12 +76,12 @@ export class MuapiClient {
      * @param {string} [params.image_url] - If present, treats as Image-to-Image
      */
     async generateImage(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
 
         // Resolve endpoint from model definition
         const modelInfo = getModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         // Build payload matching the API's expected format
         const finalPayload = {
@@ -65,8 +116,6 @@ export class MuapiClient {
             finalPayload.seed = params.seed;
         }
 
-        console.log('[Muapi] Requesting:', url);
-        console.log('[Muapi] Payload:', finalPayload);
 
         try {
             // Step 1: Submit the task
@@ -74,19 +123,18 @@ export class MuapiClient {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-api-key': key
+                    ...authHeaders
                 },
                 body: JSON.stringify(finalPayload)
             });
 
             if (!response.ok) {
                 const errText = await response.text();
-                console.error('[Muapi] API Error Body:', errText);
+                console.error('[Muapi] API request failed:', response.status);
                 throw new Error(`API Request Failed: ${response.status} ${response.statusText} - ${errText.slice(0, 100)}`);
             }
 
             const submitData = await response.json();
-            console.log('[Muapi] Submit Response:', submitData);
 
             // Extract request_id for polling
             const requestId = submitData.request_id || submitData.id;
@@ -99,12 +147,10 @@ export class MuapiClient {
             if (params.onRequestId) params.onRequestId(requestId);
 
             // Step 2: Poll for results
-            console.log('[Muapi] Polling for results, request_id:', requestId);
-            const result = await this.pollForResult(requestId, key);
+            const result = await this.pollForResult(requestId, '', 60, 2000, { signal: params.signal });
 
             // Normalize: extract image URL from outputs array
             const imageUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Muapi] Image URL:', imageUrl);
             return { ...result, url: imageUrl };
 
         } catch (error) {
@@ -119,34 +165,53 @@ export class MuapiClient {
      * @param {string} key - The API key
      * @param {number} maxAttempts - Maximum polling attempts (default 60 = ~2 min)
      * @param {number} interval - Polling interval in ms (default 2000)
+     * @param {Object} [options]
+     * @param {AbortSignal} [options.signal] - Cancel: the loop stops at the next
+     *   tick and rejects with the same `{ cancelled: true }` marker the local
+     *   Media Studio poll uses, so one catch branch serves both paths.
      */
-    async pollForResult(requestId, key, maxAttempts = 60, interval = 2000) {
-        const pollUrl = `${this.baseUrl}/api/v1/predictions/${requestId}/result`;
+    async pollForResult(requestId, key, maxAttempts = 60, interval = 2000, { signal = null } = {}) {
+        const cancelledEarly = () => Object.assign(new Error('Generation cancelled'), { cancelled: true });
+        // Already cancelled: do not even resolve the route. A poll that was
+        // abandoned before it began should touch the network zero times.
+        if (signal?.aborted) throw cancelledEarly();
+        // `key` is ignored on the proxied route and kept in the signature for
+        // the resume path, which reads a key out of storage before it knows
+        // which route this page is on.
+        const { base, headers: authHeaders } = await this.route();
+        const pollUrl = `${base}/api/v1/predictions/${requestId}/result`;
+        const cancelled = () => Object.assign(new Error('Generation cancelled'), { cancelled: true });
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            await new Promise(resolve => setTimeout(resolve, interval));
-
-            console.log(`[Muapi] Polling attempt ${attempt}/${maxAttempts}...`);
+            if (signal?.aborted) throw cancelled();
+            // The wait itself is interruptible: Cancel must not sit out the rest
+            // of a 2 s tick, because the studio's serial queue holds the next
+            // Generate behind this poll until it settles.
+            await new Promise((resolve) => {
+                const timer = setTimeout(resolve, interval);
+                signal?.addEventListener?.('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+            });
+            if (signal?.aborted) throw cancelled();
 
             try {
                 const response = await fetch(pollUrl, {
                     method: 'GET',
                     headers: {
                         'Content-Type': 'application/json',
-                        'x-api-key': key
-                    }
+                        ...authHeaders
+                    },
+                    ...(signal ? { signal } : {}),
                 });
 
                 if (!response.ok) {
                     const errText = await response.text();
-                    console.warn(`[Muapi] Poll error (${response.status}):`, errText);
+                    console.warn(`[Muapi] Poll error (${response.status})`);
                     // Continue polling on non-fatal errors
                     if (response.status >= 500) continue;
                     throw new Error(`Poll Failed: ${response.status} - ${errText.slice(0, 100)}`);
                 }
 
                 const data = await response.json();
-                console.log('[Muapi] Poll Response:', data);
 
                 const status = data.status?.toLowerCase();
 
@@ -160,6 +225,8 @@ export class MuapiClient {
 
                 // Otherwise (processing, pending, etc.) keep polling
             } catch (error) {
+                // A cancelled poll is not a retryable failure.
+                if (error?.cancelled || signal?.aborted || error?.name === 'AbortError') throw cancelled();
                 if (attempt === maxAttempts) throw error;
                 console.warn('[Muapi] Poll attempt failed, retrying...', error.message);
             }
@@ -169,11 +236,11 @@ export class MuapiClient {
     }
 
     async generateVideo(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
 
         const modelInfo = getVideoModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const finalPayload = {};
 
@@ -185,39 +252,35 @@ export class MuapiClient {
         if (params.quality) finalPayload.quality = params.quality;
         if (params.mode) finalPayload.mode = params.mode;
         if (params.image_url) finalPayload.image_url = params.image_url;
+        applyDeclaredModelInputs(finalPayload, params, modelInfo);
 
-        console.log('[Muapi] Video Request:', url);
-        console.log('[Muapi] Video Payload:', finalPayload);
 
         try {
             const response = await fetch(url, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-api-key': key
+                    ...authHeaders
                 },
                 body: JSON.stringify(finalPayload)
             });
 
             if (!response.ok) {
                 const errText = await response.text();
-                console.error('[Muapi] API Error Body:', errText);
+                console.error('[Muapi] API request failed:', response.status);
                 throw new Error(`API Request Failed: ${response.status} ${response.statusText} - ${errText.slice(0, 100)}`);
             }
 
             const submitData = await response.json();
-            console.log('[Muapi] Video Submit Response:', submitData);
 
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            console.log('[Muapi] Polling for video results, request_id:', requestId);
-            const result = await this.pollForResult(requestId, key, 900, 2000);
+            const result = await this.pollForResult(requestId, '', 900, 2000, { signal: params.signal });
 
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Muapi] Video URL:', videoUrl);
             return { ...result, url: videoUrl };
 
         } catch (error) {
@@ -237,10 +300,10 @@ export class MuapiClient {
      * @param {string} [params.resolution]
      */
     async generateI2I(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
         const modelInfo = getI2IModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const finalPayload = {};
 
@@ -261,14 +324,15 @@ export class MuapiClient {
         if (params.aspect_ratio) finalPayload.aspect_ratio = params.aspect_ratio;
         if (params.resolution) finalPayload.resolution = params.resolution;
         if (params.quality) finalPayload.quality = params.quality;
-
-        console.log('[Muapi] I2I Request:', url);
-        console.log('[Muapi] I2I Payload:', finalPayload);
+        // Seed / strength ride along when the Image studio sets them (the Advanced
+        // panel showed both for cloud runs but neither reached the request).
+        if (Number.isInteger(params.seed) && params.seed >= 0) finalPayload.seed = params.seed;
+        if (typeof params.strength === 'number' && Number.isFinite(params.strength)) finalPayload.strength = params.strength;
 
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
                 body: JSON.stringify(finalPayload)
             });
 
@@ -278,16 +342,14 @@ export class MuapiClient {
             }
 
             const submitData = await response.json();
-            console.log('[Muapi] I2I Submit Response:', submitData);
 
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key);
+            const result = await this.pollForResult(requestId, '', 60, 2000, { signal: params.signal });
             const imageUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Muapi] I2I Result URL:', imageUrl);
             return { ...result, url: imageUrl };
         } catch (error) {
             console.error('Muapi I2I Error:', error);
@@ -307,10 +369,10 @@ export class MuapiClient {
      * @param {string} [params.quality]
      */
     async generateI2V(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
         const modelInfo = getI2VModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const finalPayload = {};
 
@@ -352,14 +414,13 @@ export class MuapiClient {
         if (params.quality) finalPayload.quality = params.quality;
         if (params.mode) finalPayload.mode = params.mode;
         if (params.name) finalPayload.name = params.name;
+        applyDeclaredModelInputs(finalPayload, params, modelInfo);
 
-        console.log('[Muapi] I2V Request:', url);
-        console.log('[Muapi] I2V Payload:', finalPayload);
 
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
                 body: JSON.stringify(finalPayload)
             });
 
@@ -369,16 +430,14 @@ export class MuapiClient {
             }
 
             const submitData = await response.json();
-            console.log('[Muapi] I2V Submit Response:', submitData);
 
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000);
+            const result = await this.pollForResult(requestId, '', 900, 2000, { signal: params.signal });
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Muapi] I2V Result URL:', videoUrl);
             return { ...result, url: videoUrl };
         } catch (error) {
             console.error('Muapi I2V Error:', error);
@@ -392,17 +451,16 @@ export class MuapiClient {
      * @returns {Promise<string>} The hosted URL of the uploaded file
      */
     async uploadFile(file) {
-        const key = this.getKey();
-        const url = `${this.baseUrl}/api/v1/upload_file`;
+        const { base, headers: authHeaders } = await this.route();
+        const url = `${base}/api/v1/upload_file`;
 
         const formData = new FormData();
         formData.append('file', file);
 
-        console.log('[Muapi] Uploading file:', file.name);
 
         const response = await fetch(url, {
             method: 'POST',
-            headers: { 'x-api-key': key },
+            headers: { ...authHeaders },
             body: formData
         });
 
@@ -412,7 +470,6 @@ export class MuapiClient {
         }
 
         const data = await response.json();
-        console.log('[Muapi] Upload response:', data);
 
         const fileUrl = data.url || data.file_url || data.data?.url;
         if (!fileUrl) throw new Error('No URL returned from file upload');
@@ -430,10 +487,10 @@ export class MuapiClient {
      * @param {string} [params.prompt] - Motion description (motion-control models)
      */
     async processV2V(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
         const modelInfo = getV2VModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const videoField = modelInfo?.videoField || 'video_url';
         const finalPayload = { [videoField]: params.video_url };
@@ -445,13 +502,11 @@ export class MuapiClient {
             finalPayload.prompt = params.prompt;
         }
 
-        console.log('[Muapi] V2V Request:', url);
-        console.log('[Muapi] V2V Payload:', finalPayload);
 
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
                 body: JSON.stringify(finalPayload)
             });
 
@@ -461,16 +516,14 @@ export class MuapiClient {
             }
 
             const submitData = await response.json();
-            console.log('[Muapi] V2V Submit Response:', submitData);
 
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000);
+            const result = await this.pollForResult(requestId, '', 900, 2000, { signal: params.signal });
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Muapi] V2V Result URL:', videoUrl);
             return { ...result, url: videoUrl };
         } catch (error) {
             console.error('Muapi V2V Error:', error);
@@ -492,10 +545,10 @@ export class MuapiClient {
      * @param {Function} [params.onRequestId] - Called when request_id is received
      */
     async processLipSync(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
         const modelInfo = getLipSyncModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const finalPayload = {};
 
@@ -506,33 +559,29 @@ export class MuapiClient {
         if (params.resolution) finalPayload.resolution = params.resolution;
         if (params.seed !== undefined && params.seed !== -1) finalPayload.seed = params.seed;
 
-        console.log('[Muapi] LipSync Request:', url);
-        console.log('[Muapi] LipSync Payload:', finalPayload);
 
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
                 body: JSON.stringify(finalPayload)
             });
 
             if (!response.ok) {
                 const errText = await response.text();
-                console.error('[Muapi] LipSync API Error:', errText);
+                console.error('[Muapi] LipSync API request failed:', response.status);
                 throw new Error(`API Request Failed: ${response.status} ${response.statusText} - ${errText.slice(0, 100)}`);
             }
 
             const submitData = await response.json();
-            console.log('[Muapi] LipSync Submit Response:', submitData);
 
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000);
+            const result = await this.pollForResult(requestId, '', 900, 2000, { signal: params.signal });
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Muapi] LipSync Result URL:', videoUrl);
             return { ...result, url: videoUrl };
         } catch (error) {
             console.error('Muapi LipSync Error:', error);

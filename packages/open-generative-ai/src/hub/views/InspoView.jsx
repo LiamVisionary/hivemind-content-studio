@@ -1,0 +1,495 @@
+// Inspo — browse what people made on Civitai, and take the prompt.
+//
+// The Models view's Discover tab browses models to INSTALL. This browses the
+// gallery: images and videos other people generated, kept only when they came
+// with a prompt worth reusing, with one button that loads that prompt (and the
+// steps/CFG/seed/size that came with it) straight into the studio it belongs in.
+//
+// Two things shape this surface, both upstream facts rather than choices:
+//
+//   * A prompt is not guaranteed. Civitai's `withMeta=true` INCLUDES metadata,
+//     it does not filter by it, and roughly half of any page has nothing usable
+//     — so the gateway over-fetches and filters, and the footer reports how many
+//     raw results it read. A thin page is Civitai being thin, not a bug here.
+//   * The artwork is proxied. Every preview comes through /local-ai/model-preview
+//     like the model browser's card art, so browsing inspiration never opens a
+//     connection from this page to Civitai's CDN. The only thing that leaves is
+//     the search itself, from the Mac, on the owner's own key.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { toast } from 'react-hot-toast';
+import { loadStudioSetup } from '../../app/promptTarget.js';
+import {
+  DEFAULT_INSPO_FILTERS, INSPO_KINDS, INSPO_PERIODS, INSPO_SORTS,
+  inspoCredits, inspoSearchParams, inspoSection, inspoSettings, inspoToStudioSetup, mergeInspoResults,
+} from '../../lib/civitaiInspo.js';
+import { pref, setPrefs } from '../../lib/prefs.js';
+import { localAI } from '../../lib/localInferenceClient.js';
+import { formatCount } from '../../lib/modelLibrary.js';
+import { Icon } from '../../ui/icons.jsx';
+import { Modal } from '../../ui/Modal.jsx';
+import { Button, CardGridSkeleton, EmptyState, NativeSelect, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
+import { HubToolbar } from '../components/HubToolbar.jsx';
+import { t, tf } from '../../lib/i18n.js';
+
+// The FILTERS are remembered; the creator box is not. A search box is something
+// a person typed, and typed text does not go into plaintext browser storage —
+// the same rule the composer and the Discover tab follow. lib/prefs.js drops it
+// on the way into the document, so it lives in this view's state and no longer.
+function readSaved() {
+  const saved = pref('inspoFilters');
+  return saved ? { ...DEFAULT_INSPO_FILTERS, ...saved } : null;
+}
+
+/** Send a result's prompt and settings to the studio it belongs in. Shared by
+ *  the card and the detail dialog so both do exactly the same thing. */
+function sendToStudio(item) {
+  const section = inspoSection(item);
+  loadStudioSetup(section, inspoToStudioSetup(item));
+  window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));
+  toast.success(section === 'video'
+    ? t('inspo.loadedIntoVideo')
+    : t('inspo.loadedIntoImage'));
+}
+
+function Preview({ item, playing, className = '' }) {
+  // Poster frames for VIDEO results are transcoded by Civitai on demand, and a
+  // cold one takes many seconds to arrive (measured 2026-08-28: a fresh grid of
+  // 24 filled over ~20s, none failed). Without something behind them the whole
+  // tab reads as broken while they land, so a placeholder is rendered until the
+  // image decodes over it.
+  const [ready, setReady] = useState(false);
+  // A video card holds its still until hovered — the still is ~280 KB against
+  // ~1.8 MB of motion, so a grid of clips costs about what a grid of stills does.
+  if (item.kind === 'video' && playing) {
+    return <video src={item.previewUrl} muted loop autoPlay playsInline className={className} />;
+  }
+  const src = item.kind === 'video' ? (item.stillUrl || item.previewUrl) : item.previewUrl;
+  return (
+    <>
+      {!ready ? (
+        <span className="absolute inset-0 grid place-items-center text-ink3">
+          <Icon name={item.kind === 'video' ? 'video' : 'image'} size={18} />
+        </span>
+      ) : null}
+      <img src={src} alt="" loading="lazy" onLoad={() => setReady(true)} className={className} />
+    </>
+  );
+}
+
+// A finger never hovers, so on a phone every video result on this page was a
+// still that nothing could start — the card's own press is taken by the
+// lightbox. Read once, like kit.jsx's pointer test: a pointer does not change
+// under a running page.
+const COARSE_POINTER = typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches;
+
+// Hover's coarse-pointer stand-in: the card plays while it is on screen and
+// stops when it scrolls off, so a page of results is never twenty videos
+// decoding at once the way "play everything" would make it.
+function useVisiblePlayback(enabled) {
+  const ref = useRef(null);
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!enabled || !el || typeof IntersectionObserver !== 'function') return undefined;
+    const observer = new IntersectionObserver(([entry]) => setInView(entry.isIntersecting), { threshold: 0.5 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [enabled]);
+  return [ref, inView];
+}
+
+function ResultCard({ item, onOpen, nsfwAllowed }) {
+  const [hover, setHover] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const blurred = Boolean(item.nsfw) && nsfwAllowed && !revealed;
+  const credits = inspoCredits(item);
+  const [cardRef, inView] = useVisiblePlayback(COARSE_POINTER && item.kind === 'video');
+  return (
+    <div
+      ref={cardRef}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      className="flex min-w-0 flex-col overflow-hidden rounded-md border border-line1 bg-bg2 transition-colors duration-150 hover:border-line2"
+    >
+      <button
+        type="button"
+        onClick={() => (blurred ? setRevealed(true) : onOpen(item))}
+        aria-label={blurred ? t('inspo.revealPreview') : t('inspo.openResult')}
+        className="relative flex aspect-[3/4] items-center justify-center overflow-hidden bg-bg3"
+      >
+        {item.previewUrl ? (
+          <Preview
+            item={item}
+            playing={(hover || inView) && !blurred}
+            className={cx('h-full w-full object-cover transition-[filter] duration-200', blurred && 'scale-105 blur-lg')}
+          />
+        ) : (
+          <Icon name="image" size={18} className="text-ink3" />
+        )}
+        {blurred ? (
+          <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-bg0/40 text-ink1">
+            <Icon name="eye" size={16} />
+            <span className="text-[10px] font-semibold">{t('discover.clickToReveal')}</span>
+          </span>
+        ) : null}
+        {item.nsfw ? (
+          <span className="absolute left-1 top-1 rounded-sm bg-bg0/80 px-1 py-px text-[9px] font-semibold uppercase text-warn">18+</span>
+        ) : null}
+        {item.kind === 'video' ? (
+          <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-bg0/80 text-ink1">
+            <Icon name="video" size={11} />
+          </span>
+        ) : null}
+      </button>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5 p-2.5">
+        {/* The prompt IS the content here — it leads the card, not the metadata. */}
+        <p className="line-clamp-3 min-w-0 break-words text-[11px] leading-relaxed text-ink1" title={item.prompt}>
+          {item.prompt}
+        </p>
+        <div className="truncate text-[10px] text-ink3" title={credits}>
+          {[credits, item.username && tf('assets.byCreator', item.username)].filter(Boolean).join(' · ')}
+        </div>
+        <div className="mt-auto flex items-center gap-1.5 pt-0.5">
+          <Button
+            size="sm"
+            variant="neutral"
+            icon="sparkles"
+            className="flex-1"
+            onClick={() => sendToStudio(item)}
+          >
+            {t('common.usePrompt')}
+          </Button>
+          <button
+            type="button"
+            onClick={() => onOpen(item)}
+            title={t('inspo.details')}
+            aria-label={t('inspo.detailsLabel')}
+            className="grid h-ctl-sm w-7 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+          >
+            <Icon name="expand" size={13} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailDialog({ item, onClose }) {
+  const settings = inspoSettings(item);
+  const loras = (item.resources || []).filter((entry) => String(entry?.type || '').toLowerCase() === 'lora');
+  const copy = (text, label) => {
+    navigator.clipboard?.writeText(text).then(
+      () => toast.success(tf('inspo.labelCopied', label)),
+      () => toast.error(t('assets.copyFailed')),
+    );
+  };
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={item.kind === 'video' ? t('inspo.civitaiVideo') : t('inspo.civitaiImage')}
+      size="xl"
+      footer={
+        <>
+          {item.pageUrl ? (
+            <Button
+              variant="neutral"
+              icon="external"
+              className="mr-auto"
+              onClick={() => window.open(item.pageUrl, '_blank', 'noopener,noreferrer')}
+            >
+              {t('discover.openOnCivitai')}
+            </Button>
+          ) : null}
+          <Button variant="neutral" icon="copy" onClick={() => copy(item.prompt, t('inspo.prompt'))}>
+            {t('history.copyPrompt')}
+          </Button>
+          <Button variant="primary" icon="sparkles" onClick={() => { sendToStudio(item); onClose(); }}>
+            {item.kind === 'video'
+              ? t('inspo.useInVideo')
+              : t('inspo.useInImage')}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <div className="grid place-items-center overflow-hidden rounded-lg border border-line1 bg-bg0">
+          {item.kind === 'video' ? (
+            /* nodownload: the studio keeps exactly one download path so names
+               stay consistent, and Chrome names a native blob download after
+               the URL's UUID. Saving somebody else's Civitai clip is not a
+               thing this surface offers anyway — "Open on Civitai" is. */
+            <video src={item.previewUrl} controls controlsList="nodownload" muted loop autoPlay playsInline className="max-h-[46dvh] w-auto max-w-full" />
+          ) : (
+            <img src={item.previewUrl} alt="" className="max-h-[46dvh] w-auto max-w-full object-contain" />
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{t('inspo.prompt')}</span>
+          <p className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line1 bg-bg2 p-2.5 font-mono text-xs leading-relaxed text-ink1">
+            {item.prompt}
+          </p>
+        </div>
+
+        {item.negativePrompt ? (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{t('image.negPromptLabel')}</span>
+            <p className="max-h-28 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line1 bg-bg2 p-2.5 font-mono text-xs leading-relaxed text-ink2">
+              {item.negativePrompt}
+            </p>
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-ink2">
+          {item.width && item.height ? (
+            <span><span className="text-ink3">{t('assets.size')}</span> <span className="font-mono">{item.width}×{item.height}</span></span>
+          ) : null}
+          {settings.map(([label, value]) => (
+            <span key={label}><span className="text-ink3">{label}</span> <span className="font-mono">{String(value)}</span></span>
+          ))}
+        </div>
+
+        {/* Named so it is obvious the model is NOT coming across with the
+            prompt — the id is Civitai's and means nothing to this machine. */}
+        {item.baseModel || item.modelName || loras.length ? (
+          <div className="rounded-md border border-line1 bg-bg2 p-2.5 text-[11px] text-ink2">
+            <div className="mb-1 font-medium text-ink1">{t('inspo.madeWith')}</div>
+            {item.baseModel ? <div>{t('inspo.baseModelLabel')} <span className="font-mono">{item.baseModel}</span></div> : null}
+            {item.modelName ? <div>{t('inspo.checkpointLabel')} <span className="font-mono">{item.modelName}</span></div> : null}
+            {loras.map((entry, index) => (
+              <div key={`${entry.modelVersionId}-${index}`}>
+                {t('inspo.loraLabel')} <span className="font-mono">{entry.modelVersionName || entry.modelVersionId}</span>
+                {entry.weight != null ? <span className="text-ink3"> @ {entry.weight}</span> : null}
+              </div>
+            ))}
+            <div className="mt-1.5 text-ink3">
+              {t('inspo.onlyPromptLoaded')}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </Modal>
+  );
+}
+
+export function InspoView({ active }) {
+  const [filters, setFilters] = useState(() => readSaved() || DEFAULT_INSPO_FILTERS);
+  const [items, setItems] = useState([]);
+  const [nextCursor, setNextCursor] = useState('');
+  const [scanned, setScanned] = useState(0);
+  // Non-empty when Civitai cut the paging short. Results still arrived; this is
+  // the sentence explaining why there are fewer of them than asked for.
+  const [partial, setPartial] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [baseModelOptions, setBaseModelOptions] = useState([]);
+  const [state, setState] = useState({ status: 'idle', message: '' });
+  const loadedRef = useRef(false);
+  const supported = localAI.supportsCivitaiImages();
+
+  useEffect(() => {
+    setPrefs({ inspoFilters: filters });
+  }, [filters]);
+
+  const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
+
+  const search = useCallback(async (nextFilters) => {
+    setState({ status: 'loading', message: t('discover.searching') });
+    setNextCursor('');
+    try {
+      const result = await localAI.searchCivitaiImages(inspoSearchParams(nextFilters));
+      setItems(result.items);
+      setNextCursor(result.nextCursor || '');
+      setScanned(result.scanned || 0);
+      setPartial(result.partial || '');
+      if (result.baseModelOptions.length) setBaseModelOptions(result.baseModelOptions);
+      setState({
+        status: 'done',
+        message: result.items.length
+          ? tf('inspo.withPrompts', result.items.length, result.scanned)
+          : t('inspo.nothingUsable'),
+      });
+    } catch (error) {
+      setItems([]);
+      setState({ status: 'error', message: error.message });
+    }
+  }, []);
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const result = await localAI.searchCivitaiImages(inspoSearchParams(filters, nextCursor));
+      setItems((current) => mergeInspoResults(current, result.items));
+      setNextCursor(result.nextCursor || '');
+      setScanned((current) => current + (result.scanned || 0));
+      setPartial(result.partial || '');
+    } catch (error) {
+      setState({ status: 'error', message: error.message });
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore, filters]);
+
+  // First activation only — the hub keeps every view mounted forever.
+  useEffect(() => {
+    if (!active || loadedRef.current || !supported) return;
+    loadedRef.current = true;
+    void search(filters);
+    void localAI.listCivitaiBaseModels().then((list) => {
+      if (list.length) setBaseModelOptions(list);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, supported]);
+
+  const switchKind = useCallback((kind) => {
+    if (kind === filters.kind) return;
+    const next = { ...filters, kind };
+    setFilters(next);
+    void search(next);
+  }, [filters, search]);
+
+  const nsfwAllowed = filters.nsfw === 'true' || filters.nsfw === '';
+  const kindOptions = useMemo(
+    () => INSPO_KINDS.map((entry) => ({ value: entry.value, label: entry.label })),
+    [],
+  );
+
+  return (
+    <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+      <HubToolbar
+        kicker={t('inspo.kicker')}
+        title={t('nav.inspo')}
+        right={
+          <>
+            {state.status === 'loading' ? <Spinner size={14} className="text-honey" /> : null}
+            {/* This reads as a tab, so it behaves like one: switching media
+                type searches immediately. The dropdowns below stay manual —
+                they compose into one query and share the Search button, the
+                same way the model browser's filters do. */}
+            <Segmented options={kindOptions} value={filters.kind} onChange={(value) => switchKind(value)} />
+            <Button icon="refresh" onClick={() => void search(filters)}>{t('app.refresh')}</Button>
+          </>
+        }
+      />
+
+      {!supported ? (
+        <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+          <EmptyState
+            icon="cloud"
+            title={t('inspo.needsBridge')}
+            hint={t('inspo.needsBridgeHint')}
+          />
+        </div>
+      ) : (
+        <>
+          <form
+            onSubmit={(event) => { event.preventDefault(); void search(filters); }}
+            className="flex flex-col gap-2 border-b border-line1 px-4 py-2.5 sm:flex-row sm:flex-wrap sm:items-center md:px-5"
+          >
+            <div className="relative w-full min-w-0 sm:w-auto sm:min-w-[180px] sm:flex-1">
+              <Icon name="search" size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3" />
+              <TextInput
+                value={filters.username || ''}
+                onChange={(event) => setFilter('username', event.target.value)}
+                placeholder={t('inspo.creatorPlaceholder')}
+                aria-label={t('inspo.creatorLabel')}
+                className="pl-8"
+              />
+            </div>
+            {/* Fixed widths that wrap leave a ragged stack of half-rows on a
+                phone. Two even columns below sm; the desktop row is untouched
+                because `display: contents` hands the children straight back to
+                the form's flex. */}
+            <div className="grid grid-cols-2 gap-2 sm:contents">
+              <NativeSelect aria-label={t('discover.baseModel')} value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-full sm:w-[170px]">
+                <option value="">{t('assets.anyBaseModel')}</option>
+                {baseModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+              </NativeSelect>
+              <NativeSelect aria-label={t('discover.sort')} value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-full sm:w-[160px]">
+                {INSPO_SORTS.map((value) => <option key={value} value={value}>{value}</option>)}
+              </NativeSelect>
+              <NativeSelect aria-label={t('discover.period')} value={filters.period} onChange={(event) => setFilter('period', event.target.value)} className="w-full sm:w-[120px]">
+                {INSPO_PERIODS.map((value) => <option key={value} value={value}>{value === 'AllTime' ? t('discover.allTime') : value}</option>)}
+              </NativeSelect>
+              <NativeSelect aria-label={t('discover.rating')} value={filters.nsfw} onChange={(event) => setFilter('nsfw', event.target.value)} className="w-full sm:w-[150px]">
+                <option value="false">{t('discover.safeOnly')}</option>
+                <option value="true">{t('discover.includeNsfw')}</option>
+                <option value="">{t('discover.anyRating')}</option>
+              </NativeSelect>
+              <Button type="submit" variant="primary" icon="search" loading={state.status === 'loading'} className="col-span-2">
+                {t('discover.search')}
+              </Button>
+            </div>
+          </form>
+
+          <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+            <div className="mb-3 flex items-center gap-2">
+              <span className={cx('text-[11px]', state.status === 'error' ? 'text-danger' : 'text-ink3')}>
+                {state.message || t('inspo.everyResultHasPrompt')}
+              </span>
+            </div>
+
+            {/* Results DID arrive, so this is a note and not an alarm: the grid
+                below is real, it is just short, and "Load more" resumes from
+                the page Civitai refused. */}
+            {partial && items.length ? (
+              <div role="status" className="mb-3 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-tint px-3 py-2 text-[11px] leading-relaxed text-ink2">
+                <Icon name="warning" size={13} className="mt-px shrink-0 text-warn" />
+                <span>{tf('inspo.partialFeed', partial)}</span>
+              </div>
+            ) : null}
+
+            {items.length ? (
+              <>
+                <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]">
+                  {items.map((item) => (
+                    <ResultCard key={item.id} item={item} onOpen={setSelected} nsfwAllowed={nsfwAllowed} />
+                  ))}
+                </div>
+                {nextCursor ? (
+                  <div className="mt-4 flex justify-center">
+                    <Button icon="chevronDown" loading={loadingMore} onClick={() => void loadMore()}>
+                      {t('discover.loadMore')}
+                    </Button>
+                  </div>
+                ) : null}
+                {/* Said plainly, because the count above is post-filter and would
+                    otherwise look like Civitai is nearly empty. */}
+                <p className="mt-4 text-center text-[10px] text-ink3">
+                  {scanned
+                    ? tf('inspo.readToFind', formatCount(scanned), items.length)
+                    : null}
+                </p>
+              </>
+            ) : state.status === 'loading' ? (
+              // The wait, at the size of the thing being waited for. This used
+              // to be `null` — a 14px spinner in the toolbar and an empty page
+              // body, which is the same picture a search that found nothing
+              // draws.
+              <CardGridSkeleton
+                count={12}
+                minWidth={200}
+                aspect="aspect-[3/4]"
+                label={t('discover.searching')}
+              />
+            ) : (
+              <EmptyState
+                icon={state.status === 'error' ? 'warning' : 'sparkles'}
+                title={state.status === 'error' ? t('discover.searchFailed') : t('discover.nothingYet')}
+                hint={state.status === 'error' ? state.message : t('inspo.searchToSee')}
+                action={state.status === 'error' ? <Button onClick={() => void search(filters)}>{t('common.retry')}</Button> : null}
+              />
+            )}
+          </div>
+        </>
+      )}
+
+      {selected ? <DetailDialog item={selected} onClose={() => setSelected(null)} /> : null}
+    </div>
+  );
+}

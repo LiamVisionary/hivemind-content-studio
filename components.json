@@ -3,12 +3,6 @@
   "imported_at": "2026-07-15",
   "components": [
     {
-      "id": "unified-image-studio-template",
-      "source_commit": "80f801f8e57348bc188ed8af540b064ccfa77921",
-      "destination": "packages/unified-studio-launcher",
-      "license": "project-owned"
-    },
-    {
       "id": "Open-Generative-AI",
       "source_commit": "0ab564ba0e59a050a6db1adc61a3345e0dc35708",
       "destination": "packages/open-generative-ai",

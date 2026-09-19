@@ -1,0 +1,77 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {"title": "YuE2 3B (bf16)"},
+    "inputs": {"ckpt_name": "yue2_3b_bf16.safetensors"}
+  },
+  "2": {
+    "class_type": "YuE2GenerateABC",
+    "_meta": {"title": "Write the score"},
+    "inputs": {
+      "clip": ["1", 1],
+      "style": "warm indie folk, acoustic guitar, brushed drums, female lead vocal",
+      "lyrics": "",
+      "seed": 0,
+      "mode": "full",
+      "max_abc_tokens": 8192,
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "top_k": 30,
+      "repetition_penalty": 1.005,
+      "penalty_window": 100
+    }
+  },
+  "3": {
+    "class_type": "YuE2GenerateMusic",
+    "_meta": {"title": "Perform the score"},
+    "inputs": {
+      "clip": ["1", 1],
+      "style": "warm indie folk, acoustic guitar, brushed drums, female lead vocal",
+      "lyrics": "",
+      "abc": ["2", 0],
+      "seed": 0,
+      "mode": "full",
+      "max_duration": 60.0,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 100,
+      "repetition_penalty": 1.2
+    }
+  },
+  "4": {
+    "class_type": "ConditioningZeroOut",
+    "_meta": {"title": "Negative"},
+    "inputs": {"conditioning": ["3", 0]}
+  },
+  "5": {
+    "class_type": "EmptyYuE2LatentAudio",
+    "_meta": {"title": "Length (driven by the performance, not set by hand)"},
+    "inputs": {"seconds": ["3", 1], "batch_size": 1}
+  },
+  "6": {
+    "class_type": "KSampler",
+    "_meta": {"title": "Render"},
+    "inputs": {
+      "model": ["1", 0],
+      "seed": 0,
+      "steps": 32,
+      "cfg": 1.0,
+      "sampler_name": "heun",
+      "scheduler": "simple",
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "latent_image": ["5", 0],
+      "denoise": 1.0
+    }
+  },
+  "7": {
+    "class_type": "VAEDecodeAudio",
+    "_meta": {"title": "Decode"},
+    "inputs": {"samples": ["6", 0], "vae": ["1", 2]}
+  },
+  "8": {
+    "class_type": "SaveAudio",
+    "_meta": {"title": "Save lossless master"},
+    "inputs": {"audio": ["7", 0], "filename_prefix": "audio/hivemind-music-yue2"}
+  }
+}

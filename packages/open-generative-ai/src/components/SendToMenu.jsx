@@ -1,0 +1,187 @@
+// "Send to:" — choose the tab and the source BEFORE work leaves a studio.
+//
+// Where a production goes is two decisions, and both change what is sent. The
+// tab decides whose settings and whose in-flight run it lands beside; the
+// source decides the model, and the model decides everything else — a story
+// sent to a rented MiniMax H3 travels as a cast, four reference pictures and a
+// six-section prompt, while the same story sent to a cloud Seedance travels as
+// labelled blocks with nothing attached at all (lib/videoDelivery.js).
+//
+// So the menu shows the consequence next to the choice: every row carries the
+// model that place is on and one line saying what will actually travel there.
+// The list itself is the studio's ONE Runs-on picker (RunOnList) rather than a
+// control of this menu's own that merely borrowed its words.
+// Reusable on purpose — this is the shape any studio handing work to another
+// one needs, and the Story studio is simply the first.
+import { useEffect, useMemo, useState } from 'react';
+import { Menu, MenuHeading } from '../ui/Menu.jsx';
+import { Button, cx } from '../ui/kit.jsx';
+import { RunOnList } from './RunOnPicker.jsx';
+import { runTargetsFromRows } from '../lib/runTargets.js';
+import {
+  listSendTargets, mergeSendTargets, selectSendTarget, sendRunTargets, subscribeSendTargets,
+} from '../lib/studioTargets.js';
+
+/**
+ * Every place work can be sent — mounted or not.
+ *
+ * `resolve` answers for the tabs that are not mounted, from what the target
+ * studio already has on disk. Without it a session that had never opened the
+ * Video studio was told to go and open it and come back, which is not a
+ * fallback, it is homework.
+ */
+export function useSendTargets(section = 'video', resolve = null) {
+  const [, bump] = useState(0);
+  const [resolved, setResolved] = useState([]);
+  useEffect(() => subscribeSendTargets(() => bump((n) => n + 1)), []);
+  // Once per open: the catalog and the rentals both move, and this hook is only
+  // mounted while the panel is.
+  useEffect(() => {
+    if (!resolve) return undefined;
+    let alive = true;
+    Promise.resolve(resolve())
+      .then((list) => { if (alive) setResolved(Array.isArray(list) ? list : []); })
+      .catch(() => { if (alive) setResolved([]); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return mergeSendTargets(listSendTargets(section), resolved);
+}
+
+/**
+ * The panel's contents, mounted only while it is open.
+ *
+ * Its own component so the unmounted-target resolve runs once per OPEN rather
+ * than once per page: the catalog and the rentals both move, and a menu that
+ * answered from whatever was cached when the page loaded would offer a machine
+ * that has since gone away.
+ */
+function SendToBody({ section, resolve, describeFor, onSend, close }) {
+  const targets = useSendTargets(section, resolve);
+  const [tabId, setTabId] = useState(null);
+  const [source, setSource] = useState('');
+
+  // Default to the tab that is already in front and the source it is already
+  // on — the choice somebody would make by doing nothing.
+  const target = useMemo(
+    () => targets.find((entry) => entry.tabId === tabId) || targets.find((entry) => entry.active) || targets[0] || null,
+    [targets, tabId],
+  );
+  // 'rented' was a third mode this menu still remembered; a tab that saved one
+  // means This Mac, which is what a rental has always been mechanically.
+  const chosen = source || (target?.current === 'api' ? 'api' : 'local');
+  const descriptor = target?.sources?.[chosen] || null;
+  const ready = Boolean(target && descriptor?.available);
+  const runTargets = useMemo(
+    () => runTargetsFromRows(sendRunTargets(target, describeFor), { kind: 'video' }),
+    [target, describeFor],
+  );
+
+  if (!target) {
+    return (
+      <p className="px-2.5 py-4 text-center text-[11px] leading-snug text-ink3">
+        Reading the Video studio’s settings…
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      {/* Only when there is a choice to make. One tab is not a decision. */}
+      {targets.length > 1 ? (
+        <>
+          <MenuHeading>Which tab</MenuHeading>
+          <div className="flex flex-wrap gap-1 px-1.5 pb-1" role="radiogroup">
+            {targets.map((entry) => (
+              <button
+                key={entry.tabId}
+                type="button"
+                role="radio"
+                aria-checked={entry.tabId === target.tabId}
+                onClick={() => { setTabId(entry.tabId); setSource(''); }}
+                className={cx(
+                  // Which tab the work lands in is half of what this menu
+                  // decides, so under a thumb the chips stop being 24px.
+                  'rounded px-2 py-1 text-[11px] transition-colors touch:px-2.5 touch:py-2 touch:text-[12px]',
+                  entry.tabId === target.tabId
+                    ? 'bg-honey-tint text-honey'
+                    : 'text-ink3 hover:bg-bg3 hover:text-ink2',
+                )}
+              >
+                {entry.label}
+                {entry.active ? ` · ${'front'}` : ''}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+
+      {/* The same list every studio's Runs-on picker shows — grouped by who
+          pays, with each row carrying the model it would land on and what would
+          actually travel there. It used to be a two-row control of its own
+          that merely borrowed the words. */}
+      <RunOnList
+        targets={runTargets}
+        value={runTargets.find((entry) => entry.id === chosen) || null}
+        onChange={(entry) => setSource(entry.id)}
+        searchable={false}
+      />
+      <div className="mt-1 border-t border-line1 px-1.5 pb-0.5 pt-2">
+        <Button
+          variant="primary"
+          className="w-full justify-center"
+          disabled={!ready}
+          onClick={() => {
+            if (!ready) return;
+            onSend?.({ tabId: target.tabId, source: chosen, descriptor, target });
+            close();
+          }}
+        >
+          Send
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The picker.
+ *
+ * `resolve()` answers for targets that are not mounted — the Video studio does
+ * not have to have been opened for this session to know what it would run.
+ * `describeFor(plan)` is the sender's own one-line answer to "what would
+ * actually travel there"; it is given the target's delivery plan and knows its
+ * payload, which nothing here does. `onSend({ tabId, source, descriptor })` is
+ * called once, on Send — never on a row click, because choosing where to look
+ * is not choosing to go.
+ */
+export function SendToMenu({
+  section = 'video', resolve = null, describeFor = null, disabled = false, label, icon = 'film', onSend,
+  // The Story studio's dock makes this the page's primary action, so the
+  // trigger has to be able to look like one.
+  variant = 'neutral',
+}) {
+  return (
+    <Menu
+      up
+      width="w-[19rem]"
+      trigger={(open, toggle) => (
+        <Button variant={variant} icon={icon} disabled={disabled} onClick={toggle} aria-expanded={open}>
+          {label || 'Send to…'}
+        </Button>
+      )}
+    >
+      {(close) => (
+        <SendToBody
+          section={section}
+          resolve={resolve}
+          describeFor={describeFor}
+          onSend={onSend}
+          close={close}
+        />
+      )}
+    </Menu>
+  );
+}
+
+export { selectSendTarget };

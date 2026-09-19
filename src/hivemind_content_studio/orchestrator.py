@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -13,8 +12,48 @@ from .generation_telemetry import GenerationAttempt
 from .manifest import add_artifact, load_manifest, write_manifest
 from .lanes import LANE_STEPS
 from .planner import plan
+from .private_access import read_private_json, write_private_json
 from .run_store import RunStore
 from .stickman import render_stickman_frames
+
+
+_RECORD_SENTENCES = {
+    "missing": "This production's record file is missing, so the studio cannot read it.",
+    "sealed": "This production's record is sealed and could not be unlocked.",
+    "unreadable": "This production's record could not be read.",
+}
+
+
+def _record_failure_reason(exc: BaseException) -> str:
+    """Which of the three ways a manifest stops being readable this is.
+
+    ``load_manifest`` raises three different families and any one of them, in
+    ONE row, used to abort the whole run list: the file is gone (OSError), the
+    file is not a manifest this version understands (ValueError, which
+    JSONDecodeError is), or its private sections could not be decrypted
+    (RuntimeError, i.e. the vault is locked).
+    """
+    if isinstance(exc, OSError):
+        return "missing"
+    if isinstance(exc, ValueError):
+        return "unreadable"
+    return "sealed"
+
+
+class RunRecordUnavailable(RuntimeError):
+    """A run's manifest cannot be read.
+
+    Reading a run TOLERATES this — the envelope degrades so one orphaned row
+    cannot hide every other production. Driving one cannot, so the step paths
+    raise this instead: a sentence a person can read, never the raw traceback.
+    """
+
+    def __init__(self, *, run_id: str, manifest_path: str, reason: str, detail: str):
+        super().__init__(_RECORD_SENTENCES.get(reason, _RECORD_SENTENCES["unreadable"]))
+        self.run_id = run_id
+        self.manifest_path = manifest_path
+        self.reason = reason
+        self.detail = detail
 
 
 class ContentOrchestrator:
@@ -86,7 +125,9 @@ class ContentOrchestrator:
     def _process_step(self, state: dict[str, Any], step: str) -> str:
         run_id = state["run_id"]
         manifest_path = state["manifest_path"]
-        manifest = load_manifest(manifest_path)
+        # A run with no readable record cannot be driven — the caller gets the
+        # sentence, not a filesystem traceback behind an incident id.
+        manifest = self._load_record(state)
         artifacts = manifest.get("artifacts", [])
         roles = [item.get("role") for item in artifacts]
         scene_count = len(manifest.get("brief", {}).get("scenes") or [])
@@ -179,7 +220,17 @@ class ContentOrchestrator:
                         "reason": "Rights, claims, and outward publication require approval.",
                     }])
             elif step == "publish":
-                if not manifest.get("publish", {}).get("receipts"):
+                publish = manifest.get("publish", {})
+                drafts = publish.get("drafts") or []
+                if not publish.get("receipts") and drafts and all(draft.get("provider") == "hivemindos" for draft in drafts):
+                    # Reviewed in HivemindOS: the hand-off publishes nothing, so it is not the confirmed live action below.
+                    return self._block(run_id, step, "awaiting_agent", [{
+                        "intent": "handoff_to_hivemindos",
+                        "tool": "handoff_social_publish",
+                        "arguments": {"manifest_path": manifest_path},
+                        "reason": "These drafts are reviewed, scheduled and published in HivemindOS Socials.",
+                    }])
+                if not publish.get("receipts"):
                     return self._block(run_id, step, "awaiting_approval", [{
                         "intent": "publish_approved_content",
                         "tool": "execute_social_publish",
@@ -187,6 +238,14 @@ class ContentOrchestrator:
                         "reason": "Publishing remains a separately confirmed outward action.",
                     }])
             elif step == "metrics":
+                handed_off = any(item.get("provider") == "hivemindos" for item in manifest.get("publish", {}).get("receipts") or [])
+                if not manifest.get("performance") and handed_off:
+                    return self._block(run_id, step, "awaiting_metrics", [{
+                        "intent": "sync_hivemindos_posts",
+                        "tool": "sync_social_publish",
+                        "arguments": {"manifest_path": manifest_path},
+                        "reason": "HivemindOS holds this post's state and numbers; sync pulls them onto the run once it is live.",
+                    }])
                 if not manifest.get("performance"):
                     return self._block(run_id, step, "awaiting_metrics", [{
                         "intent": "ingest_performance_metrics",
@@ -194,6 +253,30 @@ class ContentOrchestrator:
                         "arguments": {"run_id": run_id},
                         "reason": "Performance evidence is needed to close the learning loop.",
                     }])
+            elif step == "render" and state["lane"] == "faceless":
+                # The faceless engine is local and owns its whole render. Blocking
+                # here used to mean a run created in the studio sat waiting for an
+                # agent to invoke a tool by hand; it runs directly instead. When
+                # the brief renders its own visuals, the route's provider does the
+                # generation inside this step.
+                if "final-video" not in roles:
+                    from .faceless import render_faceless
+                    from .faceless_media import is_studio_media_source, selected_provider
+
+                    brief = manifest.get("brief") if isinstance(manifest.get("brief"), dict) else {}
+                    provider = (
+                        selected_provider(brief)
+                        if is_studio_media_source(brief.get("media_source"))
+                        else "moneyprinterturbo"
+                    )
+                    self._execute_local_generation(
+                        run_id,
+                        provider=provider,
+                        intent="render_faceless_content",
+                        kind="video",
+                        artifact_key="videos",
+                        executor=lambda: render_faceless(manifest_path),
+                    )
             elif step in {"render", "clip"}:
                 return self._block(run_id, step, "awaiting_agent", [{
                     "intent": step,
@@ -215,12 +298,15 @@ class ContentOrchestrator:
         *,
         provider: str,
         executor: Callable[[], dict[str, Any]],
+        intent: str = "generate_keyframes",
+        kind: str = "image",
+        artifact_key: str = "frames",
     ) -> dict[str, Any]:
         attempt = GenerationAttempt.start(
             self.store,
             run_id=run_id,
-            intent="generate_keyframes",
-            kind="image",
+            intent=intent,
+            kind=kind,
             provider=provider,
             model="automatic",
             monotonic=self.monotonic,
@@ -231,8 +317,8 @@ class ContentOrchestrator:
         except Exception as exc:
             attempt.fail(exc)
             raise
-        frames = result.get("frames") if isinstance(result.get("frames"), list) else []
-        attempt.complete(model=str(result.get("model") or "automatic"), artifact_count=len(frames))
+        artifacts = result.get(artifact_key) if isinstance(result.get(artifact_key), list) else []
+        attempt.complete(model=str(result.get("model") or "automatic"), artifact_count=len(artifacts))
         return result
 
     def _block(self, run_id: str, step: str, status: str, actions: list[dict[str, Any]]) -> str:
@@ -263,7 +349,7 @@ class ContentOrchestrator:
             "output_contract": {"passed": "boolean", "score": "0-100", "scene_failures": "list", "regeneration_instructions": "list"},
         }
         path = manifest_file.parent / "evaluation-request.json"
-        path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_private_json(path, request)
         add_artifact(manifest, role="evaluation-request", path=path, provider="agent-evaluator")
         write_manifest(manifest_file, manifest)
 
@@ -273,13 +359,59 @@ class ContentOrchestrator:
         if not item:
             return {}
         try:
-            value = json.loads(Path(item["path"]).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            value = read_private_json(Path(item["path"]))
+        except (OSError, ValueError, RuntimeError):
             return {}
         return value if isinstance(value, dict) else {}
 
+    def _load_record(self, state: dict[str, Any]) -> dict[str, Any]:
+        manifest_path = str(state.get("manifest_path") or "")
+        try:
+            return load_manifest(manifest_path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RunRecordUnavailable(
+                run_id=str(state.get("run_id") or ""),
+                manifest_path=manifest_path,
+                reason=_record_failure_reason(exc),
+                detail=f"{type(exc).__name__}: {exc}"[:400],
+            ) from exc
+
+    def _degraded_envelope(self, state: dict[str, Any], failure: RunRecordUnavailable) -> dict[str, Any]:
+        """The row a broken record still deserves.
+
+        One run whose manifest had moved used to raise straight out of the
+        list comprehension below, so a single stale path answered the whole of
+        Productions with a 500 and the owner saw nothing. It becomes a card
+        that says what is wrong and carries the repair with it instead; every
+        other run in the list is unaffected.
+        """
+        return {
+            "ok": False,
+            **state,
+            "brief": {},
+            "providers": {},
+            "publish": {},
+            "composer": {},
+            "user_prompt": "",
+            "next_actions": [],
+            "artifacts": {},
+            "artifact_records": [],
+            "approval_required": False,
+            "cost": state["budget"],
+            "record_status": "unreadable",
+            "record_failure": {
+                "reason": failure.reason,
+                "message": str(failure),
+                "manifest_path": failure.manifest_path,
+                "detail": failure.detail,
+            },
+        }
+
     def _envelope(self, state: dict[str, Any]) -> dict[str, Any]:
-        manifest = load_manifest(state["manifest_path"])
+        try:
+            manifest = self._load_record(state)
+        except RunRecordUnavailable as failure:
+            return self._degraded_envelope(state, failure)
         current = next((step for step in state["steps"] if step["step_id"] == state["current_step"]), None)
         artifacts: dict[str, str] = {}
         artifact_records: list[dict[str, Any]] = []

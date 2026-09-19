@@ -81,10 +81,25 @@ class PublishDraft(LenientDraft):
         return normalized
 
 
+class MediaRouteDraft(LenientDraft):
+    """The provider/model a generated media source renders with.
+
+    Same shape the studio route pickers emit, so a faceless short can be routed
+    to any connected image or video model rather than only a stock library.
+    """
+
+    provider: str = Field(default="automatic", max_length=120)
+    model: str = Field(default="automatic", max_length=200)
+    auth: str = Field(default="", max_length=40)
+
+
 class FacelessDraft(LenientDraft):
     script: str = Field(default="", max_length=20_000)
     search_terms: list[str] = Field(default_factory=list, max_length=100)
-    media_source: Literal["pexels", "pixabay", "local"] = "pexels"
+    media_source: Literal[
+        "pexels", "pixabay", "coverr", "local", "studio-image", "studio-video"
+    ] = "pexels"
+    media_route: MediaRouteDraft | None = None
     count: int = Field(default=1, ge=1, le=20)
     clip_duration_seconds: int = Field(default=5, ge=1, le=30)
 
@@ -195,6 +210,7 @@ class StudioRunDraft(LenientDraft):
         }
         if self.lane == "faceless":
             brief.update(self.faceless.model_dump())
+            _apply_generated_media_route(brief, self.faceless)
         return brief
 
     def to_script_markdown(self) -> str:
@@ -233,3 +249,31 @@ class StudioRunDraft(LenientDraft):
             if self.publish.cta.strip():
                 lines.extend(("", f"CTA: {self.publish.cta.strip()}"))
         return "\n".join(lines).rstrip() + "\n"
+
+
+def _apply_generated_media_route(brief: dict, faceless: FacelessDraft) -> None:
+    """Express a generated media source in the terms the executors already read.
+
+    The route picker gives a provider and a model. Production reads the provider
+    from the `stock` role and the model from `provider_options`, so writing both
+    here keeps `faceless_media` on the standard contract instead of teaching the
+    executors about a faceless-only field.
+    """
+    if faceless.media_source not in {"studio-image", "studio-video"} or faceless.media_route is None:
+        return
+    provider = (faceless.media_route.provider or "").strip()
+    if not provider or provider == "automatic":
+        return
+    model = (faceless.media_route.model or "").strip()
+    role = "keyframe" if faceless.media_source == "studio-image" else "motion"
+
+    # Deliberately not written to providers["stock"]: an image/video model does
+    # not fill the stock-library role, and providers_for("stock") would reject
+    # it. media_route stays the single record of what renders the visuals.
+    if not model or model == "automatic":
+        return
+    options = {key: dict(value) for key, value in (brief.get("provider_options") or {}).items()}
+    role_options = dict(options.get(provider, {}).get(role, {}))
+    role_options.setdefault("model", model)
+    options.setdefault(provider, {})[role] = role_options
+    brief["provider_options"] = options

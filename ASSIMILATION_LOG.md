@@ -110,3 +110,766 @@
 - Shared Brain content-studio and media skills
   - Decision: inspected
   - Reason: existing provider and approval boundaries must remain authoritative
+## 2026-07-15T21:00:06.832557+00:00 - shared-brain
+
+- Request: Make Content Studio video model selector discover LTX 2.3 Eros workflows and route selection through the optimized Media Studio MCP route
+- Source: shared-brain
+- Decision: selected
+- Reason: Loaded shared brain memory, repo-specific Hivemind Content Studio skill, feature-development rules, and model-discoverability skill; pinned local repo and built-in media-studio-mcp workflow registry are the implementation backbone.
+
+### Candidates
+- Memory/Distillations/Agent Memory/learning/2026-07-14-media-studio-reference-image-video-upload-image-to-video-routing-69442fbd7e.md
+  - Decision: inspected
+  - Reason: prior Media Studio reference image routing context
+- Skills/hivemind-content-studio/SKILL.md
+  - Decision: selected
+  - Reason: repo contract says Media Studio MCP is the local/fleet video route
+- packages/media-gateway/bin/media-studio-mcp.mjs
+  - Decision: selected
+  - Reason: contains built-in ltx23-eros-fast and ltx23-eros-exact workflow registry
+## 2026-07-15T21:04:48.297885+00:00 - implementation
+
+- Request: Make Content Studio video model selector discover LTX 2.3 Eros workflows and route selection through the optimized Media Studio MCP route
+- Source: local-project:hivemind-content-studio
+- Decision: adapted_code
+- Reason: Adapted existing managed Media Studio MCP descriptor, built-in LTX workflow registry, simple media catalog, and manifest executor instead of adding a separate selector path.
+
+### Candidates
+- src/hivemind_content_studio/media_studio.py
+  - Decision: adapted_code
+  - Reason: fallback discovery for managed local Media Studio MCP and token-file auth
+- src/hivemind_content_studio/media_catalog.py
+  - Decision: adapted_code
+  - Reason: safe composer catalog exposes ltx23-eros workflow ids from built-in/live registry
+- src/hivemind_content_studio/provider_execution.py
+  - Decision: adapted_code
+  - Reason: nested composer motion.model becomes Media Studio workflow_id
+- src/hivemind_content_studio/ui/studio.js
+  - Decision: adapted_code
+  - Reason: run restore reads nested motion.model
+## 2026-07-15T21:05:50.254197+00:00 - verification
+
+- Request: Make Content Studio video model selector discover LTX 2.3 Eros workflows and route selection through the optimized Media Studio MCP route
+- Source: local-project:hivemind-content-studio
+- Decision: selected
+- Reason: Focused tests, syntax checks, diff check, and live managed MCP/catalog probes passed.
+- Verification: live media_studio_status configured/auth/reachable true; live workflows include ltx23-eros-fast default and ltx23-eros-exact
+## 2026-07-15T21:07:17.255184+00:00 - verification
+
+- Request: Make Content Studio video model selector discover LTX 2.3 Eros workflows and route selection through the optimized Media Studio MCP route
+- Source: local-project:hivemind-content-studio
+- Decision: selected
+- Reason: Focused tests, syntax checks, diff check, and shared-env live managed MCP/catalog probes passed after authenticated readiness fix.
+- Verification: hive-env-run live probe: media_studio_status reachable true; media_list_workflows includes ltx23-eros-fast default and ltx23-eros-exact; media catalog exposes workflow-default plus both LTX ids
+## 2026-07-16T18:08:23.663981+00:00 - shared-brain
+
+- Request: Expose local LTX 2.3 Media Studio workflows in OpenGen Video Studio selector
+- Source: shared-brain
+- Decision: selected
+- Reason: Loaded Hivemind Content Studio, HivemindOS feature development, model discoverability, and assimilation skills; reused existing Media Studio MCP workflow registry and OpenGen Hivemind bridge.
+
+### Candidates
+- Skills/hivemind-content-studio/SKILL.md
+  - Decision: selected
+  - Reason: Media Studio MCP is the local/fleet video route
+- Skills/hive-make-model-discoverable/SKILL.md
+  - Decision: selected
+  - Reason: model/workflow must be listed by runtime/UI discovery surfaces
+- packages/media-gateway/bin/media-studio-mcp.mjs
+  - Decision: selected
+  - Reason: source registry lists ltx23-eros-fast/exact and other LTX 2.3 workflows
+## 2026-07-16T18:08:23.726896+00:00 - implementation
+
+- Request: Expose local LTX 2.3 Media Studio workflows in OpenGen Video Studio selector
+- Source: local-project:hivemind-content-studio
+- Decision: adapted_code
+- Reason: Adapted the existing OpenGen Hivemind bridge path so Media Studio workflows are included in the primary Video Studio model list, not only the image-mode/dock path.
+
+### Candidates
+- packages/open-generative-ai/src/lib/hivemindStudio.js
+  - Decision: selected
+  - Reason: existing catalog-to-hivemind-media workflow adapter
+- packages/open-generative-ai/src/components/VideoStudio.js
+  - Decision: adapted_code
+  - Reason: selector now includes hivemindI2V in normal video mode and switches selection into local workflow mode
+- test/studio/test_studio_ui_contract.py
+  - Decision: test_adapted
+  - Reason: regression asserts local workflows stay in primary selector
+## 2026-07-16T18:10:52.656891+00:00 - verification
+
+- Request: Expose local LTX 2.3 Media Studio workflows in OpenGen Video Studio selector
+- Source: local-project:hivemind-content-studio
+- Decision: selected
+- Reason: Source contract, live catalog, syntax, production build, served bundle marker, and diff checks confirm the local Media Studio workflows now appear through the OpenGen Video Studio selector path.
+- Verification: uv run pytest test/studio/test_studio_ui_contract.py::test_explore_core_embeds_hivemind_workflows_and_preserves_local_generation_paths passed; uv run pytest test/studio/test_studio_ui_contract.py passed 18/18; node --check passed for touched OpenGen modules; hive-env-run live catalog probe returned workflow-default, ltx23-eros-fast, ltx23-eros-exact, ltx23-regular-fp8, ltx23-transition-lora, ltx23-better-motion-lora, ltx23-ic-dual-character-lora; npm run vite:build passed; dist grep confirmed Hivemind local workflow marker; git diff --check passed.
+## 2026-07-16T18:24:35.273322+00:00 - implementation
+
+- Request: Ensure direct OpenGen Media Studio video renders use encrypted output flow
+- Source: local-project:hivemind-content-studio
+- Decision: adapted_code
+- Reason: Direct Media Studio bridge now encrypts generated MP4s to authenticated .zenc sidecars, removes plaintext start-frame temp files, sanitizes response metadata, and keeps playback behind owner/control auth.
+- Verification: Focused endpoint regression passed; broader Studio API/UI contracts passed 47/47; py_compile passed for control_api.py and private_access.py.
+## 2026-07-16T18:27:05.140511+00:00 - verification
+
+- Request: Ensure direct OpenGen Media Studio video renders use encrypted output flow
+- Source: local-project:hivemind-content-studio
+- Decision: selected
+- Reason: Managed stack was restarted after the encryption patch, and live checks confirm the API and Media Studio workflow catalog are back online.
+- Verification: curl http://127.0.0.1:8765/healthz returned ok; stack status shows listeners on 8765, 8796, and LTX 8199; live catalog returns ltx23 workflow ids; LTX queue is empty after restart; git diff --check is being run as the final whitespace gate.
+## 2026-07-16T18:48:17.894849+00:00 - shared-brain
+
+- Request: Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio
+- Source: shared-brain
+- Selected backbone: local-project:/Users/liam/comfy/hivemind-content-studio
+
+### Candidates
+- Shared Brain memory:Media Studio reference upload routing and machine-private receipts
+  - Decision: selected
+  - Reason: confirmed project runtime and privacy conventions
+- Skills/hivemind-content-studio/SKILL.md
+  - Decision: selected
+  - Reason: project runbook and verification contract
+- Skills/systematic-debugging/SKILL.md
+  - Decision: selected
+  - Reason: reproduce-test-fix verification workflow
+## 2026-07-16T18:48:24.849317+00:00 - triage
+
+- Request: Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio
+- Source: local-project
+- Selected backbone: local-project:/Users/liam/comfy/hivemind-content-studio
+
+### Candidates
+- src/hivemind_content_studio/private_access.py
+  - Decision: selected
+  - Reason: existing owner lock and server-side field cipher
+- packages/comfyui-mobile/src/utils/workflowEncryption.ts
+  - Decision: selected-donor
+  - Reason: existing client AES-GCM workflow envelope
+- packages/media-gateway/app.py
+  - Decision: selected-donor
+  - Reason: existing encrypted-output wrapper
+- packages/open-generative-ai/src/components/ImageStudio.js
+  - Decision: inspected
+  - Reason: browser history persistence exposure
+- public GitHub search
+  - Decision: not-assimilated
+  - Reason: pinned local implementation contains the actual cross-package call chain; external code would not establish this product contract
+## 2026-07-16T19:02:32.467295+00:00 - implementation
+
+- Request: Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio
+- Source: local-project
+- Decision: adapted_code
+- Reason: Extended the existing client AES-GCM workflow envelope, owner lock, machine-redacted MCP receipts, and encrypted-output gateway instead of introducing a second privacy subsystem.
+
+### Candidates
+- packages/comfyui-mobile/src/utils/workflowEncryption.ts=>packages/comfyui-mobile/src/utils/workflowEncryption.ts
+  - Decision: adapted_code
+  - Reason: tab-scoped unlock key with legacy persistent-secret cleanup
+- packages/open-generative-ai/src/lib/hivemindStudio.js=>packages/open-generative-ai/src/components/ImageStudio.js
+  - Decision: adapted_code
+  - Reason: embedded-mode memory-only creative history and lock cleanup
+- packages/media-gateway/app.py=>packages/media-gateway/app/comfy/[[...path]]/route.js
+  - Decision: adapted_code
+  - Reason: native encrypted-output serve path reused as the first playback hop
+- src/hivemind_content_studio/private_access.py=>src/hivemind_content_studio/control_api.py
+  - Decision: adapted_code
+  - Reason: owner-gated encrypted media response and QA cleanup
+## 2026-07-16T19:04:58.195907+00:00 - assimilation-manifest
+
+- Request: Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: local-project:hivemind-content-studio:packages/comfyui-mobile/src/utils/workflowEncryption.ts => packages/comfyui-mobile/src/utils/workflowEncryption.ts, local-project:hivemind-content-studio:packages/open-generative-ai/src/lib/hivemindStudio.js => packages/open-generative-ai/src/components/ImageStudio.js, local-project:hivemind-content-studio:packages/media-gateway/app.py => packages/media-gateway/app/comfy/[[...path]]/route.js, local-project:hivemind-content-studio:src/hivemind_content_studio/private_access.py => src/hivemind_content_studio/control_api.py
+- Verification: Wrote ASSIMILATION.client-privacy-audit.json with 4 entries and custom_code_assessment=balanced.
+## 2026-07-16T19:05:03.475180+00:00 - verification
+
+- Request: Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.client-privacy-audit.json: 4 concrete reuse entries, 4 substantive
+## 2026-07-16T19:05:09.941616+00:00 - verification
+
+- Request: Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio
+- Source: local-project
+- Decision: selected
+- Reason: Privacy contracts, production builds, live owner lock, live token-log redaction, and managed-stack restart all passed.
+- Note: test/studio 180 passed; Media Gateway 41 passed; ComfyUI Mobile 937 passed; OpenGen 23 passed; both production builds passed; git diff --check passed; live 8765 owner lock and no-store headers confirmed; live gateway log rendered token=%5Bredacted%5D; assimilation manifest valid with four substantive entries.
+
+## 2026-07-16T20:00:20.000000+00:00 - implementation
+
+- Request: Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio
+- Source: local-project
+- Decision: adapted_code
+- Reason: Tightened the existing owner-lock and machine-receipt patterns so control-token and MCP callers can operate without reading creative content.
+- Note: Creative read routes now require the owner session; control-token video generation returns an opaque receipt; machine-private Media Studio MCP strips output URLs even when requested; the trusted server resolves native/Comfy output internally before encrypted owner playback.
+
+## 2026-07-16T20:09:37.000000+00:00 - verification
+
+- Request: Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio
+- Source: local-project
+- Decision: passed
+- Reason: Automated and live owner/control/MCP boundaries passed after the final managed-stack restart.
+- Note: Studio 183/183; gateway 41/41; live control-token encrypted-media read 401; live owner-session encrypted-media read 200 with no-store and cleanup; live MCP history/job URL-request probe exposed no forbidden fields or credentials; live catalog retained seven local workflows.
+
+## 2026-07-16T20:32:08.000000+00:00 - implementation
+
+- Request: Improve Studio video generation progress and preserve setup across result, back, and regenerate actions
+- Source: local-project
+- Decision: adapted_code
+- Reason: Extended the existing OpenGen Video Studio canvas and generation handler without changing provider or encryption boundaries.
+- Note: Added an animated progress card with real Wan2GP percentages and honest indeterminate states elsewhere; captured prompt, reference URLs, model, and controls in memory; Back restores the existing setup; Regenerate restores and resubmits the captured context.
+
+## 2026-07-16T20:32:08.000000+00:00 - verification
+
+- Request: Improve Studio video generation progress and preserve setup across result, back, and regenerate actions
+- Source: local-project
+- Decision: passed
+- Reason: Focused regressions, full Studio tests, production build, served-bundle checks, and managed-stack restart passed.
+- Note: OpenGen 26/26 from baseline 23/23; UI contract 21/21 from baseline 20/20; Studio 185/185; all required listeners online; live OpenGen serves the rebuilt progress code and CSS. Browser screenshot verification was unavailable in this runtime.
+
+## 2026-07-16T20:38:26.000000+00:00 - implementation
+
+- Request: Raise the Studio video progress card and add an optional completion sound
+- Source: local-project
+- Decision: adapted_code
+- Reason: Extended the existing OpenGen generation layer and composer controls without changing provider, prompt, media, or encryption paths.
+- Note: Added a responsive upward offset, a session-only Ping when complete toggle, a user-gesture-primed Web Audio chime, and a one-shot completion guard that excludes history playback.
+
+## 2026-07-16T20:38:26.000000+00:00 - verification
+
+- Request: Raise the Studio video progress card and add an optional completion sound
+- Source: local-project
+- Decision: passed
+- Reason: Focused and complete regressions, production build, served-asset checks, listener status, and diff checks passed.
+- Note: OpenGen 26/26; UI contract 21/21; Studio 185/185; live OpenGen serves `video-generation-stage` and the completion-ping code. Real render/audio playback and screenshot QA were unavailable in this runtime.
+
+## 2026-07-16T20:40:05.000000+00:00 - implementation
+
+- Request: Keep the Studio chat input hidden when Regenerate automatically resubmits prior video parameters
+- Source: local-project
+- Decision: adapted_code
+- Reason: Removed the setup-view reveal from the successful regeneration path while preserving explicit Back and error recovery.
+- Note: Regenerate now restores context off-screen, pauses the previous video, and enters the existing progress card directly.
+
+## 2026-07-16T20:40:05.000000+00:00 - verification
+
+- Request: Keep the Studio chat input hidden when Regenerate automatically resubmits prior video parameters
+- Source: local-project
+- Decision: passed
+- Reason: Focused OpenGen/UI regressions, syntax, production build, served-bundle check, and diff checks passed.
+- Note: OpenGen 26/26; UI contract 21/21; the rebuilt Video Studio chunk is live on the managed OpenGen service.
+
+## 2026-07-16T20:51:04.000000+00:00 - implementation
+
+- Request: Persist the Video Studio model and duration between reloads
+- Source: local-project
+- Decision: adapted_code
+- Reason: Reused the existing OpenGen selector state and asynchronous Hivemind workflow discovery path, adding only a validated non-creative browser preference.
+- Note: The stored payload contains only model ID and duration; immediate catalog models restore during setup, while local LTX/Eros workflow IDs restore after workflow discovery without persisting prompts or media.
+
+## 2026-07-16T20:51:04.000000+00:00 - verification
+
+- Request: Persist the Video Studio model and duration between reloads
+- Source: local-project
+- Decision: passed
+- Reason: Focused and complete regressions, syntax, production build, live served-asset inspection, model-ID collision audit, and diff checks passed.
+- Note: OpenGen 27/27 from baseline 26/26; UI contract 21/21; Studio 185/185; live OpenGen serves the `video_generation_preferences` key and model/duration-only payload. Browser interaction QA was unavailable in this runtime.
+
+## 2026-07-16T20:55:34.000000+00:00 - implementation
+
+- Request: Keep the video generation card above the composer and make completion audio reliable
+- Source: local-project
+- Decision: adapted_code
+- Reason: Corrected the existing progress layer and Web Audio implementation without changing generation, provider, prompt, media, or encryption paths.
+- Note: Generation structurally hides the animated setup UI, uses an upper-anchored z-50 progress layer, grants autoplay to the embedded Explore frame, previews the ping when enabled, and primes the audio context from the Generate gesture.
+
+## 2026-07-16T20:55:34.000000+00:00 - verification
+
+- Request: Keep the video generation card above the composer and make completion audio reliable
+- Source: local-project
+- Decision: passed
+- Reason: Focused and complete regressions, syntax, production build, live served OpenGen asset checks, and diff checks passed.
+- Note: OpenGen 27/27; UI contract 21/21; Studio 185/185; live CSS contains the upper progress anchor and live JavaScript contains the audio unlock path. Real speaker playback and screenshot QA were unavailable in this runtime.
+## 2026-08-10T20:04:56.727587+00:00 - triage
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Selected backbone: local-project:hivemind-content-studio
+- Note: Target studio stays backbone; Mix-Studio is the donor. Feature gap matrix in progress via parallel exploration.
+
+### Candidates
+- BlackMixture/Mix-Studio
+  - Decision: selected-donor
+  - Reason: pinned by user; GPL-3.0 (commercial use permitted, copyleft on distribution); cloned to candidate cache and audited (REVIEW: only vendored minified lottie eval findings)
+  - Path: `server.js,lib/,public/app.js`
+## 2026-08-10T20:04:56.768235+00:00 - shared-brain
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: shared-brain
+- Decision: inspected
+- Note: hive-brain answer 'Mix-Studio BlackMixture ComfyUI workspace assimilation prior research' --scope full-vault returned no prior Mix-Studio context (only comfy-cli refs + this skill).
+## 2026-08-10T20:12:38.092472+00:00 - audit
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Decision: inspected
+- Note: Full donor-module dissection complete via Explore agent; line refs recorded in agent report.
+## 2026-08-10T20:13:46.279224+00:00 - local-search
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: inspected
+- Note: Full have/partial/missing catalog via Explore agent over frontend, gateway, MCP, control API.
+## 2026-08-10T20:43:46.042037+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer L28757-29003) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js+manifest.webmanifest+offline.html+pwa.js => packages/open-generative-ai/public/ + index.html, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (buildStrengthHuntSheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py
+- Verification: Wrote ASSIMILATION.mix-studio.json with 9 entries and custom_code_assessment=balanced.
+## 2026-08-10T20:43:46.144126+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: failed
+- Reason: ASSIMILATION.mix-studio.json: Entry 6 target_path does not exist: /Users/liam/comfy/hivemind-content-studio/packages/open-generative-ai/public/ + index.html
+## 2026-08-10T20:44:03.322725+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer L28757-29003) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js => packages/open-generative-ai/public/service-worker.js, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (buildStrengthHuntSheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py
+- Verification: Wrote ASSIMILATION.mix-studio.json with 9 entries and custom_code_assessment=balanced.
+## 2026-08-10T20:44:03.429111+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 9 concrete reuse entries, 6 substantive
+## 2026-08-10T20:44:03.502709+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: Manifest verified. Gates: gateway 148/148 unittest OK (incl. new strength-hunt dispatch test + 17 module tests); frontend 285 tests, 280 pass, only the 5 documented pre-existing hivemindStudioReferences fails; vite build OK; browser-verified on vite dev 5273: camera-motion apply/replace, compare viewer reveal+zoom sync, PWA assets served. Deferred to live lanes: strength-hunt end-to-end on Comfy (route inert until gateway restart), SW install flow on 8765.
+## 2026-08-10T21:13:50.625549+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer L28757-29003) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js => packages/open-generative-ai/public/service-worker.js, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (buildStrengthHuntSheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py, BlackMixture/Mix-Studio:server.js (strengthHunt lora flag UX) => packages/open-generative-ai/src/lib/loraSelection.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan math) => packages/open-generative-ai/src/lib/expandGeometry.js, BlackMixture/Mix-Studio:lib/edit-outpaint-workflows.js (expand UX) => packages/open-generative-ai/src/studios/image/ExpandDialog.jsx, BlackMixture/Mix-Studio:test/strength-hunt.test.js (selection semantics) => packages/open-generative-ai/tests/imageStyleAndHunt.test.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan tests) => packages/open-generative-ai/tests/expandGeometry.test.js
+- Verification: Wrote ASSIMILATION.mix-studio.json with 14 entries and custom_code_assessment=balanced.
+## 2026-08-10T21:13:50.711741+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 14 concrete reuse entries, 9 substantive
+## 2026-08-10T21:13:50.760484+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Decision: adapted_code
+- Note: Phase 2 slice landed: Strength Hunt UI (LoRA hunt-axis toggle + generate wiring + bridge passthrough), Style Preset dead control fixed (idempotent phrase composer), Batch Count dead control fixed (sequential batch, seed+shot), outpaint route (run_comfy_krea2_outpaint on the LTX-anchor builder) + Expand dialog with donor plan math. RIFE + chained-clip join deferred (need node installs / live lanes).
+## 2026-08-10T21:14:01.760694+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: Phase 2 gates: gateway 167/167 (incl. outpaint dispatch test), frontend 296 tests / 291 pass (same 5 pre-existing), vite build OK, hosted-server parses. Browser-verified on vite dev 5273 against the REAL /local-ai bridge: Krea 2 model selected from live catalog, hunt toggle arms with hint (stubbed LoRA catalog), Expand dialog reads real pixels (640x640) and computes 21:9 -> 1488x640. Not submitted live: hunt/outpaint generation (gateway restart still pending, deliberately not run).
+## 2026-08-10T22:03:23.822909+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Decision: adapted_code
+- Note: Soft-inpaint shipped end-to-end. Bonus robustness: defensive setPointerCapture in MaskEditorDialog + CompareViewer. Verified: 8 builder tests + dispatch test (gateway 177/177), brush paints at natural res in browser (47k px stroke), export = white-on-black PNG. Live Comfy run pending stack restart, as with hunt/outpaint.
+## 2026-08-10T22:03:23.983040+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js => packages/open-generative-ai/public/service-worker.js, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (sheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py, BlackMixture/Mix-Studio:server.js (strengthHunt flag UX) => packages/open-generative-ai/src/lib/loraSelection.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan math) => packages/open-generative-ai/src/lib/expandGeometry.js, BlackMixture/Mix-Studio:lib/edit-outpaint-workflows.js (expand UX) => packages/open-generative-ai/src/studios/image/ExpandDialog.jsx, BlackMixture/Mix-Studio:test/strength-hunt.test.js (selection) => packages/open-generative-ai/tests/imageStyleAndHunt.test.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan tests) => packages/open-generative-ai/tests/expandGeometry.test.js, BlackMixture/Mix-Studio:lib/regional-workflows.js (buildKrea2InpaintGraph) => packages/media-gateway/krea2_identity_workflow.py, BlackMixture/Mix-Studio:lib/edit-mask.js => packages/media-gateway/krea2_identity_workflow.py, BlackMixture/Mix-Studio:public/app.js (mask brush canvas) => packages/open-generative-ai/src/studios/image/MaskEditorDialog.jsx, BlackMixture/Mix-Studio:test/edit-mask.test.js => packages/media-gateway/test_krea2_inpaint.py
+- Verification: Wrote ASSIMILATION.mix-studio.json with 18 entries and custom_code_assessment=balanced.
+## 2026-08-10T22:03:24.141874+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 18 concrete reuse entries, 12 substantive
+## 2026-08-10T22:48:19.503854+00:00 - implementation
+
+- Request: Add a character sheet generator to the image studios' reference-edit models (Klein family), assimilating the Civitai 'Flux2 Klein Multi-view Character Generation' v2.0 workflow
+- Source: pinned-source
+- Decision: adapted_recipe
+- Reason: Donor is a 446-node ComfyUI graph across eight custom-node packs; only its load-bearing recipe (white-background per-view Klein edit prompts, shared seed, labeled composite sheet) was assimilated, onto the studio's existing native MLX Klein edit lane. Pose-guided mode not portable (pose assets live on RunningHub, not in the file); donor LoRAs (bfs_head_v1, f2k_consis) not imported — the LoRA panel covers that.
+- Assimilated: civitai.red/models/2401955 v2.0 (lrzjason) prompt/view recipe => packages/media-gateway/klein_character_sheet.py; multi-view runner => packages/media-gateway/app.py (run_klein_character_sheet, character_sheet dispatch, _klein3_native_edit_once extraction); UI mode => packages/open-generative-ai/src/studios/ImageStudio.jsx (+ hosted-server.js passthrough, imagePrefs/studioTabs persistence)
+- Verification: gateway pytest 189/189; frontend 299 tests / 294 pass (the 5 documented pre-existing hivemindStudioReferences fails); vite build OK; browser-verified on vite dev 5373 (Klein-gated section, preset picker, empty-prompt submit, payload capture, history tag); live turnaround E2E submitted to the restarted gateway.
+## 2026-08-10T23:40:53.903315+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Decision: adapted_code
+- Note: LIVE E2E verified: one real angle render (BigLove Klein 3, front-right eye-level medium shot) ran through the real bridge from the dev UI, landed in the gallery labeled and source-paired, Compare opened on the pair. Compare after-label generalized to Result for non-upscale pairs.
+## 2026-08-10T23:40:53.945457+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: Gates after angle/sequence slice: frontend 304 tests / 299 pass (same 5 pre-existing), 5 new editAnglesAndSequence tests, dist rebuilt. Gateway untouched this slice (still 177/177).
+## 2026-08-10T23:41:17.148960+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js => packages/open-generative-ai/public/service-worker.js, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (sheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py, BlackMixture/Mix-Studio:server.js (strengthHunt flag UX) => packages/open-generative-ai/src/lib/loraSelection.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan math) => packages/open-generative-ai/src/lib/expandGeometry.js, BlackMixture/Mix-Studio:lib/edit-outpaint-workflows.js (expand UX) => packages/open-generative-ai/src/studios/image/ExpandDialog.jsx, BlackMixture/Mix-Studio:test/strength-hunt.test.js (selection) => packages/open-generative-ai/tests/imageStyleAndHunt.test.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan tests) => packages/open-generative-ai/tests/expandGeometry.test.js, BlackMixture/Mix-Studio:lib/regional-workflows.js (buildKrea2InpaintGraph) => packages/media-gateway/krea2_identity_workflow.py, BlackMixture/Mix-Studio:lib/edit-mask.js => packages/media-gateway/krea2_identity_workflow.py, BlackMixture/Mix-Studio:public/app.js (mask brush canvas) => packages/open-generative-ai/src/studios/image/MaskEditorDialog.jsx, BlackMixture/Mix-Studio:test/edit-mask.test.js => packages/media-gateway/test_krea2_inpaint.py, BlackMixture/Mix-Studio:lib/edit-angle.js => packages/open-generative-ai/src/lib/editAngles.js, BlackMixture/Mix-Studio:lib/edit-sequence.js => packages/open-generative-ai/src/lib/editSequence.js, BlackMixture/Mix-Studio:server.js (camera variation + sequence UX) => packages/open-generative-ai/src/studios/image/AngleVariationsDialog.jsx, BlackMixture/Mix-Studio:test/edit-mask.test.js (dialect semantics) => packages/open-generative-ai/tests/editAnglesAndSequence.test.js
+- Verification: Wrote ASSIMILATION.mix-studio.json with 22 entries and custom_code_assessment=balanced.
+## 2026-08-10T23:41:17.231110+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 22 concrete reuse entries, 15 substantive
+## 2026-08-11T00:19:05.938588+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: public-search
+- Decision: adapted_code
+- Note: Liam directives: proper RIFE on the native MLX lane (no filters) + most-correct long-term client-side join. RIFE E2E-verified twice (CLI 24f@12->47f@24 w/ audio; unittest 8f->15f). Join verified in Node (ffprobe: 60 frames bit-copied) AND in-browser (3.0s joined MP4, audioJoined true). Fixes en route: AAC priming negative timestamps (per-track rebase), trailing padding collision (video-duration trim).
+## 2026-08-11T00:19:05.977418+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: Gates: gateway 186/186 (incl real-RIFE runner test), frontend 307/302+5 (incl real join tests), builds+parses OK everywhere, dist rebuilt w/ lazy joiner chunk. UI verified live: Smooth 2x + Join 2 shots buttons render on a chained result; in-page join engine returned {size:37218, seconds:3, audioJoined:true}. Restart-gated: /api/interpolate + bridge route + control_api allowlist go live at next idle zimage-stack restart.
+## 2026-08-11T00:19:34.249386+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: failed
+- Reason: ASSIMILATION.mix-studio.json: Entry 23 missing source_repo.
+## 2026-08-11T00:19:50.735329+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 24 concrete reuse entries, 17 substantive
+## 2026-08-11T00:48:35.369374+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: LIVE E2E, all four restart-gated routes on real hardware: RIFE interpolate success 2.24s (rife_*_2x.mp4 sealed); Strength Hunt success 4/4 variants + composed sheet, 5 sealed outputs (apple sequential path); outpaint success 139s WITH new left-anchor placement proven live (geometry left/right 0/640); inpaint success 71s. Stack restarted twice at verified-idle. Also landed+verified this pass: outpaint placement (offset_x/y through geometry->builder->route->bridge->ExpandDialog anchor chips, 5 unit tests + live run + browser check) and six H3 restyle presets ported verbatim from donor h3-prompt-guide.js STYLE_TRANSFER_PRESETS (idempotent Style menu on H3 models, 2 unit tests). Final gates: frontend 315/310+5, gateway suites all OK, dist rebuilt.
+## 2026-08-11T00:48:35.481266+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 26 concrete reuse entries, 19 substantive
+## 2026-08-11T19:57:03.308420+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 26 concrete reuse entries, 19 substantive
+## 2026-08-11T20:45:35.421725+00:00 - reuse
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio lib/edit-mask.js buildSam3MaskGraph
+- Decision: assimilate
+- Reason: SAM3 smart-select closes the last Phase-2 item: name or tap an object instead of painting the mask by hand.
+- Assimilated: packages/media-gateway/smart_mask.py (translated_code from lib/edit-mask.js buildSam3MaskGraph + normalizeMaskPoints); /api/smart-mask route; Smart select mode in MaskEditorDialog.jsx
+- Not assimilated: Donor's SaveImage sink (our masks leave via PreviewImage — SaveImage output would be sealed by the privacy sweeper and clutter History); donor's comfy-env install path
+- Verification: 8 unit/route tests (test_smart_mask.py); LIVE on this Mac through the real bridge: text 'blue ball' -> mask bbox x300-440 y120-260 in 4.1s, tap (0.25,0.50) -> x60-200 y90-300 in 2.1s, each selecting the correct distinct object; no mask left in temp or history.jsonl
+## 2026-08-11T20:45:53.998003+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 28 concrete reuse entries, 21 substantive
+## 2026-08-11T21:48:33.983276+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `regional multi-box prompting (Phase 3)`
+- Decision: assimilate
+- Note: Scope: the language half of regional prompting only; the per-region LoRA/reference graph is deferred until Krea2RegionalMultiLoRAV3 exists on this stack.
+- Reason: Checked /object_info on the live ComfyUI (2494 nodes): Ideogram4PromptBuilderKJ IS installed but Krea2RegionalMultiLoRAV3 is NOT, so the donor's regional graph cannot run on this stack. Their own code comment says the regional node only masks LoRA/reference deltas and that spatial LANGUAGE in the caption is what pins placement for description-only regions — so the half that does the real work needs no node at all and applies to every image model we serve, local or cloud.
+- Assimilated: lib/regional-workflows.js normalizeRegions/positionPhrase/elementDesc -> src/lib/regionPrompt.js; region-box editor over the same normalized model -> src/studios/image/RegionBoxEditor.jsx; 9 behavioural tests -> tests/regionPrompt.test.js
+- Not assimilated: buildRegionalT2IGraph / buildKrea2InpaintGraph / addRegionalPrompting (need Krea2RegionalMultiLoRAV3, absent); per-region LoRA and reference-image masking; region colors as caption palette (donor warns it paints literal swatches)
+- Verification: Frontend 398 tests: 393 pass, 5 fail = the long-standing hivemindStudioReferences.test.js baseline. vite build clean. Live browser check on vite dev :5673 with a page-context fetch stub: two boxes drawn (top-left + bottom-right), the outgoing /api/v1/nano-banana payload carried 'a detective in a long coat, positioned in the top left of the frame. a ramen cart, positioned in the bottom right of the frame' appended to the scene prompt; the request was stubbed so nothing left the machine.
+- Note: Composer made idempotent: a restored generation hands back both its composed prompt and its boxes, so re-composing must not say everything twice.
+- Note: Found and fixed a real race while testing: a tap fast enough to land pointerdown+pointerup in one React batch created no region, because endDrag read the draft from state before the re-render. Draft now lives on the drag ref.
+- Note: Region text is prompt content, so it is session-only (never localStorage) and rides in the sealed per-generation context; only the on/off toggle persists.
+## 2026-08-11T21:49:30.794887+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 30 concrete reuse entries, 22 substantive
+## 2026-08-11T22:06:39.651675+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `LTX Director (Extend/Keyframes/Timeline)`
+- Decision: assimilate
+- Reason: User asked for the LTXDirector node to be installed. Traced it from the donor's dependency-installer to WhatDreamsCost/WhatDreamsCost-ComfyUI pinned at d6495f50926ab245a0b96f76ef6b89de40d19f6e (GPL-3.0). Installed as a pinned fork with security deltas; ported the timeline normalization half, which needs no weights.
+- Assimilated: lib/ltx-director-workflows.js L1-330 -> packages/media-gateway/ltx_director_timeline.py (+18 tests); node pack installed at ~/comfy/ComfyUI/custom_nodes/WhatDreamsCost-ComfyUI pinned d6495f5
+- Not assimilated: buildLtxDirectorGraph (L332+) — deferred: the LTX 2.3 22B base checkpoint is NOT on this machine, so the graph cannot be run or verified; their extensionSource {itemId,videoId} library form (we have no plaintext media library)
+- Verification: All 9 pack nodes registered live after a restart at an idle queue (object_info 2494 -> 2503, LTXDirector/LTXDirectorGuide/LTXDirectorCropGuides all present). Gateway suite 247 passed / 11 skipped. Fork security deltas probed live: arbitrary read of /etc/passwd and ../ traversal both 404, legitimate input-dir read 200 with correct body, upload traversal confined to the input dir (no file escaped), open_folder 403.
+- Note: AUDIT FINDING: at the pinned revision load_video_ui.py registers two unauthenticated routes with no path sanitization — GET /video_ui_custom_view is an arbitrary file read (web.FileResponse of the raw query param) and POST /video_ui_upload_chunk an arbitrary write. The pack's own newer upload route sanitizes correctly, so this is drift. Both confined by the fork; /ltx_director_check_file and /ltx_director_get_audio likewise, and /ltx_director_open_folder (host GUI side effect) is now 403.
+- Note: ComfyUI's loader checks NODE_CLASS_MAPPINGS before comfy_entrypoint and returns early, so the pack's half-finished V3 entrypoint (which lists LTXDirectorGuide without a GET_SCHEMA, and omits LTXDirectorCropGuides) is never called and cannot break the load.
+- Note: BLOCKED ON WEIGHTS: ComfyUI lists only waiANIMA_v10Base10.safetensors as a checkpoint. The IC-LoRA ingredients 0.9, the 384 distilled LoRA and the spatial upscaler are all present, but ltx-2.3-22b-dev-fp8.safetensors is not — only its Civitai sidecars. Our LTX lane runs through MLX, not a ComfyUI checkpoint.
+## 2026-08-11T23:45:24.493776+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `LTX Director live render`
+- Decision: partial
+- Reason: Video path verified end to end on real hardware; the audio track decodes to digital silence and the cause is below our port.
+- Verification: Cold render 381s: 73 frames at 704x384 = exactly the 8n+1 lattice the timeline model predicts, no extra frames (proves LTXDirectorCropGuides stripped the guides). Output sealed to the owner vault; QA copies read via ComfyUI's temp dir since the server cannot decrypt its own output. Audio: 48kHz stereo 3.05s but peak 1/32767, -91 dB. Bisected per pass — silent after the base pass too, so it is never denoised. Gateway suite 260 passed / 11 skipped.
+- Note: Ruled out as causes: our wiring (node-for-node faithful to the donor), LTXVConcatAVLatent mask semantics (unmasked audio gets ones_like = generate), comfy.sample.prepare_noise (it unbinds nested AV latents and noises each), and the checkpoint (carries audio_vae + vocoder). Remaining suspects are model/platform level: fp8 audio branch on MPS, distilled LoRA at 0.5, or text-encoder variant.
+- Note: DOWNLOADER BUG worth remembering: parallel range-chunk fetch reassembled with 'cat part.*' — the shell globs lexicographically, so with 12 parts part.10/part.11 landed before part.2 and both files were byte-scrambled. Size and safetensors data_offsets still matched exactly, so the cheap integrity check passed; it only surfaced as a sentencepiece parse failure loading the tokenizer. Recovered WITHOUT re-downloading by inverting the known permutation, then verified against HuggingFace's published sha256.
+- Note: MLX weights are not substitutable for the ComfyUI ones: the MLX transformer is MLX block-quantised (1632 U32 tensors with .scales/.biases), diffusers-keyed, transformer-only.
+## 2026-08-12T00:08:44.027484+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `LTX Director silent audio root cause`
+- Decision: passed
+- Reason: The silent audio is NOT in our port. It reproduces with the stock reference AV graph structure and no Director nodes at all.
+- Verification: Five configurations measured, every one a BYTE-IDENTICAL 27415-byte silent FLAC (peak 1/32767): Director base pass; Director refine pass; eros AV reference structure rebuilt on this checkpoint with no Director nodes, distilled LoRA 0.5, 8 steps; the same without the LoRA; the same at 20 steps. Invariance across graph structure, LoRA, step count and prompt means the audio half of the nested latent is never modified by sampling. Gateway suite 260 passed / 11 skipped.
+- Note: Ruled out: our wiring; LTXVConcatAVLatent mask semantics (unmasked audio gets ones_like = generate); comfy.sample.prepare_noise (unbinds nested AV latents and noises each); LTXVSeparateAVLatent (unbinds, index 1); the checkpoint (4,728 audio tensors in the transformer incl. scale_shift_table_a2v_ca_audio, plus audio_vae + vocoder); the audio VAE (loads and decodes, no missing-key warnings); LTXAVModel.forward (accepts the combined AV tensor and derives a_timestep). LTX2AudioLatentNormalizingSampling is a quality patch, not a prerequisite.
+- Note: Decisive next test: run the unchanged control graph on a rented CUDA box. The donor validated this exact configuration on NVIDIA, so it separates 'this machine/MPS' from 'model/config' outright.
+## 2026-08-12T00:08:44.127735+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 34 concrete reuse entries, 24 substantive
+## 2026-08-20T07:12:54.556986+00:00 - triage
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: user-pinned
+- Selected backbone: local-project:hivemind-content-studio (src/auto_clipper stays the backbone)
+- Note: Gap confirmed by source read: our clip selection is fully delegated to Podcli; Postiz caption is transcript_excerpt or rationale or 'Approved clip'
+
+### Candidates
+- zhouxiaoka/autoclip
+  - Decision: inspected
+  - Reason: user-pinned donor; MIT, 6532 stars, 1271 forks, last push 2026-06-03
+## 2026-08-20T07:16:23.516712+00:00 - shared-brain
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: hive-brain
+- Decision: selected
+- Reason: hive-brain recall 'clip scoring hook title generation short form virality rubric' --scope full-vault --limit 6
+
+### Candidates
+- Skills/content-rewards-viral-app-campaign/SKILL.md
+  - Decision: selected
+  - Reason: existing 6-axis clippability rubric (clippable, result-driven, desire-to-know, repeatable, controversy/tension, conversion path) becomes the rubric spine instead of the donor's B-station rubric
+- Intake/App Virality Case Study.md
+  - Decision: inspected
+  - Reason: hook/demo/CTA framing, no extractable code
+## 2026-08-20T07:16:23.558274+00:00 - local-search
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: current-project
+- Decision: selected
+- Reason: established project way check before adding any LLM helper
+
+### Candidates
+- src/hivemind_content_studio/local_llm.py
+  - Decision: selected
+  - Reason: LocalLlmRuntime.chat is the established unpaid local LLM path; no new client
+- app/services/llm.py
+  - Decision: selected-donor
+  - Reason: _generate_response provider-generic cloud fallback
+- src/auto_clipper/transcripts.py
+  - Decision: inspected
+  - Reason: our uniform word-timing split already equals the donor's; no gain there
+## 2026-08-20T07:16:23.604757+00:00 - audit
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: audit-candidate-repo
+- Decision: selected
+- Reason: inert clone audited at ~/.codex/hive-assimilate/candidates/zhouxiaoka-autoclip
+
+### Candidates
+- zhouxiaoka/autoclip@17100c0
+  - Decision: selected-donor
+  - Reason: repo-wide BLOCK was 3 false positives (rm -rf /var/lib/apt/lists/* in Dockerfile); selected-path audit of backend/pipeline, prompt, llm_client.py, shared_config.py, backend/tests returned high=0 medium=0 low=0
+## 2026-08-20T07:17:43.718281+00:00 - assimilation-manifest
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: zhouxiaoka/autoclip@17100c0:backend/pipeline/step3_scoring.py => src/auto_clipper/rerank.py, zhouxiaoka/autoclip@17100c0:backend/pipeline/step4_title.py => src/auto_clipper/titles.py, zhouxiaoka/autoclip@17100c0:backend/utils/llm_client.py => src/auto_clipper/llm_json.py, zhouxiaoka/autoclip@17100c0:backend/core/shared_config.py => src/auto_clipper/prompts.py, zhouxiaoka/autoclip@17100c0:prompt/推荐理由.txt => presets/prompts/clip-rerank.txt, zhouxiaoka/autoclip@17100c0:prompt/标题生成.txt => presets/prompts/clip-title.txt, zhouxiaoka/autoclip@17100c0:prompt/knowledge => presets/prompts/knowledge, zhouxiaoka/autoclip@17100c0:backend/pipeline/step1_outline.py => src/auto_clipper/outline.py, zhouxiaoka/autoclip@17100c0:backend/pipeline/step2_timeline.py => src/auto_clipper/timeline.py, zhouxiaoka/autoclip@17100c0:backend/pipeline/step5_clustering.py => src/auto_clipper/collections.py
+- Verification: Wrote ASSIMILATION.autoclip.json with 10 entries and custom_code_assessment=balanced.
+## 2026-08-20T07:17:59.176847+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: failed
+- Reason: ASSIMILATION.autoclip.json: Entry 1 target_path does not exist: /Users/liam/comfy/hivemind-content-studio/src/auto_clipper/rerank.py
+## 2026-08-20T07:18:09.636398+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: below-threshold
+- Reason: Expected fail: ASSIMILATION.autoclip.json is a scoping manifest, all 10 entries status=planned, no target path written yet. Re-verify when phase 1 lands (rerank.py, titles.py, llm_json.py, prompts.py + presets/prompts).
+## 2026-08-20T07:18:09.689645+00:00 - final
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: hive-assimilate
+- Decision: selected
+- Reason: Scope delivered: docs/AUTOCLIP_ASSIMILATION_PLAN.md + ASSIMILATION.autoclip.json. No code landed this pass.
+## 2026-08-20T07:42:01.677473+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `LTX Director silent audio — CUDA control`
+- Decision: passed
+- Reason: Root cause is Apple Silicon (MPS), not the model, the configuration, or our port. LTX 2.3 joint audio-video generation produces real audio on CUDA and digital silence on MPS.
+- Verification: Rented an RTX A6000 on Vast and ran the IDENTICAL control graph at the SAME ComfyUI commit (2a0e30e9) with the SAME weights (checkpoint 28606c5b... and encoder 60216ce9... both sha256-verified byte-identical to the local copies, confirmed independently on the box) and the same prompt/seed/steps. Mac (MPS): peak 1/32767, rms 0.1, 0.6 percent non-zero, 27,415-byte FLAC. A6000 (CUDA): peak 11,998, rms 3,216, 100 percent non-zero, 316,330-byte FLAC. Instance destroyed; no instances remain; throwaway SSH key deleted from the account. Total spend about 3.19 USD of Vast credit.
+- Note: Scope is wider than Director: every LTX 2.3 AV path through ComfyUI on this Mac returns silent audio. The working local audio path is the MLX eros lane, a different runtime.
+- Note: LTX Director is fully usable today through the rental lane, which already stocks both weights in R2. CUDA was also 4-5x faster: 42s vs 170-210s for the same 73-frame control.
+- Note: Rental gotchas hit: the vast ComfyUI template serves on port 18188 (not 8188) as the repo's own validated scripts already assumed; its image ships ComfyUI 0.7.0 which predates the LTX AV nodes, so the box had to be checked out to our exact commit; a shallow clone needs 'git fetch --depth 1 origin <sha>' before checkout; and nohup alone does not survive the SSH exit, so ComfyUI needs tmux.
+## 2026-08-20T07:53:43.889226+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.autoclip.phase1.json: 7 concrete reuse entries, 7 substantive
+## 2026-08-20T07:58:46.852110+00:00 - implementation
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: hive-assimilate
+- Decision: adapted_code
+- Reason: Phase 1 landed: rerank.py, titles.py, llm_json.py, prompts.py, llm.py, db migration 3, podcli/scheduling/obsidian/cli/mcp/doctor wiring, presets/prompts defaults + 7 category overlays, 20 new tests
+## 2026-08-20T07:58:46.938542+00:00 - correction
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: live-verification
+- Decision: adapted_code
+- Reason: Live run on local Qwen3-4B showed the title pass echoing the reviewer critique into the caption field; removed score+reason from the title payload entirely (departs from donor step4) and locked it with a test
+## 2026-08-20T07:58:47.061268+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.autoclip.phase1.json: 7 concrete reuse entries, 7 substantive
+## 2026-08-20T07:58:47.114248+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: selected
+- Reason: ASSIMILATION.autoclip.phase1.json valid: 7 concrete reuse entries, 7 substantive. Suites: test/auto_clipper 58 passed; +test/services +test_repo_contract 576 passed 0 failed. Podcli render path unproven on this machine (podcli not installed).
+## 2026-08-20T08:15:29.118500+00:00 - audit
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: audit-candidate-repo
+- Decision: selected
+- Reason: Pre-install audit of the render dependency; podcli was never installed on this machine (no vendor/)
+
+### Candidates
+- nmbrthirteen/podcli@e204f98
+  - Decision: selected-donor
+  - Reason: AGPL-3.0-only; audit high=0 medium=3; DEFECT: ai_select defaults true and pipes transcript into claude/codex on PATH; gated by patches/podcli-ai-select-default-off.patch and verified by canary + doctor
+## 2026-08-20T11:24:02.656996+00:00 - correction
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: live-verification
+- Decision: adapted_code
+- Reason: Real podcli render exposed two defects the fake path hid: import globbed intermediates+thumbnails as clips (9 rows for --top 3, no timings), and the semantic pass had no text to read. Now parses podcli's printed selection and slices the transcript by range. Hook quality went from 'Nobody tells you about raising mo' (0.35) to 'Your round is priced by your worst month' (0.95).
+## 2026-08-20T11:24:02.694152+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: live-verification
+- Decision: selected
+- Reason: Podcli installed at pinned e204f98 with 3 patches; doctor overall_ok True; canary claude+codex on PATH never spawned across a full render (gate held); 587 passed 10 skipped 0 failed
+## 2026-08-22T00:00:00.000000+00:00 - triage
+
+- Request: Implement the H3 Prompt Composer's capabilities in the video studio and anywhere else relevant
+- Source: BMB12d3/minimax-h3-prompt-composer@V5.37.3
+- Decision: technique-only
+- Reason: Upstream ships one 1.1MB HTML file with NO LICENSE (all rights reserved), so nothing could be copied. The valuable part is not its code but which parts of MiniMax H3's prompt grammar a composer must get exactly right, and the shape of a pre-flight check over that grammar.
+- Assimilated: shot timeline grammar, structured camera builder, frame-alignment sentence, prompt check, reference-ownership roles for still-image edits
+- Not assimilated: the composer's HTML/JS, its project format, its AI project-setup import/export, its frame grabber, its visual camera-path planner, and its second camera-move vocabulary
+## 2026-09-06T12:40:41.147792+00:00 - shared-brain
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: shared-brain
+- Decision: inspected
+- Reason: hive-brain answer/recall full-vault: ComfyUI skill says node ops go through ComfyUI-Manager (cm-cli); no existing dependency-preflight note
+
+### Candidates
+- Skills/comfyui/SKILL.md
+  - Decision: selected-donor
+  - Reason: custom node install via ComfyUI-Manager cm-cli; /object_info as the installed-node oracle
+  - Path: `SKILL.md`
+- Skills/local-control-panel-webapps/references/comfyui-lora-manager-installed-ui.md
+  - Decision: rejected
+  - Reason: installed-library UI parity, not a dependency prompt
+## 2026-09-06T12:40:41.179455+00:00 - local-search
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Reason: rg over gateway/studio: persisted download-job system, concurrent download store + pending card, object_info combo lookup, lane request helper, registry model_dependencies schema
+- Selected backbone: local-project:hivemind-content-studio
+
+### Candidates
+- packages/media-gateway/gateway/models.py
+  - Decision: selected
+  - Reason: download job records (history.download_jobs, progress_cb, cancel, .part+rename) = backbone for model installers
+  - Path: `start_civitai_download_job`
+- packages/open-generative-ai/src/lib/civitaiDownloadStore.js
+  - Decision: selected
+  - Reason: keyed concurrent download store with poll loops = backbone for live inline installers
+- packages/open-generative-ai/src/studios/image/PendingLoraCard.jsx
+  - Decision: selected-donor
+  - Reason: progress card UI
+- packages/media-gateway/gateway/models.py:_model_catalog_from_object_info
+  - Decision: selected-donor
+  - Reason: object_info/<class> combo options as installed-model oracle
+- packages/media-gateway/gateway/lanes.py:comfy_lane_request
+  - Decision: selected-donor
+  - Reason: lane-aware authenticated requests
+- packages/media-gateway/workflow-registry.json:model_dependencies
+  - Decision: selected
+  - Reason: existing schema (folder/relativePath/url/bytes/sha256) extended with custom nodes
+- scripts/hivemind-studio-stack custom_nodes symlink installs
+  - Decision: rejected
+  - Reason: boot-time symlinks of repo-shipped nodes, not a runtime installer
+## 2026-09-06T12:47:58.590169+00:00 - local-search
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: local-index
+- Decision: not-assimilated
+- Reason: no local assimilation index present (~/.codex/hive-assimilate/index/chunks.jsonl missing); bounded rg over the project used instead
+## 2026-09-06T12:48:35.353625+00:00 - public-search
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: public-github
+- Decision: not-assimilated
+- Reason: search_github_public.py ran but crashed in its own log step (OSError argument list too long); no public candidate outranked the project's own download-job system + ComfyUI-Manager node map, which the local search already selected as backbone
+## 2026-09-06T13:06:51.369710+00:00 - assimilation-manifest
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: local-project:hivemind-content-studio:packages/media-gateway/gateway/models.py => packages/media-gateway/gateway/dependencies.py, local-project:hivemind-content-studio:packages/media-gateway/gateway/models.py => packages/media-gateway/gateway/dependencies.py, local-project:hivemind-content-studio:packages/media-gateway/bin/media-studio-mcp.mjs => packages/media-gateway/gateway/dependencies.py, local-project:hivemind-content-studio:packages/open-generative-ai/src/lib/civitaiDownloadStore.js => packages/open-generative-ai/src/lib/workflowDependencies.js, local-project:hivemind-content-studio:packages/open-generative-ai/src/studios/image/PendingLoraCard.jsx => packages/open-generative-ai/src/components/WorkflowDependencyPrompt.jsx, local-project:hivemind-content-studio:packages/open-generative-ai/hosted-server.js => packages/open-generative-ai/hosted-server.js, local-project:hivemind-content-studio:src/hivemind_content_studio/gpu_rentals.py => packages/media-gateway/workflow-registry.json, ComfyUI-Manager:extension-node-map.json => packages/media-gateway/gateway/dependencies.py, local-project:hivemind-content-studio:packages/media-gateway/test_app.py => packages/media-gateway/test_app.py
+- Verification: Wrote ASSIMILATION.workflow-dependencies.json with 9 entries and custom_code_assessment=balanced.
+## 2026-09-06T13:06:51.450478+00:00 - verification
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.workflow-dependencies.json: 9 concrete reuse entries, 7 substantive
+## 2026-09-06T13:06:51.504032+00:00 - verification
+
+- Request: Workflow dependency preflight with inline auto-installers for missing ComfyUI custom nodes and model files in hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Reason: verify_assimilation_manifest passed; gateway test_app.py 253 passed, control API 111 passed, JS 1449 passed (3 pre-existing failures from concurrent uncommitted composer work), live preflight against this Mac's lane reported hardware unsupported + 42.5 GB missing

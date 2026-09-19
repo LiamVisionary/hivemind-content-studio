@@ -18,6 +18,7 @@ from typing import Any
 
 from .config import load_config
 from .manifest import add_artifact, load_manifest, write_manifest
+from .private_access import encrypt_private_media
 from .qa import qa_asset
 
 
@@ -126,6 +127,7 @@ class AssetStore:
         manifest = load_manifest(manifest_file)
         artifact = add_artifact(manifest, role=role, path=destination, provider=provider, scene=scene)
         write_manifest(manifest_file, manifest)
+        encrypt_private_media(destination)
         return artifact
 
     def _destination(self, manifest_file: Path, file_name: str, identity: bytes) -> Path:

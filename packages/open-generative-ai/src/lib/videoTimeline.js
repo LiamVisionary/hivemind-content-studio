@@ -1,0 +1,340 @@
+// The manual timeline: an ordered strip of segment cards the user curates by
+// hand — generate into a slot, drag clips in, reorder, drop, combine.
+//
+// This is the general-purpose sibling of chainTimeline.js. That model DERIVES
+// an episode from chain lineage and only exists once two clips are linked; this
+// one is explicit state the user opens with a button, works for any model or
+// workflow, and holds empty placeholder segments ("the shot I am about to
+// generate") as first-class items. Chained generations still record their
+// lineage — the two models coexist, and the strip simply hides the derived one
+// while the explicit one is open.
+//
+// Pure, and in src/lib, so the node:test suite can cover the transitions — the
+// insert/replace/move/capture rules are exactly the kind of arithmetic that is
+// easy to get subtly wrong and invisible in a screenshot.
+
+/** A fresh segment. `url` '' means an empty slot waiting for a generation. */
+export function newTimelineSegment(url = '', model = '') {
+  const id = globalThis.crypto?.randomUUID?.()
+    || `seg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return { id, url: String(url || ''), model: String(model || ''), excluded: false };
+}
+
+// A runaway restore must not mount hundreds of poster decoders; no real
+// sequence is 24 shots of anything (that is six minutes of H3).
+export const MAX_TIMELINE_SEGMENTS = 24;
+
+/** The segments that actually hold a clip, in order. */
+export const filledTimelineSegments = (segments) => (segments || []).filter((seg) => seg?.url);
+
+/**
+ * The segments the cut is built FROM: filled, minus the ones dropped from the
+ * cut. Dropping is non-destructive — the card stays in the scene and the file
+ * is untouched — which is the behaviour the derived chain strip had and the one
+ * surface has to keep.
+ */
+export const timelineCutSegments = (segments) => filledTimelineSegments(segments)
+  .filter((seg) => !seg.excluded);
+
+/** Identity of the cut: what a built combined clip was built FROM. */
+export const timelineCombineKey = (segments) => timelineCutSegments(segments)
+  .map((seg) => seg.url).join(' ');
+
+/** Joining is a concat: one clip is not a cut. */
+export const timelineCanCombine = (segments) => timelineCutSegments(segments).length >= 2;
+
+/** Drop a clip from the cut, or put it back. The card and the file both stay. */
+export function toggleTimelineSegmentExcluded(segments, id) {
+  return (segments || []).map((seg) => (seg.id === id ? { ...seg, excluded: !seg.excluded } : seg));
+}
+
+/**
+ * The scene a chain lineage already describes, as strip segments.
+ *
+ * A chained episode is real state that outlives the browser session — the
+ * lineage lives in History and the sealed per-generation context — while the
+ * strip itself is per-session. So the strip is SEEDED from the lineage on open
+ * and on restore, which is what makes the one surface show a chained scene
+ * again after a restart instead of showing an empty strip beside a scene that
+ * still exists.
+ */
+export function timelineFromChainShots(shots) {
+  const segments = (shots || [])
+    .filter((shot) => shot && shot.url)
+    .slice(0, MAX_TIMELINE_SEGMENTS)
+    .map((shot) => ({ ...newTimelineSegment(shot.url, shot.model || ''), excluded: Boolean(shot.excluded) }));
+  if (!segments.length) return null;
+  // The scene continues at its END: the selected slot is the empty one after
+  // the last shot, which is exactly where "Continue scene" writes.
+  const tail = newTimelineSegment();
+  return { segments: [...segments, tail].slice(0, MAX_TIMELINE_SEGMENTS), selectedId: tail.id };
+}
+
+/**
+ * Opening the timeline seeds it from what is on screen: the current result
+ * becomes shot 1 (selected), matching "the timeline starts with the existing
+ * shot". With nothing on the canvas it opens on a single empty selected slot.
+ */
+export function openTimeline(resultUrl = '', resultModel = '') {
+  const first = newTimelineSegment(resultUrl || '', resultUrl ? resultModel : '');
+  return { segments: [first], selectedId: first.id };
+}
+
+const indexOfSegment = (segments, id) => (segments || []).findIndex((seg) => seg?.id === id);
+
+/**
+ * Where the "+" lands: the empty TAIL when there is one, otherwise one past the
+ * end. A sequence whose last card is already an empty slot does not grow a
+ * second one — that card IS the next shot. Asking twice used to stack blank
+ * cards nobody had asked for, and the second buried the first. Same rule
+ * openSceneAt applies to the card after the clip it arms; and like that one,
+ * only the TAIL is reused — a gap in the middle is a placeholder somebody made
+ * on purpose.
+ *
+ * Exported because the rail has to NAME the slot ("Shot 03") in the menu the
+ * press opens, and a second copy of this rule would drift off by one.
+ */
+export function nextShotIndex(segments) {
+  const list = segments || [];
+  const last = list[list.length - 1];
+  return last && !last.url ? list.length - 1 : list.length;
+}
+
+/** The "+": the slot the next shot lands in, selected. */
+export function addTimelineSegment(segments) {
+  const list = segments || [];
+  const at = nextShotIndex(list);
+  if (at < list.length) return { segments: list, selectedId: list[at].id };
+  const next = newTimelineSegment();
+  return { segments: [...list, next].slice(0, MAX_TIMELINE_SEGMENTS), selectedId: next.id };
+}
+
+/** Put a clip into an existing segment (fill an empty slot, or replace). */
+export function fillTimelineSegment(segments, id, { url, model }) {
+  return (segments || []).map((seg) => (seg.id === id ? { ...seg, url: String(url || ''), model: String(model || '') } : seg));
+}
+
+/** Insert a segment at an index (clamped). Returns the new list. */
+export function insertTimelineSegment(segments, index, segment) {
+  const list = [...(segments || [])];
+  if (list.length >= MAX_TIMELINE_SEGMENTS) return list;
+  const at = Math.max(0, Math.min(Number.isInteger(index) ? index : list.length, list.length));
+  list.splice(at, 0, segment);
+  return list;
+}
+
+/**
+ * Remove a segment. Selection moves to its neighbour — the one that slid into
+ * its slot, else the new last — so the strip never ends up with a selection
+ * pointing at nothing while segments remain.
+ */
+export function removeTimelineSegment(segments, id, selectedId) {
+  const index = indexOfSegment(segments, id);
+  const list = (segments || []).filter((seg) => seg.id !== id);
+  const selected = selectedId === id
+    ? (list[Math.min(Math.max(index, 0), list.length - 1)]?.id || '')
+    : selectedId;
+  return { segments: list, selectedId: selected };
+}
+
+/**
+ * Move a segment to a new index (a card dragged between its siblings). The
+ * index is where it lands in the list WITHOUT itself — the shape a drop gap
+ * naturally produces.
+ */
+export function moveTimelineSegment(segments, id, toIndex) {
+  const from = indexOfSegment(segments, id);
+  if (from < 0) return segments || [];
+  const list = [...(segments || [])];
+  const [seg] = list.splice(from, 1);
+  const at = Math.max(0, Math.min(Number.isInteger(toIndex) ? toIndex : list.length, list.length));
+  list.splice(at, 0, seg);
+  return list;
+}
+
+/**
+ * A finished generation lands in the strip: it fills the selected slot when
+ * that slot is empty, and otherwise becomes a NEW segment directly after the
+ * selected one — never a silent replacement of a clip the user already has.
+ * Returns the landed segment so the caller can select and announce it.
+ */
+export function captureIntoTimeline(segments, selectedId, { url, model }) {
+  const list = segments || [];
+  const index = indexOfSegment(list, selectedId);
+  const selected = index >= 0 ? list[index] : null;
+  if (selected && !selected.url) {
+    const filled = fillTimelineSegment(list, selected.id, { url, model });
+    return { segments: filled, selectedId: selected.id, segment: filled[index] };
+  }
+  const segment = newTimelineSegment(url, model);
+  const at = index >= 0 ? index + 1 : list.length;
+  return { segments: insertTimelineSegment(list, at, segment), selectedId: segment.id, segment };
+}
+
+/**
+ * What a drop MEANS, resolved in one place so the component stays wiring.
+ *
+ * `target`: { id, region } — region 'before' | 'after' | 'on' for a card,
+ * 'end' for the "+" card / trailing zone.
+ * `payload`: { kind: 'segment', id } for a card being reordered, or
+ * { kind: 'clip', url, model } for a clip arriving from outside.
+ *
+ * Returns { action, index?, id?, needsConfirm? } or null for a drop that
+ * changes nothing (a card dropped back onto its own position).
+ */
+export function timelineDropPlan(segments, target, payload) {
+  const list = segments || [];
+  if (!target || !payload) return null;
+  const targetIndex = target.region === 'end' ? list.length : indexOfSegment(list, target.id);
+  if (target.region !== 'end' && targetIndex < 0) return null;
+
+  if (payload.kind === 'segment') {
+    const from = indexOfSegment(list, payload.id);
+    if (from < 0) return null;
+    // A card has no business being dropped ONTO another; the nearest gap wins.
+    let index = target.region === 'end' ? list.length
+      : targetIndex + (target.region === 'before' ? 0 : 1);
+    // Where it lands in the list without itself.
+    if (from < index) index -= 1;
+    if (index === from) return null;
+    return { action: 'move', id: payload.id, index };
+  }
+
+  if (payload.kind !== 'clip' || !payload.url) return null;
+  if (target.region === 'end') return { action: 'append' };
+  if (target.region === 'on') {
+    const seg = list[targetIndex];
+    if (!seg.url) return { action: 'fill', id: seg.id };
+    if (seg.url === payload.url) return null;
+    // Replacing a clip the user already placed loses work — the caller asks.
+    return { action: 'replace', id: seg.id, needsConfirm: true };
+  }
+  return { action: 'insert', index: targetIndex + (target.region === 'before' ? 0 : 1) };
+}
+
+/**
+ * How the NEXT shot continues from the previous one, when "Auto-continue" is
+ * on: the mechanism is a property of the MODEL, the source clip is the last
+ * filled segment before the selected slot.
+ *
+ *   'chain'  MiniMax H3 Motion Context — the pinned tail carries motion and
+ *            room tone across the cut (the real chaining feature).
+ *   'frame'  Any other local workflow with a start-image input (LTX included):
+ *            the next clip opens on the previous clip's LAST FRAME, grabbed
+ *            client-side. Fast, and free to change the scene — but a still
+ *            frame carries no sound, so the next shot scores itself afresh.
+ *   'extend' LTX's own extension, asked for by `withSound`: the model
+ *            regenerates the previous clip AND the new frames from one latent,
+ *            holding the source's audio clean, so the soundtrack continues.
+ *            The gateway trims the source's span back off (extend_return_tail),
+ *            which is what lets a growing clip still feed a segment-per-shot
+ *            strip — the reason this mode used to be unusable here.
+ *
+ * Returns { mode, fromUrl, fromIndex } or null when there is nothing to
+ * continue from or the model has no way to do it.
+ */
+export function timelineContinuationPlan(modelEntry, segments, selectedId, { withSound = false } = {}) {
+  const list = segments || [];
+  const index = indexOfSegment(list, selectedId);
+  if (index < 0 || list[index]?.url) return null;
+  const before = list.slice(0, index).filter((seg) => seg.url);
+  const prev = before[before.length - 1];
+  if (!prev) return null;
+  const mode = timelineContinuationMode(modelEntry, { withSound });
+  if (!mode) return null;
+  return { mode, fromUrl: prev.url, fromIndex: indexOfSegment(list, prev.id) };
+}
+
+/**
+ * Which mechanism this lane would continue with, before there is anything to
+ * continue from. The menu needs it to know which rows to draw; the plan above
+ * needs it to arm. One function, so a row can never be offered for a mechanism
+ * the arming would not use.
+ */
+export function timelineContinuationMode(modelEntry, { withSound = false } = {}) {
+  // H3 chains through Motion Context, which already carries room tone — there
+  // is no quieter variant to choose, so `withSound` does not apply.
+  if (modelEntry?.supportsMotionContext) return 'chain';
+  if (withSound && modelEntry?.supportsVideoInput) return 'extend';
+  return modelEntry?.supportsStartFrame ? 'frame' : '';
+}
+
+/** Can this lane continue WITH its sound, as a distinct choice from 'frame'? */
+export function timelineCanContinueWithSound(modelEntry) {
+  return Boolean(modelEntry)
+    && !modelEntry.supportsMotionContext
+    && Boolean(modelEntry.supportsVideoInput)
+    && Boolean(modelEntry.supportsStartFrame);
+}
+
+/* ---------------- per-tab persistence ---------------- */
+
+// The strip survives a RELOAD, not a new browser session — sessionStorage,
+// like the tab strip and the pending-job registry it has to outlive with.
+// Segments persist as opaque output POINTERS (id, url, model); prompts are
+// deliberately never written here — they live in the encrypted composer and
+// the sealed per-generation context, and a plaintext copy in storage would
+// undo that. Same stance the persisted motionContextUrl already takes.
+const TIMELINE_STORE_PREFIX = 'studio.videoTimeline.';
+
+export const timelineStorageKey = (tabId) => `${TIMELINE_STORE_PREFIX}${Number(tabId) || 0}`;
+
+export function serializeTimeline({ on, segments, selectedId, extend, withSound, showCombined }) {
+  return {
+    on: Boolean(on),
+    segments: (segments || []).slice(0, MAX_TIMELINE_SEGMENTS)
+      .map((seg) => ({
+        id: String(seg.id || ''), url: String(seg.url || ''), model: String(seg.model || ''), excluded: Boolean(seg.excluded),
+      })),
+    selectedId: String(selectedId || ''),
+    extend: Boolean(extend),
+    withSound: Boolean(withSound),
+    showCombined: Boolean(showCombined),
+  };
+}
+
+// Validated field by field rather than trusted: a corrupt blob must degrade to
+// "no timeline", never to a strip of undefined cards.
+export function reviveTimeline(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const segments = Array.isArray(raw.segments)
+    ? raw.segments
+      .filter((seg) => seg && typeof seg === 'object' && typeof seg.id === 'string' && seg.id)
+      .map((seg) => ({
+        id: seg.id,
+        url: typeof seg.url === 'string' ? seg.url : '',
+        model: typeof seg.model === 'string' ? seg.model : '',
+        excluded: seg.excluded === true,
+      }))
+      .slice(0, MAX_TIMELINE_SEGMENTS)
+    : [];
+  if (!segments.length) return null;
+  const ids = new Set(segments.map((seg) => seg.id));
+  if (ids.size !== segments.length) return null;
+  return {
+    on: raw.on === true,
+    segments,
+    selectedId: ids.has(raw.selectedId) ? raw.selectedId : segments[0].id,
+    extend: raw.extend === true,
+    withSound: raw.withSound === true,
+    showCombined: raw.showCombined === true,
+  };
+}
+
+export function saveTimelineState(tabId, state) {
+  try {
+    sessionStorage.setItem(timelineStorageKey(tabId), JSON.stringify(serializeTimeline(state)));
+  } catch { /* storage disabled or full — the strip just doesn't survive */ }
+}
+
+export function loadTimelineState(tabId) {
+  try {
+    return reviveTimeline(JSON.parse(sessionStorage.getItem(timelineStorageKey(tabId)) || 'null'));
+  } catch {
+    return null;
+  }
+}
+
+export function clearTimelineState(tabId) {
+  try { sessionStorage.removeItem(timelineStorageKey(tabId)); } catch { /* non-critical */ }
+}

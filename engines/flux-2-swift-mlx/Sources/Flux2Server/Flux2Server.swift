@@ -16,7 +16,10 @@ struct LoRARequest: Codable, Hashable {
 
 struct GenerateRequest: Codable {
     var prompt: String
-    var imagePath: String
+    // Optional, because Klein is one model with two modes. A request with no
+    // reference is a text-to-image run; the server used to refuse it, so the
+    // whole lane was declared image-only all the way up to the composer.
+    var imagePath: String?
     var imagePaths: [String]?
     var outputPath: String
     var width: Int?
@@ -299,19 +302,24 @@ actor Flux2Service {
             Flux2Profiler.shared.reset()
         }
         do {
-            let sourcePaths = (req.imagePaths?.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }).flatMap { $0.isEmpty ? nil : $0 } ?? [req.imagePath]
+            let requestedPaths = (req.imagePaths?.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+                ?? [req.imagePath ?? ""].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             var loadedRefs: [(path: String, image: CGImage)] = []
-            for path in sourcePaths.prefix(3) {
+            for path in requestedPaths.prefix(model.maxReferenceImages) {
                 guard let image = loadImage(from: path) else {
                     throw Flux2Error.imageProcessingFailed("Failed to load reference image: \(path)")
                 }
                 loadedRefs.append((path, image))
             }
-            guard let firstRef = loadedRefs.first?.image else {
-                throw Flux2Error.imageProcessingFailed("No reference images provided")
+            // No reference is not an error, it is the other mode. Only a run
+            // that DOES carry references takes its canvas from the first one;
+            // a text-to-image run needs the caller to say how big it is.
+            let firstRef = loadedRefs.first?.image
+            guard firstRef != nil || (req.width != nil && req.height != nil) else {
+                throw Flux2Error.imageProcessingFailed("text-to-image needs width and height")
             }
-            let targetWidth = req.width ?? firstRef.width
-            let targetHeight = req.height ?? firstRef.height
+            let targetWidth = req.width ?? firstRef!.width
+            let targetHeight = req.height ?? firstRef!.height
             var refs: [CGImage] = []
             for item in loadedRefs {
                 guard let ref = cropResizeImage(item.image, width: targetWidth, height: targetHeight) else {
@@ -319,6 +327,7 @@ actor Flux2Service {
                 }
                 refs.append(ref)
             }
+            let mode: Flux2GenerationMode = refs.isEmpty ? .textToImage : .imageToImage(images: refs)
             let active = try pipeline(for: req.loras)
             let embeddings: MLXArray
             if let cached = embeddingCache[req.prompt] {
@@ -331,7 +340,7 @@ actor Flux2Service {
             progressStore.update(jobId: jobId, currentStep: 0, totalSteps: req.steps ?? 1, phase: "starting")
             active.pipeline.resetTransformerInferenceCaches()
             let image = try await active.pipeline.generate(
-                mode: .imageToImage(images: refs),
+                mode: mode,
                 prompt: req.prompt,
                 interpretImagePaths: nil,
                 height: targetHeight,

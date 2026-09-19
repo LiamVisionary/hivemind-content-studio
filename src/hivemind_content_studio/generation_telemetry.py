@@ -13,6 +13,7 @@ import uuid
 from typing import Any, Callable
 
 from .run_store import RunStore
+from .studio_telemetry import StudioGenerationLedger, failure_hint
 
 
 GENERATION_KINDS = {
@@ -140,8 +141,31 @@ def generation_model(manifest: dict[str, Any], provider: str, intent: str, execu
     return "automatic"
 
 
-def generation_telemetry_snapshot(store: RunStore, *, limit: int = 100) -> dict[str, Any]:
-    events = store.list_events(kind_prefix="generation.", limit=10_000)
+def generation_telemetry_snapshot(
+    store: RunStore, *, limit: int = 100, studio_ledger: StudioGenerationLedger | None = None
+) -> dict[str, Any]:
+    """Every generation attempt this studio made, folded per attempt.
+
+    Two sources, one shape: the run store's ``generation.*`` events (what a
+    content run did) and the studio ledger (what the video tab did, with the
+    machine-safe failure classification the backend gave). The ledger lives
+    beside the store, so a caller that only has the store still sees both."""
+    events = list(store.list_events(kind_prefix="generation.", limit=10_000))
+    ledger = studio_ledger or StudioGenerationLedger.beside(store.path)
+    for index, row in enumerate(ledger.rows()):
+        # Rows are oldest first. The sort below orders by timestamp then id, and
+        # the ledger's timestamps are whole seconds, so a row's position in the
+        # file is its tiebreaker: a "failed" written a moment after its
+        # "started" must fold on top of it, not under it.
+        events.append({
+            "id": index + 1,
+            "run_id": "",
+            "lane": "studio",
+            "kind": f"generation.{row.get('status')}",
+            "payload": {**row, "surface": row.get("surface") or "studio"},
+            "created_at": row.get("at") or "",
+        })
+    events.sort(key=lambda event: (str(event.get("created_at") or ""), _event_order(event)), reverse=True)
     attempts: dict[str, dict[str, Any]] = {}
     for event in reversed(events):
         payload = event["payload"] if isinstance(event.get("payload"), dict) else {}
@@ -161,25 +185,45 @@ def generation_telemetry_snapshot(store: RunStore, *, limit: int = 100) -> dict[
         reverse=True,
     )[: max(1, min(500, int(limit)))]
     recent = [{key: value for key, value in item.items() if not key.startswith("_")} for item in ordered]
+    for item in recent:
+        if item.get("failure_code"):
+            hint = failure_hint({"code": item["failure_code"], "node_class": item.get("failure_node_class")})
+            if hint:
+                item["failure_hint"] = hint
     by_provider = _breakdown(terminal, "provider")
     by_kind = _breakdown(terminal, "kind")
+    failed = [item for item in terminal if item.get("status") == "failed"]
     return {
         "ok": True,
         "privacy": "Local aggregate telemetry only. Prompts, media, credentials, tokens, and provider payloads are excluded.",
         "summary": _aggregate(terminal, running=len(running)),
         "by_provider": by_provider,
         "by_kind": by_kind,
+        # Why generations fail here, by machine-safe code — the question the
+        # redacted toast could not answer.
+        "by_failure": _breakdown(failed, "failure_code"),
         "recent_attempts": recent,
     }
 
 
+def _event_order(event: dict[str, Any]) -> int:
+    try:
+        return int(event.get("id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _safe_attempt_fields(payload: dict[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
-    for key in ("intent", "kind", "provider", "model", "status", "error_type"):
+    for key in (
+        "intent", "kind", "provider", "model", "status", "error_type",
+        # Studio-ledger columns: identifiers only (see studio_telemetry).
+        "surface", "stage", "workflow_id", "run_on", "failure_code", "failure_node_class", "lora_base",
+    ):
         value = str(payload.get(key) or "").strip()
         if value:
             safe[key] = value[:240]
-    for key in ("duration_ms", "artifact_count"):
+    for key in ("duration_ms", "artifact_count", "artifact_bytes", "lora_count"):
         if payload.get(key) is not None:
             safe[key] = max(0, int(float(payload[key])))
     for key in ("estimated_cost_usd", "charged_usd"):

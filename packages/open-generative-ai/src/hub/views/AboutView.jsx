@@ -1,0 +1,361 @@
+// About — the licence surface.
+//
+// This app is AGPL-3.0-or-later and, until this page existed, said so nowhere in
+// its own interface. GPLv3/AGPLv3 §5(d) asks an interactive program to display
+// Appropriate Legal Notices — copyright, no warranty, the licence, and how to
+// read it — and §6 plus AGPL §13 ask a distributed or network-served copy to
+// offer its Corresponding Source. This page is that offer: version and commit,
+// the licence, a link to the tagged source, the no-warranty line, and the
+// generated third-party notices.
+//
+// One fetch of /api/about on first open, plus one per licence document the
+// reader actually opens — the licence text alone is 34 KB, and a page that
+// names a file it cannot show is the defect this replaced.
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { APP_VERSION, shortCommit, versionLabel } from '../../lib/appVersion.js';
+import { describeFailure } from '../../lib/describeFailure.js';
+import {
+  Button, Card, CollapsibleSection, FailureCallout, LoadingState, Pill, SectionLabel, Spinner,
+} from '../../ui/kit.jsx';
+import { HubToolbar } from '../components/HubToolbar.jsx';
+import { t, tf } from '../../lib/i18n.js';
+
+// Only the licences worth a group of their own; everything else is counted under
+// "other" rather than producing a page of one-package headings.
+const GROUP_MINIMUM = 2;
+
+function normalizeLicense(value) {
+  const text = String(value || '').trim();
+  if (!text) return t('about.unstated');
+  // "MIT License" and "MIT" are the same terms written by two packaging tools.
+  return text.replace(/\s+License$/i, '').replace(/\s+/g, ' ');
+}
+
+// [{ license, packages: [...] }], biggest group first, "Unstated" last so a
+// missing licence is the thing left on screen rather than buried mid-list.
+export function groupByLicense(packages) {
+  const groups = new Map();
+  for (const item of packages || []) {
+    const key = normalizeLicense(item?.license);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  const rows = [...groups.entries()].map(([license, items]) => ({ license, packages: items }));
+  const small = rows.filter((row) => row.packages.length < GROUP_MINIMUM && row.license !== t('about.unstated'));
+  const kept = rows.filter((row) => !small.includes(row));
+  if (small.length) {
+    kept.push({ license: t('about.otherLicences'), packages: small.flatMap((row) => row.packages) });
+  }
+  return kept.sort((a, b) => {
+    if (a.license === t('about.unstated')) return 1;
+    if (b.license === t('about.unstated')) return -1;
+    return b.packages.length - a.packages.length;
+  });
+}
+
+// Everything the bundle carries, in one flat list: the pinned Python set, each
+// npm lockfile, the Rust crates statically linked into the shell, and the
+// binaries the DMG carries that no lockfile knows about. A crate whose notice is
+// not shown here is a crate whose notice does not ship.
+export function allNoticePackages(notices) {
+  const python = notices?.python?.packages || [];
+  const npm = Object.values(notices?.npm || {}).flat();
+  const rust = notices?.rust?.packages || [];
+  const bundled = notices?.bundled || [];
+  return [...python, ...npm, ...rust, ...bundled];
+}
+
+function Row({ label, children }) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-b border-line1 py-2 last:border-b-0">
+      <span className="w-28 shrink-0 text-[11px] uppercase tracking-[0.06em] text-ink3">{label}</span>
+      <span className="min-w-0 flex-1 break-words text-[13px] text-ink1">{children}</span>
+    </div>
+  );
+}
+
+function LicenseGroup({ group }) {
+  const [open, setOpen] = useState(false);
+  const shown = open ? group.packages : group.packages.slice(0, 8);
+  return (
+    <div className="rounded-lg border border-line1 bg-bg2 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <b className="text-[13px] font-semibold text-ink1">{group.license}</b>
+        <Pill tone={group.license === t('about.unstated') ? 'warn' : 'neutral'}>{group.packages.length}</Pill>
+      </div>
+      <p className="mt-1.5 break-words font-mono text-[11px] leading-relaxed text-ink3 [overflow-wrap:anywhere]">
+        {shown.map((item) => `${item.name}@${item.version}`).join(', ')}
+      </p>
+      {group.packages.length > shown.length || open ? (
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className="mt-1.5 text-[11px] font-medium text-honey hover:underline"
+        >
+          {open
+            ? t('about.showFewer')
+            : tf('about.showMore', group.packages.length - shown.length)}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One of the two licence documents, fetched when its section is opened.
+ *
+ * This page used to say "the full licence text ships with the app (LICENSE)"
+ * and give no way to read it — a claim about a file, made by a build that could
+ * not check whether the file was there. Now it reads the file: present, the
+ * text is on the page; absent, the page says which build shipped without it and
+ * points at the tagged source, which is where the AGPL's offer actually lives.
+ *
+ * Mounted only while the section is open (CollapsibleSection renders no closed
+ * children), so 34 KB of licence text is never fetched by a page nobody opened.
+ */
+function LicenceDocument({ name, sourceUrl }) {
+  const [doc, setDoc] = useState(null);
+  const [failure, setFailure] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setFailure(null);
+    try {
+      const response = await fetch(`/api/about/document/${name}`, { headers: { Accept: 'application/json' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setDoc(await response.json());
+    } catch (error) {
+      setFailure(describeFailure(error, { operation: 'reading the licence' }));
+    } finally {
+      setLoading(false);
+    }
+  }, [name]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  if (failure) {
+    return (
+      <FailureCallout
+        title={failure.title}
+        detail={failure.detail}
+        onRetry={load}
+        retryDisabled={loading}
+        retryLabel={t('common.tryAgain')}
+      />
+    );
+  }
+  if (!doc) {
+    return (
+      <Card className="flex items-center gap-2 p-4 text-[13px] text-ink3">
+        <Spinner size={14} />
+      </Card>
+    );
+  }
+  if (!doc.available) {
+    return (
+      <Card className="flex flex-wrap items-center justify-between gap-3 p-4 text-[13px] text-ink2">
+        <span className="min-w-[240px] flex-1">{tf('about.documentMissing', doc.filename || name)}</span>
+        <a
+          href={sourceUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="text-[13px] font-semibold text-honey hover:underline"
+        >
+          {t('about.viewSource')}
+        </a>
+      </Card>
+    );
+  }
+  return (
+    <Card className="p-0">
+      <pre className="custom-scrollbar m-0 max-h-[420px] overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[11px] leading-relaxed text-ink2">
+        {doc.text}
+      </pre>
+    </Card>
+  );
+}
+
+export function AboutView({ active }) {
+  const [about, setAbout] = useState(null);
+  const [failure, setFailure] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setFailure(null);
+    try {
+      const response = await fetch('/api/about', { headers: { Accept: 'application/json' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setAbout(await response.json());
+      setLoaded(true);
+    } catch (error) {
+      setFailure(describeFailure(error, { operation: 'reading the version' }));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // First open only. Nothing here changes while the app runs.
+  useEffect(() => {
+    if (active && !loaded && !loading) void load();
+  }, [active, loaded, loading, load]);
+
+  const groups = useMemo(() => groupByLicense(allNoticePackages(about?.notices)), [about]);
+  const total = useMemo(() => allNoticePackages(about?.notices).length, [about]);
+
+  // The chip's build-time version is shown immediately; the server's answer
+  // replaces it. A disagreement means this page came from a different build than
+  // the one answering, which is worth saying rather than hiding.
+  const shownVersion = about?.version || APP_VERSION;
+  const mismatch = Boolean(about?.version && APP_VERSION && about.version !== APP_VERSION);
+  const sourceUrl = about?.source_url || 'https://github.com/LiamVisionary/hivemind-content-studio';
+  const taggedSource = about?.version ? `${sourceUrl}/releases/tag/studio-v${about.version}` : sourceUrl;
+
+  return (
+    // Hub pages stay mounted and are display-toggled; the shell topbar already
+    // names the page, so the toolbar carries the kicker and this body scrolls
+    // inside itself (DESIGN.md §2).
+    <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+      <HubToolbar
+        kicker={t('nav.about')}
+        title={about?.product || t('app.name')}
+        subtitle={t('about.subtitle')}
+        right={<Pill tone="neutral">{about?.license || 'AGPL-3.0-or-later'}</Pill>}
+      />
+      <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+      <div className="mx-auto flex w-full max-w-[820px] flex-col gap-6">
+        {failure ? (
+          <FailureCallout
+            title={failure.title}
+            detail={failure.detail}
+            onRetry={load}
+            retryDisabled={loading}
+            retryLabel={t('common.tryAgain')}
+          />
+        ) : null}
+
+        <Card className="p-4">
+          <Row label={t('about.version')}>
+            <span className="font-mono">{versionLabel({ version: shownVersion, commit: about?.commit }) || (loading ? '…' : '—')}</span>
+            {mismatch ? (
+              <span className="ml-2 text-[11px] text-warn">
+                {tf('about.builtFrom', APP_VERSION)}
+              </span>
+            ) : null}
+          </Row>
+          <Row label={t('about.built')}>
+            <span className="font-mono">{about?.build_date ? String(about.build_date).slice(0, 10) : '—'}</span>
+          </Row>
+          <Row label={t('about.licence')}>
+            {about?.license || 'AGPL-3.0-or-later'}
+          </Row>
+          <Row label={t('common.source')}>
+            <a
+              href={taggedSource}
+              target="_blank"
+              rel="noreferrer"
+              className="text-honey hover:underline"
+            >
+              {t('about.viewSource')}
+            </a>
+            <span className="ml-2 text-[11px] text-ink3">
+              {about?.commit
+                ? tf('about.thisBuildIsCommit', shortCommit(about.commit))
+                : t('about.correspondingSource')}
+            </span>
+          </Row>
+          <Row label={t('about.security')}>
+            <a
+              href={`${sourceUrl}/security/advisories/new`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-honey hover:underline"
+            >
+              {t('about.reportVulnerability')}
+            </a>
+            <span className="ml-2 text-[11px] text-ink3">
+              {t('about.securityDoc')}
+            </span>
+          </Row>
+        </Card>
+
+        <section className="flex flex-col gap-2">
+          <SectionLabel>{t('about.warranty')}</SectionLabel>
+          <Card className="p-4 text-[13px] leading-relaxed text-ink2">
+            <p>
+              {t('about.noWarranty')}
+            </p>
+            <p className="mt-2">
+              {t('about.freeSoftware')}
+            </p>
+            <p className="mt-2 text-ink3">
+              {t('about.licenceShips')}
+            </p>
+          </Card>
+          <CollapsibleSection title={t('about.licenceText')} storageKey="about.licenceText">
+            <LicenceDocument name="licence" sourceUrl={taggedSource} />
+          </CollapsibleSection>
+          <CollapsibleSection title={t('about.donorProvenance')} storageKey="about.donorProvenance">
+            <LicenceDocument name="notices" sourceUrl={taggedSource} />
+          </CollapsibleSection>
+        </section>
+
+        <section className="flex flex-col gap-2">
+          <SectionLabel>{t('about.whatsNew')}</SectionLabel>
+          {about?.whats_new?.length ? (
+            <Card className="p-4">
+              <ul className="flex flex-col gap-2">
+                {about.whats_new.map((entry) => (
+                  <li key={`${entry.date}-${entry.title}`} className="flex flex-col gap-0.5">
+                    <span className="font-mono text-[11px] text-ink3">{entry.date}</span>
+                    <span className="text-[13px] text-ink1">{entry.title}</span>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          ) : (
+            <Card className="p-4 text-[13px] text-ink3">
+              {t('about.noChangelog')}
+            </Card>
+          )}
+        </section>
+
+        <section className="flex flex-col gap-2">
+          <SectionLabel>
+            {t('about.thirdPartyNotices')}
+            {total ? <span className="ml-2 font-normal text-ink3">{total}</span> : null}
+          </SectionLabel>
+          {loading && !about ? (
+            <LoadingState label={t('app.loading')} className="min-h-[220px] py-10" />
+          ) : about?.notices?.available === false ? (
+            // A build that shipped without running the notices generator. The
+            // page still carries the licence and the source; this says exactly
+            // what is missing and how it comes back.
+            <Card className="flex flex-col items-start gap-2 p-4">
+              <p className="text-[13px] text-ink2">
+                {t('about.noNotices')}
+              </p>
+              <p className="font-mono text-[11px] text-ink3">python3 scripts/generate_notices.py</p>
+              <Button size="sm" variant="neutral" icon="refresh" onClick={load} disabled={loading}>
+                {t('common.tryAgain')}
+              </Button>
+            </Card>
+          ) : groups.length ? (
+            <>
+              <p className="text-[12px] text-ink3">
+                {t('about.groupedByLicence')}
+                {about?.notices?.generated_at ? ` · ${about.notices.generated_at}` : ''}
+              </p>
+              <div className="grid gap-2 md:grid-cols-2">
+                {groups.map((group) => <LicenseGroup key={group.license} group={group} />)}
+              </div>
+            </>
+          ) : null}
+        </section>
+      </div>
+      </div>
+    </div>
+  );
+}

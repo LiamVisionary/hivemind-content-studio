@@ -1,8 +1,10 @@
 /**
  * Test script for MiniMax provider integration.
  *
- * Verifies that the MiniMax Image 01 model is correctly registered in models.js
- * and that the model definition has the expected structure.
+ * Verifies that the MiniMax Image 01 model is correctly registered in the one
+ * MUAPI catalog (src/hivemind_content_studio/catalog/muapi_models.json, served
+ * to the studios at /api/muapi/catalog) and that the model definition has the
+ * expected structure.
  *
  * Usage:
  *   node scripts/test_minimax_provider.js
@@ -20,23 +22,13 @@ const ROOT = join(__dirname, "..");
 
 // ── 1. Model registration check ──────────────────────────────────────────────
 
-const modelsContent = readFileSync(
-  join(ROOT, "src", "lib", "models.js"),
-  "utf-8"
-);
-
-// Extract the t2iModels JSON array via a simple regex
-const t2iMatch = modelsContent.match(/export const t2iModels = (\[[\s\S]*?\]);/);
-if (!t2iMatch) {
-  console.error("FAIL: Could not parse t2iModels from src/lib/models.js");
-  process.exit(1);
-}
+const CATALOG = join(ROOT, "..", "..", "src", "hivemind_content_studio", "catalog", "muapi_models.json");
 
 let t2iModels;
 try {
-  t2iModels = JSON.parse(t2iMatch[1]);
+  t2iModels = JSON.parse(readFileSync(CATALOG, "utf-8")).buckets.t2i;
 } catch (err) {
-  console.error("FAIL: t2iModels is not valid JSON:", err.message);
+  console.error(`FAIL: could not read the MUAPI catalog at ${CATALOG}:`, err.message);
   process.exit(1);
 }
 
@@ -45,7 +37,7 @@ const minimaxModel = t2iModels.find((m) => m.id === "minimax-image-01");
 if (!minimaxModel) {
   console.error(
     'FAIL: "minimax-image-01" not found in t2iModels.\n' +
-      "Expected it to be registered in src/lib/models.js."
+      "Expected it to be registered in the catalog's t2i bucket."
   );
   process.exit(1);
 }
@@ -86,21 +78,7 @@ console.log(
   `      aspect ratios: ${minimaxModel.inputs.aspect_ratio.enum.join(", ")}`
 );
 
-// ── 2. models_dump.json check ─────────────────────────────────────────────────
-
-const dump = JSON.parse(
-  readFileSync(join(ROOT, "models_dump.json"), "utf-8")
-);
-const dumpEntry = dump.t2i?.find((m) => m.id === "minimax-image-01");
-if (!dumpEntry) {
-  console.error(
-    'FAIL: "minimax-image-01" not found in models_dump.json t2i section'
-  );
-  process.exit(1);
-}
-console.log("PASS: minimax-image-01 found in models_dump.json");
-
-// ── 3. Live API smoke test (optional) ────────────────────────────────────────
+// ── 2. Live API smoke test (optional) ────────────────────────────────────────
 
 const apiKey = process.env.MUAPI_KEY;
 if (!apiKey) {

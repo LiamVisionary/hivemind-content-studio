@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0c0c0e" />
+    <title>Hivemind Content Studio — offline</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0c0c0e;
+        color: #e8e6e3;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      main { text-align: center; padding: 2rem; }
+      img { width: 72px; height: 72px; border-radius: 16px; margin-bottom: 1rem; }
+      h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
+      p { font-size: .85rem; color: #9a978f; margin: 0 0 1.25rem; }
+      button {
+        border: 1px solid #3a3833; background: #1a1918; color: #e8b53a;
+        padding: .5rem 1.25rem; border-radius: 8px; font-size: .85rem;
+        font-weight: 600; cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/app-icon-192.png" alt="" />
+      <h1>The studio is unreachable</h1>
+      <p>Your device is offline, or the studio server is not running on this network.</p>
+      <button onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>

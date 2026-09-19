@@ -5,91 +5,347 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
-import json
+import logging
 import os
-import tempfile
-import urllib.error
-import urllib.request
+import re
+import sys
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-import yaml
 
-from .approval_config import load_approval_ledger
-from .agent_runtime import attach_script
+from .config import DataFormatTooNew
 from .approval_ledger import ApprovalLedger
-from .asset_store import AssetStore
-from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
-from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
-from .lanes import LANE_MATRIX
-from .manifest import load_manifest, write_manifest
-from .media_catalog import media_catalog
-from .hivemindos_oauth import oauth_provider_status, start_oauth_login
+from .canvas_history import (
+    CanvasDeleteFetcher,
+    CanvasHistoryFetcher,
+    CanvasHistoryStore,
+    CanvasMediaFetcher,
+    CanvasWorkflowFetcher,
+)
+from . import (
+    local_llm, media_posters,
+)
 from .orchestrator import ContentOrchestrator
-from .prompt_history import PromptHistoryStore
-from .providers import provider_report, providers_for
-from .shared_env import apply_shared_hive_env
-from .studio_drafts import StudioRunDraft
-from .template_catalog import template_report
-from .unified_runtime import unified_runtime_snapshot
+from .account_gate import account_gate_html
+from .accounts import (
+    ACCOUNT_COOKIE,
+)
+from .private_access import (
+    OwnerAccess,
+    PrivateFieldCipher,
+)
+from .gpu_rentals import register_gpu_rental_routes
+from .hivemindos_hosted_media import warm_hosted_media_prices_in_background
+from .observability import (
+    access_route,
+    configure_logging,
+    record_access,
+    record_incident,
+    remedy_text,
+)
+from .api import accounts as accounts_routes
+from .api import approvals as approvals_routes
+from .api import bridge as bridge_routes
+from .api import canvas as canvas_routes
+from .api import catalog as catalog_routes
+from .api import hivemindos as hivemindos_routes
+from .api import image as image_routes
+from .api import ingredients as ingredients_routes
+from .api import lanes as lanes_routes
+from .api import media_models as media_models_routes
+from .api import muapi as muapi_routes
+from .api import music as music_routes
+from .api import oauth as oauth_routes
+from .api import passbook as passbook_routes
+from .api import prompting as prompting_routes
+from .api import references as references_routes
+from .api import restore as restore_routes
+from .api import runs as runs_routes
+from .api import sam3 as sam3_routes
+from .api import settings as settings_routes
+from .api import shell as shell_routes
+from .api import sprite as sprite_routes
+from .api import system as system_routes
+from .api import vault as vault_routes
+from .api import video as video_routes
+from .api.context import build_context
+# ── the other half of this module ─────────────────────────────────────────────
+# This file keeps the app object, the middleware chain, the lifespan and
+# main(); every subject's routes live in hivemind_content_studio/api/ (see its
+# __init__). Names are imported here rather than only where they are used
+# because they are re-exported at their old name: tests import them from
+# control_api, and several are PATCHED on this module by name — the route
+# modules read those back off it at call time, which is what keeps
+# `monkeypatch.setattr("…control_api.run_media_studio_video", …)` working
+# after the route moved out.
+import subprocess  # noqa: E402, F401 — patched here; read through ctx.control_api
+import urllib.error  # noqa: E402, F401
+import urllib.request  # noqa: E402, F401
+
+from . import (  # noqa: F401 — patched here; read through ctx.control_api
+    comfy_lanes,
+    hivemindos_models,
+    image_router,
+    muapi_proxy,
+    text_models,
+)
+from .hivemindos_brain import brain_catalog, plan_with_brain  # noqa: F401
+from .hivemindos_oauth import oauth_provider_status, start_oauth_login  # noqa: F401
+from .media_catalog import media_catalog  # noqa: F401
+from .media_studio import (  # noqa: F401
+    cancel_video as run_media_studio_video_cancel,
+    check_video as run_media_studio_video_check,
+    current_owner_spki as media_studio_owner_spki,
+    finish_video as run_media_studio_video_finish,
+    generate_video as run_media_studio_video,
+    smart_mask as run_smart_mask,
+    start_video as run_media_studio_video_start,
+    video_job_record as run_media_studio_video_record,
+)
+from .remote_access import (  # noqa: F401
+    RemoteAccessError,
+    set_remote_access,
+    tailnet_hostname,
+)
+from .unified_runtime import unified_runtime_snapshot  # noqa: F401
+from .api.cloud_output import (  # noqa: F401 — re-exported at the old name
+    CLOUD_OUTPUT_MAX_BYTES,
+    CloudOutputFetcher,
+    cloud_output_suffix,
+    fetch_cloud_output,
+)
+from .api.hosts import (  # noqa: F401 — re-exported at the old name
+    PROXY_SECRET_ENV,
+    PROXY_SECRET_HEADER,
+    _LOOPBACK_HOSTS,
+    _LOOPBACK_NAMES,
+    _SAFE_METHODS,
+    _host_name,
+)
+from .api.media_common import (  # noqa: F401 — re-exported at the old name
+    E2E_REQUESTER_HEADER,
+    _INLINE_AUDIO_SUFFIXES,
+    _INLINE_IMAGE_SUFFIXES,
+    _INLINE_VIDEO_SUFFIXES,
+    _e2e_envelope_response,
+    _encrypt_private_media,
+    _private_media_exists,
+    _private_media_response,
+    _PRIVATE_MEDIA_SUFFIX,
+    _private_media_sidecar,
+    _public_media_studio_qa,
+    _public_media_studio_result,
+    _read_private_media,
+    _remove_media_studio_qa_artifacts,
+    _requester_pub,
+    _sniffed_media_suffix,
+    _write_inline_media,
+)
+from .api.models import (  # noqa: F401 — re-exported at the old name
+    AccountCreateBody,
+    AccountPasswordChangeBody,
+    AccountRecoveryChallengeBody,
+    AccountRecoveryResetBody,
+    AccountRenameBody,
+    AccountSetupBody,
+    AccountUnlockBody,
+    CancelBody,
+    CanvasProvenanceBody,
+    CloudOutputAdoptBody,
+    ComfyAttachBody,
+    ComfyDetachBody,
+    ConfirmDeleteBody,
+    DecisionBody,
+    FavoriteBody,
+    HivemindosConnectBody,
+    HivemindosLinkCallbackBody,
+    HivemindosMergeBody,
+    HivemindosTopUpBody,
+    HostedSam3MaskBody,
+    HostedSam3QuoteBody,
+    LaneFreeBody,
+    MediaStudioIngredientImageBody,
+    MediaStudioIngredientPreviewBody,
+    MediaStudioInpaintBody,
+    MediaStudioLoraBody,
+    MediaStudioReferenceAudioBody,
+    MediaStudioReferenceVideoBody,
+    MediaStudioVideoBody,
+    PassBookBody,
+    PassBookModeBody,
+    PassBookResolveBody,
+    PassBookRevokeBody,
+    PassBookUnlockBody,
+    PasskeyAssertionBody,
+    PasskeyChallengeBody,
+    PasskeyRegisterBody,
+    PromptHelperDescribeLookBody,
+    PromptHelperGenerateBody,
+    PromptHelperLoadBody,
+    PromptHelperUnloadBody,
+    RemoteAccessBody,
+    RestorePlanBody,
+    RetryBody,
+    SettingsBody,
+    SimplePlanBody,
+    SpriteMatteBody,
+    SpritePointBody,
+    StoryProducerBody,
+    StudioImageBody,
+    VaultBlobBody,
+    VaultIdentityBody,
+    VaultPassphraseWrap,
+    VaultPrfWrapBody,
+    VaultRecoveryWrapBody,
+    _MAX_DESCRIPTION_CHARS,
+    _MAX_ID_CHARS,
+    _MAX_PROMPT_CHARS,
+    _StagedVideoInputs,
+)
+from .api.timings import (  # noqa: F401 — re-exported at the old name
+    _DEFAULT_VIDEO_SECONDS_PER_WORK_UNIT,
+    _VIDEO_BACKEND_GONE,
+    _VIDEO_RECORD_PROBE_SECONDS,
+    _VIDEO_UNRESPONSIVE_CHECKS,
+    _VIDEO_UNRESPONSIVE_SECONDS,
+    GenerationTimings,
+    _estimate_seconds_for_work,
+    _video_frame_megapixels,
+    _video_timing_signature,
+)
 
 
-class CancelBody(BaseModel):
-    reason: str
+log = logging.getLogger("hivemind.studio.control")
 
 
-class RetryBody(BaseModel):
-    step_id: str
+class AccountLocked(Exception):
+    """No session and no bearer: answered as the middleware's sign-in shape.
+
+    Raised by ``require_control`` so the machine-allowed routes (generate,
+    poll, runs) refuse an expired browser session with the SAME body the
+    owner-gated routes use — ``{"detail": "Sign in to a workspace",
+    "privacy": "account-locked"}`` — instead of an operator-token message."""
 
 
-class DecisionBody(BaseModel):
-    decided_by: str = "owner"
+ACCOUNT_LOCKED_DETAIL = "Sign in to a workspace"
+# How long a stop waits for a video finisher to seal its download before giving
+# up on it. Long enough for a seal, short enough that launchd's own SIGKILL
+# timer never fires.
+SHUTDOWN_FINISHER_SECONDS = 20.0
 
 
-class FavoriteBody(BaseModel):
-    favorite: bool
+def unexpected_error_detail() -> str:
+    """The 500 sentence. Was "Check the control API log", which named a file
+    the app did not write, in a directory the stack marked hidden, and emptied
+    on the restart a person tries first. What replaces it is an incident id in
+    the same reply and a Copy details action beside it."""
+    return remedy_text("unexpected")
 
 
-class SimplePlanBody(BaseModel):
-    prompt: str
-    provider: str
-    model: str
-    auth: str | None = None
-    promptHelper: bool = True
-    walkthrough: bool = False
-    confirmed: bool = False
-    history: list[dict[str, Any]] = []
-    attachments: list[dict[str, Any]] = []
-    imageSelection: dict[str, str] = {}
-    videoSelection: dict[str, str] = {}
-    studioMode: Literal["create", "edit", "animate", "workflow"] = "create"
+def _validation_sentence(errors: list[Any]) -> str:
+    """FastAPI's 422 array as one sentence: "steps: Input should be less than
+    or equal to 100 · duration_seconds: …". Every studio wrapper does
+    ``payload.detail || …`` and rendered the array as ``[object Object]``."""
+    parts: list[str] = []
+    for error in errors or []:
+        if not isinstance(error, dict):
+            continue
+        location = [str(part) for part in (error.get("loc") or []) if str(part) not in {"body", "query", "path", "header"}]
+        message = str(error.get("msg") or "is invalid").strip()
+        parts.append(f"{'.'.join(location)}: {message}" if location else message)
+    return " · ".join(parts) or "The request was not valid"
 
 
-def _route_snapshot(value: object) -> dict[str, str]:
-    if not isinstance(value, dict):
-        return {"provider": "automatic", "model": "automatic"}
-    provider = str(value.get("provider") or "automatic")[:160]
-    model = str(value.get("model") or "automatic")[:240]
-    auth = str(value.get("auth") or "")[:40]
-    return {"provider": provider, "model": model, **({"auth": auth} if auth else {})}
+# The size ceilings, and the three writers that read them. Both halves stayed
+# here when the routes moved out: a test shortens a ceiling by patching it on
+# THIS module, and these functions resolve it out of this module's globals, so
+# separating them would quietly stop the ceiling being enforceable under test.
+# api/media_common.py holds everything they lean on.
+_MAX_PRIVATE_IMAGE_BYTES = 32 * 1024 * 1024
+_MAX_PRIVATE_VIDEO_BYTES = 100 * 1024 * 1024
+# One number per kind of file: inline voice clips and uploaded ones share it.
+_MAX_PRIVATE_AUDIO_BYTES = 25 * 1024 * 1024
 
 
-def _composer_snapshot(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    return {
-        "studioMode": str(value.get("studioMode") or "create"),
-        "brain": _route_snapshot(value.get("brain")),
-        "imageSelection": _route_snapshot(value.get("imageSelection")),
-        "videoSelection": _route_snapshot(value.get("videoSelection")),
-        "promptHelper": bool(value.get("promptHelper", True)),
-        "walkthrough": bool(value.get("walkthrough", False)),
-    }
+def _write_inline_image(value: str, destination_dir: Path, *, label: str = "") -> Path:
+    written = _write_inline_media(
+        value,
+        destination_dir,
+        field_name="image_base64",
+        mime_suffixes=_INLINE_IMAGE_SUFFIXES,
+        default_suffix=".png",
+        max_bytes=_MAX_PRIVATE_IMAGE_BYTES,
+        label=label,
+    )
+    # An iPhone HEIC becomes a JPEG here too. The multipart upload route above
+    # has done this since 2026-08-22 because ComfyUI's LoadImage has no HEIC
+    # decoder, but this route was missed — and it is the one a SAVED reference
+    # comes back through: sealed media can only be decrypted in the browser, so
+    # reuse arrives as image_base64 rather than as an upload. A Hive Persona ID
+    # built from iPhone photos therefore reached the lane as .heic no matter how
+    # many times the pictures were re-attached.
+    return media_posters.transcode_opaque_image(written) or written
+
+
+def _write_inline_video(value: str, destination_dir: Path, *, label: str = "") -> Path:
+    return _write_inline_media(
+        value,
+        destination_dir,
+        field_name="video_base64",
+        mime_suffixes=_INLINE_VIDEO_SUFFIXES,
+        default_suffix=".mp4",
+        max_bytes=_MAX_PRIVATE_VIDEO_BYTES,
+        label=label,
+    )
+
+
+def _write_inline_audio(value: str, destination_dir: Path, *, label: str = "") -> Path:
+    # Reference clips are 15 seconds at most, so even lossless stereo stays
+    # small; the cap is here to reject non-audio payloads, not to bound length.
+    return _write_inline_media(
+        value,
+        destination_dir,
+        field_name="audio_base64",
+        mime_suffixes=_INLINE_AUDIO_SUFFIXES,
+        default_suffix=".wav",
+        max_bytes=_MAX_PRIVATE_AUDIO_BYTES,
+        label=label,
+    )
+
+
+def _machine_route_allowed(path: str, method: str) -> bool:
+    # /readyz joins /healthz: the shell that launched this process polls it
+    # before anyone has signed in, and it says nothing an unlocked studio does
+    # not already say on /healthz.
+    if path in {"/api/owner/session", "/api/owner/lock", "/healthz", "/readyz"}:
+        return True
+    if method == "GET" and path in {
+        "/api/catalog",
+        "/api/providers",
+        "/api/runtime",
+        "/api/telemetry/generations",
+        # The shared media-model catalog: a projection of /api/catalog and
+        # /api/providers in the vocabulary HivemindOS reads, holding model
+        # ids, readiness sentences and credential NAMES — nothing the three
+        # reads above do not already hand a caller on this port.
+        "/api/media-models",
+    }:
+        return True
+    if path == "/api/runs" and method in {"GET", "POST"}:
+        return True
+    if path in {"/api/media-studio/video", "/api/media-studio/video/start"} and method == "POST":
+        return True
+    if method == "GET" and re.fullmatch(r"/api/media-studio/video/job/[^/]+", path):
+        return True
+    if method == "GET" and re.fullmatch(r"/api/runs/[^/]+", path):
+        return True
+    return bool(method == "POST" and re.fullmatch(r"/api/runs/[^/]+/(resume|retry|cancel)", path))
 
 
 def build_control_app(
@@ -98,411 +354,537 @@ def build_control_app(
     approvals: ApprovalLedger | None = None,
     control_token: str | None = None,
     operator_token: str | None = None,
+    owner_access: OwnerAccess | None = None,
+    private_cipher: PrivateFieldCipher | None = None,
+    canvas_history: CanvasHistoryStore | None = None,
+    canvas_history_fetcher: CanvasHistoryFetcher | None = None,
+    canvas_media_fetcher: CanvasMediaFetcher | None = None,
+    canvas_workflow_fetcher: CanvasWorkflowFetcher | None = None,
+    canvas_delete_fetcher: CanvasDeleteFetcher | None = None,
+    cloud_output_fetcher: CloudOutputFetcher | None = None,
 ) -> FastAPI:
-    apply_shared_hive_env()
-    runs = orchestrator or ContentOrchestrator(generation_metric_sink=record_hivemind_generation_metric)
-    prompt_history = PromptHistoryStore(Path(runs.store.path).parent / "prompt-history.sqlite3")
-    configured_control_token = control_token if control_token is not None else os.environ.get("CONTENT_STUDIO_CONTROL_TOKEN", "")
-    configured_operator_token = operator_token if operator_token is not None else os.environ.get("CONTENT_STUDIO_OPERATOR_TOKEN", "")
-    if approvals is None:
-        approvals = load_approval_ledger(required=False)
+    # Every store this app runs on, opened in the order it always was (see
+    # api/context.py). What follows re-binds those as locals under their old
+    # names, so the lifespan, the account boundary and the dependencies below
+    # read exactly as they did when all of this was one function — and so a
+    # route module that takes `ctx` needs no other argument.
+    ctx = build_context(
+        orchestrator=orchestrator,
+        approvals=approvals,
+        control_token=control_token,
+        operator_token=operator_token,
+        owner_access=owner_access,
+        private_cipher=private_cipher,
+        canvas_history=canvas_history,
+        canvas_history_fetcher=canvas_history_fetcher,
+        canvas_media_fetcher=canvas_media_fetcher,
+        canvas_workflow_fetcher=canvas_workflow_fetcher,
+        canvas_delete_fetcher=canvas_delete_fetcher,
+        cloud_output_fetcher=cloud_output_fetcher,
+    )
+    account_store = ctx.account_store
+    owner_account = ctx.owner_account
+    account_access = ctx.account_access
+    current_account = ctx.current_account
+    configured_control_token = ctx.configured_control_token
+    configured_operator_token = ctx.configured_operator_token
+    boot_state = ctx.boot_state
+    shutting_down = ctx.shutting_down
+    app_version = ctx.app_version
+    open_gen_dist = ctx.open_gen_dist
+    _from_proxy = ctx._from_proxy
+    _set_session_cookie = ctx._set_session_cookie
+    media_studio_finishers = ctx.media_studio_finishers
 
-    app = FastAPI(title="Hivemind Content Studio", version="0.2.0")
-    ui_root = Path(__file__).resolve().parent / "ui"
-    repository_root = Path(__file__).resolve().parents[2]
-    open_gen_dist = repository_root / "packages/open-generative-ai/dist"
-    app.mount("/assets", StaticFiles(directory=ui_root), name="studio-assets")
+    @contextlib.asynccontextmanager
+    async def _lifespan(application: FastAPI):
+        # Startup work registers on app.state.startup_hooks (here and in
+        # gpu_rentals) instead of the deprecated @app.on_event("startup"),
+        # which was the source of ~900 warnings per test run.
+        for hook in list(getattr(application.state, "startup_hooks", []) or []):
+            hook()
+        boot_state["ready"] = True
+        try:
+            yield
+        finally:
+            # The shutdown half. Anything that holds plaintext or a child
+            # process gets a bounded chance to finish; nothing here may raise,
+            # or uvicorn reports a crash on a clean stop.
+            boot_state["ready"] = False
+            shutting_down.set()
+            pending = [task for task in media_studio_finishers if not task.done()]
+            if pending:
+                # Bounded: a gateway that has stopped answering must not hold
+                # the app open. Whatever has not sealed by then is handled by
+                # the finisher's own cleanup on the next boot.
+                done, unfinished = await asyncio.wait(pending, timeout=SHUTDOWN_FINISHER_SECONDS)
+                for task in unfinished:
+                    task.cancel()
+                if unfinished:
+                    print(
+                        f"[content-studio] {len(unfinished)} video finisher(s) did not settle in "
+                        f"{SHUTDOWN_FINISHER_SECONDS:.0f}s",
+                        file=sys.stderr,
+                    )
+            for hook in reversed(list(getattr(application.state, "shutdown_hooks", []) or [])):
+                try:
+                    hook()
+                except Exception as exc:  # a stuck reaper must not block the rest
+                    print(f"[content-studio] shutdown hook failed: {type(exc).__name__}", file=sys.stderr)
+            with contextlib.suppress(Exception):
+                # The llama-server is a child process; atexit alone leaves it
+                # holding the GPU when the parent is killed from launchd.
+                started = local_llm.runtime_if_started()
+                if started is not None:
+                    started.unload_all()
+
+    app = FastAPI(title="Hivemind Content Studio", version=app_version, lifespan=_lifespan)
+    app.state.startup_hooks = []
+    app.state.shutdown_hooks = []
+    # gpu_rentals and the catalog refresher read this off app.state so they do
+    # not need a reference to the closure.
+    app.state.shutting_down = shutting_down
+
+    @app.exception_handler(AccountLocked)
+    async def _account_locked(request: Request, exc: AccountLocked) -> JSONResponse:
+        return JSONResponse({"detail": ACCOUNT_LOCKED_DETAIL, "privacy": "account-locked"}, status_code=401)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_failed(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # ``detail`` is a STRING here on purpose (see _validation_sentence);
+        # the structured list stays under ``errors`` for developers. No
+        # ``input`` echo: a body field can be a prompt or a picture.
+        errors = [
+            {key: value for key, value in error.items() if key in {"loc", "msg", "type"}}
+            for error in exc.errors()
+            if isinstance(error, dict)
+        ]
+        return JSONResponse({"detail": _validation_sentence(errors), "errors": errors}, status_code=422)
+
+    @app.exception_handler(Exception)
+    async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        # JSON, not Starlette's plain-text "Internal Server Error", and never
+        # str(exc): an exception message can carry a path or a prompt. The
+        # incident id is the ONE thing that crosses from the log to the person,
+        # so support can look up a failure the toast could not describe.
+        incident = record_incident(
+            exc,
+            method=request.method,
+            route=access_route(request.url.path, request.scope.get("path_params")),
+        )
+        return JSONResponse(
+            {"detail": unexpected_error_detail(), "incident": incident}, status_code=500
+        )
+
+    # The unified studio frontend (packages/open-generative-ai, Vite build) is
+    # the ONLY UI this server ships. /open-gen stays mounted for older links
+    # and the desktop shell; /assets serves the same build's hashed bundles.
+    app.mount("/assets", StaticFiles(directory=open_gen_dist / "assets", check_dir=False), name="studio-assets")
     app.mount("/open-gen", StaticFiles(directory=open_gen_dist, html=True, check_dir=False), name="open-generative-ai")
 
-    def record_prompt(
-        draft: StudioRunDraft,
-        *,
-        source: str,
-        run_id: str,
-        user_prompt: str = "",
-        composer: dict[str, Any] | None = None,
-    ) -> None:
-        """History capture never blocks or fails a production run."""
-        with contextlib.suppress(Exception):
-            prompt_history.record(
-                prompt=(draft.concept or "").strip() or user_prompt or draft.title,
-                user_prompt=user_prompt,
-                title=draft.title,
-                lane=draft.lane,
-                source=source,
-                run_id=run_id,
-                composer=composer,
-            )
+    # Routes the sign-in screen itself must reach before anyone is signed in.
+    # Deliberately a small, exact set: everything else stays behind the gate.
+    # Exactly the alphabet secrets.token_urlsafe produces, and a length no
+    # shorter than the 32 bytes civitai_post mints.
+    _TOKEN_PATH_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 
-    def execute_draft(body: StudioRunDraft) -> dict:
-        draft_root = Path(runs.store.path).parent / "ui-drafts"
-        draft_root.mkdir(parents=True, exist_ok=True)
-        descriptor, draft_name = tempfile.mkstemp(prefix="studio-draft-", suffix=".yaml", dir=draft_root)
-        draft_path = Path(draft_name)
+    _GATE_ROUTES = frozenset({
+        "/api/accounts",
+        "/api/accounts/setup",
+        "/api/accounts/unlock",
+        # Forgotten password. Reachable before sign-in by necessity — that is
+        # the whole situation — and safe because neither route hands out the
+        # passphrase-wrapped master key, both are throttled exactly like unlock,
+        # and the reset one only answers a nonce that had to be decrypted with
+        # the vault's own private key.
+        "/api/accounts/recovery/challenge",
+        "/api/accounts/recovery/reset",
+        "/api/accounts/webauthn/authenticate/options",
+        "/api/accounts/webauthn/authenticate",
+        # The HivemindOS app answering a link the owner started here. It has no
+        # studio session and cannot be given one, so this route is reachable
+        # without signing in — guarded instead by three things it cannot fake:
+        # the caller must be on this machine, it must carry a 32-byte single-use
+        # nonce this studio minted in the last five minutes for a link the owner
+        # asked for, and the key it hands over is verified against HivemindOS
+        # before anything is stored. Nothing here reads studio state; the only
+        # thing it can do is complete a hand-over that was already requested.
+        "/api/hivemindos/models/link-callback",
+    })
+
+    def _civitai_staged_route(path: str, method: str) -> bool:
+        """One file, staged for a Civitai post, being read back.
+
+        This has to be reachable without a session, and that is not a gap — it
+        is the mechanism. Civitai's post composer fetches the media from the
+        BROWSER (confirmed in their `intent/post.tsx`: `await fetch(src)`), and
+        that request is cross-origin to civitai.com, so it carries no cookie of
+        ours. A gated URL would 401 and the handoff could not work at all.
+
+        What stands in for the session is the same thing the HivemindOS
+        link-callback above relies on: an unguessable token this studio minted
+        itself, moments ago, because the owner asked to post that exact file.
+        It is 32 random bytes, it names one file and nothing else, it expires
+        on its own, and the studio drops it as soon as the post is made.
+        """
+        if method not in {"GET", "HEAD", "OPTIONS"} or not path.startswith("/civitai/staged/"):
+            return False
+        # "<token>/<filename>" — the filename is cosmetic (Civitai names the
+        # attachment after the URL's last segment), so only the token is
+        # checked, and only against the alphabet it is minted from.
+        rest = path.removeprefix("/civitai/staged/").split("/", 1)
+        return bool(rest and _TOKEN_PATH_RE.fullmatch(rest[0]))
+
+    def _machine_token_presented(request: Request) -> bool:
+        """A caller holding the control or operator bearer token.
+
+        Agents and the MCP reach the studio this way, with no browser session.
+        They act for the person who owns the machine, so they resolve to the
+        OWNER workspace — which is what they already reached when there was only
+        one. Stated here rather than falling out of a default, because the same
+        code path decides whose vault an agent's output gets sealed to.
+        """
+        header = request.headers.get("authorization", "")
+        supplied = header.removeprefix("Bearer ").strip()
+        if not supplied:
+            return False
+        return any(
+            len(token) >= 12 and hmac.compare_digest(supplied, token)
+            for token in (configured_control_token, configured_operator_token)
+        )
+
+    served_tailnet_host = tailnet_hostname()
+
+    def _same_site_origin(request: Request) -> bool:
+        """Is this write coming from a page the studio actually serves?
+
+        A browser sends Origin on every unsafe request. Loopback is the studio
+        opened on this machine; the proxy's forwarded host is the studio opened
+        over the tailnet, which arrives here with Host already rewritten to
+        127.0.0.1 and so cannot be recognised any other way. Anything else is a
+        page on somebody else's site talking to this port.
+        """
+        origin = request.headers.get("origin", "").strip()
+        if not origin:
+            # Not a browser fetch: agents, the MCP and curl send no Origin, and
+            # a same-origin top-level navigation does not either.
+            return True
+        name = _host_name(origin)
+        if name in _LOOPBACK_NAMES:
+            return True
+        # Tailscale Serve preserves Host. Trust only this machine's discovered
+        # name, and require Origin to match the full authority (including port).
+        if served_tailnet_host and name == served_tailnet_host:
+            return origin.rstrip("/") == f"{request.url.scheme}://{request.headers.get('host', '')}"
+        forwarded_host = _host_name(_from_proxy(request, "x-forwarded-host"))
+        return bool(forwarded_host) and name == forwarded_host
+
+    # Past this age (half the session) an authenticated request re-issues the
+    # cookie, so a tab that stays in use never expires mid-generation. The old
+    # fixed 24 h cookie was only ever written at sign-in.
+    SESSION_SLIDE_AFTER_SECONDS = account_access.session_seconds // 2
+
+    @app.middleware("http")
+    async def enforce_account_boundary(request: Request, call_next):
+        # Captured before the router runs: url.path is the ORIGINAL path even
+        # after a mount rewrites scope["path"], and it has no query string —
+        # which is why uvicorn's own access log (every URL, verbatim, tokens
+        # and all) is turned off in main() in favour of this one line.
+        request_path = request.url.path
+        if request.method not in _SAFE_METHODS and not _same_site_origin(request):
+            # Refused before the cookie is even read: a page on another site
+            # that has rebound its DNS to 127.0.0.1 sends the session cookie
+            # with its POST like any same-origin script would, so the cookie
+            # proves nothing here. The Origin header is the browser's own
+            # account of who asked, and it is the one thing the page cannot
+            # forge.
+            return JSONResponse(
+                {"detail": "This request came from another site. Open the studio at "
+                           "http://127.0.0.1:8765 or at its tailnet address.",
+                 "privacy": "cross-site-blocked"},
+                status_code=400,
+            )
+        session_cookie = request.cookies.get(ACCOUNT_COOKIE)
+        signed_in = account_access.account_id(session_cookie)
+        # A cookie for a workspace that has since been deleted proves nothing.
+        account = account_store.get(signed_in) if signed_in else None
+        request.state.account = account
+        request.state.is_owner = account is not None
+        # Machine callers get the owner workspace for STORAGE scope only; they
+        # are still not `request.state.account`, so every owner-gated route goes
+        # on refusing them exactly as before.
+        scope = account or (account_store.get(owner_account.id) if _machine_token_presented(request) else None)
+        token = current_account.set(scope)
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                yaml.safe_dump(body.to_brief(), handle, sort_keys=False)
-            return runs.execute_content_run(
-                draft_path,
-                policy={"privacy": body.privacy},
-                budget={"max_cost_usd": body.max_cost_usd},
+            allowed = (
+                account is not None
+                or request.url.path in _GATE_ROUTES
+                or _civitai_staged_route(request.url.path, request.method)
+                or _machine_route_allowed(request.url.path, request.method)
             )
+            if not allowed:
+                if request.method in {"GET", "HEAD"} and (
+                    request.url.path == "/" or "text/html" in request.headers.get("accept", "")
+                ):
+                    # A STANDALONE page, deliberately not the React shell: the
+                    # app bundle lives under /assets, which is gated, so a shell
+                    # served here would load a script that 401s and render
+                    # nothing. Keeping the gate self-contained also means an
+                    # unauthenticated visitor is never handed the application.
+                    response = HTMLResponse(account_gate_html(), status_code=200)
+                else:
+                    response = JSONResponse(
+                        {"detail": "Sign in to a workspace", "privacy": "account-locked"},
+                        status_code=401,
+                    )
+            else:
+                response = await call_next(request)
+                if account is not None:
+                    remaining = account_access.remaining_seconds(session_cookie)
+                    if remaining is not None and remaining < SESSION_SLIDE_AFTER_SECONDS:
+                        _set_session_cookie(response, request, account)
         finally:
-            draft_path.unlink(missing_ok=True)
+            current_account.reset(token)
+        if request.url.path.startswith("/assets/"):
+            # Vite fingerprints every bundle under /assets, so these are
+            # immutable; no-store here re-downloaded the whole app on every
+            # page load over the tailnet.
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        # Route template and status, never the path's leaves: the media routes
+        # end in the owner's own filenames.
+        record_access(request.method, request_path, response.status_code, request.scope.get("path_params"))
+        return response
 
-    def require_control(authorization: Annotated[str | None, Header()] = None) -> None:
-        if len(configured_control_token) < 12:
-            raise HTTPException(status_code=503, detail="Operator mutations are disabled until CONTENT_STUDIO_CONTROL_TOKEN is configured")
+    # Tailscale Serve preserves the browser's Host, unlike the retired proxy.
+    # Accept only this node's discovered name, never *.ts.net or arbitrary hosts.
+    allowed_hosts = list(_LOOPBACK_HOSTS)
+    if served_tailnet_host:
+        allowed_hosts.append(served_tailnet_host)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts, www_redirect=False)
+
+    def require_control(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
         supplied = authorization.removeprefix("Bearer ").strip() if authorization else ""
+        if not supplied and getattr(request.state, "account", None) is None:
+            # No bearer and no session: a browser whose cookie expired, or the
+            # dev server with none. That is "sign in", in the same shape the
+            # middleware answers everywhere else — not an operator-token
+            # lecture (and not a 503 about an unconfigured token).
+            raise AccountLocked()
+        if len(configured_control_token) < 12:
+            # A build with no operator token configured. Nothing the person at
+            # the browser can do about an environment variable, and the name of
+            # it means nothing to them — so this is the same sign-in answer the
+            # middleware gives everywhere else, with the variable named in the
+            # log instead of the toast.
+            log.warning("operator mutation refused: no control token configured")
+            raise AccountLocked()
         if not hmac.compare_digest(supplied, configured_control_token):
             raise HTTPException(status_code=401, detail="Valid operator bearer token required")
 
-    @app.get("/", response_class=FileResponse, include_in_schema=False)
-    def index() -> FileResponse:
-        return FileResponse(ui_root / "index.html")
+    def require_owner_or_control(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
+        if bool(getattr(request.state, "is_owner", False)):
+            return
+        require_control(request, authorization)
 
-    @app.get("/api/catalog")
-    def catalog() -> dict:
-        provider_rows = provider_report()
-        providers_by_role: dict[str, list[dict]] = {}
-        for provider in provider_rows:
-            for role in provider["roles"]:
-                providers_by_role.setdefault(role, []).append(provider)
+    def require_owner(request: Request) -> None:
+        """Any signed-in workspace. Named for the 60-odd routes that already
+        depend on it; what it now proves is "some account", and WHICH account is
+        what the scoped resolvers above answer."""
+        if getattr(request.state, "account", None) is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+
+    def require_owner_account(request: Request) -> None:
+        """The OWNER workspace, not merely a signed-in one.
+
+        Deliberate (2026-09-03), and the counterpart to the rentals decision
+        below. `require_owner` means "some account", which is right for the
+        studio's own work: a workspace exists because the owner approved it,
+        and that approval carries generating, renting and publishing. It is
+        wrong for what reaches PAST the studio to something that is the
+        owner's: the machine's shared credential store, which every Hive app
+        on this Mac reads (overwriting OPENAI_API_KEY there breaks apps a
+        collaborator has never heard of); the desktop app's account key, which
+        the app-mediated link hands out; and the owner's wallet in that app.
+        Reading stays open on `require_owner`: a collaborator may see WHICH
+        keys are configured (never a value) so they can say what is missing.
+
+        The HivemindOS credit routes left this gate on 2026-09-14, when every
+        workspace got its own account: a top-up from a collaborator's
+        workspace now charges an account that is theirs, and the store each
+        route writes follows the session, so the owner's key is out of reach
+        without any gate at all (api/hivemindos.py).
+        """
+        account = getattr(request.state, "account", None)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        if not account.is_owner:
+            raise HTTPException(status_code=403, detail={
+                "message": "Only the owner's workspace can change this machine's credentials and credit.",
+                "remedy": "Sign in to the owner workspace, or ask its owner to make the change.",
+            })
+
+    # GPU rentals are open to EVERY signed-in workspace, not just the owner.
+    # Deliberate (2026-08-21): a workspace only exists because the owner
+    # approved its creation, and that approval carries the whole studio —
+    # including renting on the machine-wide provider keys. The gate that
+    # matters is workspace creation itself, which stays owner-approved.
+    register_gpu_rental_routes(app, require_owner)
+
+    @app.get("/healthz")
+    def healthz() -> dict:
+        # Unauthenticated and proxied to the tailnet, so it stays minimal: is
+        # the process up, has it finished booting, and which build is it. What
+        # the engines are doing is /api/runtime's job.
         return {
             "ok": True,
-            "lanes": [lane.as_dict() for lane in LANE_MATRIX],
-            "providers_by_role": providers_by_role,
-            "platforms": ["instagram", "tiktok", "youtube", "facebook", "x", "linkedin"],
-            "aspect_ratios": ["9:16", "4:5", "1:1", "16:9"],
-            "privacy_modes": ["local-only", "local-first", "cloud-allowed"],
+            "ready": bool(boot_state["ready"]),
+            "version": app_version,
+            "service": "hivemind-content-studio",
+            "owner_lock": True,
         }
 
-    @app.get("/api/surfaces")
-    def surfaces() -> dict:
-        return {
-            "ok": True,
-            "surfaces": {
-                "explore": {"path": "/open-gen/", "available": (open_gen_dist / "index.html").is_file()},
-                "canvas": {"gateway_path": "/mobile/", "available": True},
-                "models": {"gateway_path": "/models", "available": True},
-                "gateway": {"gateway_path": "/", "available": True},
-            },
-        }
+    @app.get("/readyz")
+    def readyz(response: Response) -> dict:
+        """True only once the accounts bootstrap and the catalog warm have run.
 
-    @app.api_route("/open-gen-api/{path:path}", methods=["GET", "POST"])
-    async def open_gen_api(path: str, request: Request) -> Response:
-        allowed = {
-            "health",
-            "healthz",
-            "local-ai/binary-status",
-            "local-ai/models",
-            "local-ai/generate",
-        }
-        if path not in allowed and not (path.startswith("local-ai/job/") and path.removeprefix("local-ai/job/").replace("-", "").replace("_", "").isalnum()):
-            raise HTTPException(status_code=404, detail="OpenGen bridge route not found")
-        body = await request.body()
+        The shell polls this instead of /healthz so it never opens the studio
+        onto a model list that is still being built.
+        """
+        ready = bool(boot_state["ready"]) and bool(boot_state.get("catalog_warm"))
+        response.status_code = 200 if ready else 503
+        return {"ok": ready, "ready": ready, "version": app_version}
 
-        def forward() -> tuple[bytes, int, str]:
-            proxy_request = urllib.request.Request(
-                f"http://127.0.0.1:8794/{path}",
-                data=body or None,
-                method=request.method,
-                headers={"Content-Type": request.headers.get("content-type", "application/json")},
-            )
-            try:
-                with urllib.request.urlopen(proxy_request, timeout=190) as upstream:
-                    return upstream.read(), upstream.status, upstream.headers.get("content-type", "application/json")
-            except urllib.error.HTTPError as exc:
-                return exc.read(), exc.code, exc.headers.get("content-type", "application/json")
-            except (OSError, urllib.error.URLError) as exc:
-                raise RuntimeError("OpenGen local inference bridge is unavailable") from exc
+    # ── the routes, one module per subject ────────────────────────────────────
+    #
+    # Each `register` builds an APIRouter out of the same route functions this
+    # file used to hold inline and includes it here, so registration order —
+    # and therefore which route a path matches — is the order below. The four
+    # dependencies and this module itself go onto the context first: a route
+    # that reads a name PATCHED on control_api (the media-studio entry points,
+    # the video ceilings) reads it through `ctx.control_api` at call time.
+    ctx.control_api = sys.modules[__name__]
+    ctx.require_control = require_control
+    ctx.require_owner = require_owner
+    ctx.require_owner_or_control = require_owner_or_control
+    ctx.require_owner_account = require_owner_account
+    for routes in (
+        accounts_routes,
+        shell_routes,
+        catalog_routes,
+        media_models_routes,
+        bridge_routes,
+        prompting_routes,
+        hivemindos_routes,
+        lanes_routes,
+        runs_routes,
+        system_routes,
+        settings_routes,
+        vault_routes,
+        video_routes,
+        muapi_routes,
+        music_routes,
+        image_routes,
+        sam3_routes,
+        restore_routes,
+        ingredients_routes,
+        sprite_routes,
+        references_routes,
+        canvas_routes,
+        passbook_routes,
+        oauth_routes,
+        approvals_routes,
+    ):
+        routes.register(app, ctx)
+    # Staged plaintext a crashed request left behind goes at boot, and
+    # hourly after that. Registered here because build_context has no app.
+    app.state.startup_hooks.append(ctx.start_media_studio_staging_sweeper)
+    # Every hosted model's price, before anyone opens a picker. 146 endpoints,
+    # sixteen at a time, ~17s on a cold cache and nothing at all on a warm one
+    # — off the boot thread either way, because a price is a convenience and a
+    # studio that would not start without one is not a trade worth making.
+    # Asking per row as it scrolled into view is what made them pop in.
+    app.state.startup_hooks.append(warm_hosted_media_prices_in_background)
 
-        try:
-            content, status, content_type = await asyncio.to_thread(forward)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from None
-        return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
-
-    @app.get("/api/simple/catalog")
-    def simple_catalog() -> dict:
-        brains: list[dict] = []
-        brain_error = ""
-        try:
-            value = brain_catalog()
-            brains = value.get("providers") if isinstance(value.get("providers"), list) else []
-        except RuntimeError as exc:
-            brain_error = str(exc)
-            brains = local_brain_catalog()["providers"]
-        return {
-            "ok": True,
-            "brains": brains,
-            "brain_error": brain_error,
-            "media": media_catalog(),
-            "templates": template_report(),
-            "attachment_intake_limit": 30,
-            "attachment_note": "The studio can retain up to 30 ordered references. Each selected provider/model receives only roles allowed by its capability schema.",
-        }
-
-    @app.get("/api/templates")
-    def templates() -> dict:
-        return {"ok": True, "templates": template_report()}
-
-    @app.post("/api/simple/plan")
-    def simple_plan(body: SimplePlanBody) -> dict:
-        if body.provider == "local-planner":
-            plan = plan_with_local_brain(body.model_dump())
-        else:
-            try:
-                plan = plan_with_brain(body.model_dump())
-            except RuntimeError as exc:
-                raise HTTPException(status_code=502, detail=str(exc)) from None
-        draft = plan.get("draft")
-        if isinstance(draft, dict):
-            selections = (("keyframe", body.imageSelection), ("motion", body.videoSelection))
-            for role, selection in selections:
-                if not isinstance(selection, dict):
-                    continue
-                provider = str(selection.get("provider") or "automatic")
-                model = str(selection.get("model") or "automatic")
-                if provider == "automatic" or provider not in {item.id for item in providers_for(role)}:
-                    continue
-                draft.setdefault("providers", {})[role] = provider
-                if model != "automatic":
-                    draft.setdefault("provider_options", {}).setdefault(provider, {})[role] = {"model": model}
-        plan["selections"] = {
-            "image": body.imageSelection or {"provider": "automatic", "model": "automatic"},
-            "video": body.videoSelection or {"provider": "automatic", "model": "automatic"},
-        }
-        plan["composer"] = {
-            "studioMode": body.studioMode,
-            "brain": _route_snapshot({"provider": body.provider, "model": body.model, "auth": body.auth}),
-            "imageSelection": _route_snapshot(body.imageSelection),
-            "videoSelection": _route_snapshot(body.videoSelection),
-            "promptHelper": body.promptHelper,
-            "walkthrough": body.walkthrough,
-        }
-        return {"ok": True, "plan": plan}
-
-    @app.post("/api/simple/runs", status_code=201)
-    async def create_simple_run(
-        plan_json: Annotated[str, Form()],
-        images: Annotated[list[UploadFile] | None, File()] = None,
-    ) -> dict:
-        try:
-            plan = json.loads(plan_json)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail="Production plan is not valid JSON") from exc
-        if not isinstance(plan, dict) or not isinstance(plan.get("draft"), dict):
-            raise HTTPException(status_code=400, detail="Production plan has no validated draft")
-        uploads = images or []
-        reused = plan.get("reference_artifacts", [])
-        if not isinstance(reused, list) or any(not isinstance(item, dict) for item in reused):
-            raise HTTPException(status_code=400, detail="Saved reference images are not valid")
-        if len(uploads) + len(reused) > 30:
-            raise HTTPException(status_code=400, detail="A production can retain at most 30 reference images")
-        payloads: list[tuple[str, bytes]] = []
-        total_bytes = 0
-        for index, reference in enumerate(reused, start=1):
-            try:
-                source_run = runs.get_run(str(reference.get("run_id") or ""))
-            except KeyError:
-                raise HTTPException(status_code=400, detail="A saved reference image belongs to an unknown run") from None
-            record = next(
-                (item for item in source_run["artifact_records"] if item.get("id") == reference.get("artifact_id")),
-                None,
-            )
-            if not record or not str(record.get("role") or "").startswith("reference-"):
-                raise HTTPException(status_code=400, detail="Only a run's reference image artifacts can be reused")
-            if not str(record.get("mime_type") or "").startswith("image/"):
-                raise HTTPException(status_code=400, detail="The saved reference image is not an image")
-            manifest_root = Path(source_run["manifest_path"]).expanduser().resolve().parent
-            source_path = Path(str(record.get("path") or "")).expanduser().resolve()
-            if not source_path.is_file() or not source_path.is_relative_to(manifest_root):
-                raise HTTPException(status_code=400, detail="The saved reference image is unavailable")
-            size = source_path.stat().st_size
-            if size > 50 * 1024 * 1024:
-                raise HTTPException(status_code=400, detail="A saved reference image exceeds 50 MB")
-            total_bytes += size
-            if total_bytes > 500 * 1024 * 1024:
-                raise HTTPException(status_code=400, detail="Reference images exceed the 500 MB production limit")
-            payloads.append((source_path.name or f"saved-reference-{index}.png", source_path.read_bytes()))
-        for upload in uploads:
-            if not (upload.content_type or "").startswith("image/"):
-                raise HTTPException(status_code=400, detail=f"{upload.filename or 'Attachment'} is not an image")
-            data = await upload.read()
-            if len(data) > 50 * 1024 * 1024:
-                raise HTTPException(status_code=400, detail=f"{upload.filename or 'Attachment'} exceeds 50 MB")
-            total_bytes += len(data)
-            if total_bytes > 500 * 1024 * 1024:
-                raise HTTPException(status_code=400, detail="Reference images exceed the 500 MB production limit")
-            payloads.append((upload.filename or f"reference-{len(payloads) + 1}.png", data))
-        try:
-            draft = StudioRunDraft.model_validate(plan["draft"])
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"The brain returned an invalid production draft: {exc}") from None
-        run = execute_draft(draft)
-        if payloads:
-            store = AssetStore()
-            try:
-                for index, (file_name, data) in enumerate(payloads, start=1):
-                    role = "reference-image"
-                    if len(payloads) > 1 and index == 1:
-                        role = "reference-start-frame"
-                    elif len(payloads) > 1 and index == len(payloads):
-                        role = "reference-end-frame"
-                    store.ingest_bytes(
-                        run["manifest_path"],
-                        file_name=file_name,
-                        data=data,
-                        role=role,
-                        provider="studio-upload",
-                        scene=index,
-                    )
-            except ValueError as exc:
-                runs.cancel_run(run["run_id"], f"Reference image validation failed: {exc}")
-                raise HTTPException(status_code=400, detail=str(exc)) from None
-        composer = _composer_snapshot(plan.get("composer"))
-        manifest_path = Path(run["manifest_path"])
-        manifest = load_manifest(manifest_path)
-        manifest["studio"] = {
-            "composer": composer,
-            "user_prompt": str(plan.get("user_prompt") or "").strip()[:20_000],
-        }
-        write_manifest(manifest_path, manifest)
-        script_path = manifest_path.parent / "script.md"
-        script_path.write_text(draft.to_script_markdown(), encoding="utf-8")
-        brain = composer.get("brain") if isinstance(composer.get("brain"), dict) else {}
-        runtime = f"{brain.get('provider', 'agent-brain')}:{brain.get('model', 'automatic')}"
-        attach_script(manifest_path, script_path, runtime=runtime, copy=False)
-        run = runs.resume_run(run["run_id"])
-        record_prompt(
-            draft,
-            source="simple",
-            run_id=run["run_id"],
-            user_prompt=str(plan.get("user_prompt") or ""),
-            composer=composer,
-        )
-        return {**run, "plan": plan}
-
-    @app.get("/api/runs")
-    def list_runs(status: str = "", limit: int = 100) -> dict:
-        return {"ok": True, "runs": runs.list_runs(status=status or None, limit=limit)}
-
-    @app.get("/api/telemetry/generations")
-    def generation_telemetry(limit: int = 100) -> dict:
-        return generation_telemetry_snapshot(runs.store, limit=limit)
-
-    @app.get("/api/runtime")
-    def runtime() -> dict:
-        return unified_runtime_snapshot()
-
-    @app.post("/api/runs", status_code=201)
-    def create_run(body: StudioRunDraft) -> dict:
-        run = execute_draft(body)
-        record_prompt(body, source="advanced", run_id=run["run_id"])
-        return run
-
-    @app.get("/api/simple/prompts")
-    def list_prompts(favorites: bool = False, limit: int = 200) -> dict:
-        return {"ok": True, "prompts": prompt_history.list(favorites_only=favorites, limit=limit)}
-
-    @app.post("/api/simple/prompts/{prompt_id}/favorite")
-    def favorite_prompt(prompt_id: str, body: FavoriteBody) -> dict:
-        try:
-            return {"ok": True, "prompt": prompt_history.set_favorite(prompt_id, body.favorite)}
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-
-    @app.delete("/api/simple/prompts/{prompt_id}")
-    def delete_prompt(prompt_id: str) -> dict:
-        try:
-            prompt_history.delete(prompt_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-        return {"ok": True}
-
-    @app.get("/api/runs/{run_id}")
-    def get_run(run_id: str) -> dict:
-        try:
-            return runs.get_run(run_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-
-    @app.get("/api/runs/{run_id}/artifacts/{artifact_id}", response_class=FileResponse)
-    def artifact(run_id: str, artifact_id: str) -> FileResponse:
-        try:
-            run = runs.get_run(run_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-        record = next((item for item in run["artifact_records"] if item.get("id") == artifact_id), None)
-        if not record:
-            raise HTTPException(status_code=404, detail="Artifact not found")
-        manifest_root = Path(run["manifest_path"]).expanduser().resolve().parent
-        artifact_path = Path(str(record.get("path") or "")).expanduser().resolve()
-        if not artifact_path.is_file() or not artifact_path.is_relative_to(manifest_root):
-            raise HTTPException(status_code=404, detail="Artifact is unavailable")
-        return FileResponse(artifact_path, media_type=record.get("mime_type"), filename=artifact_path.name)
-
-    @app.get("/api/providers")
-    def providers() -> dict:
-        return {"ok": True, "providers": provider_report()}
-
-    @app.get("/api/oauth")
-    def oauth_status() -> dict:
-        return {
-            "ok": True,
-            "providers": {
-                provider: oauth_provider_status(provider)
-                for provider in ("openai", "xai")
-            },
-        }
-
-    @app.post("/api/oauth/{provider}/start")
-    def oauth_start(provider: str) -> dict:
-        try:
-            return {"ok": True, **start_oauth_login(provider)}
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-
-    @app.post("/api/runs/{run_id}/resume", dependencies=[Depends(require_control)])
-    def resume(run_id: str) -> dict:
-        return runs.resume_run(run_id)
-
-    @app.post("/api/runs/{run_id}/retry", dependencies=[Depends(require_control)])
-    def retry(run_id: str, body: RetryBody) -> dict:
-        return runs.retry_step(run_id, body.step_id)
-
-    @app.post("/api/runs/{run_id}/cancel", dependencies=[Depends(require_control)])
-    def cancel(run_id: str, body: CancelBody) -> dict:
-        return runs.cancel_run(run_id, body.reason)
-
-    @app.get("/api/approvals", dependencies=[Depends(require_control)])
-    def list_approvals(run_id: str = "", status: str = "") -> dict:
-        if approvals is None:
-            raise HTTPException(status_code=503, detail="Approval ledger is not configured")
-        return {"ok": True, "approvals": approvals.list(run_id=run_id or None, status=status or None)}
-
-    @app.post("/api/approvals/{approval_id}/approve", dependencies=[Depends(require_control)])
-    def approve(approval_id: str, body: DecisionBody) -> dict:
-        if approvals is None or len(configured_operator_token) < 12:
-            raise HTTPException(status_code=503, detail="Approval ledger is not configured")
-        return {"ok": True, "approval": approvals.approve(approval_id, operator_token=configured_operator_token, decided_by=body.decided_by)}
-
-    @app.post("/api/approvals/{approval_id}/deny", dependencies=[Depends(require_control)])
-    def deny(approval_id: str, body: DecisionBody) -> dict:
-        if approvals is None or len(configured_operator_token) < 12:
-            raise HTTPException(status_code=503, detail="Approval ledger is not configured")
-        return {"ok": True, "approval": approvals.deny(approval_id, operator_token=configured_operator_token, decided_by=body.decided_by)}
+    # Registered last so every API route above wins; serves root-level build
+    # files the unified frontend references absolutely (/hosted-local-ai.js,
+    # /vite.svg, …).
+    app.mount("/", StaticFiles(directory=open_gen_dist, html=True, check_dir=False), name="unified-frontend")
 
     return app
 
 
+def publish_remote_access(*, port: int, https_port: int) -> bool:
+    """Publish the tailnet URL, and never take the studio down failing to.
+
+    This runs as a startup hook, so an exception here aborts the lifespan and
+    uvicorn exits -- a tailnet port some other service already holds used to
+    cost the whole studio, localhost included. Remote access is an extra, not
+    a precondition: name what happened and what fixes it, and serve anyway.
+    """
+    try:
+        status = set_remote_access(True, port=port, https_port=https_port)
+    except RemoteAccessError as exc:
+        detail, remedy = exc.message, exc.remedy
+    else:
+        if status["enabled"]:
+            print(f"Tailnet URL: {status['url']} (workspace sign-in required)", flush=True)
+            return True
+        detail = "Tailscale did not confirm that the studio was published."
+        remedy = "The studio is still reachable on this machine."
+    log.warning("remote access not published: %s %s", detail, remedy)
+    print(
+        f"[content-studio] Remote access is off. {detail} {remedy}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False
+
+
 def main() -> None:
+    import argparse
     import uvicorn
+    from .remote_access import RemoteAccessError, tailnet_https_port
+
+    parser = argparse.ArgumentParser(description="Host Content Studio locally, optionally on your tailnet.")
+    parser.add_argument("--remote-access", action="store_true",
+                        default=os.environ.get("CONTENT_STUDIO_REMOTE_ACCESS") == "1",
+                        help="Enable persistent tailnet-only HTTPS access through Tailscale")
+    parser.add_argument("--tailnet-port", type=int, default=tailnet_https_port(),
+                        help="HTTPS port on the tailnet (default: 8765; use 8789 for the old URL)")
+    args = parser.parse_args()
+    if not 1 <= args.tailnet_port <= 65535:
+        parser.error("--tailnet-port must be between 1 and 65535")
+    os.environ["CONTENT_STUDIO_TAILNET_PORT"] = str(args.tailnet_port)
 
     host = os.environ.get("CONTENT_STUDIO_CONTROL_HOST", "127.0.0.1")
+    # 8765 stays the preferred, stable port. A shell that has to fall back
+    # because a foreign process holds it passes the replacement in here rather
+    # than killing whatever is listening.
     port = int(os.environ.get("CONTENT_STUDIO_CONTROL_PORT", "8765"))
-    uvicorn.run(build_control_app(), host=host, port=port)
+    target = configure_logging()
+    if target is not None:
+        log.info("control API listening on %s:%s (log %s)", host, port, target.name)
+    try:
+        app = build_control_app()
+    except DataFormatTooNew as exc:
+        # One sentence and a distinct exit code, not a traceback: the launcher
+        # renders this and offers Retry, and there is nothing to retry into
+        # until the person acts on it. Logged as well as printed, so the
+        # incident is in the file a bug report carries.
+        log.error("refusing to open a newer data format: %s", exc)
+        print(f"[content-studio] {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(3) from None
+    if args.remote_access:
+        app.state.startup_hooks.append(
+            lambda: publish_remote_access(port=port, https_port=args.tailnet_port)
+        )
+    # uvicorn's access log writes the full URL, query string included; the
+    # boundary middleware writes a redacted line instead.
+    uvicorn.run(app, host=host, port=port, access_log=False)
 
 
 if __name__ == "__main__":

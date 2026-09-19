@@ -1,0 +1,35 @@
+{
+  "created_at": "2026-07-16T19:04:58.172404+00:00",
+  "request": "Audit and enforce client-unlock privacy for prompts, images, videos, prompt helpers, user inputs, and outputs in Hivemind Content Studio",
+  "custom_code_assessment": "balanced",
+  "entries": [
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/comfyui-mobile/src/utils/workflowEncryption.ts",
+      "target_path": "packages/comfyui-mobile/src/utils/workflowEncryption.ts",
+      "reuse_type": "adapted_code",
+      "note": "existing AES-GCM workflow envelope now uses tab-scoped unlock persistence"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/open-generative-ai/src/lib/hivemindStudio.js",
+      "target_path": "packages/open-generative-ai/src/components/ImageStudio.js",
+      "reuse_type": "adapted_code",
+      "note": "existing embedded Studio bridge now governs memory-only creative history"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:packages/media-gateway/app.py",
+      "target_path": "packages/media-gateway/app/comfy/[[...path]]/route.js",
+      "reuse_type": "adapted_code",
+      "note": "existing encrypted native playback path reused before browser media responses"
+    },
+    {
+      "source_repo": "local-project",
+      "source_path": "hivemind-content-studio:src/hivemind_content_studio/private_access.py",
+      "target_path": "src/hivemind_content_studio/control_api.py",
+      "reuse_type": "adapted_code",
+      "note": "existing owner cipher and no-store response contract reused for private video delivery"
+    }
+  ]
+}

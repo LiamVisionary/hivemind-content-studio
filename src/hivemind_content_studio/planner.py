@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import csv
-import json
+import io
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from .config import load_config
+from .faceless_media import is_studio_media_source
 from .manifest import add_artifact, create_manifest, write_manifest
+from .private_access import read_private_text, write_private_json, write_private_text
 
 
 DEFAULT_PROVIDERS = {
@@ -26,17 +28,51 @@ DEFAULT_PROVIDERS = {
 }
 
 
+def normalize_aspect_ratio(value: Any) -> str:
+    """Give back "W:H", including when YAML already ate it.
+
+    An unquoted `9:16` is a YAML 1.1 sexagesimal integer, so `safe_load` hands
+    back 556 — nine sixties plus sixteen — and every ratio a person types by
+    hand arrives as arithmetic. It failed loudly on the faceless lane (pydantic
+    refused `video_aspect=556`) and silently everywhere else, where the declared
+    ratio was simply never honoured. Briefs are hand-written, so the loader
+    undoes it rather than asking everyone to remember the quotes.
+    """
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, int):
+        # Base-60 is reversible for every ratio anyone writes: both sides of a
+        # real aspect ratio are under 60, which is exactly the range YAML packed.
+        width, height = divmod(value, 60)
+        if 0 < width < 60 and 0 <= height < 60:
+            return f"{width}:{height}"
+        raise ValueError(
+            f"aspect_ratio {value} is not a ratio. Quote it in the brief — aspect_ratio: \"9:16\""
+        )
+    text = str(value).strip()
+    return text
+
+
 def load_brief(path: str | Path) -> dict[str, Any]:
     brief_path = Path(path).expanduser().resolve()
-    brief = yaml.safe_load(brief_path.read_text(encoding="utf-8")) or {}
+    brief = yaml.safe_load(read_private_text(brief_path)) or {}
     if not isinstance(brief, dict):
         raise ValueError(f"Brief must be a YAML object: {brief_path}")
+    if "aspect_ratio" in brief:
+        normalized = normalize_aspect_ratio(brief["aspect_ratio"])
+        if normalized:
+            brief["aspect_ratio"] = normalized
+    for raw in brief.get("scenes") or []:
+        if isinstance(raw, dict) and "aspect_ratio" in raw:
+            normalized = normalize_aspect_ratio(raw["aspect_ratio"])
+            if normalized:
+                raw["aspect_ratio"] = normalized
     return brief
 
 
 def infer_lane(brief: dict[str, Any]) -> str:
     explicit = str(brief.get("lane") or "").strip().lower()
-    if explicit in {"animation", "first-frame-animation-ad", "stickman-performance-ad", "static-text-ad", "faceless", "clip", "social-post"}:
+    if explicit in {"animation", "first-frame-animation-ad", "persona-series", "stickman-performance-ad", "static-text-ad", "faceless", "clip", "social-post"}:
         return explicit
     brief_type = str(brief.get("type") or "").lower()
     if "clip" in brief_type:
@@ -56,13 +92,15 @@ def plan(brief_path: str | Path, *, lane: str | None = None) -> Path:
     run_dir = manifest_path.parent
 
     brief_snapshot = run_dir / "brief.yaml"
-    brief_snapshot.write_text(yaml.safe_dump(brief, sort_keys=False), encoding="utf-8")
+    write_private_text(brief_snapshot, yaml.safe_dump(brief, sort_keys=False))
     add_artifact(manifest, role="brief", path=brief_snapshot)
 
     if selected_lane == "animation":
         _plan_animation(run_dir, brief, manifest)
     elif selected_lane == "first-frame-animation-ad":
         _plan_first_frame_animation_ad(run_dir, brief, manifest)
+    elif selected_lane == "persona-series":
+        _plan_persona_series(run_dir, brief, manifest)
     elif selected_lane == "stickman-performance-ad":
         manifest["providers"]["image"] = str(provider_overrides.get("image") or "stickman-renderer")
         _plan_stickman_performance_ad(run_dir, brief, manifest)
@@ -90,20 +128,21 @@ def _scenes(brief: dict[str, Any]) -> list[dict[str, Any]]:
 def _plan_animation(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
     scenes = _scenes(brief)
     scene_csv = run_dir / "scene_manifest.csv"
-    with scene_csv.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["scene", "title", "duration_seconds", "beat", "voice", "image_prompt", "motion_prompt"])
-        writer.writeheader()
-        for index, scene in enumerate(scenes, start=1):
-            beat = str(scene.get("beat") or scene.get("description") or "")
-            writer.writerow({
-                "scene": index,
-                "title": scene.get("title") or f"Scene {index}",
-                "duration_seconds": scene.get("duration_seconds") or "",
-                "beat": beat,
-                "voice": scene.get("voice") or beat,
-                "image_prompt": scene.get("image_prompt") or beat,
-                "motion_prompt": scene.get("motion_prompt") or f"Animate the scene naturally: {beat}",
-            })
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["scene", "title", "duration_seconds", "beat", "voice", "image_prompt", "motion_prompt"])
+    writer.writeheader()
+    for index, scene in enumerate(scenes, start=1):
+        beat = str(scene.get("beat") or scene.get("description") or "")
+        writer.writerow({
+            "scene": index,
+            "title": scene.get("title") or f"Scene {index}",
+            "duration_seconds": scene.get("duration_seconds") or "",
+            "beat": beat,
+            "voice": scene.get("voice") or beat,
+            "image_prompt": scene.get("image_prompt") or beat,
+            "motion_prompt": scene.get("motion_prompt") or f"Animate the scene naturally: {beat}",
+        })
+    write_private_text(scene_csv, buffer.getvalue())
     add_artifact(manifest, role="scene-manifest", path=scene_csv)
 
     prompt_roles = {
@@ -117,12 +156,12 @@ def _plan_animation(run_dir: Path, brief: dict[str, Any], manifest: dict[str, An
         for index, scene in enumerate(scenes, start=1):
             value = scene.get(scene_key) or scene.get("beat") or ""
             blocks.append(f"## Scene {index}\n\n{value}")
-        output.write_text("\n\n".join(blocks).strip() + "\n", encoding="utf-8")
+        write_private_text(output, "\n\n".join(blocks).strip() + "\n")
         add_artifact(manifest, role=artifact_role, path=output, provider=manifest["providers"][provider_role])
 
     music = run_dir / "music-brief.md"
     music_data = brief.get("music") if isinstance(brief.get("music"), dict) else {}
-    music.write_text(str(music_data.get("mood") or brief.get("music_prompt") or "Instrumental score matching the story arc.") + "\n", encoding="utf-8")
+    write_private_text(music, str(music_data.get("mood") or brief.get("music_prompt") or "Instrumental score matching the story arc.") + "\n")
     add_artifact(manifest, role="music-brief", path=music, provider=manifest["providers"]["music"])
     _write_publish_metadata(run_dir, brief, manifest)
 
@@ -146,7 +185,7 @@ def _write_script_request(run_dir: Path, brief: dict[str, Any], manifest: dict[s
         },
     }
     output = run_dir / "script-request.json"
-    output.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, request)
     add_artifact(manifest, role="script-request", path=output, provider=manifest["providers"]["script"])
 
 
@@ -165,7 +204,7 @@ def _write_generation_requests(run_dir: Path, brief: dict[str, Any], manifest: d
             for index, scene in enumerate(scenes, start=1)
         ]
         output = run_dir / "keyframe-requests.json"
-        output.write_text(json.dumps(keyframe_requests, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_private_json(output, keyframe_requests)
         add_artifact(manifest, role="keyframe-requests", path=output, provider=manifest["providers"]["image"])
 
     motion_requests = [
@@ -179,7 +218,7 @@ def _write_generation_requests(run_dir: Path, brief: dict[str, Any], manifest: d
         for index, scene in enumerate(scenes, start=1)
     ]
     motion = run_dir / "motion-requests.json"
-    motion.write_text(json.dumps(motion_requests, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(motion, motion_requests)
     add_artifact(manifest, role="motion-requests", path=motion, provider=manifest["providers"]["motion"])
 
 
@@ -201,11 +240,49 @@ def _write_editor_handoff(run_dir: Path, brief: dict[str, Any], manifest: dict[s
         "note": "FFmpeg is the deterministic zero-human default; CapCut receives a portable asset/timeline handoff rather than an unstable private project format.",
     }
     output = run_dir / "editor-handoff.json"
-    output.write_text(json.dumps(handoff, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, handoff)
     add_artifact(manifest, role="editor-handoff", path=output, provider=manifest["providers"]["assembly"])
 
 
 def _plan_first_frame_animation_ad(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
+    _write_script_request(run_dir, brief, manifest)
+    _plan_animation(run_dir, brief, manifest)
+    _write_generation_requests(run_dir, brief, manifest, keyframes=True)
+    _write_editor_handoff(run_dir, brief, manifest)
+
+
+def _persona_continuity(brief: dict[str, Any]) -> dict[str, Any]:
+    """What keeps the character the same person in every clip of the series.
+
+    The persona rides in ``continuity``, the field every keyframe request
+    already carries to its image provider, so the series needs no generation
+    path of its own: a lane that respects continuity respects the persona.
+    """
+    persona = brief.get("persona")
+    if not isinstance(persona, dict) or not str(persona.get("name") or "").strip():
+        raise ValueError("A persona-series brief needs persona.name (and persona.appearance or persona.references) so every clip shows the same character")
+    references = [str(item) for item in persona.get("references") or [] if str(item).strip()]
+    appearance = str(persona.get("appearance") or "").strip()
+    if not references and not appearance:
+        raise ValueError("A persona needs persona.appearance or persona.references; a name alone cannot keep a character consistent")
+    base = brief.get("continuity") if isinstance(brief.get("continuity"), dict) else {}
+    return {
+        **base,
+        "persona": {
+            "id": str(persona.get("id") or "").strip() or None,
+            "name": str(persona["name"]).strip(),
+            "appearance": appearance,
+            "references": references,
+            "disclosed_as_ai": persona.get("disclosed_as_ai") is not False,
+        },
+    }
+
+
+def _plan_persona_series(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
+    brief["continuity"] = _persona_continuity(brief)
+    # A persona clip is a silent loop unless the brief asks for a voice.
+    if not isinstance(brief.get("voice"), dict):
+        brief["voice"] = {"enabled": False}
     _write_script_request(run_dir, brief, manifest)
     _plan_animation(run_dir, brief, manifest)
     _write_generation_requests(run_dir, brief, manifest, keyframes=True)
@@ -217,7 +294,7 @@ def _plan_stickman_performance_ad(run_dir: Path, brief: dict[str, Any], manifest
     _plan_animation(run_dir, brief, manifest)
     scenes = _scenes(brief)
     output = run_dir / "stickman-scenes.json"
-    output.write_text(json.dumps(scenes, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, scenes)
     add_artifact(manifest, role="stickman-scenes", path=output, provider="stickman-renderer")
     _write_generation_requests(run_dir, brief, manifest, keyframes=False)
     _write_editor_handoff(run_dir, brief, manifest)
@@ -227,27 +304,56 @@ def _plan_static_text_ad(run_dir: Path, brief: dict[str, Any], manifest: dict[st
     _write_script_request(run_dir, brief, manifest)
     scenes = _scenes(brief)
     output = run_dir / "static-text-scenes.json"
-    output.write_text(json.dumps(scenes, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, scenes)
     add_artifact(manifest, role="static-text-scenes", path=output, provider="static-text-renderer")
     _write_publish_metadata(run_dir, brief, manifest)
+
+
+def _faceless_voice_name(voice: dict[str, Any]) -> str:
+    """The brief's voice, in the name the faceless engine dispatches on.
+
+    The engine picks its backend from the SHAPE of the voice name — a bare name
+    goes to azure/edge, `localtts:model:voice-Local` goes to the local server.
+    Passing only `voice.voice_id` through meant a brief asking for universal-tts
+    was answered by the azure router, which rejected the local voice by name
+    ("Invalid voice 'Luna'") and failed the whole render. Everything else in the
+    studio honours `voice.provider`; this lane now does too.
+    """
+    from .local_voice import LOCAL_VOICE_PROVIDERS
+
+    provider = str(voice.get("provider") or "").strip().lower()
+    voice_id = str(voice.get("voice_id") or voice.get("name") or "").strip()
+    if provider not in LOCAL_VOICE_PROVIDERS:
+        return voice_id
+    if voice_id.startswith("localtts:"):
+        return voice_id
+    from .local_voice import resolve_local_voice
+
+    model_id, resolved_voice = resolve_local_voice(voice)
+    return f"localtts:{model_id}:{resolved_voice}-Local"
 
 
 def _plan_faceless(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
     voice = brief.get("voice") if isinstance(brief.get("voice"), dict) else {}
     subtitles = brief.get("subtitles") if isinstance(brief.get("subtitles"), dict) else {}
+    media_source = str(brief.get("media_source") or "pexels").strip().lower() or "pexels"
     payload = {
         "video_subject": brief.get("subject") or brief.get("title") or brief.get("goal") or "",
         "video_script": brief.get("script") or "",
         "video_terms": brief.get("search_terms") or [],
         "video_aspect": brief.get("aspect_ratio") or "9:16",
-        "video_source": brief.get("media_source") or "pexels",
-        "voice_name": voice.get("voice_id") or "",
+        # A generated source is not something the engine can search for. It
+        # renders first, then feeds the results in as owned local material, so
+        # the params written here already say "local" and render_faceless fills
+        # video_materials in before the engine runs.
+        "video_source": "local" if is_studio_media_source(media_source) else media_source,
+        "voice_name": _faceless_voice_name(voice),
         "subtitle_enabled": subtitles.get("enabled", True),
         "video_count": int(brief.get("count") or 1),
         "video_clip_duration": int(brief.get("clip_duration_seconds") or 5),
     }
     params = run_dir / "faceless-params.json"
-    params.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(params, payload)
     add_artifact(manifest, role="faceless-params", path=params, provider="moneyprinterturbo")
     _write_publish_metadata(run_dir, brief, manifest)
 
@@ -261,7 +367,7 @@ def _plan_clip(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -
         "rights_status": "research",
     }
     clip_plan = run_dir / "clip-plan.json"
-    clip_plan.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(clip_plan, payload)
     add_artifact(manifest, role="clip-plan", path=clip_plan, provider="auto-clipper")
     _write_publish_metadata(run_dir, brief, manifest)
 
@@ -280,5 +386,5 @@ def _write_publish_metadata(run_dir: Path, brief: dict[str, Any], manifest: dict
         "cta": publish.get("cta") or brief.get("cta") or "",
     }
     output = run_dir / "publish-metadata.json"
-    output.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, metadata)
     add_artifact(manifest, role="publish-metadata", path=output, provider=manifest["providers"]["publish"])

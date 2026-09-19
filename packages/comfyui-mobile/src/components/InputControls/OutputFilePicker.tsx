@@ -4,6 +4,7 @@ import { getUserImages, uploadImageFile } from "@/api/client";
 import type { FileItem } from "@/api/client";
 import { useWorkflowErrorsStore } from "@/hooks/useWorkflowErrors";
 import { isOutputFileSelectable, sortOutputPickerFiles } from "./outputPickerUtils";
+import { E2EImage } from '@/components/E2EMedia';
 
 interface OutputFilePickerProps {
   open: boolean;
@@ -144,7 +145,7 @@ export function OutputFilePicker({
                 disabled={isCopying}
               >
                 {f.previewUrl && (
-                  <img
+                  <E2EImage
                     src={f.previewUrl}
                     alt=""
                     className="w-12 h-12 rounded object-cover bg-gray-100 dark:bg-gray-800 shrink-0"

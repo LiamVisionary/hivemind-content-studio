@@ -26,7 +26,9 @@ LOCAL_BRAIN_PROVIDER = {
 
 
 def brain_catalog(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
-    return _request("/api/local-apps/content-studio/catalog", method="GET", opener=opener)
+    # Catalog discovery is on the studio's first-paint path — a busy dashboard
+    # must degrade to the local planner quickly, not stall the model UI.
+    return _request("/api/local-apps/content-studio/catalog", method="GET", opener=opener, timeout=8)
 
 
 def plan_with_brain(payload: dict[str, Any], *, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:

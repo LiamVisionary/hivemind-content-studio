@@ -89,14 +89,23 @@ def write_run_note(conn, cfg: Config, run_id: int) -> Path:
     if bundle["clips"]:
         content.extend(
             [
-                "| ID | Slug | Status | Score | Output |",
-                "| --- | --- | --- | ---: | --- |",
+                "| ID | Slug | Status | Score | Hook | Why | Output |",
+                "| --- | --- | --- | ---: | --- | --- | --- |",
             ]
         )
-        for clip in bundle["clips"]:
+        # Best-first: this table is what gets read before `approve`, so the
+        # ordering is the re-rank's entire reason for existing. Unscored clips
+        # keep render order and sit at the bottom.
+        for clip in sorted(
+            bundle["clips"],
+            key=lambda row: (row.get("llm_score") is None, -(row.get("llm_score") or 0.0), row["id"]),
+        ):
+            score = clip.get("llm_score")
+            score_cell = f"{score:.2f}" if isinstance(score, (int, float)) else (clip.get("score") or "")
             content.append(
                 f"| {clip['id']} | {clip['slug']} | {clip['status']} | "
-                f"{clip.get('score') or ''} | {clip.get('output_path') or ''} |"
+                f"{score_cell} | {_cell(clip.get('hook_title'))} | {_cell(clip.get('llm_reason'))} | "
+                f"{clip.get('output_path') or ''} |"
             )
     else:
         content.append("- No clips yet.")
@@ -122,6 +131,13 @@ def write_run_note(conn, cfg: Config, run_id: int) -> Path:
     content.extend(["```", ""])
     path.write_text("\n".join(content), encoding="utf-8")
     return path
+
+
+def _cell(value: object) -> str:
+    """Make LLM prose safe for a markdown table cell."""
+    if not value:
+        return ""
+    return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
 def _approved_ids(approvals: list[dict]) -> list[int]:

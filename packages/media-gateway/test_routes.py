@@ -1,0 +1,338 @@
+"""The route table has to answer exactly what the if-chain answered.
+
+Dispatch used to be a 1,100-line if/elif over `parsed.path` inside do_GET and
+do_POST. It is now a table, which is only an improvement if every path that
+reached a block then reaches the same code now - so the mapping below was read
+off the chain that was replaced, and is asserted rather than trusted.
+"""
+import importlib.util
+import os
+import sys
+import sqlite3
+import tempfile
+import unittest
+from unittest import mock
+from unittest.mock import patch
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent
+
+
+def load_app():
+    for _cached in [n for n in sys.modules if n == 'gateway' or n.startswith('gateway.')]:
+        del sys.modules[_cached]
+    spec = importlib.util.spec_from_file_location('zimg_app_routes', BASE / 'app.py')
+    app = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(app)
+    return app
+
+
+# (method, path, the Handler method it must reach). Every row of the table is
+# covered, parameterised paths included.
+EXPECTED = [
+    ('GET', '/healthz', 'get_health'),
+    ('GET', '/health', 'get_health'),
+    ('GET', '/workflow-key', 'get_workflow_key'),
+    ('GET', '/api/e2e/vault-identity', 'get_api_e2e_vault_identity'),
+    ('GET', '/workflow-for-output', 'get_workflow_for_output'),
+    ('GET', '/internal/private-input', 'get_private_input'),
+    ('GET', '/ws', 'get_ws'),
+    ('GET', '/', 'get_frontend'),
+    ('GET', '/history', 'get_frontend'),
+    ('GET', '/models', 'get_frontend'),
+    ('GET', '/workbench', 'get_frontend'),
+    ('GET', '/favicon.ico', 'get_frontend'),
+    ('GET', '/_next/static/chunk.js', 'get_frontend'),
+    ('GET', '/api/models', 'get_api_models'),
+    ('GET', '/api/library', 'get_api_library'),
+    ('GET', '/api/model-preview', 'get_api_model_preview'),
+    ('GET', '/api/loras/preview', 'get_api_loras_preview'),
+    ('GET', '/api/loras', 'get_api_loras'),
+    ('GET', '/api/civitai/lora-updates', 'get_api_civitai_lora_updates'),
+    ('GET', '/api/civitai/base-models', 'get_api_civitai_base_models'),
+    ('GET', '/api/civitai/images', 'get_api_civitai_images'),
+    ('GET', '/api/civitai/search', 'get_api_civitai_search'),
+    ('GET', '/api/civitai/download/9271', 'get_api_civitai_download'),
+    ('GET', '/api/comfy/prompt-by-client/client-42', 'get_api_comfy_prompt_by_client'),
+    ('GET', '/comfy/view', 'get_comfy_view'),
+    ('GET', '/view', 'get_comfy_view'),
+    ('GET', '/output', 'get_output'),
+    ('GET', '/mobile', 'get_mobile_app'),
+    ('GET', '/mobile/', 'get_mobile_app'),
+    ('GET', '/mobile/index.html', 'get_mobile_app'),
+    ('GET', '/assets/index.js', 'get_mobile_app'),
+    ('GET', '/comfy/object_info', 'get_mobile_app'),
+    ('GET', '/api/restore/projects', 'get_api_restore_projects'),
+    ('GET', '/api/restore/capabilities', 'get_api_restore_capabilities'),
+    ('GET', '/api/restore/project/p-1', 'get_api_restore_project'),
+    ('GET', '/api/restore/source/s-1', 'get_api_restore_source'),
+    ('GET', '/api/history', 'get_api_history'),
+    ('GET', '/api/job/j-1', 'get_api_job'),
+    ('GET', '/job/j-1', 'get_job'),
+    ('GET', '/image/frame.png', 'get_image'),
+
+    ('POST', '/api/job/j-1/cancel', 'post_job_cancel'),
+    ('POST', '/api/cancel/j-1', 'post_api_cancel'),
+    ('POST', '/api/delete-output', 'post_api_delete_output'),
+    ('POST', '/api/lanes/resolve', 'post_api_lanes_resolve'),
+    ('POST', '/api/delete-input', 'post_api_delete_input'),
+    ('POST', '/api/interpolate', 'post_api_interpolate'),
+    ('POST', '/api/smart-mask', 'post_api_smart_mask'),
+    ('POST', '/api/audio-split', 'post_api_audio_split'),
+    ('POST', '/api/ltx-director', 'post_api_ltx_director'),
+    ('POST', '/api/episode', 'post_api_episode'),
+    ('POST', '/api/upscale', 'post_api_upscale'),
+    ('POST', '/api/restore/upload', 'post_api_restore_upload'),
+    ('POST', '/api/restore', 'post_api_restore'),
+    ('POST', '/api/restore/plan', 'post_api_restore_plan'),
+    ('POST', '/api/restore/finish', 'post_api_restore_finish'),
+    ('POST', '/api/restore/cancel/p-1', 'post_api_restore_cancel'),
+    ('POST', '/api/restore/delete/p-1', 'post_api_restore_delete'),
+    ('POST', '/api/models/equip', 'post_api_models_equip_or_unequip'),
+    ('POST', '/api/models/unequip', 'post_api_models_equip_or_unequip'),
+    ('POST', '/api/loras/select', 'post_api_loras_select'),
+    ('POST', '/api/civitai/download', 'post_api_civitai_download'),
+    ('POST', '/api/civitai/cancel-download/9271', 'post_api_civitai_cancel_download'),
+    ('GET', '/api/direction-reference', 'get_api_direction_reference'),
+
+    ('POST', '/comfy/prompt', 'post_comfy'),
+    ('POST', '/mobile/queue', 'post_comfy'),
+    ('POST', '/generate', 'post_generate'),
+    ('POST', '/api/generate', 'post_generate'),
+
+    ('DELETE', '/comfy/queue', 'delete_comfy'),
+    ('DELETE', '/mobile/queue', 'delete_comfy'),
+]
+
+
+class RouteTableTests(unittest.TestCase):
+    def setUp(self):
+        self.app = load_app()
+        self.routes = self.app.routes
+
+    def test_every_path_the_gateway_answered_reaches_the_same_handler(self):
+        for method, path, handler in EXPECTED:
+            with self.subTest(method=method, path=path):
+                _, route = self.routes.match(method, path)
+                self.assertIsNotNone(route, f"{method} {path} reaches no route")
+                self.assertEqual(route.handler, handler)
+
+    def test_the_table_covers_every_route_and_the_test_covers_every_row(self):
+        """A row nothing exercises is a route nobody checked when it moved."""
+        covered = {(method, handler) for method, _, handler in EXPECTED}
+        for route in self.routes.ROUTES:
+            with self.subTest(route=repr(route)):
+                self.assertIn((route.method, route.handler), covered)
+
+    def test_every_route_names_a_handler_the_request_handler_actually_has(self):
+        for route in self.routes.ROUTES:
+            with self.subTest(route=repr(route)):
+                self.assertTrue(callable(getattr(self.app.http.Handler, route.handler, None)))
+
+    def test_only_the_health_probe_answers_without_the_token(self):
+        """Every other path - including one no route claims - is behind the
+        token, so an unauthenticated caller cannot map the surface."""
+        open_paths = sorted(
+            path for route in self.routes.ROUTES if not route.auth for path in route.exact
+        )
+        self.assertEqual(open_paths, ['/health', '/healthz'])
+        self.assertEqual([r.prefixes for r in self.routes.ROUTES if not r.auth], [()])
+
+    def test_order_decides_when_two_rows_claim_one_path(self):
+        # /comfy/view is a private output first and a ComfyUI path second; the
+        # exact row sits above the /comfy/ proxy, and says NEXT when the name
+        # is not one of ours.
+        index, route = self.routes.match('GET', '/comfy/view')
+        self.assertEqual(route.handler, 'get_comfy_view')
+        _, following = self.routes.match('GET', '/comfy/view', start=index + 1)
+        self.assertEqual(following.handler, 'get_mobile_app')
+
+    def test_a_path_no_row_claims_has_no_route(self):
+        for method in ('GET', 'POST', 'DELETE'):
+            with self.subTest(method=method):
+                _, route = self.routes.match(method, '/api/not-a-real-route')
+                self.assertIsNone(route)
+
+    def test_a_method_the_gateway_does_not_serve_matches_nothing(self):
+        _, route = self.routes.match('PUT', '/api/models')
+        self.assertIsNone(route)
+
+    def test_every_row_is_reachable_by_one_of_its_own_paths(self):
+        """An unreachable row is a route that quietly stopped answering."""
+        for index, route in enumerate(self.routes.ROUTES):
+            samples = list(route.exact) + [
+                prefix + ('sample' + (route.suffix or '')) for prefix in route.prefixes
+            ]
+            with self.subTest(route=repr(route)):
+                hits = [self.routes.match(route.method, path)[0] for path in samples]
+                self.assertIn(index, hits)
+
+    def test_lane_refresh_is_declared_for_every_method_the_table_serves(self):
+        for route in self.routes.ROUTES:
+            self.assertIn(route.method, self.routes.REFRESHES_LANES)
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class FileRelativePaths(unittest.TestCase):
+    """Every `__file__`-relative path in the split package still resolves.
+
+    The 2026-09-04 split moved 14,516 lines from packages/media-gateway/app.py
+    into packages/media-gateway/gateway/ — ONE DIRECTORY DEEPER — and the move
+    was verbatim, which is exactly what made this class of bug invisible: the
+    text of `Path(__file__).resolve().parents[2]` did not change, its MEANING
+    did. Two were wrong (the vault DB pointed at packages/, the strength-hunt
+    composer at a bin/ that does not exist). A verbatim move cannot be trusted
+    for anything anchored to __file__, so each one is pinned here.
+    """
+
+    def test_the_vault_db_default_is_under_the_repo_root(self):
+        from gateway import media
+        # The default is <root>/data/… — at the top for the legacy flat file,
+        # two deeper for an account vault (data/accounts/<id>/vault.sqlite3).
+        # The invariant is the anchor, not the depth: the root is the directory
+        # holding packages/, never packages/ itself.
+        roots = [base for base in media.VAULT_DB.parents if (base / "packages" / "media-gateway").is_dir()]
+        self.assertTrue(roots, f"VAULT_DB is anchored at {media.VAULT_DB}, which is under no repo root")
+        base = roots[0]
+        self.assertTrue(
+            media.VAULT_DB.is_relative_to(base / "data"),
+            f"VAULT_DB is {media.VAULT_DB}, which is not under {base / 'data'}",
+        )
+        self.assertNotEqual(base.name, "packages", "VAULT_DB lost a directory level in the split")
+
+    def test_every_bin_script_the_gateway_shells_out_to_exists(self):
+        import re
+        from pathlib import Path
+        package = Path(__file__).resolve().parent / "gateway"
+        missing = []
+        for source in package.glob("*.py"):
+            text = source.read_text(encoding="utf-8")
+            for name in re.findall(r'"bin"\s*/\s*"([^"]+)"', text):
+                if not (package.parent / "bin" / name).is_file():
+                    missing.append(f"{source.name} -> bin/{name}")
+        self.assertEqual(missing, [], f"gateway modules point at scripts that are not there: {missing}")
+
+
+class OwnerIsAlwaysARecipient(unittest.TestCase):
+    """A harvest must never be sealed to the requesting browser alone.
+
+    2026-09-06: fifteen of the owner's clips were sealed to device key
+    01e23578 and to nothing else, then became unopenable when the browser
+    reclaimed that origin's IndexedDB. TWO independent defaults caused it —
+    ZIMG_AGENT_DUAL_SEAL was off, and vault_public_key_spki() had returned None
+    since the accounts migration moved the database it points at. Either one
+    alone is enough to lose media, so both are pinned here.
+    """
+
+    def test_the_route_s_own_owner_key_wins_over_the_global_vault_path(self):
+        from gateway import promptroutes
+        route = {"requester_spki": "A" * 392, "owner_spki": "B" * 392}
+        with patch.object(promptroutes.media, "vault_public_key_spki", lambda: "C" * 392):
+            owner, agent = promptroutes.sealing_recipients_for_route(route)
+        # The studio knows which workspace submitted; the single global path does not.
+        self.assertEqual(owner, "B" * 392)
+        self.assertEqual(agent, "A" * 392)
+
+    def test_a_broken_global_vault_path_no_longer_costs_the_owner_a_copy(self):
+        from gateway import promptroutes
+        route = {"requester_spki": "A" * 392, "owner_spki": "B" * 392}
+        # Exactly the state this machine was in for sixteen days.
+        with patch.object(promptroutes.media, "vault_public_key_spki", lambda: None):
+            owner, agent = promptroutes.sealing_recipients_for_route(route)
+        self.assertEqual(owner, "B" * 392, "the owner must still get an envelope")
+        self.assertEqual(agent, "A" * 392, "and the browser must keep its own")
+
+    def test_dual_seal_is_on_by_default(self):
+        from gateway import media
+        self.assertTrue(
+            media.AGENT_DUAL_SEAL_ENABLED,
+            "off means one envelope, sealed to an evictable browser key, with no way back",
+        )
+
+    def test_with_no_owner_key_anywhere_the_requester_still_gets_its_media(self):
+        from gateway import promptroutes
+        route = {"requester_spki": "A" * 392}
+        with patch.object(promptroutes.media, "vault_public_key_spki", lambda: None):
+            owner, agent = promptroutes.sealing_recipients_for_route(route)
+        # A first-run machine with no vault at all: one envelope, to the asker.
+        # Degraded, but never a refusal to seal.
+        self.assertEqual(owner, "A" * 392)
+        self.assertIsNone(agent)
+
+
+class VaultDbFollowsTheAccountsMigration(unittest.TestCase):
+    """The 2026-08-21 accounts migration renamed the owner vault and this
+    default did not follow, so the gateway sealed sixteen days of harvested
+    media to the submitting browser's device key alone."""
+
+    def _resolve(self, tmp: Path) -> Path:
+        from gateway import media
+        with mock.patch.dict(os.environ, {"CONTENT_STUDIO_DATA_DIR": str(tmp)}, clear=False):
+            return media._default_vault_db()
+
+    def test_the_legacy_flat_vault_still_wins_while_it_exists(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            (tmp / "owner-vault.sqlite3").write_bytes(b"")
+            (tmp / "accounts/1").mkdir(parents=True)
+            (tmp / "accounts/1/vault.sqlite3").write_bytes(b"")
+            self.assertEqual(self._resolve(tmp), tmp / "owner-vault.sqlite3")
+
+    def test_a_migrated_single_account_vault_is_found(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            (tmp / "accounts/1").mkdir(parents=True)
+            (tmp / "accounts/1/vault.sqlite3").write_bytes(b"")
+            # This is the case that silently broke: no flat file any more.
+            self.assertEqual(self._resolve(tmp), tmp / "accounts/1/vault.sqlite3")
+
+    def _with_accounts(self, tmp: Path, *accounts: str) -> None:
+        for account in accounts:
+            (tmp / f"accounts/{account}").mkdir(parents=True)
+            (tmp / f"accounts/{account}/vault.sqlite3").write_bytes(b"")
+
+    def _accounts_db(self, tmp: Path, owner_id: int) -> None:
+        connection = sqlite3.connect(tmp / "accounts.sqlite3")
+        connection.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT, is_owner INTEGER)")
+        connection.executemany(
+            "INSERT INTO accounts(id, name, is_owner) VALUES(?, ?, ?)",
+            [(1, "Owner", 1 if owner_id == 1 else 0), (2, "Second", 1 if owner_id == 2 else 0)],
+        )
+        connection.commit()
+        connection.close()
+
+    def test_several_accounts_resolve_to_the_owners_vault(self):
+        """Refusing to choose here is what produced a key-less seal, and a
+        key-less seal falls through to legacy `.zenc`, whose Keychain secret
+        every process running as this user can read. This path is only the
+        fallback — the studio still sends X-E2E-Owner-Pub per job — so the
+        question it answers is "whose vault opens an output nobody claimed",
+        and the listing already answers that with the owner."""
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            self._with_accounts(tmp, "1", "2")
+            self._accounts_db(tmp, owner_id=2)
+            self.assertEqual(self._resolve(tmp), tmp / "accounts/2/vault.sqlite3")
+
+    def test_the_owner_is_read_from_the_accounts_table_not_assumed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            self._with_accounts(tmp, "1", "2")
+            self._accounts_db(tmp, owner_id=1)
+            self.assertEqual(self._resolve(tmp), tmp / "accounts/1/vault.sqlite3")
+
+    def test_with_no_accounts_table_the_lowest_numbered_account_is_the_owner(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            # Ten must not sort before two.
+            self._with_accounts(tmp, "2", "10")
+            self.assertEqual(self._resolve(tmp), tmp / "accounts/2/vault.sqlite3")
+
+    def test_with_no_vault_at_all_the_legacy_path_names_where_to_make_one(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            self.assertEqual(self._resolve(tmp), tmp / "owner-vault.sqlite3")
+            self.assertFalse(self._resolve(tmp).is_file())

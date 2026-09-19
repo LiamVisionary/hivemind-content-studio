@@ -1,0 +1,178 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+// The SHIPPED normalizer. This used to import the retired vanilla studio's copy,
+// so the rule the app actually runs was never exercised.
+async function loadImageStudioHelpers() {
+    return import('../src/studios/image/imagePrefs.js');
+}
+
+test('image preferences retain provider, dropdown, advanced, and per-model LoRA settings', async () => {
+    const { normalizeImagePreferences } = await loadImageStudioHelpers();
+
+    assert.deepEqual(normalizeImagePreferences({
+        modelId: ' local-krea2 ',
+        imageMode: true,
+        useLocalModel: true,
+        localModelId: ' krea2-turbo ',
+        aspectRatio: ' 9:16 ',
+        resolution: '2K',
+        localRuntimeMode: 'persistent',
+        negativePrompt: 'washed out',
+        guidanceScale: 99,
+        steps: 0,
+        seed: 42.4,
+        style: 'Cinematic',
+        batchCount: 9,
+        customWidth: 1080,
+        customHeight: 1920,
+        referenceStrength: -5,
+        coupleMode: 1,
+        coupleDirection: 'vertical',
+        coupleSplit: 95,
+        couplePair: 'boys',
+        loraSelections: {
+            'krea2-turbo': [{
+                id: ' pink-hair ',
+                name: 'pink.safetensors',
+                displayName: 'Pink Hair',
+                previewUrl: '/preview/pink.jpg',
+                strength: 20,
+            }],
+        },
+    }), {
+        modelId: 'local-krea2',
+        imageMode: true,
+        useLocalModel: true,
+        localModelId: 'krea2-turbo',
+        aspectRatio: '9:16',
+        resolution: '2K',
+        localRuntimeMode: 'persistent',
+        negativePrompt: 'washed out',
+        guidanceScale: 20,
+        steps: 1,
+        seed: 42,
+        style: 'Cinematic',
+        batchCount: 4,
+        customWidth: 1080,
+        customHeight: 1920,
+        coupleMode: true,
+        coupleDirection: 'vertical',
+        coupleSplit: 90,
+        couplePair: 'boys',
+        // Added after the React port; the retired vanilla normalizer never knew
+        // them, which is why this expectation had drifted out of date.
+        baseSize: 0,
+        characterSheetMode: false,
+        characterSheetPreset: 'turnaround',
+        regionMode: false,
+        // Which ACCOUNT a cloud model is on: the catalog lists the same model
+        // id under three providers on three different bills, so the id alone
+        // cannot route. '' is the MUAPI account, where every cloud selection
+        // written before the Image studio could reach the others lived.
+        providerId: '',
+        rentedMachineId: '',
+        sampler: '',
+        scheduler: '',
+        // The Camera menu's rig — normalized to its defaults when none was saved.
+        cameraRig: { camera: 'Modular 8K Digital', lens: 'Creative Tilt Lens', focal: 35, aperture: 'f/1.4' },
+        modelSettings: {},
+        loraSelections: {
+            'krea2-turbo': [{
+                id: 'pink-hair',
+                name: 'pink.safetensors',
+                displayName: 'Pink Hair',
+                previewUrl: '/preview/pink.jpg',
+                strength: 10,
+                enabled: true,
+            }],
+        },
+    });
+});
+
+test('image preferences reject missing models and recover safe defaults', async () => {
+    const { normalizeImagePreferences } = await loadImageStudioHelpers();
+
+    assert.equal(normalizeImagePreferences({ modelId: '' }), null);
+    assert.deepEqual(normalizeImagePreferences({ modelId: 'z-image', style: 'removed', localRuntimeMode: 'invalid' }), {
+        modelId: 'z-image',
+        imageMode: false,
+        useLocalModel: false,
+        localModelId: '',
+        aspectRatio: '',
+        resolution: '',
+        localRuntimeMode: 'one-off',
+        negativePrompt: '',
+        guidanceScale: 7.5,
+        steps: 25,
+        seed: -1,
+        style: 'None',
+        batchCount: 1,
+        customWidth: 0,
+        customHeight: 0,
+        coupleMode: false,
+        coupleDirection: 'horizontal',
+        coupleSplit: 50,
+        couplePair: 'girls',
+        baseSize: 0,
+        characterSheetMode: false,
+        characterSheetPreset: 'turnaround',
+        regionMode: false,
+        providerId: '',
+        rentedMachineId: '',
+        sampler: '',
+        scheduler: '',
+        cameraRig: { camera: 'Modular 8K Digital', lens: 'Creative Tilt Lens', focal: 35, aperture: 'f/1.4' },
+        modelSettings: {},
+        loraSelections: {},
+    });
+});
+
+test('per-model settings are sanitized and junk entries dropped', async () => {
+    const { normalizeImagePreferences } = await loadImageStudioHelpers();
+
+    const prefs = normalizeImagePreferences({
+        modelId: 'z-image',
+        modelSettings: {
+            'local:comfy-auto-wai-anima-couple-turbo': {
+                steps: 400,
+                guidanceScale: 3,
+                negativePrompt: 'blurry',
+                aspectRatio: ' 3:4 ',
+                resolution: '',
+                customWidth: -5,
+                customHeight: 1344,
+                localRuntimeMode: 'persistent',
+                coupleMode: 1,
+                coupleDirection: 'vertical',
+                coupleSplit: 65,
+                couplePair: 'mixed',
+            },
+            '': { steps: 5 },
+            'api:junk': 'not-an-object',
+        },
+    });
+
+    assert.deepEqual(prefs.modelSettings, {
+        'local:comfy-auto-wai-anima-couple-turbo': {
+            steps: 50,
+            guidanceScale: 3,
+            negativePrompt: 'blurry',
+            aspectRatio: '3:4',
+            resolution: '',
+            customWidth: 0,
+            customHeight: 1344,
+            localRuntimeMode: 'persistent',
+            coupleMode: true,
+            coupleDirection: 'vertical',
+            coupleSplit: 65,
+            couplePair: 'mixed',
+            baseSize: 0,
+            characterSheetMode: false,
+            characterSheetPreset: 'turnaround',
+            regionMode: false,
+            sampler: '',
+            scheduler: '',
+        },
+    });
+});

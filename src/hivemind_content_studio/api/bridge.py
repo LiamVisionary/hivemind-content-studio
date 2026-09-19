@@ -1,0 +1,512 @@
+"""Same-origin proxies: the local-inference bridge, the Civitai handoff, and
+the one route that writes an output's settings back into the file.
+
+Moved out of control_api.py unchanged (2026-09-04). The staged-media route is
+reachable without a session on purpose; the reason, and the check that stands
+in for the session, are in control_api.py beside the gate.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import mimetypes
+import pathlib
+import re
+import tempfile
+import urllib.parse
+import urllib.request
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
+
+from .. import civitai_post, media_tracks
+from ..media_studio import local_gateway_token, normalized_requester_pub, sanitize_error_detail
+from ..settings import settings as studio_settings
+
+
+# The bridge routes that START a gateway job. Each answers with the job's id,
+# and each produces media the gateway seals and lists machine-wide — so each is
+# a moment the studio has to say whose workspace is asking (see open_gen_api).
+JOB_STARTING_ROUTES = frozenset({
+    "local-ai/generate",
+    "local-ai/upscale",
+    "local-ai/interpolate",
+    "local-ai/episode",
+    "local-ai/smart-mask",
+    "local-ai/ltx-director",
+})
+OWNER_PUB_HEADER = "X-E2E-Owner-Pub"
+_JOB_POLL_PATH = re.compile(r"^local-ai/job/([A-Za-z0-9_.:%-]+)$")
+
+
+def register(app, ctx) -> None:
+    """Register the bridge, the open-gen API proxy and the Civitai staging routes."""
+    router = APIRouter()
+    require_owner = ctx.require_owner
+    _forget_canvas_sync = ctx._forget_canvas_sync
+    _vault_public_key = ctx._vault_public_key
+    current_account = ctx.current_account
+    gateway_claims = ctx.gateway_claims
+
+    def _owner_pub_headers() -> dict[str, str]:
+        """The signed-in workspace's vault public key, for the gateway to seal
+        to. Never raises and never blocks a generation: a workspace with no
+        vault yet simply sends nothing and gets the machine-key fallback."""
+        try:
+            pub = normalized_requester_pub(_vault_public_key() or "")
+        except Exception:
+            return {}
+        return {OWNER_PUB_HEADER: pub} if pub else {}
+
+    def _claim_bridge_answer(path: str, method: str, content: bytes) -> None:
+        """Stamp whose job this is, at the two moments the bridge learns it.
+
+        Image renders reach the gateway through this proxy — browser, studio,
+        node bridge, gateway — and the gateway's history is machine-wide with
+        no notion of accounts. Video jobs are claimed for the workspace that
+        starts them; image jobs were not, so a non-owner workspace's renders
+        listed under nobody: the owner saw them as unclaimed, the workspace
+        that made them saw nothing at all. The job id is claimed when the 202
+        hands it over, and every output name when a poll reports the finish —
+        the name is what the listing agrees on once the job log has rolled.
+        """
+        scope = current_account.get()
+        if scope is None:
+            return
+        try:
+            payload = json.loads(content or b"{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+        if method == "POST" and path in JOB_STARTING_ROUTES:
+            job_id = str(payload.get("id") or "").strip()
+            if job_id:
+                gateway_claims.claim_job(job_id, scope.id)
+                _forget_canvas_sync()
+            return
+        poll = _JOB_POLL_PATH.match(path) if method == "GET" else None
+        if poll is None or payload.get("status") != "success":
+            return
+        job_id = urllib.parse.unquote(poll.group(1))
+        claimed = gateway_claims.account_for(gateway_claims.job_key(job_id))
+        if claimed is not None and claimed != scope.id:
+            # Another workspace's job; watching it does not make it yours.
+            return
+        names = [
+            urllib.parse.unquote(str(url).split("?", 1)[0].rsplit("/", 1)[-1])
+            for url in (payload.get("image_urls") or [])
+            if isinstance(url, str) and url.strip()
+        ]
+        if not names:
+            return
+        if claimed is None:
+            # An unclaimed job polled by a workspace is that workspace's —
+            # one started before claims existed, or by a studio since restarted.
+            gateway_claims.claim_job(job_id, scope.id)
+        for name in names:
+            gateway_claims.claim_output(name, scope.id)
+        _forget_canvas_sync()
+
+    # /local-ai/* is the same bridge without the prefix — the unified frontend
+    # served at "/" calls it same-origin (hosted-local-ai.js apiBase = '').
+    # DELETE is here for one route only — cancelling a Civitai download — but the
+    # allowlist below still decides which paths exist at all.
+    @router.api_route("/local-ai/{subpath:path}", methods=["GET", "POST", "DELETE"], dependencies=[Depends(require_owner)])
+    async def local_ai_bridge(subpath: str, request: Request) -> Response:
+        return await open_gen_api(f"local-ai/{subpath}", request)
+
+    @router.api_route("/open-gen-api/{path:path}", methods=["GET", "POST", "DELETE"], dependencies=[Depends(require_owner)])
+    async def open_gen_api(path: str, request: Request) -> Response:
+        allowed = {
+            "health",
+            "healthz",
+            "local-ai/binary-status",
+            "local-ai/models",
+            # The music catalogue. Separate from local-ai/models because that one
+            # lists image workflows only; without this line the Music studio's
+            # same-origin GET is answered by the bridge with a 404 and the page
+            # has no model to render at all.
+            "local-ai/audio-models",
+            "local-ai/generate",
+            "local-ai/upscale",
+            "local-ai/interpolate",
+            "local-ai/episode",
+            "local-ai/smart-mask",
+            # Splitting a finished clip's sound into stems. NOT in
+            # JOB_STARTING_ROUTES: the stems ride back inline on the job record
+            # and are never gateway outputs, so there is nothing to claim for a
+            # workspace and no vault key for the job to be sealed to.
+            "local-ai/audio-split",
+            "local-ai/ltx-director",
+            "local-ai/prompt-helper",
+            "local-ai/civitai-download",
+            "local-ai/lora-updates",
+            # Model manager: the installed library, Civitai browse, and its filter
+            # vocabulary. All read-only; downloads still go through civitai-download.
+            "local-ai/library",
+            "local-ai/civitai-search",
+            "local-ai/civitai-base-models",
+            # The inspiration finder: Civitai images/videos that carry a
+            # reusable prompt. Read-only, same bridge, same Civitai key.
+            "local-ai/civitai-images",
+            # A model's artwork, blurb and links, matched on Civitai and Hugging
+            # Face by the bridge and cached there. Read-only; the picture itself
+            # comes back through the model-art prefix below.
+            "local-ai/model-card",
+            # Workflow preflight and its inline installers: what the lane
+            # lacks for a registered workflow, install it, restart the lane.
+            "local-ai/workflow-dependencies",
+            "local-ai/workflow-dependencies/install",
+            "local-ai/workflow-dependencies/restart",
+        }
+        dynamic_local_ai_route = any(
+            path.startswith(prefix)
+            and path.removeprefix(prefix).replace("-", "").replace("_", "").replace("%", "").isalnum()
+            for prefix in (
+                "local-ai/job/",
+                "local-ai/loras/",
+                "local-ai/lora-preview/",
+                "local-ai/model-preview/",
+                "local-ai/model-art/",
+                "local-ai/civitai-download/",
+                "local-ai/workflow-dependencies/jobs/",
+            )
+        ) or (
+            # Stopping an image job at the gateway: one id segment, then "cancel".
+            request.method == "POST"
+            and re.fullmatch(r"local-ai/job/[A-Za-z0-9_.:%-]+/cancel", path) is not None
+        )
+        if path not in allowed and not dynamic_local_ai_route:
+            raise HTTPException(status_code=404, detail="OpenGen bridge route not found")
+        body = await request.body()
+        # Forward the query string too. The route allowlist above is matched on the
+        # PATH only, so this cannot widen it — but dropping the query silently broke
+        # callers that pass parameters (e.g. /local-ai/loras/<id>?baseModels=…, which
+        # is how workflows the bridge cannot see in its own registry get resolved).
+        query = str(request.url.query or "")[:2048]
+        upstream_url = f"{studio_settings().network.bridge_url}/{path}" + (f"?{query}" if query else "")
+        # A job started here is sealed by the gateway, and the gateway has one
+        # vault path for a machine that can hold several workspaces — on such a
+        # machine that path names nobody, and every render fell back to the
+        # machine key. The workspace's own vault key travels with the job
+        # instead, exactly as the video path sends it (media_studio._owner_headers).
+        # Resolved here, on the request, not in the thread below.
+        starts_job = request.method == "POST" and path in JOB_STARTING_ROUTES
+        owner_headers = _owner_pub_headers() if starts_job else {}
+
+        def forward() -> tuple[bytes, int, str]:
+            # The bridge authenticates its callers now (canvas-gate, same two
+            # credentials as the Canvas surface beside it). This hop has no
+            # browser session of its own, so it presents the loopback gateway
+            # token — the same secret the bridge reads off disk. It stays
+            # server-side: it is set on the outbound request and never on the
+            # response the browser gets back.
+            headers = {"Content-Type": request.headers.get("content-type", "application/json")}
+            headers.update(owner_headers)
+            token = local_gateway_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            proxy_request = urllib.request.Request(
+                upstream_url,
+                data=body or None,
+                method=request.method,
+                headers=headers,
+            )
+            try:
+                with urllib.request.urlopen(proxy_request, timeout=190) as upstream:
+                    return upstream.read(), upstream.status, upstream.headers.get("content-type", "application/json")
+            except urllib.error.HTTPError as exc:
+                return exc.read(), exc.code, exc.headers.get("content-type", "application/json")
+            except (OSError, urllib.error.URLError) as exc:
+                timed_out = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+                if timed_out:
+                    raise RuntimeError("The local inference bridge did not answer within 190 s") from exc
+                raise RuntimeError("The local inference bridge is unavailable") from exc
+
+        try:
+            content, status, content_type = await asyncio.to_thread(forward)
+        except RuntimeError as exc:
+            # Both keys: the studio wrappers read ``detail``, the bridge shim
+            # (hosted-local-ai.js) reads ``error`` — so the Models view used to
+            # show a bare "HTTP 503" for this.
+            #
+            # ``message`` is the sentence a person is shown, and ``remedy``
+            # says which repair belongs beside it. "The local inference bridge
+            # is unavailable" is accurate and means nothing to the owner of a
+            # studio that has simply not finished starting.
+            return JSONResponse(
+                {
+                    "message": "Your local engine isn't running",
+                    "remedy": "local-engine",
+                    "provider": "local",
+                    "detail": str(exc),
+                    "error": str(exc),
+                },
+                status_code=503,
+            )
+        # The last hop before the browser. An upstream refusal arrives as the
+        # gateway's own words — a traceback tail, an absolute path, a JSON body
+        # — and this is the only place left to translate it, so a failed lane
+        # reads as a sentence with the original kept beside it rather than
+        # instead of it. 2xx bodies (images, job records) pass untouched.
+        if status >= 400 and "json" in content_type.lower():
+            try:
+                payload = json.loads(content or b"{}")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
+                raw = payload.get("error") or payload.get("detail") or payload.get("message") or ""
+                said = sanitize_error_detail(raw if isinstance(raw, str) else json.dumps(raw))
+                if said:
+                    payload = {**payload, "error": said, "detail": said, "message": said}
+                    return JSONResponse(payload, status_code=status)
+        elif status < 300 and "json" in content_type.lower():
+            _claim_bridge_answer(path, request.method, content)
+        return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
+
+    # --- posting a creation to Civitai -------------------------------------
+    # See civitai_post.py for why this is shaped the way it is: Civitai has no
+    # upload API, its post composer fetches the media from the BROWSER, and so
+    # the studio's job is to hold one plaintext copy at a URL the browser can
+    # read, for a few minutes, and then forget it.
+
+    # NOT under /api/civitai/*: the tailnet HTTPS proxy routes that whole prefix
+    # to the MEDIA GATEWAY (its Civitai model search and downloads live there),
+    # so a staging route inside it would 404 for every session reached over the
+    # ts.net URL — which is most of them.
+    @router.post("/api/civitai-post/stage", dependencies=[Depends(require_owner)])
+    async def civitai_post_stage(
+        request: Request,
+        file: UploadFile = File(...),
+        title: Annotated[str, Form()] = "",
+        description: Annotated[str, Form()] = "",
+        tags: Annotated[str, Form()] = "",
+        meta: Annotated[str, Form()] = "",
+    ) -> dict:
+        """Take the decrypted bytes, write the generation metadata into them,
+        and answer with the Civitai URL to open.
+
+        The media arrives already decrypted: the browser holds the vault key,
+        so it is the only side that CAN unseal an output. What crosses here is
+        plaintext by the time it is sent, which is the whole point of the
+        feature and is why nothing on this route touches the seal.
+        """
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="That file is empty.")
+        try:
+            parsed_meta = json.loads(meta) if meta else {}
+            if not isinstance(parsed_meta, dict):
+                parsed_meta = {}
+        except json.JSONDecodeError:
+            parsed_meta = {}
+        content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+        if not content_type:
+            content_type = mimetypes.guess_type(file.filename or "")[0] or ""
+        try:
+            staged, stamped = await asyncio.to_thread(
+                civitai_post.stage,
+                data=data,
+                content_type=content_type,
+                filename=file.filename or "",
+                meta=parsed_meta,
+            )
+        except civitai_post.CivitaiPostError as exc:
+            # Always a named limit ("this clip runs 300s, the limit is 245s"),
+            # so it is shown to the owner as written.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # The media URL has to be absolute AND reachable from the browser that
+        # is signed in to Civitai — which is this browser. Its own origin is
+        # therefore the only correct answer: guessing a hostname here is how a
+        # tailnet session ends up handed a localhost URL it cannot open.
+        origin = str(request.headers.get("origin") or "").rstrip("/")
+        if not origin:
+            base = request.base_url
+            origin = f"{base.scheme}://{base.netloc}".rstrip("/")
+        media_url = f"{origin}/civitai/staged/{staged.token}/{staged.filename}"
+        tag_list = [tag.strip() for tag in str(tags or "").split(",") if tag.strip()]
+        return {
+            "ok": True,
+            "token": staged.token,
+            "mediaUrl": media_url,
+            "intentUrl": civitai_post.intent_url(
+                media_url, title=title, description=description, tags=tag_list
+            ),
+            "expiresAt": staged.expires_at,
+            "bytes": staged.path.stat().st_size,
+            "kind": staged.kind,
+            # Whether the prompt actually travelled INSIDE the file. False is a
+            # normal outcome (no ffmpeg, an odd container), and the studio says
+            # so rather than implying Civitai will find settings that are not
+            # there.
+            "metadataEmbedded": bool(stamped),
+        }
+
+    @router.api_route("/civitai/staged/{token}/{filename}", methods=["GET", "HEAD", "OPTIONS"])
+    async def civitai_staged_media(token: str, filename: str, request: Request) -> Response:
+        """Serve one staged file to Civitai's post composer.
+
+        Deliberately outside the sign-in gate — see _civitai_staged_route. The
+        response is readable only from Civitai's own origins, and only while the
+        token lives.
+        """
+        origin = civitai_post.cors_origin(request.headers.get("origin"))
+        headers = {
+            "Cache-Control": "no-store",
+            # The composer reads these bytes with fetch().blob(), so without a
+            # matching CORS header the read fails and the media never attaches.
+            **({"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if origin else {}),
+            # Chrome treats civitai.com -> this machine as a public-to-private
+            # request and preflights it; without this the fetch is blocked
+            # before it is ever made.
+            **({"Access-Control-Allow-Private-Network": "true"} if origin else {}),
+        }
+        if request.method == "OPTIONS":
+            return Response(
+                status_code=204,
+                headers={
+                    **headers,
+                    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Max-Age": "600",
+                },
+            )
+        staged = await asyncio.to_thread(civitai_post.read_staged, token)
+        if staged is None:
+            raise HTTPException(status_code=404, detail="That staged media has expired.")
+        return FileResponse(
+            staged.path,
+            media_type=staged.content_type,
+            filename=staged.filename,
+            headers=headers,
+        )
+
+    @router.delete("/api/civitai-post/stage/{token}", dependencies=[Depends(require_owner)])
+    async def civitai_post_unstage(token: str) -> dict:
+        """Drop a staging as soon as the post is made or abandoned, rather than
+        leaving plaintext to wait out its TTL."""
+        return {"ok": True, "dropped": await asyncio.to_thread(civitai_post.drop_staged, token)}
+
+    # --- writing the settings into a file the owner keeps -------------------
+    #
+    # Everything this studio saves is sealed and ComfyUI runs with
+    # --disable-metadata, so a downloaded picture carries no prompt, no seed and
+    # no model: the settings live encrypted in the owner's vault, beside the
+    # output rather than inside it. That is the right default — a file that
+    # announces its prompt announces it to everyone it is ever sent to — and it
+    # is also why "which settings made this?" cannot be answered by any tool but
+    # this one.
+    #
+    # This route is the deliberate exception, asked for one file at a time from
+    # the studio's download menu, behind a toggle that has to be turned on
+    # first. It writes the SAME A1111 `parameters` block the Civitai handoff
+    # writes (civitai_post.stamp), because that is the format the ecosystem
+    # reads — Civitai, A1111, ComfyUI, every metadata viewer.
+    #
+    # Not the Civitai staging route, and deliberately not built on it: staging
+    # mints a public token, holds plaintext for half an hour and enforces
+    # Civitai's own ceilings, none of which belong to saving a file to your own
+    # disk. Here the bytes arrive decrypted, are stamped in a temporary
+    # directory that is removed before the response is sent, and go straight
+    # back to the browser that asked.
+    @router.post("/api/media/stamp-settings", dependencies=[Depends(require_owner)])
+    async def media_stamp_settings(
+        file: UploadFile = File(...),
+        meta: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Return the uploaded media with its generation settings written in.
+
+        Answers with the ORIGINAL bytes when the stamp could not be written (no
+        Pillow, no ffmpeg, a container that will not carry tags) rather than
+        failing: the person asked to save their file, and `X-Settings-Embedded`
+        tells the studio whether the settings actually travelled so it can say
+        so instead of implying they did.
+        """
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="That file is empty.")
+        try:
+            parsed_meta = json.loads(meta) if meta else {}
+            if not isinstance(parsed_meta, dict):
+                parsed_meta = {}
+        except json.JSONDecodeError:
+            parsed_meta = {}
+        content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+        if not content_type:
+            content_type = mimetypes.guess_type(file.filename or "")[0] or ""
+
+        def _stamped() -> tuple[bytes, bool]:
+            # A named temporary DIRECTORY, not a file: _stamp_video remuxes to a
+            # sibling path and replaces the original, so the stamper needs a
+            # place of its own. Removed on the way out of this block, which is
+            # before anything is returned — plaintext lives here for exactly as
+            # long as the stamp takes.
+            with tempfile.TemporaryDirectory(prefix="hive-stamp-") as tmp:
+                path = pathlib.Path(tmp) / (pathlib.Path(file.filename or "media").name or "media")
+                path.write_bytes(data)
+                embedded = civitai_post.stamp(path, content_type, parsed_meta)
+                return path.read_bytes(), bool(embedded)
+
+        try:
+            stamped, embedded = await asyncio.to_thread(_stamped)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not write the settings into that file.") from exc
+        return Response(
+            content=stamped,
+            media_type=content_type or "application/octet-stream",
+            headers={
+                "Cache-Control": "no-store",
+                # Whether the settings actually travelled INSIDE the file. The
+                # studio reports the false case rather than claiming a stamp it
+                # did not make.
+                "X-Settings-Embedded": "1" if embedded else "0",
+            },
+        )
+
+    # --- one half of a clip: its sound, or its picture ---------------------
+    #
+    # Same shape and same promises as the stamp above, for the same reason: the
+    # browser holds the vault key, so the bytes arrive decrypted, live in a
+    # temporary directory for exactly as long as ffmpeg needs them, and go
+    # straight back to the tab that asked. Nothing is listed, sealed or kept —
+    # this is a person saving part of their own file, not a new creation.
+    @router.post("/api/media/track", dependencies=[Depends(require_owner)])
+    async def media_track(
+        file: UploadFile = File(...),
+        mode: Annotated[str, Form()] = "audio",
+    ) -> Response:
+        """`mode=audio`: the soundtrack as WAV. `mode=silent`: the video, stream-copied, with no sound."""
+        if mode not in media_tracks.MODES:
+            raise HTTPException(status_code=400, detail="mode must be 'audio' or 'silent'.")
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="That file is empty.")
+
+        def _extracted() -> tuple[bytes, str, str]:
+            with tempfile.TemporaryDirectory(prefix="hive-track-") as tmp:
+                suffix = pathlib.Path(file.filename or "").suffix.lower() or ".mp4"
+                # A fixed name: the upload's own name is somebody's title, and
+                # nothing about this step needs it on disk.
+                source = pathlib.Path(tmp) / f"source{suffix}"
+                source.write_bytes(data)
+                return media_tracks.extract(source, mode)
+
+        try:
+            content, media_type, extension = await asyncio.to_thread(_extracted)
+        except media_tracks.TrackError as exc:
+            # 422, not 500: "this clip has no sound" is an answer about the
+            # file, and the studio shows the sentence as it is.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not take that clip apart.") from exc
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Cache-Control": "no-store", "X-Track-Extension": extension},
+        )
+
+    app.include_router(router)

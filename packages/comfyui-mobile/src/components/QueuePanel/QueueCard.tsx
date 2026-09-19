@@ -28,6 +28,7 @@ import { getQueueCardHeaderGridClass, getQueueCardHeaderLabel } from './queueCar
 import { getHistoryImageFileId } from '@/utils/viewerImages';
 import { preloadQueueMedia } from './queueMediaHandoff';
 import { getHistoryImagePreviewUrl, getHistoryImageUrl } from '@/utils/historyImageUrls';
+import { E2EImage, E2EVideo } from '@/components/E2EMedia';
 
 // One entry in the queue item's image slot / tab bar.
 interface MediaTab {
@@ -701,7 +702,7 @@ function QueueCardComponent({
                         )}
                         {isVideoFilename(img.filename) ? (
                           <>
-                            <video
+                            <E2EVideo
                               src={src}
                               className="w-full h-auto block"
                               muted
@@ -735,7 +736,7 @@ function QueueCardComponent({
                             )}
                           </>
                         ) : (
-                          <img
+                          <E2EImage
                             src={displaySrc}
                             alt="Generation"
                             className="w-full h-auto block"

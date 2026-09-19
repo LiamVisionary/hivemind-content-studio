@@ -4,7 +4,7 @@ title: From idea to finished campaign
 audience: founder-led software companies
 goal: show a complete content workflow in under 15 seconds
 runtime_seconds: 14
-aspect_ratio: 9:16
+aspect_ratio: "9:16"
 tone: direct, visual, specific
 style_guardrails:
   - keep the same founder, product interface, palette, and lighting across keyframes

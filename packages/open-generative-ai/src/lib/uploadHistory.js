@@ -1,9 +1,36 @@
+import { isHivemindStudioEnabled } from './hivemindStudio.js';
+import { getComposerUploads, setComposerUploads } from './composerState.js';
+
 const STORAGE_KEY = 'muapi_uploads';
 const MAX_UPLOADS = 20;
 
-export function getUploadHistory() {
+function studioMode() {
     try {
-        return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        return isHivemindStudioEnabled();
+    } catch {
+        return false;
+    }
+}
+
+export function isPersistentUploadReference(value) {
+    const url = String(value || '').trim().toLowerCase();
+    return Boolean(url) && !url.startsWith('blob:') && !url.startsWith('data:');
+}
+
+export function getUploadHistory() {
+    // Studio mode: the reference grid lives in the encrypted, owner-gated
+    // composer state (hydrated at studio boot), never in browser storage.
+    if (studioMode()) {
+        return getComposerUploads().filter((entry) => isPersistentUploadReference(entry?.uploadedUrl));
+    }
+    try {
+        const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        const history = Array.isArray(parsed) ? parsed : [];
+        const persistent = history.filter((entry) => isPersistentUploadReference(entry?.uploadedUrl));
+        if (persistent.length !== history.length) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(persistent.slice(0, MAX_UPLOADS)));
+        }
+        return persistent;
     } catch {
         return [];
     }
@@ -12,11 +39,19 @@ export function getUploadHistory() {
 export function saveUpload({ id, name, uploadedUrl, thumbnail, timestamp }) {
     const history = getUploadHistory();
     history.unshift({ id, name, uploadedUrl, thumbnail, timestamp });
+    if (studioMode()) {
+        setComposerUploads(history.slice(0, MAX_UPLOADS));
+        return;
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(history.slice(0, MAX_UPLOADS)));
 }
 
 export function removeUpload(id) {
     const history = getUploadHistory().filter(e => e.id !== id);
+    if (studioMode()) {
+        setComposerUploads(history);
+        return;
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
 }
 

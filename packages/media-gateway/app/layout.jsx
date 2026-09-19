@@ -1,14 +1,12 @@
 export const metadata = {
-  title: 'Media Studio',
-  description: 'Next.js control surface for Media Studio and ComfyUI',
+  title: 'Media gateway',
+  description: 'ComfyUI proxy, media API and mobile workbench for Hivemind Content Studio',
 };
-
-import './globals.css';
 
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body style={{ margin: 0 }}>{children}</body>
     </html>
   );
 }

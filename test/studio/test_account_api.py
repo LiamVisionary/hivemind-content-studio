@@ -1,0 +1,884 @@
+"""The account gate over HTTP, and the isolation claim end to end.
+
+test_account_scope.py proves two stores cannot see each other. This file proves
+the same thing through the API a browser actually calls — signing in as one
+workspace, writing something, signing in as another, and finding nothing. That
+distinction matters: the stores could be perfectly separated and a route could
+still resolve the wrong one.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from hivemind_content_studio.accounts import ACCOUNT_COOKIE, AccountStore
+from hivemind_content_studio.control_api import (
+    PROXY_SECRET_ENV,
+    PROXY_SECRET_HEADER,
+    build_control_app,
+)
+from hivemind_content_studio.orchestrator import ContentOrchestrator
+from hivemind_content_studio.private_access import OwnerAccess, PrivateFieldCipher
+from hivemind_content_studio.run_store import RunStore
+
+OWNER_PASSWORD = "owner-passphrase"
+
+
+@pytest.fixture()
+def client(tmp_path: Path, monkeypatch) -> TestClient:
+    monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
+    # The studio reads x-forwarded-* only from a caller carrying this secret, so
+    # the tailnet-shaped tests below can present it and every other test is
+    # treated as the ordinary browser on loopback that it is.
+    monkeypatch.setenv(PROXY_SECRET_ENV, "test-proxy-secret")
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    app = build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret",
+        operator_token="operator-secret",
+        owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
+        private_cipher=cipher,
+    )
+    return TestClient(app)
+
+
+def _sign_in(client: TestClient, account_id: int, password: str) -> None:
+    response = client.post("/api/accounts/unlock", json={"account_id": account_id, "password": password})
+    assert response.status_code == 200, response.text
+
+
+def _add_workspace(client: TestClient, name: str, password: str) -> int:
+    _sign_in(client, 1, OWNER_PASSWORD)
+    created = client.post("/api/accounts", json={"name": name, "password": password})
+    assert created.status_code == 201, created.text
+    client.post("/api/accounts/sign-out")
+    return int(created.json()["account"]["id"])
+
+
+# ── the gate ─────────────────────────────────────────────────────────────────
+
+def test_the_picker_is_reachable_before_sign_in_and_leaks_nothing(client):
+    response = client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["signed_in_as"] is None
+    assert [account["name"] for account in payload["accounts"]] == ["Owner"]
+    owner = payload["accounts"][0]
+    assert owner["has_password"] is True and owner["has_passkey"] is False
+    # Nothing an attacker can take away and grind on.
+    body = json.dumps(payload)
+    assert "scrypt" not in body and "password_hash" not in body and "salt" not in body
+
+
+def test_everything_else_is_refused_until_a_workspace_is_open(client):
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 401
+    assert client.get("/api/media-studio/references").status_code == 401
+    gate = client.get("/", headers={"accept": "text/html"})
+    assert gate.status_code == 200 and "Who's working?" in gate.text
+
+
+def test_sign_in_and_out_moves_the_gate(client):
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.get("/api/accounts").json()["signed_in_as"] == 1
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 200
+    assert client.post("/api/accounts/sign-out").status_code == 200
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 401
+
+
+def test_a_wrong_password_says_nothing_useful_and_is_throttled(client):
+    for _ in range(5):
+        refused = client.post("/api/accounts/unlock", json={"account_id": 1, "password": "nope"})
+        assert refused.status_code == 401
+        assert refused.json()["detail"] == "Wrong password"
+    blocked = client.post("/api/accounts/unlock", json={"account_id": 1, "password": "nope"})
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+    # Even the CORRECT password is refused while the block stands, or the
+    # throttle would be a speed bump rather than a lockout.
+    assert client.post("/api/accounts/unlock",
+                       json={"account_id": 1, "password": OWNER_PASSWORD}).status_code == 429
+
+
+def test_a_missing_workspace_is_indistinguishable_from_a_bad_password(client):
+    absent = client.post("/api/accounts/unlock", json={"account_id": 9999, "password": "whatever"})
+    wrong = client.post("/api/accounts/unlock", json={"account_id": 1, "password": "whatever"})
+    assert absent.status_code == wrong.status_code == 401
+    assert absent.json()["detail"] == wrong.json()["detail"]
+
+
+def test_a_forged_cookie_does_not_open_a_workspace(client):
+    client.cookies.set(ACCOUNT_COOKIE, "1.99999999999.nonce.deadbeef")
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 401
+
+
+# ── managing workspaces ──────────────────────────────────────────────────────
+
+def test_the_gate_offers_a_new_workspace_card(client):
+    gate = client.get("/", headers={"accept": "text/html"})
+    assert gate.status_code == 200
+    assert "New workspace" in gate.text
+    assert 'id="create-form"' in gate.text
+    # Both approval paths are in the page: the owner-passkey button (shown only
+    # when the owner has a passkey) and the owner-password fallback.
+    assert 'id="create-passkey"' in gate.text
+    assert 'id="create-owner-password"' in gate.text
+
+
+def test_the_gates_create_flow_lands_in_the_new_workspace(client):
+    # The exact sequence the gate's create card performs: owner approval sets
+    # the session the create route checks, then unlocking the NEW workspace
+    # switches the session so the reload lands inside it.
+    _sign_in(client, 1, OWNER_PASSWORD)
+    created = client.post("/api/accounts", json={"name": "Editor", "password": "editor-pass"})
+    assert created.status_code == 201, created.text
+    new_id = int(created.json()["account"]["id"])
+    _sign_in(client, new_id, "editor-pass")
+    assert client.get("/api/accounts").json()["signed_in_as"] == new_id
+
+
+def test_only_the_owner_can_add_a_workspace(client):
+    assert client.post("/api/accounts", json={"name": "Sneaky", "password": "x"}).status_code == 403
+
+    second = _add_workspace(client, "Second", "second-pass")
+    assert second == 2
+    _sign_in(client, second, "second-pass")
+    refused = client.post("/api/accounts", json={"name": "Third", "password": "x"})
+    assert refused.status_code == 403
+
+
+def test_the_owner_workspace_cannot_be_deleted(client):
+    _sign_in(client, 1, OWNER_PASSWORD)
+    refused = client.delete("/api/accounts/1")
+    assert refused.status_code == 400
+    assert "owner workspace cannot be deleted" in refused.json()["detail"]
+
+
+def test_a_workspace_cannot_delete_a_sibling(client):
+    second = _add_workspace(client, "Second", "second-pass")
+    third = _add_workspace(client, "Third", "third-pass")
+    _sign_in(client, second, "second-pass")
+    assert client.delete(f"/api/accounts/{third}").status_code == 403
+    # ...but may delete itself, and the owner may delete anyone.
+    assert client.delete(f"/api/accounts/{second}").status_code == 200
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.delete(f"/api/accounts/{third}").status_code == 200
+    assert [account["id"] for account in client.get("/api/accounts").json()["accounts"]] == [1]
+
+
+def test_deleting_a_workspace_destroys_its_data(client, tmp_path):
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, second, "second-pass")
+    client.put("/api/vault/blob/composer/opengen", json={"ciphertext": "theirs-sealed"})
+    root = tmp_path / "accounts" / str(second)
+    assert root.is_dir()
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.delete(f"/api/accounts/{second}").status_code == 200
+    assert not root.exists()
+
+
+# ── the isolation claim, over HTTP ───────────────────────────────────────────
+
+def test_one_workspace_cannot_read_anothers_composer(client):
+    second = _add_workspace(client, "Second", "second-pass")
+
+    _sign_in(client, 1, OWNER_PASSWORD)
+    client.put("/api/vault/blob/composer/opengen", json={"ciphertext": "owner's sealed draft"})
+    assert client.get("/api/vault/blob/composer/opengen").json()["ciphertext"] == "owner's sealed draft"
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    response = client.get("/api/vault/blob/composer/opengen")
+    assert response.status_code == 200
+    assert response.json()["ciphertext"] is None
+    assert "owner's sealed draft" not in response.text
+
+
+def test_one_workspace_cannot_list_anothers_references(client):
+    second = _add_workspace(client, "Second", "second-pass")
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+
+    _sign_in(client, 1, OWNER_PASSWORD)
+    uploaded = client.post(
+        "/api/media-studio/references",
+        files={"file": ("owner-secret.png", png, "image/png")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    owner_reference = uploaded.json()["url"]
+    assert len(client.get("/api/media-studio/references").json()["references"]) == 1
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    assert client.get("/api/media-studio/references").json()["references"] == []
+    # Naming the other workspace's file directly does not fetch it either: the
+    # path is resolved under THIS account's root, where it does not exist.
+    assert client.get(owner_reference).status_code in {403, 404}
+
+
+def test_each_workspace_has_its_own_vault_identity_over_http(client):
+    second = _add_workspace(client, "Second", "second-pass")
+    identity = {
+        "salt": "s", "wrapped_mk_pass": "a", "wrapped_mk_recovery": "b",
+        "public_key": "owner-public-key", "wrapped_private_key": "d",
+    }
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.put("/api/vault/identity", json={"identity": identity}).status_code in {200, 201}
+    assert client.get("/api/vault/identity").json()["identity"]["public_key"] == "owner-public-key"
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    # A fresh workspace has NO vault, so its browser is asked to create one
+    # rather than being handed the owner's.
+    assert client.get("/api/vault/identity").json()["identity"] is None
+
+
+def test_one_workspace_cannot_enumerate_anothers_runs(client):
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    owner_run = client.post("/api/runs", json={
+        "lane": "static-text-ad", "title": "Owner ad",
+        "concept": "Owner's private concept.", "scenes": [{"overlay": "Owner"}],
+    }).json()["run_id"]
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    # The listing enumerates only this workspace's runs…
+    assert client.get("/api/runs").json()["runs"] == []
+    # …and the owner's run is INDISTINGUISHABLE from one that never existed.
+    hidden = client.get(f"/api/runs/{owner_run}")
+    absent = client.get(f"/api/runs/{owner_run}x")
+    assert hidden.status_code == absent.status_code == 404
+    assert hidden.json()["detail"].replace(f"{owner_run}", "") == absent.json()["detail"].replace(f"{owner_run}x", "")
+    assert client.get(f"/api/runs/{owner_run}/artifacts/anything").status_code == 404
+    assert client.post(f"/api/runs/{owner_run}/cancel", json={"reason": "not mine"}).status_code == 404
+
+    # Its own runs appear normally — and stay invisible to the owner in turn.
+    mine = client.post("/api/runs", json={
+        "lane": "static-text-ad", "title": "Second ad",
+        "concept": "Second's concept.", "scenes": [{"overlay": "Second"}],
+    }).json()["run_id"]
+    assert [run["run_id"] for run in client.get("/api/runs").json()["runs"]] == [mine]
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    owner_listed = [run["run_id"] for run in client.get("/api/runs").json()["runs"]]
+    assert owner_run in owner_listed and mine not in owner_listed
+    assert client.get(f"/api/runs/{mine}").status_code == 404
+
+
+def test_canvas_history_shows_each_workspace_only_its_own_gateway_outputs(client, tmp_path, monkeypatch):
+    """The canvas index reads MACHINE-wide sources (the gateway's output roots
+    and job log), where every workspace's video-studio clips land side by side.
+    The studio claims each gateway job it starts and each output it finishes
+    for the workspace that asked, and every History lists only what its scope
+    may see: a sibling its own clips, the owner everything unclaimed — and
+    neither the other's. (2026-08-22: a second workspace generated a video,
+    saw it in the studio, and found History empty — the whole gateway surface
+    was owner-only.)"""
+    def piece(name: str) -> str:
+        path = tmp_path / name
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        return str(path)
+
+    records = [{
+        "id": "job-1", "status": "success",
+        "created_at": "2026-08-21T00:00:00+00:00", "finished_at": "2026-08-21T00:00:00+00:00",
+        "outputs": [piece("canvas-piece.png")],
+    }]
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_start",
+        lambda **_: {"job_id": "job-sib-1", "uploaded_names": [], "provider": "Media Studio"},
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_check",
+        lambda job_id, **_: {"status": "completed", "failed": False, "error": "",
+                             "video_url": "http://gateway/image/sibling-clip.mp4", "progress": 1.0},
+    )
+    # The gateway names the sealed form; claims and listings meet on the logical name.
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_finish",
+        lambda job_id, **_: {"job_id": job_id, "provider": "Media Studio", "gateway_output": "sibling-clip.mp4.e2e"},
+    )
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    canvas_client = TestClient(build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret",
+        operator_token="operator-secret",
+        owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
+        private_cipher=cipher,
+        canvas_history_fetcher=lambda: [dict(record) for record in records],
+        canvas_media_fetcher=lambda name, requester_pub="", reveal_agent=False: (b"sealed:" + Path(name).name.encode(), "application/vnd.hivemind.e2e+json"),
+    ))
+
+    def basenames(view: dict) -> list[str]:
+        return sorted(item["output_basename"] for item in view["history"])
+
+    _sign_in(canvas_client, 1, OWNER_PASSWORD)
+    owner_view = canvas_client.get("/api/canvas/history").json()
+    assert basenames(owner_view) == ["canvas-piece.png"]
+    owner_item = owner_view["history"][0]["history_id"]
+    created = canvas_client.post("/api/accounts", json={"name": "Second", "password": "second-pass"})
+    assert created.status_code == 201, created.text
+    second = int(created.json()["account"]["id"])
+
+    # The sibling's clip lands at the gateway (a file record, id unrelated to
+    # the job) BEFORE the studio has finished the job — the owner's History,
+    # polling meanwhile, adopts it as unclaimed.
+    records.append({"id": "file-deadbeef", "status": "success", "created_at": "2026-08-22T00:28:00+00:00",
+                    "finished_at": "2026-08-22T00:28:00+00:00", "outputs": [piece("sibling-clip.mp4")]})
+    # A page-1 listing re-indexes the gateway at most every few seconds per
+    # workspace (the History poll used to walk both output roots every tick);
+    # ?refresh=1 is the explicit re-index, and what this step needs — the
+    # owner's previous listing was milliseconds ago.
+    assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == ["canvas-piece.png", "sibling-clip.mp4"]
+
+    canvas_client.post("/api/accounts/sign-out")
+    _sign_in(canvas_client, second, "second-pass")
+    # Nothing is the sibling's yet: not the owner's piece, not an unclaimed clip.
+    assert canvas_client.get("/api/canvas/history").json()["history"] == []
+
+    # The sibling generates a video through the real start/poll path: start
+    # claims the job id, finishing it claims the output name.
+    queued = canvas_client.post("/api/media-studio/video/start",
+                                json={"prompt": "a clip of my own", "workflow_id": "ltx23-eros-fast", "duration_seconds": 2})
+    assert queued.status_code == 200, queued.text
+    assert queued.json()["job_id"] == "job-sib-1"
+    done = canvas_client.get("/api/media-studio/video/job/job-sib-1").json()
+    assert done.get("ok") is True and done["output"] == "sibling-clip.mp4.e2e", done
+    # A local-lane record the studio never finished (restart mid-run) is still
+    # found by the job id the gateway's workflow index lists it under.
+    records.append({"id": "job-sib-1", "status": "success", "created_at": "2026-08-22T00:30:00+00:00",
+                    "finished_at": "2026-08-22T00:30:00+00:00", "outputs": [piece("sibling-local.mp4")]})
+
+    second_view = canvas_client.get("/api/canvas/history?refresh=1").json()
+    assert basenames(second_view) == ["sibling-clip.mp4", "sibling-local.mp4"]
+    mine = next(item for item in second_view["history"] if item["output_basename"] == "sibling-clip.mp4")
+    media = canvas_client.get(f"/api/canvas/history/{mine['history_id']}/media")
+    assert media.status_code == 200 and media.content == b"sealed:sibling-clip.mp4"
+    assert media.headers["X-E2E-Media"] == "1"
+    # The owner's items stay hidden outright from the sibling's detail routes.
+    assert canvas_client.get(f"/api/canvas/history/{owner_item}/media").status_code == 404
+    assert canvas_client.get(f"/api/canvas/history/{owner_item}/workflow").status_code == 404
+    assert canvas_client.delete(f"/api/canvas/history/{owner_item}", params={}).status_code in {404, 422}
+
+    # And in the other direction: the owner's History drops the clip it had
+    # adopted before the claim existed, and never lists the sibling's ids.
+    canvas_client.post("/api/accounts/sign-out")
+    _sign_in(canvas_client, 1, OWNER_PASSWORD)
+    assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == ["canvas-piece.png"]
+    assert canvas_client.get(f"/api/canvas/history/{mine['history_id']}/media").status_code == 404
+
+
+def test_one_workspace_cannot_read_anothers_sealed_blobs(client):
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.put("/api/vault/blob/library/saved-prompts",
+                      json={"ciphertext": "owner-ciphertext"}).status_code in {200, 201}
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    response = client.get("/api/vault/blob/library/saved-prompts")
+    assert response.status_code in {200, 404}
+    assert "owner-ciphertext" not in response.text
+
+
+# ── passkeys over HTTP ───────────────────────────────────────────────────────
+
+def test_passkey_registration_requires_an_open_workspace(client):
+    assert client.post("/api/accounts/webauthn/register/options").status_code == 401
+    assert client.post("/api/accounts/webauthn/register", json={
+        "credential_id": "c", "public_key": "k", "algorithm": -7, "client_data_json": "x",
+    }).status_code == 401
+
+
+def test_registration_options_are_bound_to_the_signed_in_workspace(client):
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, second, "second-pass")
+    options = client.post("/api/accounts/webauthn/register/options").json()["publicKey"]
+    assert options["rp"]["id"] == "127.0.0.1"
+    assert options["user"]["displayName"] == "Second"
+    # The user handle is a digest of the account id, never the name in clear.
+    expected = hashlib.sha256(f"hivemind-account-{second}".encode("utf-8")).digest()[:16]
+    assert options["user"]["id"] == __import__("base64").urlsafe_b64encode(expected).decode().rstrip("=")
+
+
+def test_the_relying_party_follows_the_browsers_host_through_the_proxy(client):
+    """The tailnet proxy rewrites Host to its upstream target, so without the
+    forwarded host the RP id comes out as 127.0.0.1 and the browser refuses:
+    'The relying party ID is not a registrable domain suffix of, nor equal to
+    the current domain.'"""
+    _sign_in(client, 1, OWNER_PASSWORD)
+    proxied = {
+        "x-forwarded-host": "studio.tailnet.example:8789",
+        "x-forwarded-proto": "https",
+        PROXY_SECRET_HEADER: "test-proxy-secret",
+    }
+    response = client.post("/api/accounts/webauthn/register/options", headers=proxied)
+    assert response.json()["publicKey"]["rp"]["id"] == "studio.tailnet.example"
+    # And a caller that merely CLAIMS to be the proxy names no relying party: a
+    # passkey must never be asked to sign for a domain of someone else's choosing.
+    unproved = client.post("/api/accounts/webauthn/register/options",
+                           headers={key: value for key, value in proxied.items()
+                                    if key != PROXY_SECRET_HEADER})
+    assert unproved.json()["publicKey"]["rp"]["id"] == "127.0.0.1"
+
+
+def test_the_gate_asks_for_registration_options_with_a_post(client):
+    """The gate's api() helper sends GET when no body is passed, and a GET to
+    this POST-only path falls through to the root static mount, whose bare 404
+    surfaced as 'Not Found' on the Add-a-passkey card. Every call the gate
+    script makes to it must therefore carry a body."""
+    gate = client.get("/", headers={"accept": "text/html"})
+    calls = re.findall(r"api\('/api/accounts/webauthn/register/options'(.)", gate.text)
+    assert calls, "the gate script no longer registers passkeys?"
+    assert all(next_char == "," for next_char in calls), \
+        "a bodiless api() call goes out as GET and 404s against the static mount"
+
+
+def test_a_sign_in_challenge_is_offered_without_a_session(client):
+    """The whole point of a passkey tile: no password, no prior session."""
+    response = client.post("/api/accounts/webauthn/authenticate/options", json={"account_id": 1})
+    assert response.status_code == 200
+    options = response.json()["publicKey"]
+    assert options["challenge"] and options["rpId"] == "127.0.0.1"
+    # A workspace that does not exist is not a probe oracle for challenges.
+    assert client.post("/api/accounts/webauthn/authenticate/options",
+                       json={"account_id": 9999}).status_code == 404
+
+
+def test_a_bogus_assertion_is_refused(client):
+    refused = client.post("/api/accounts/webauthn/authenticate", json={
+        "credential_id": "not-a-real-credential", "client_data_json": "x",
+        "authenticator_data": "y", "signature": "z",
+    })
+    assert refused.status_code == 401
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 401
+
+
+# ── an existing store keeps working ──────────────────────────────────────────
+
+def test_the_session_probe_reports_the_workspace_that_signed_in(client):
+    """The topbar and the in-app vault modal both read /api/owner/session."""
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "wrong"}).status_code == 401
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD}).status_code == 200
+    session = client.get("/api/owner/session").json()
+    assert session["unlocked"] is True and session["account"]["id"] == 1
+    assert client.get("/api/accounts").json()["signed_in_as"] == 1
+
+
+def test_the_legacy_owner_hash_is_upgraded_to_scrypt_on_first_use(client, tmp_path):
+    store = AccountStore(tmp_path / "accounts.sqlite3")
+    assert store.password_hash(1) == hashlib.sha256(OWNER_PASSWORD.encode()).hexdigest()
+    _sign_in(client, 1, OWNER_PASSWORD)
+    upgraded = store.password_hash(1)
+    assert upgraded.startswith("scrypt$")
+    # ...and the same password still opens it afterwards.
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, 1, OWNER_PASSWORD)
+
+
+def test_gpu_rentals_follow_any_signed_in_workspace(client, monkeypatch):
+    # No marketplace is consulted: the claim under test is the ACCESS rule,
+    # and the conftest transport guard would (rightly) refuse a real call.
+    from hivemind_content_studio import rental_providers
+
+    monkeypatch.setattr(rental_providers, "configured_providers", lambda: [])
+    # Signed out, the rental surface is refused outright…
+    assert client.get("/api/gpu-rentals").status_code == 401
+    # …but any workspace may manage rentals once signed in: its creation was
+    # owner-approved, and that approval carries the whole studio.
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, second, "second-pass")
+    reached = client.get("/api/gpu-rentals")
+    assert reached.status_code not in (401, 403)
+
+
+def test_only_the_owner_workspace_may_rewrite_the_machines_credentials(client):
+    """The other side of the rentals rule above.
+
+    Renting is studio work and every invited workspace does it. The shared
+    credential store is not: it is read by every Hive app on this Mac, so a
+    collaborator replacing OPENAI_API_KEY there breaks software they have never
+    heard of. Sealing the store and revoking a machine link are the same
+    machine-wide switch. Seeing WHICH keys exist stays open — that is how a
+    collaborator says what is missing — and no route ever returns a value.
+    """
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, second, "second-pass")
+
+    replaced = client.post("/api/passbook", json={
+        "values": {"OPENAI_API_KEY": "sk-not-the-owners"}, "overwrite": True})
+    assert replaced.status_code == 403
+    assert "owner" in replaced.json()["detail"]["message"].lower()
+    assert replaced.json()["detail"]["remedy"]
+
+    assert client.post("/api/passbook/seal").status_code == 403
+    assert client.post("/api/passbook/links/revoke", json={"did": "did:key:zSomeMachine"}).status_code == 403
+    assert client.post("/api/passbook/policy/lock").status_code == 403
+    # Reading is not a machine-wide write, so it is not refused.
+    assert client.get("/api/passbook").status_code != 403
+
+
+def _gateway_that_names_accounts(monkeypatch, tmp_path: Path) -> None:
+    """A gateway that answers the account row for ANY key, naming the account
+    after the key — so which account a workspace is on can be read off its
+    row. The machine-wide store is pointed at the tmp dir too, or the owner's
+    key would be written into the developer's real data folder."""
+    from hivemind_content_studio import hivemindos_models
+
+    from hivemind_content_studio import hivemindos_account
+
+    names: dict[str, dict] = {}
+
+    def gateway(path, *, headers=None, method="GET", body=None, **_):
+        token = str((headers or {}).get("X-HivemindOS-Credit-Token") or "")
+        if path.endswith("/credits/balance"):
+            return {"ok": True, "accountId": f"acct-{token[-4:]}", "balanceCredits": 5}
+        if path == "/api/mini-app-account":
+            return {"ok": True, "authenticated": True}
+        if path == hivemindos_account.USERNAME_PATH:
+            # The hive username registry: the derived name on first read, a
+            # chosen one once claimed.
+            derived = {"username": hivemindos_account.derive_handle(f"acct-{token[-4:]}"), "custom": False}
+            if method == "POST":
+                names[token] = {"username": body["username"], "custom": True} if body.get("username") else derived
+            return {"ok": True, **names.setdefault(token, derived)}
+        if path.startswith("/api/free-models/"):
+            return {"ok": True, "model": {"allowance": {"dailyRequests": 1, "dailyTokens": 1}}}
+        raise AssertionError(f"the fixture has no answer for {path}")
+
+    monkeypatch.setattr(hivemindos_models, "_gateway_request", gateway)
+    monkeypatch.setattr(hivemindos_models, "_store_path", lambda: tmp_path / "hivemindos-models.json")
+
+
+TOKEN_A = "hmos_credit_" + "a" * 30
+TOKEN_B = "hmos_credit_" + "b" * 30
+
+
+def test_each_workspace_holds_its_own_hivemindos_account(client, monkeypatch, tmp_path):
+    """Reported: whichever workspace was signed in, the account row showed the
+    same name. Every workspace now names, backs up and spends its own."""
+    _gateway_that_names_accounts(monkeypatch, tmp_path)
+    second = _add_workspace(client, "Second", "second-pass")
+
+    _sign_in(client, second, "second-pass")
+    # No account yet, and a name of its own rather than the owner's.
+    before = client.get("/api/hivemindos/account").json()["identity"]
+    assert before["connected"] is False
+    # Connecting is the second workspace's to do — no owner gate — and the
+    # key lands under ITS subtree.
+    assert client.post("/api/hivemindos/models/connect", json={"token": TOKEN_B}).status_code == 200
+    mine = client.get("/api/hivemindos/account").json()["identity"]
+    assert mine["connected"] is True and mine["accountId"] == "acct-bbbb"
+    assert (tmp_path / "accounts" / str(second) / "hivemindos-account.json").is_file()
+    assert client.post("/api/hivemindos/account/handle", json={"handle": "Second_Bee"}).status_code == 200
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    owner = client.get("/api/hivemindos/account").json()["identity"]
+    assert owner["connected"] is False
+    assert owner["handle"] not in {mine["handle"], "Second_Bee"}
+    assert owner["handle"] != before["handle"]
+    assert client.post("/api/hivemindos/models/connect", json={"token": TOKEN_A}).status_code == 200
+    assert client.get("/api/hivemindos/account").json()["identity"]["accountId"] == "acct-aaaa"
+    assert "hivemindos-account.json" not in {entry.name for entry in (tmp_path / "accounts" / "1").iterdir()}
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    again = client.get("/api/hivemindos/account").json()["identity"]
+    assert again["accountId"] == "acct-bbbb" and again["handle"] == "Second_Bee"
+
+
+def test_a_share_lets_a_sibling_spend_the_owners_credits_over_http(client, monkeypatch, tmp_path):
+    _gateway_that_names_accounts(monkeypatch, tmp_path)
+    second = _add_workspace(client, "Second", "second-pass")
+
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.post("/api/hivemindos/models/connect", json={"token": TOKEN_A}).status_code == 200
+    sheet = client.get("/api/hivemindos/account").json()["sharing"]
+    assert sheet["canShare"] is True and sheet["sharedFrom"] is None
+    assert [(entry["id"], entry["name"], entry["shared"]) for entry in sheet["workspaces"]] == [(second, "Second", False)]
+    # A stranger is refused; the chosen sibling is written.
+    assert client.post("/api/hivemindos/account/share", json={"workspaces": [9999]}).status_code == 400
+    shared = client.post("/api/hivemindos/account/share", json={"workspaces": [second]})
+    assert shared.status_code == 200, shared.text
+    assert shared.json()["sharing"]["workspaces"][0]["shared"] is True
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    row = client.get("/api/hivemindos/account").json()
+    assert row["credits"]["configured"] is True and row["credits"]["source"] == "shared"
+    assert row["sharing"]["sharedFrom"] == {"id": 1, "name": "Owner", "isOwner": True}
+    # Spending is all a share grants: the account is still not this workspace's.
+    assert row["identity"]["connected"] is False
+    assert client.post("/api/hivemindos/account/recovery-key").status_code == 400
+    # …and with nothing of its own there is nothing for it to share onward.
+    assert client.post("/api/hivemindos/account/share", json={"everyone": True}).status_code == 400
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.post("/api/hivemindos/account/share", json={"workspaces": []}).status_code == 200
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    assert client.get("/api/hivemindos/account").json()["credits"]["configured"] is False
+
+
+def test_the_owners_doors_stay_the_owners(client):
+    """What reaches the owner's app — its account key through the link, its
+    wallet — is not a sibling's to press, whatever is shared."""
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, second, "second-pass")
+    assert client.post("/api/hivemindos/models/link-request").status_code == 403
+    assert client.post("/api/hivemindos/account/wallet-pay", json={"amountUsd": 10.0}).status_code == 403
+
+
+# ── first run ────────────────────────────────────────────────────────────────
+
+def _unclaimed(tmp_path: Path, monkeypatch, *, host: str = "127.0.0.1") -> TestClient:
+    """A studio nobody has ever opened: no seed hash, no accounts store."""
+    monkeypatch.delenv("CONTENT_STUDIO_OWNER_PASSWORD_HASH", raising=False)
+    monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    app = build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret",
+        operator_token="operator-secret",
+        # from_runtime, not for_testing: the claim is that a real boot with no
+        # environment seed leaves the owner with no credentials at all.
+        owner_access=OwnerAccess.from_runtime(cipher),
+        private_cipher=cipher,
+    )
+    return TestClient(app, client=(host, 51000))
+
+
+def test_no_owner_password_ships_in_the_source(monkeypatch):
+    monkeypatch.delenv("CONTENT_STUDIO_OWNER_PASSWORD_HASH", raising=False)
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    assert OwnerAccess.from_runtime(cipher).password_hash is None
+    seeded = hashlib.sha256(b"seeded").hexdigest()
+    monkeypatch.setenv("CONTENT_STUDIO_OWNER_PASSWORD_HASH", seeded)
+    assert OwnerAccess.from_runtime(cipher).password_hash == seeded
+
+
+def test_a_fresh_studio_asks_to_be_named_before_anything_else(tmp_path: Path, monkeypatch):
+    fresh = _unclaimed(tmp_path, monkeypatch)
+    payload = fresh.get("/api/accounts").json()
+    assert payload["setup_required"] is True
+    owner = payload["accounts"][0]
+    assert owner["has_password"] is False and owner["has_passkey"] is False
+    # …and the gate carries the card that flag switches on.
+    gate = fresh.get("/", headers={"accept": "text/html"})
+    assert gate.status_code == 200
+    assert "Name your studio and set a passphrase" in gate.text
+    assert 'id="setup-form"' in gate.text and "payload.setup_required" in gate.text
+
+
+def test_an_unclaimed_studio_cannot_be_unlocked(tmp_path: Path, monkeypatch):
+    """No credentials means no password opens it."""
+    fresh = _unclaimed(tmp_path, monkeypatch)
+    assert fresh.post("/api/accounts/unlock",
+                      json={"account_id": 1, "password": "anything"}).status_code == 401
+    assert fresh.get("/api/vault/blob/composer/opengen").status_code == 401
+
+
+def test_setup_names_the_studio_signs_in_and_only_ever_runs_once(tmp_path: Path, monkeypatch):
+    fresh = _unclaimed(tmp_path, monkeypatch)
+    done = fresh.post("/api/accounts/setup", json={"name": "Bee Studio", "password": "first-passphrase"})
+    assert done.status_code == 200, done.text
+    assert done.json()["account"]["name"] == "Bee Studio"
+    # Signed in on the spot, which is what enrolling a passkey next needs.
+    after = fresh.get("/api/accounts").json()
+    assert after["signed_in_as"] == 1 and after["setup_required"] is False
+    assert after["accounts"][0]["name"] == "Bee Studio"
+    assert fresh.get("/api/vault/blob/composer/opengen").status_code == 200
+    # And the door closes behind it, signed in or not.
+    assert fresh.post("/api/accounts/setup",
+                      json={"name": "Someone Else", "password": "second"}).status_code == 409
+    fresh.post("/api/accounts/sign-out")
+    assert fresh.post("/api/accounts/setup",
+                      json={"name": "Someone Else", "password": "second"}).status_code == 409
+    # The passphrase that was set is the one that opens it afterwards.
+    _sign_in(fresh, 1, "first-passphrase")
+
+
+def test_setup_is_refused_from_anywhere_but_this_machine(tmp_path: Path, monkeypatch):
+    """Whoever is at the keyboard owns a fresh install; nobody on the tailnet does."""
+    remote = _unclaimed(tmp_path, monkeypatch, host="10.0.0.9")
+    refused = remote.post("/api/accounts/setup", json={"name": "Not Yours", "password": "pw"})
+    assert refused.status_code == 403
+    assert remote.get("/api/accounts").json()["setup_required"] is True
+
+
+def test_a_studio_that_is_already_set_up_never_shows_the_setup_card(tmp_path: Path, monkeypatch):
+    """An existing store signs in as it always did, seed hash or no seed hash."""
+    monkeypatch.delenv("CONTENT_STUDIO_OWNER_PASSWORD_HASH", raising=False)
+    store = AccountStore(tmp_path / "accounts.sqlite3")
+    store.create(name="Owner", password=OWNER_PASSWORD, is_owner=True)
+    already = _unclaimed(tmp_path, monkeypatch)
+    assert already.get("/api/accounts").json()["setup_required"] is False
+    assert already.post("/api/accounts/setup",
+                        json={"name": "Hijack", "password": "pw"}).status_code == 409
+    _sign_in(already, 1, OWNER_PASSWORD)
+
+
+def test_a_background_finished_clip_is_claimed_for_the_workspace_that_started_it(tmp_path, monkeypatch):
+    """The waited path claims the output name inside the request, so the
+    workspace is in the context. The BACKGROUND finisher runs on no request at
+    all -- and used to claim nothing, leaving the job claimed only by an id
+    that a gateway listing built from a file walk never carries. Once the
+    route entry aged out, the clip surfaced unclaimed: the owner adopted it
+    and the workspace that made it never listed it (2026-08-22: three of a
+    sibling workspace's clips under Owner). The submit path now stashes the
+    workspace on the job and the finisher claims the name with it, even when
+    finished through the control-token poll with no account scope."""
+    def piece(name: str) -> str:
+        path = tmp_path / name
+        path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"0" * 32)
+        return str(path)
+
+    records: list[dict] = []
+    # The finisher is a background task, and asyncio copies the submitting
+    # request's contextvars into it -- so in-process it inherits the sibling's
+    # scope and the bug hides. What happened for real: a rented job outlived a
+    # studio restart, the task died with it, and a later control-token poll
+    # finished the job under NO scope. Spawn finishers with an empty context to
+    # model exactly that; the stashed workspace must then carry the claim.
+    import asyncio as _asyncio
+    import contextvars as _contextvars
+    real_get_running_loop = _asyncio.get_running_loop
+
+    class _DetachedLoop:
+        def __init__(self, loop): self._loop = loop
+        def create_task(self, coro, **kw):
+            return self._loop.create_task(coro, context=_contextvars.Context(), **kw)
+        def __getattr__(self, name): return getattr(self._loop, name)
+
+    monkeypatch.setattr("hivemind_content_studio.api.video.asyncio.get_running_loop",
+                        lambda: _DetachedLoop(real_get_running_loop()))
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_start",
+        lambda **_: {"job_id": "job-bg-1", "uploaded_names": [], "provider": "Media Studio"},
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_check",
+        lambda job_id, **_: {"status": "completed", "failed": False, "error": "",
+                             "video_url": "http://gateway/image/bg-clip.mp4", "progress": 1.0},
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_finish",
+        lambda job_id, **_: {"job_id": job_id, "provider": "Media Studio", "gateway_output": "bg-clip.mp4.e2e"},
+    )
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    app = build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret",
+        operator_token="operator-secret",
+        owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
+        private_cipher=cipher,
+        canvas_history_fetcher=lambda: [dict(record) for record in records],
+        canvas_media_fetcher=lambda name, requester_pub="", reveal_agent=False: (b"sealed:" + Path(name).name.encode(), "application/vnd.hivemind.e2e+json"),
+    )
+    canvas_client = TestClient(app)
+
+    def basenames(view: dict) -> list[str]:
+        return sorted(item["output_basename"] for item in view["history"])
+
+    _sign_in(canvas_client, 1, OWNER_PASSWORD)
+    created = canvas_client.post("/api/accounts", json={"name": "Second", "password": "second-pass"})
+    assert created.status_code == 201, created.text
+    second = int(created.json()["account"]["id"])
+    canvas_client.post("/api/accounts/sign-out")
+
+    # The sibling starts the job (its workspace is stashed on the job) ...
+    _sign_in(canvas_client, second, "second-pass")
+    queued = canvas_client.post("/api/media-studio/video/start",
+                                json={"prompt": "mine", "workflow_id": "ltx23-eros-fast", "duration_seconds": 2})
+    assert queued.status_code == 200, queued.text
+    canvas_client.post("/api/accounts/sign-out")
+
+    # ... and it is FINISHED with no account in scope at all: the control
+    # token, which is how an agent or a supervisor polls. This is the path
+    # that used to leave the output name unclaimed.
+    # A FRESH client: no session cookie at all, so nothing can smuggle the
+    # sibling's scope back in. This is what a supervisor or agent poll is.
+    done = TestClient(app).get("/api/media-studio/video/job/job-bg-1",
+                               headers={"Authorization": "Bearer control-secret"}).json()
+    # A control caller gets a machine receipt, which deliberately omits the
+    # output name; that the job finished is all it may learn. The listings
+    # below are what prove the claim was written for the right workspace.
+    assert done.get("ok") is True, done
+
+    # The gateway later lists the clip as a file-walk record: no job id.
+    records.append({"id": "file-0badc0ffee", "status": "success", "created_at": "2026-08-22T07:17:00+00:00",
+                    "finished_at": "2026-08-22T07:17:00+00:00", "outputs": [piece("bg-clip.mp4")]})
+
+    # The sibling lists it; the owner does not adopt it as unclaimed.
+    _sign_in(canvas_client, second, "second-pass")
+    assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == ["bg-clip.mp4"]
+    canvas_client.post("/api/accounts/sign-out")
+    _sign_in(canvas_client, 1, OWNER_PASSWORD)
+    assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == []
+
+
+def test_recovery_tools_reseal_replaces_the_envelope_and_keeps_the_old_one(tmp_path, monkeypatch):
+    """The browser opened a clip with some other private key and re-sealed it
+    to the vault; the server's only jobs are to check the shape, swap the file,
+    and keep the previous envelope beside it. And none of that is reachable
+    until developer.recovery_tools is on -- an owner session must not be able
+    to rewrite media files by default."""
+    monkeypatch.setenv("CONTENT_STUDIO_SETTINGS_FILE", str(tmp_path / "settings.json"))
+    from hivemind_content_studio import settings as settings_module
+    settings_module.forget_cached_settings()
+
+    clip = tmp_path / "old-clip.mp4"
+    envelope_path = tmp_path / "old-clip.mp4.e2e"
+    envelope_path.write_text(json.dumps({"v": 1, "media_type": "video/mp4", "wrapped_dek": "A" * 342, "ciphertext": "B" * 64}))
+    records = [{"id": "file-0ld", "status": "success", "created_at": "2026-08-22T07:17:00+00:00",
+                "finished_at": "2026-08-22T07:17:00+00:00", "outputs": [str(clip)]}]
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    client = TestClient(build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret", operator_token="operator-secret",
+        owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
+        private_cipher=cipher,
+        canvas_history_fetcher=lambda: [dict(r) for r in records],
+        canvas_media_fetcher=lambda name, requester_pub="", reveal_agent=False: (b"sealed", "application/vnd.hivemind.e2e+json"),
+    ))
+    _sign_in(client, 1, OWNER_PASSWORD)
+    item = client.get("/api/canvas/history?refresh=1").json()["history"][0]["history_id"]
+
+    # A real 256-byte RSA wrap, base64url, as the browser would send.
+    import base64
+    good = {"v": 1, "media_type": "video/mp4",
+            "wrapped_dek": base64.urlsafe_b64encode(b"\x07" * 256).decode().rstrip("="),
+            "ciphertext": base64.urlsafe_b64encode(b"\x09" * 96).decode().rstrip("=")}
+
+    # Off by default: the door does not exist.
+    assert client.put(f"/api/canvas/history/{item}/reseal", json=good).status_code == 404
+    assert envelope_path.read_text().startswith('{"v": 1, "media_type": "video/mp4", "wrapped_dek": "AAAA')
+
+    assert client.put("/api/settings", json={"values": {"developer.recovery_tools": True}}).status_code == 200
+
+    # Shape is checked before anything is touched.
+    bad = dict(good, wrapped_dek=base64.urlsafe_b64encode(b"\x07" * 128).decode().rstrip("="))
+    assert client.put(f"/api/canvas/history/{item}/reseal", json=bad).status_code == 422
+    assert client.put(f"/api/canvas/history/{item}/reseal", json=dict(good, media_type="not a mime")).status_code == 422
+    assert not (tmp_path / "old-clip.mp4.e2e.superseded").exists()
+
+    # The real thing: new envelope in place, old one kept, nothing deleted.
+    done = client.put(f"/api/canvas/history/{item}/reseal", json=good)
+    assert done.status_code == 200, done.text
+    assert done.json() == {"ok": True, "resealed": True, "kept_previous": True}
+    written = json.loads(envelope_path.read_text())
+    assert written["wrapped_dek"] == good["wrapped_dek"] and written["media_type"] == "video/mp4"
+    assert (tmp_path / "old-clip.mp4.e2e.superseded").read_text().startswith('{"v": 1, "media_type": "video/mp4", "wrapped_dek": "AAAA')
+    assert not (tmp_path / "old-clip.mp4.e2e.partial").exists()
+
+    # An unknown item is a 404, not a write somewhere surprising.
+    assert client.put("/api/canvas/history/canvas_nope/reseal", json=good).status_code == 404
+    settings_module.forget_cached_settings()

@@ -1,0 +1,202 @@
+// Deliberately textual: what the hosted server FORWARDS is a request shape on
+// the wire, not a screen.
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const {
+    discoverAutoImageWorkflows, discoverAutoImageWorkflowsDetailed,
+    inspectAutoWorkflow, inspectAutoWorkflowDetailed,
+} = require('../auto-workflow-discovery');
+
+const T2I_GRAPH = {
+    1: { class_type: 'UNETLoader', inputs: { unet_name: 'waiANIMA_v10Base10.safetensors', weight_dtype: 'default' } },
+    2: { class_type: 'LoadQwen35AnimaCLIP', inputs: { clip_name: 'qwen35_4b.safetensors' } },
+    4: {
+        class_type: 'ForgeCoupleRegionalPrompt',
+        inputs: { model: ['1', 0], clip: ['2', 0], positive_text: 'two girls', width: 1024, height: 1344 },
+    },
+    6: { class_type: 'EmptyQwenImageLayeredLatentImage', inputs: { width: 1024, height: 1344, layers: 0, batch_size: 1 } },
+    7: {
+        class_type: 'KSampler',
+        inputs: { model: ['4', 0], positive: ['4', 1], negative: ['4', 1], latent_image: ['6', 0], seed: 7, steps: 8, cfg: 1.0 },
+    },
+    8: { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['3', 0] } },
+    9: { class_type: 'SaveImage', inputs: { images: ['8', 0], filename_prefix: 'auto_test' } },
+};
+
+test('auto-detects an API-format text-to-image graph with template defaults', () => {
+    const model = inspectAutoWorkflow('/x/wai-anima-couple-turbo.json', JSON.stringify(T2I_GRAPH));
+    assert.ok(model);
+    assert.equal(model.id, 'comfy-auto-wai-anima-couple-turbo');
+    assert.equal(model.backend, 'comfy-api-image');
+    assert.equal(model.workflowFile, '/x/wai-anima-couple-turbo.json');
+    assert.equal(model.type, 'image');
+    assert.equal(model.defaultWidth, 1024);
+    assert.equal(model.defaultHeight, 1344);
+    assert.equal(model.defaultSteps, 8);
+    assert.equal(model.requires.image, false);
+    assert.equal(model.supportsImage, false);
+    assert.match(model.description, /waiANIMA_v10Base10/);
+});
+
+test('accepts a {prompt: graph} wrapper export', () => {
+    const model = inspectAutoWorkflow('/x/wrapped.json', JSON.stringify({ prompt: T2I_GRAPH }));
+    assert.ok(model);
+    assert.equal(model.id, 'comfy-auto-wrapped');
+});
+
+// A graph this loader cannot drive is still someone's file, sitting in a folder
+// they put it in deliberately. Each rejection therefore has to come back with a
+// sentence they could act on — the studio prints these verbatim.
+test('skips what it cannot drive, and says why in words a person can act on', () => {
+    const webFormat = { nodes: [{ id: 1, type: 'KSampler' }], links: [] };
+    assert.equal(inspectAutoWorkflow('/x/web.json', JSON.stringify(webFormat)), null);
+    assert.match(inspectAutoWorkflowDetailed('/x/web.json', JSON.stringify(webFormat)).reason, /Save \(API format\)/);
+
+    const conversion = {
+        0: { class_type: 'INT8PreLoraLoader', inputs: { lora_name_1: 'x.safetensors' } },
+        1: { class_type: 'OTUNetLoaderW8A8', inputs: { unet_name: 'y.safetensors', pre_lora: ['0', 0] } },
+        2: { class_type: 'INT8ModelSave', inputs: { model: ['1', 0], filename_prefix: 'z' } },
+    };
+    assert.equal(inspectAutoWorkflow('/x/convert.json', JSON.stringify(conversion)), null);
+    assert.match(inspectAutoWorkflowDetailed('/x/convert.json', JSON.stringify(conversion)).reason, /KSampler/);
+
+    assert.equal(inspectAutoWorkflow('/x/broken.json', '{not json'), null);
+    assert.match(inspectAutoWorkflowDetailed('/x/broken.json', '{not json').reason, /valid JSON/);
+
+    // Every reason reads as the back half of "… was skipped because …", so the
+    // notice can print it after the filename without rewriting it.
+    for (const reason of [
+        inspectAutoWorkflowDetailed('/x/web.json', JSON.stringify(webFormat)).reason,
+        inspectAutoWorkflowDetailed('/x/convert.json', JSON.stringify(conversion)).reason,
+    ]) {
+        assert.match(reason, /^it /, `a reason has to be a sentence, got: ${reason}`);
+    }
+});
+
+// The rule this replaces: any graph containing a LoadImage was dropped, with
+// `// v1: text-to-image only` as the whole explanation. Somebody's own edit
+// workflow disappeared and nothing anywhere said so.
+test('an image-input graph becomes a model, and says whether the picture is required', () => {
+    const i2i = JSON.parse(JSON.stringify(T2I_GRAPH));
+    i2i[3] = { class_type: 'LoadImage', inputs: { image: 'ref.png' } };
+    i2i[5] = { class_type: 'VAEEncode', inputs: { pixels: ['3', 0], vae: ['3', 0] } };
+    i2i[7].inputs.latent_image = ['5', 0];
+
+    const edit = inspectAutoWorkflow('/x/my-edit.json', JSON.stringify(i2i));
+    assert.ok(edit, 'an edit workflow is a model like any other');
+    // Its latent IS the picture, so words alone cannot start this run.
+    assert.equal(edit.requires.image, true);
+    assert.equal(edit.supportsImage, true);
+    assert.equal(edit.maxReferenceImages, 1);
+    assert.ok(edit.accepts.includes('image_base64'));
+    assert.match(edit.description, /Starts from a picture/);
+
+    // Conditioning, not canvas: the latent still comes from an empty node, so
+    // the picture is optional — as long as the file the node names is there.
+    const control = JSON.parse(JSON.stringify(T2I_GRAPH));
+    control[3] = { class_type: 'LoadImage', inputs: { image: 'pose.png' } };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-comfy-'));
+    fs.mkdirSync(path.join(dir, 'input'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'input', 'pose.png'), 'PNG');
+    const previous = process.env.COMFY_DIR;
+    process.env.COMFY_DIR = dir;
+    try {
+        const optional = inspectAutoWorkflow('/x/my-control.json', JSON.stringify(control));
+        assert.equal(optional.requires.image, false, 'a bundled control image still runs prompt-only');
+        assert.equal(optional.maxReferenceImages, 1);
+
+        // …and the same graph whose bundled file is NOT on disk cannot run
+        // prompt-only, because ComfyUI would be handed a name that is not there.
+        fs.rmSync(path.join(dir, 'input', 'pose.png'));
+        assert.equal(inspectAutoWorkflow('/x/my-control.json', JSON.stringify(control)).requires.image, true);
+    } finally {
+        if (previous === undefined) delete process.env.COMFY_DIR;
+        else process.env.COMFY_DIR = previous;
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('a folder scan reports what it skipped, not just what it kept', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-workflows-skipped-'));
+    try {
+        fs.writeFileSync(path.join(dir, 'good_api.json'), JSON.stringify(T2I_GRAPH));
+        fs.writeFileSync(path.join(dir, 'editor_export.json'), JSON.stringify({ nodes: [], links: [] }));
+        const found = discoverAutoImageWorkflowsDetailed([dir]);
+        assert.deepEqual(found.models.map((model) => model.id), ['comfy-auto-good-api']);
+        assert.deepEqual(found.skipped.map((entry) => entry.file), ['editor_export.json']);
+        assert.match(found.skipped[0].reason, /API format/);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('discovers from folders, skipping invalid files without failing', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-workflows-'));
+    try {
+        fs.writeFileSync(path.join(dir, 'good_api.json'), JSON.stringify(T2I_GRAPH));
+        fs.writeFileSync(path.join(dir, 'bad.json'), '{');
+        fs.writeFileSync(path.join(dir, 'notes.txt'), 'ignore me');
+        const models = discoverAutoImageWorkflows([dir, path.join(dir, 'missing-subdir')]);
+        assert.equal(models.length, 1);
+        assert.equal(models[0].id, 'comfy-auto-good-api');
+        assert.equal(models[0].name, 'Good');
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('hosted server merges auto-detected models and forwards workflow_file', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../hosted-server.js'), 'utf8');
+    assert.match(source, /discoverAutoImageWorkflows/);
+    assert.match(source, /workflow_file = selected\.workflowFile/);
+});
+
+test('marks regional-prompt graphs couple-capable, plain graphs not', () => {
+    const regional = {
+        ...T2I_GRAPH,
+        4: {
+            ...T2I_GRAPH[4],
+            inputs: { ...T2I_GRAPH[4].inputs, advanced_mapping: '[[0.0, 0.5, 0.0, 1.0, 1.0], [0.5, 1.0, 0.0, 1.0, 1.0]]' },
+        },
+    };
+    assert.equal(inspectAutoWorkflow('/x/couple.json', JSON.stringify(regional)).coupleCapable, true);
+    assert.equal(inspectAutoWorkflow('/x/plain.json', JSON.stringify(T2I_GRAPH)).coupleCapable, false);
+});
+
+test('hosted server forwards couple options to the local API', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../hosted-server.js'), 'utf8');
+    assert.match(source, /payload\.couple_mode = true/);
+    assert.match(source, /couple_split/);
+    assert.match(source, /couple_direction/);
+});
+
+test('hosted image generation forwards its opaque app-tab scheduler lane', () => {
+    const hosted = fs.readFileSync(path.join(__dirname, '../hosted-server.js'), 'utf8');
+    const studio = fs.readFileSync(path.join(__dirname, '../src/studios/ImageStudio.jsx'), 'utf8');
+    assert.match(studio, /studio_lane:\s*studioLane/);
+    assert.match(hosted, /payload\.studio_lane\s*=\s*String\(body\.studio_lane\)/);
+});
+
+test('infers LoRA base compatibility from the checkpoint name', () => {
+    const anima = inspectAutoWorkflow('/x/wai.json', JSON.stringify(T2I_GRAPH));
+    assert.equal(anima.supportsLoras, true);
+    assert.deepEqual(anima.compatibleBaseModels, ['Anima']);
+
+    const unknown = {
+        ...T2I_GRAPH,
+        1: { class_type: 'UNETLoader', inputs: { unet_name: 'mystery_model_v2.safetensors', weight_dtype: 'default' } },
+    };
+    const model = inspectAutoWorkflow('/x/mystery.json', JSON.stringify(unknown));
+    assert.equal(model.supportsLoras, false);
+    assert.deepEqual(model.compatibleBaseModels, []);
+});
+
+test('loras route falls back to auto-discovered models', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../hosted-server.js'), 'utf8');
+    assert.match(source, /listWorkflowModels\(\)\.find\(\(model\) => model\.id === modelId\)\s*\|\|\s*listModels\(\)\.find/);
+});

@@ -1,49 +1,121 @@
+/* ============================================================
+   Hivemind Content Studio — design tokens (v3 "Hive" system)
+   Warm graphite surfaces, one honey-amber accent, hairline lines.
+   ============================================================ */
 :root {
-  /* Brand Colors */
-  --color-primary: #22d3ee;
-  /* Electric Cyan */
-  --color-primary-hover: #06b6d4;
-  --color-accent: #a855f7;
-  /* Creative Purple */
-  --color-accent-hover: #9333ea;
-  --color-danger: #ef4444;
+  /* Accent — honey */
+  --honey: #f6b21b;
+  --honey-bright: #ffc94a;
+  --honey-deep: #c88a0a;
+  --honey-tint: rgba(246, 178, 27, 0.12);
+  --honey-tint-strong: rgba(246, 178, 27, 0.22);
+  --on-honey: #1a1205;
 
-  /* Backgrounds - Strict Dark Mode */
-  --bg-app: #050505;
-  /* Deepest Black */
-  --bg-panel: #0a0a0a;
-  /* Panel Background */
-  --bg-card: #141414;
-  /* Card/Input Background */
-  --bg-glass: rgba(10, 10, 10, 0.8);
+  /* Semantic */
+  --ok: #34c77b;
+  --ok-tint: rgba(52, 199, 123, 0.12);
+  --danger: #f26d5f;
+  --danger-tint: rgba(242, 109, 95, 0.12);
+  --warn: #e8893a;
+  --info: #6ca8ff;
+
+  /* Surfaces — warm near-black, four layers. Never pure #000. */
+  --bg-0: #0c0c0e;
+  --bg-1: #111114;
+  --bg-2: #17171b;
+  --bg-3: #1e1e24;
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(255, 255, 255, 0.09);
+  --bg-glass: rgba(17, 17, 20, 0.9);
+  --bg-scrim: rgba(8, 8, 10, 0.72);
 
   /* Text */
-  --text-primary: #ffffff;
-  --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
+  --ink-1: #f2f2f3;
+  --ink-2: #a3a3ac;
+  --ink-3: #6b6b74;
+  /* The studio frame's mid-grey: quieter than ink-2, brighter than ink-3. The
+     redesigned Image/Video stages lean on it for every label that must recede
+     without vanishing over a full-bleed picture. */
+  --ink-soft: #8a8a93;
 
-  /* UI Elements */
-  --border-color: #27272a;
-  --border-light: rgba(255, 255, 255, 0.1);
+  /* Channel triplets — the Tailwind colour map reads these so opacity
+     modifiers (border-honey/50, bg-bg0/80, bg-warn/10 …) actually emit CSS.
+     Keep each in sync with the hex token above it. */
+  --honey-rgb: 246 178 27;
+  --honey-bright-rgb: 255 201 74;
+  --honey-deep-rgb: 200 138 10;
+  --on-honey-rgb: 26 18 5;
+  --ok-rgb: 52 199 123;
+  --danger-rgb: 242 109 95;
+  --warn-rgb: 232 137 58;
+  --info-rgb: 108 168 255;
+  --bg-0-rgb: 12 12 14;
+  --bg-1-rgb: 17 17 20;
+  --bg-2-rgb: 23 23 27;
+  --bg-3-rgb: 30 30 36;
+  --ink-1-rgb: 242 242 243;
+  --ink-2-rgb: 163 163 172;
+  --ink-3-rgb: 107 107 116;
+  --ink-soft-rgb: 138 138 147;
+  --honey-tint-a: 0.12;
+  --ok-tint-a: 0.12;
+  --danger-tint-a: 0.12;
 
-  --border-radius-sm: 6px;
-  --border-radius-md: 10px;
-  --border-radius-lg: 16px;
-  --border-radius-xl: 24px;
-  --border-radius-full: 9999px;
+  /* Lines */
+  --line-1: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.16);
+
+  /* Radii */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-full: 9999px;
+
+  /* Control metrics. See the touch override at the foot of this file: these
+     three are the app's whole control ladder, so raising them there is what
+     makes every chip, field and row a thumb can hit on a phone. */
+  --ctl-xs: 24px;
+  --ctl-sm: 28px;
+  --ctl-md: 36px;
+  --ctl-lg: 44px;
 
   /* Effects */
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
-  --shadow-glow: 0 0 20px rgba(176, 251, 93, 0.4);
-  --shadow-glow-accent: 0 0 20px rgba(168, 85, 247, 0.4);
-  --backdrop-blur: blur(20px);
+  --shadow-overlay: 0 24px 64px -24px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --shadow-pop: 0 12px 32px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.07);
+  --shadow-card: 0 1px 0 0 rgba(255, 255, 255, 0.03) inset;
+  --focus-ring: 0 0 0 2px var(--bg-0), 0 0 0 4px rgba(246, 178, 27, 0.55);
 
-  /* Transitions */
-  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-normal: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  /* Motion */
+  --ease-swift: cubic-bezier(0.2, 0.9, 0.3, 1);
+  --t-fast: 120ms var(--ease-swift);
+  --t-med: 180ms var(--ease-swift);
+  --t-slow: 260ms var(--ease-swift);
 
-  /* Typography */
-  --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  /* Type */
+  --font-ui: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+
+  /* Shell metrics */
+  --sidebar-w: 216px;
+  --sidebar-w-rail: 64px;
+}
+
+/* ---- Touch ----
+   The same controls at the size a thumb can actually land on. A 36px chip is a
+   comfortable mouse target and a miss on a phone; 44px is Apple's floor and the
+   one the composer's own press is drawn at.
+
+   Gated on `pointer: coarse` — the PRIMARY input — rather than on a width, so a
+   narrow desktop window keeps the tight metrics it was designed with and an
+   iPad in landscape gets the roomy ones. There are 24 h-ctl-* call sites and
+   they are the app's whole control ladder, so this one block is worth more than
+   any number of per-component breakpoints. */
+@media (pointer: coarse) {
+  :root {
+    --ctl-xs: 32px;
+    --ctl-sm: 34px;
+    --ctl-md: 44px;
+    --ctl-lg: 48px;
+  }
 }

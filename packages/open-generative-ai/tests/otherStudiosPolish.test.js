@@ -1,0 +1,280 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { renderComponent, renderStudio, textOf } = require('./helpers/render.js');
+
+// The Lip sync / shared-dialog fixes.
+//
+// This file used to open by saying these were "JSX files node:test cannot
+// import", which stopped being true when tests/helpers/render.js landed: every
+// sentence a person reads is rendered here now. What stays textual is the
+// wiring underneath it — which helper a write goes through, that a deleted file
+// is still deleted, that a retired string has not come back — and each of those
+// says why above itself.
+const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
+
+test('the Lip sync studio says where the files go before anything is attached', async () => {
+    // Rendered, not grepped: the sentence that warns a person their portrait
+    // leaves the machine has to be on screen when they arrive, not merely
+    // present in the file behind a condition.
+    const lip = textOf(await renderStudio('src/studios/LipSyncStudio.jsx', 'LipSyncStudio'));
+    assert.match(lip, /Runs on MUAPI \(cloud\) — files you attach are uploaded there\./);
+    assert.match(lip, /It needs a MUAPI account\./);
+    assert.match(lip, /Manage keys/, 'and the way to fix that is in the same place as the problem');
+    // The empty state names the next move rather than saying "nothing here".
+    assert.match(lip, /Pick a model, attach a portrait or video plus an audio track, then press Generate\./);
+    assert.match(lip, /Generate/);
+});
+
+// Deliberately textual: which helper the history goes through is invisible on
+// screen — the point is that the studio never touches localStorage itself, and
+// only the source can say that.
+test('Lip sync routes history through the studio helpers, never raw localStorage', () => {
+    for (const [relative, key] of [['src/studios/LipSyncStudio.jsx', 'lipsync_history']]) {
+        const source = read(relative);
+        assert.match(source, /import \{ loadStudioGenerationHistory, saveStudioGenerationHistory \} from '\.\.\/lib\/hivemindStudio\.js';/, `${relative} imports the helpers`);
+        assert.match(source, new RegExp(`loadStudioGenerationHistory\\(${key.toUpperCase().replace('_', '_')}_KEY\\)|loadStudioGenerationHistory\\('${key}'\\)`), `${relative} reads through the helper`);
+        assert.match(source, /saveStudioGenerationHistory\(/, `${relative} writes through the helper`);
+        // The only localStorage use left is the preferences normalizer — never the history.
+        const rawHistoryWrites = source.match(/localStorage\.setItem\([^)]*HISTORY/g) || [];
+        assert.deepEqual(rawHistoryWrites, [], `${relative} must not write history to localStorage itself`);
+        assert.doesNotMatch(source, /localStorage\.getItem\(LIPSYNC_HISTORY_KEY\)/);
+        // The storage key names are unchanged so the scrub helper can target them.
+        assert.match(source, new RegExp(`'${key}'`));
+    }
+});
+
+test('Lip sync: composer drop routes files by kind, sealed portraits are confirmed before upload, errors are described', () => {
+    const lip = read('src/studios/LipSyncStudio.jsx');
+    assert.match(lip, /composerDrop=\{composerDrop\}/);
+    assert.match(lip, /mime\.startsWith\('audio\/'\)[\s\S]*mime\.startsWith\('video\/'\)[\s\S]*mime\.startsWith\('image\/'\)/);
+    assert.match(lip, /referencesNeedingApproval\(\[s\.uploadedImageUrl\], s\.cloudRefApproved\)/);
+    assert.match(lip, /resolveCloudReferences\(\[s\.uploadedImageUrl\], \{ cache: s\.cloudRefUploads \}\)/);
+    assert.match(lip, /Runs on MUAPI \(cloud\) — files you attach are uploaded there\./);
+    assert.match(lip, /toastMuapiError\(/);
+    assert.doesNotMatch(lip, /toast\.error\(`Error: \$\{e\.message\}`\)/);
+    assert.match(lip, /Runs again with the current inputs/);
+    assert.match(lip, /toLocaleString\(\)/, 'the viewer shows a readable timestamp');
+    assert.match(lip, /getCurrentModel\(\)\?\.hasPrompt/, 'the dock inserter is guarded on hasPrompt');
+    assert.match(lip, /videoDownloadName\(entry\.model, entry\.id\)/);
+    // The payload contract is untouched.
+    assert.match(lip, /if \(prompt && model\?\.hasPrompt\) lipsyncParams\.prompt = prompt;/);
+    assert.match(lip, /if \(model\?\.hasSeed\) lipsyncParams\.seed = -1;/);
+});
+
+test('the saved library shows a failed read with the button that retries it', async () => {
+    // The failure primitive's whole promise is that a problem never arrives
+    // without its fix. A grep for the string proved the string existed; this
+    // proves the callout and its Retry button paint together, and that the
+    // Retry disappears when there is nothing to retry.
+    const failed = textOf(await renderComponent('src/ui/SavedLibrary.jsx', 'LibraryStateNote', {
+        error: 'the vault is unreachable', onRetry: () => {},
+    }));
+    assert.match(failed, /Couldn't open your library\./);
+    assert.match(failed, /Retry/, 'the remedy is in the same component as the problem');
+
+    const noRetry = textOf(await renderComponent('src/ui/SavedLibrary.jsx', 'LibraryStateNote', { error: 'the vault is unreachable' }));
+    assert.doesNotMatch(noRetry, /Retry/, 'no dead button when there is nothing to retry');
+
+    // An unreadable blob is not "nothing saved yet" — saving over it asks first.
+    const unreadable = textOf(await renderComponent('src/ui/SavedLibrary.jsx', 'LibraryStateNote', {
+        unreadable: true, empty: 'Nothing saved yet',
+    }));
+    assert.match(unreadable, /Saving will ask before replacing it\./);
+});
+
+// Deliberately textual: the read path behind that callout — which hook builds
+// the error, and how the menu turns an unreadable blob into a confirm — has no
+// rendered form until a vault exists to fail.
+test('the saved library reads a failure out of the hook and confirms before overwriting', () => {
+    const hooks = read('src/hooks/hooks.js');
+    assert.match(hooks, /error: locked \? '' : \(error\?\.message \|\| 'Could not open your library\.'\)/);
+    assert.match(hooks, /unreadable: isLibraryUnreadable\(library\)/);
+    const menu = read('src/studios/SavedPromptsMenu.jsx');
+    assert.match(menu, /error=\{error\}\s+onRetry=\{retry\}\s+unreadable=\{unreadable\}/);
+    assert.match(menu, /if \(error\?\.unreadable\) \{ setConfirmReplace\(name\); return; \}/);
+    assert.match(menu, /save\(name, \{ overwriteUnreadable: true \}\)/);
+    // Delete keeps the menu open under the confirm; the menu closes after.
+    assert.match(menu, /onClick=\{\(\) => setConfirmDelete\(entry\)\}/);
+    assert.match(menu, /closeMenuRef\.current\?\.\(\);/);
+    assert.match(menu, /searchable \? filterSavedPrompts\(entries, query\) : entries/);
+});
+
+test('ClipPrep says which side of the motion budget binds, the right way round', async () => {
+    const dialog = read('src/dialogs/ClipPrepDialog.jsx');
+    // The sentences moved onto keys, so the phrasing is asserted where it is now
+    // decided; the branch that picks between them is still read from the source.
+    const { STRINGS } = await import('../src/lib/i18n.js');
+    // Short reference (limitedByReference): it keeps its own length and opens the full range.
+    assert.match(dialog, /budget\.limitedByReference \? \(/);
+    assert.equal(STRINGS['clipPrep.budgetKeepsBefore'], 'This');
+    assert.equal(
+        STRINGS['clipPrep.budgetKeepsAfter']('0:02.0', '0:05.0'),
+        'reference keeps its own length — it costs 0:02.0 of motion budget and leaves the full 0:05.0 range open.',
+    );
+    // Long reference: trimmed to the shot on the way in.
+    assert.equal(
+        STRINGS['clipPrep.budgetLonger']('0:05.0'),
+        'Longer than the 0:05.0 shot: it is trimmed to 0:05.0 on the way in. Trim it below 0:05.0 to spend less budget.',
+    );
+    assert.doesNotMatch(dialog, /the shot will be capped to the reference/);
+    assert.doesNotMatch(dialog, /type="checkbox"/, 'the audio switch is the kit Toggle');
+    assert.match(dialog, /<Toggle checked=\{dropAudio\}/);
+    assert.match(dialog, /onClick=\{\(\) => setAttempt\(\(n\) => n \+ 1\)\}>\{t\('common\.retry'\)\}<\/Button>/);
+});
+
+test('the prompt helper waits for the runtime snapshot and keeps Unload out of the row button', async () => {
+    const dialog = read('src/dialogs/PromptHelperDialog.jsx');
+    const picker = read('src/components/ModelSourcePicker.jsx');
+    const { STRINGS } = await import('../src/lib/i18n.js');
+    assert.match(dialog, /t\('promptHelper\.checkingRam'\)/);
+    assert.equal(STRINGS['promptHelper.checkingRam'], "Checking this machine's RAM and models…");
+    // The rows themselves moved to the shared picker when the prompt helper
+    // stopped being local-only, but the rule did not: a row carries a control
+    // of its own, so it cannot be a <button>.
+    assert.match(picker, /role="radio"/);
+    assert.doesNotMatch(picker, /role="button"/, 'no control nested in a button');
+    assert.match(dialog, /label=\{model\.provider === 'mtplx' \? t\('promptHelper\.stopLocalHelper'\) : tf\('promptHelper\.unloadModel', model\.name\)\}/);
+    assert.equal(STRINGS['promptHelper.stopLocalHelper'], 'Stop the local helper');
+    assert.equal(STRINGS['promptHelper.unloadModel']('Qwen'), 'Unload Qwen');
+    assert.match(dialog, /writingForChips\(\{ cast, references \}\)/);
+    assert.match(dialog, /https:\/\/github\.com\/ggml-org\/llama\.cpp\/releases/);
+    assert.match(dialog, /flattenApiDetail\(payload\?\.detail \?\? payload\?\.error\)/);
+});
+
+test('the tab strip is a real tablist and caps how many studios it mounts', () => {
+    const tabs = read('src/app/StudioTabs.jsx');
+    assert.match(tabs, /role="tab"/);
+    assert.match(tabs, /aria-selected=\{on\}/);
+    assert.match(tabs, /ArrowLeft|ArrowRight/);
+    assert.match(tabs, /scrollIntoView\(\{ inline: 'nearest', block: 'nearest' \}\)/);
+    assert.match(tabs, /state\.tabs\.length >= MAX_TABS/);
+    assert.match(tabs, /cancelLabel=\{TEXT\.cancel\(\)\}/);
+});
+
+test('the Agents & API page is truthful about reach and the gate', async () => {
+    const page = textOf(await renderStudio('src/studios/McpCliStudio.jsx', 'McpCliStudio'));
+    assert.match(page, /Agents & API/);
+    assert.match(page, /this machine only — the MCP server listens on 127\.0\.0\.1/);
+});
+
+// Deliberately textual: the retired over-promises must not come back, and a
+// string that only appears after a clipboard write fails has no render.
+test('the Agents & API page kept its retired promises retired, and says when a copy failed', () => {
+    const page = read('src/studios/McpCliStudio.jsx');
+    assert.doesNotMatch(page, /available without a session on/);
+    assert.doesNotMatch(page, /packages\/media-gateway\/bin/);
+    assert.match(page, /Copy failed — select the text/);
+    assert.match(page, /<IconButton[\s\S]*icon=\{copied \? 'check' : 'copy'\}/);
+});
+
+test('the restore drop zone only lights up for image/video drags and has no dead URL tier', () => {
+    const zone = read('src/app/OutputRestoreDropZone.jsx');
+    assert.doesNotMatch(zone, /text\/uri-list/);
+    assert.match(zone, /\/\^\(image\|video\)\\\/\/i\.test\(item\.type\)/);
+    assert.match(zone, /Drop an image or video from this studio to restore its settings/);
+});
+
+test('the UGC chip wears the persona glyph, not a second camera beside the Camera chip', () => {
+    assert.match(read('src/studios/UgcMenu.jsx'), /<ChipButton\s+(?:\/\/[^\n]*\n\s*)*icon="persona"/);
+});
+
+test('the dead preference copies are gone and MetaRow lives in one place', () => {
+    for (const relative of ['src/studios/cinemaPrefs.js', 'src/studios/cinema/cinemaPrefs.js', 'src/studios/lipSyncPrefs.js', 'src/studios/lipsync/lipsyncPrefs.js']) {
+        assert.equal(fs.existsSync(path.join(__dirname, '..', relative)), false, `${relative} should be deleted`);
+    }
+    assert.match(read('src/studios/LipSyncStudio.jsx'), /import \{ MetaRow \} from '\.\/lipsync\/MetaRow\.jsx';/);
+    assert.doesNotMatch(read('src/studios/LipSyncStudio.jsx'), /function MetaRow/);
+});
+
+test('the prompt helper offers Refine as one box plus one-press knobs, not a revision box', async () => {
+    const dialog = read('src/dialogs/PromptHelperDialog.jsx');
+    const { STRINGS } = await import('../src/lib/i18n.js');
+    const { refineSuggestions } = await import('../src/lib/promptHelperRuntime.js');
+    // The Refine action and the box beside it. The words are the table's now;
+    // what the source still has to show is that this dialog asks for them.
+    assert.match(dialog, /\{t\('composer\.refine'\)\}/);
+    assert.equal(STRINGS['composer.refine'], 'Refine');
+    assert.equal(STRINGS['promptHelper.refinePlaceholder'], 'What do you wanna change?');
+    // The two Segmented controls became one-press suggestions. What matters is
+    // not that they are still switches but that the STRUCTURED signals survive:
+    // the server turns each into a craft sentence free text would lose, and any
+    // non-enrich pass also emits "keep the level of detail as it is", so a
+    // suggestion sent as prose would contradict itself.
+    const video = refineSuggestions({ mediaType: 'video', chained: false });
+    assert.deepEqual(video.map((entry) => entry.id), ['moreDetail', 'tighten', 'anotherShot', 'singleStill', 'timing']);
+    assert.equal(video.find((entry) => entry.id === 'moreDetail').detail, 'enrich');
+    assert.equal(video.find((entry) => entry.id === 'anotherShot').shots, 'more');
+    assert.equal(video.find((entry) => entry.id === 'singleStill').shots, 'single');
+    // The three with no knob behind them carry a spelled-out instruction, not
+    // the three-word label a person pressed.
+    for (const id of ['tighten', 'timing']) {
+        assert.ok(video.find((entry) => entry.id === id).guidance.length > 40, `${id} ships a bare label`);
+    }
+    assert.equal(STRINGS['promptHelper.suggestMoreDetail'], 'add more detail');
+    assert.equal(STRINGS['promptHelper.suggestAnotherShot'], 'add another shot');
+    assert.equal(STRINGS['promptHelper.suggestSingleStill'], 'make it a single still');
+    assert.equal(STRINGS['promptHelper.suggestMatchShot']('03'), 'match shot 03 harder');
+    // Image mode never sends shot knobs, and never offers the presses that are
+    // nothing but a shot knob — the server ignores `shots` outside video.
+    assert.match(dialog, /mediaType === 'video' \? \(refine\?\.shots \|\| 'keep'\) : 'keep'/);
+    assert.deepEqual(
+        refineSuggestions({ mediaType: 'image' }).map((entry) => entry.id),
+        ['moreDetail', 'tighten'],
+    );
+    // Matching the previous shot is only offered when there IS one: the system
+    // prompt names it through isContinuation/previousPrompt, and asking a fresh
+    // prompt to match a shot it was never shown describes nothing.
+    assert.ok(refineSuggestions({ mediaType: 'video', chained: true }).some((entry) => entry.id === 'matchShot'));
+    // The wire shape the backend validates (prompt_profiles.normalize_refine).
+    assert.match(dialog, /refine: refine \|\| undefined/);
+    assert.match(dialog, /detail: refine\?\.detail \|\| 'keep'/);
+    // The free-text box rides `refine.guidance`, NEVER the older `revision`
+    // field: the profile lock, the structure clause and the structure-loss
+    // guard are all gated on `refine is not None`, and routing the box through
+    // `revision` brings back the flattening seen live on 2026-08-24.
+    // A press and a typed note both mean "what to change", and the server has
+    // exactly one guidance field — so a press carries what is already in the
+    // box instead of throwing it away.
+    assert.match(dialog, /guidance: \[guidance\.trim\(\), \(refine\?\.guidance \|\| ''\)\.trim\(\)\]\.filter\(Boolean\)\.join/);
+    assert.doesNotMatch(dialog, /revision:/);
+    assert.doesNotMatch(dialog, /Apply change/);
+    // The model picker is a pill in the title bar with a panel behind it.
+    assert.match(dialog, /setPickerOpen/);
+    assert.match(dialog, /titleAside=\{modelPill\}/);
+});
+
+test('every hub page hides itself when another one is open, and scrolls when it is', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const dir = path.join(__dirname, '../src/hub/views');
+    const views = fs.readdirSync(dir).filter((f) => f.endsWith('View.jsx'));
+    assert.ok(views.length >= 8, 'expected the hub to still have its pages');
+
+    for (const file of views) {
+        const src = fs.readFileSync(path.join(dir, file), 'utf8');
+        // CanvasView is one line that hands the whole page to ToolSurface, which
+        // owns both rules for it.
+        if (/ToolSurface/.test(src) && src.length < 800) continue;
+
+        // Hub pages stay MOUNTED and are display-toggled, so a page that does
+        // not hide itself is painted on top of whichever one is actually open.
+        // PassBook shipped without the `active` prop at all and covered
+        // Machines, Providers and History (2026-08-26).
+        assert.match(
+            src,
+            /active \? 'flex min-h-0 flex-1 flex-col' : 'hidden'/,
+            `${file} must hide itself and size itself like every other hub page`,
+        );
+        // And the page has to scroll INSIDE itself: `min-h-0 flex-1` with no
+        // scroll container anywhere below makes everything past the fold
+        // unreachable, which is the same page's second bug the same day.
+        // ModelsView delegates that to whichever tab body it renders.
+        const delegates = /RunnableModels|InstalledAssets|CivitaiBrowser/.test(src);
+        assert.ok(
+            /overflow-y-auto/.test(src) || delegates,
+            `${file} has no scroll container and does not delegate to one`,
+        );
+    }
+});

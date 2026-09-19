@@ -8,6 +8,13 @@ SCRIPT_PATH="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.ar
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 STUDIO_ROOT="${HIVEMIND_STUDIO_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
 MEDIA_STATE_ROOT="${HIVEMIND_MEDIA_STATE_DIR:-$HOME/.hivemindos/media-studio}"
+# The interpreter is part of the artifact. `python3` on PATH is whatever
+# Homebrew last upgraded to (3.14 removed `cgi` and took the gateway down on
+# 2026-07-26); the project venv is the one pyproject pins and the one that has
+# cryptography and Pillow. Falls back only so a checkout without a venv still
+# starts the parts that do not need it.
+STUDIO_PYTHON="$STUDIO_ROOT/.venv/bin/python"
+[ -x "$STUDIO_PYTHON" ] || STUDIO_PYTHON="python3"
 
 LABEL="com.liam.zimage-stack"
 OLD_CF_LABEL="com.liam.zimage-cloudflared"
@@ -17,13 +24,50 @@ PRIV="${COMFY_PRIVATE_ROOT:-$HOME/.comfy-private.noindex}"
 COMFY="${COMFY_DIR:-$HOME/comfy/ComfyUI}"
 APP="$STUDIO_ROOT/packages/media-gateway"
 MOBILE="$STUDIO_ROOT/packages/comfyui-mobile"
+KREA2_IDENTITY_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-krea2-identity"
+SEEDVR2_TRT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-seedvr2-trt"
+PRIVATE_MEDIA_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-private-media"
+PROGRESS_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-progress"
+AUDIO_SPLIT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-audio-split"
 OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
 CONTENT_STUDIO="$STUDIO_ROOT"
-CLOUDFLARED="$HOME/.local/bin/cloudflared"
 TAILSCALE_CLI="/Applications/Tailscale.app/Contents/MacOS/tailscale"
-TAILSCALE_PROXY="$HOME/.local/bin/zimage-tailscale-proxy"
-TAILSCALE_HTTPS_PROXY="$APP/tailscale-https-proxy.js"
-TAILSCALE_HTTPS_PORT="8789"
+# What `tailscale serve` publishes on when the studio's remote-access switch is
+# turned on and nothing publishes the studio yet. Must match
+# DEFAULT_TAILNET_HTTPS_PORT in remote_access.py. A door that already exists on
+# another HTTPS port (8789 — the retired proxy's number — is the URL the owner's
+# other devices kept) is found by what it proxies and used as it is; nothing
+# here keys on this number.
+TAILNET_HTTPS_PORT="${CONTENT_STUDIO_TAILNET_PORT:-8765}"
+# Parse before touching runtime state. launchd needs explicit environment
+# forwarding; it does not inherit the invoking shell's flags.
+STACK_ACTION="${1:-status}"
+[ "$#" -eq 0 ] || shift
+REMOTE_ACCESS="${CONTENT_STUDIO_REMOTE_ACCESS:-0}"
+REMOTE_ACCESS_FLAG=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --remote-access) REMOTE_ACCESS=1; REMOTE_ACCESS_FLAG=1; shift ;;
+    --tailnet-port)
+      [ "$#" -ge 2 ] || { echo "--tailnet-port needs a port" >&2; exit 2; }
+      TAILNET_HTTPS_PORT="$2"; shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+case "$TAILNET_HTTPS_PORT" in
+  ''|*[!0-9]*) echo "Invalid tailnet port" >&2; exit 2 ;;
+esac
+if [ "$TAILNET_HTTPS_PORT" -lt 1 ] || [ "$TAILNET_HTTPS_PORT" -gt 65535 ]; then
+  echo "Tailnet port must be between 1 and 65535" >&2; exit 2
+fi
+if [ "$REMOTE_ACCESS_FLAG" = 1 ]; then
+  case "$STACK_ACTION" in
+    start|restart|supervise) ;;
+    *) echo "--remote-access requires start, restart, or supervise" >&2; exit 2 ;;
+  esac
+fi
+export CONTENT_STUDIO_REMOTE_ACCESS="$REMOTE_ACCESS"
+export CONTENT_STUDIO_TAILNET_PORT="$TAILNET_HTTPS_PORT"
 MEDIA_STUDIO_MCP_PORT="${MEDIA_STUDIO_MCP_PORT:-8796}"
 FLUX2_SERVER_DIR="$STUDIO_ROOT/engines/flux-2-swift-mlx"
 FLUX2_SERVER_BIN="$FLUX2_SERVER_DIR/.build/arm64-apple-macosx/release/Flux2Server"
@@ -33,11 +77,70 @@ COMFY_ANIMA_PORT="8198"
 COMFY_LTX_PORT="8199"
 CONTENT_STUDIO_PORT="8765"
 OPEN_GEN_PORT="8794"
+# The one Node child. It mounts the Canvas surface, the local-inference bridge
+# and the agent MCP on this port, and keeps 8788, $OPEN_GEN_PORT and
+# $MEDIA_STUDIO_MCP_PORT answering as compatibility ports.
+NODE_SERVICES_PORT="${HIVEMIND_NODE_SERVICES_PORT:-8793}"
+# 90 seconds, not the 45 this gate carried through the 2026-09-04 boot loop.
+# The Node child has to reach a Next.js PRODUCTION build before /healthz can
+# answer, and it starts AFTER up to three ComfyUI lanes have loaded — each of
+# which pins several GB and saturates the disk on its way in. 45s is plenty on
+# a warm machine and is not obviously enough on a cold or busy one. Being wrong
+# the tight way costs a boot loop; being wrong the loose way costs 45 extra
+# seconds on a boot that was going to fail anyway, and the log now says which
+# of the two it was. Override with HIVEMIND_NODE_SERVICES_TIMEOUT.
+NODE_SERVICES_TIMEOUT="${HIVEMIND_NODE_SERVICES_TIMEOUT:-90}"
 ZIMG_TOKEN_FILE="${ZIMG_TOKEN_FILE:-$MEDIA_STATE_ROOT/secure/zimg-token}"
+
+# Start a service with the machine's shared credentials loaded.
+#
+# PassBook owns the store, so `passbook run` is the direct route and it names
+# the asking service, which is the difference that matters: without --app every
+# read in the access ledger is attributed to the wrapper, and five services
+# collapse into one row that says nothing about who wanted the key.
+#
+# `hive-env-run` is the older shim over the same store and stays as the
+# fallback, because a machine can have HivemindOS without having run
+# `passbook install` yet. Running bare is last: the services still start, they
+# just see only what this shell already exported.
+# The keys this stack actually needs, from the access ledger rather than from
+# memory. Named so each service is handed ten credentials instead of the three
+# hundred in the store: `passbook run` without --only passes the lot, and every
+# one of those is a key some dependency could read, log, or ship in a crash
+# report. It also means the machine can seal reads and stop trusting this app
+# by name — a grant is proof of how the process started, which a name is not.
+# CLOUDFLARE_*: gpu_rentals.py presigns the weights manifest on R2 itself
+# (_r2_credentials -> _env), and a plain os.environ read never appears in
+# PassBook's access ledger — which is what this list was built from. Without
+# them renting dies at manifest publish with "CLOUDFLARE_API_TOKEN is not
+# configured in the environment", after the prices have already loaded, which
+# reads as a billing fault rather than a missing key. The marketplace keys are
+# deliberately NOT here: with a HivemindOS account connected those calls go
+# through the hosted worker and this machine holds no marketplace key at all.
+STUDIO_KEYS="CIVITAI_API_KEY CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN
+GOOGLE_AI_STUDIO_API_KEY HIVEMINDOS_DASHBOARD_DEVICE_TOKEN
+OPENAI_API_KEY OPENAI_OAUTH_ACCESS_TOKEN OPENAI_OAUTH_ACCOUNT_ID
+OPENAI_OAUTH_EXPIRES_AT OPENAI_OAUTH_REFRESH_TOKEN OPENROUTER_API_KEY
+VENICE_API_KEY XAI_API_KEY"
+
+with_credentials() {
+  local app="$1"
+  shift
+  if command -v passbook >/dev/null 2>&1; then
+    local only=()
+    for key in $STUDIO_KEYS; do only+=(--only "$key"); done
+    passbook run --app "$app" "${only[@]}" -- "$@"
+  elif command -v hive-env-run >/dev/null 2>&1; then
+    hive-env-run -- "$@"
+  else
+    log "no passbook and no hive-env-run; $app starts without the shared store"
+    "$@"
+  fi
+}
 
 load_hardware_profile() {
   if [ -f "$APP/hardware_profile.py" ]; then
-    eval "$(python3 "$APP/hardware_profile.py" --shell 2>/dev/null)" || true
+    eval "$("$STUDIO_PYTHON" "$APP/hardware_profile.py" --shell 2>/dev/null)" || true
   fi
   ZIMG_ACCELERATOR_PROFILE="${ZIMG_ACCELERATOR_PROFILE:-cpu}"
   ZIMG_IS_APPLE_SILICON="${ZIMG_IS_APPLE_SILICON:-0}"
@@ -67,20 +170,29 @@ COMFY_DEFAULT_ASFP8_INT8_EXT="${COMFY_DEFAULT_ASFP8_INT8_EXT:-$ZIMG_DEFAULT_ASFP
 COMFY_DEFAULT_ASFP8_FP8_EXT="${COMFY_DEFAULT_ASFP8_FP8_EXT:-$ZIMG_DEFAULT_ASFP8_FP8_EXT}"
 COMFY_DEFAULT_ASFP8_TRACE_OPS="${COMFY_DEFAULT_ASFP8_TRACE_OPS:-$ZIMG_DEFAULT_ASFP8_TRACE_OPS}"
 COMFY_DEFAULT_ASFP8_PROFILE="${COMFY_DEFAULT_ASFP8_PROFILE:-$ZIMG_DEFAULT_ASFP8_PROFILE}"
-TLS_DIR="$PRIV/tls"
-TLS_CERT="$TLS_DIR/zimage-tailscale.crt"
-TLS_KEY="$TLS_DIR/zimage-tailscale.key"
 LOG_DIR="$HOME/Library/Logs"
 SUP_LOG="$LOG_DIR/zimage-stack-supervisor.log"
-URL_FILE="$PRIV/z-image-remote-url.txt"
 LOCK_DIR="$PRIV/zimage-stack-supervise.lock"
 
-mkdir -p "$PRIV/output" "$PRIV/z_image_outputs" "$PRIV/debug_outputs" "$PRIV/input" "$PRIV/temp" "$PRIV/temp-anima" "$PRIV/temp-ltx" "$LOG_DIR" "$TLS_DIR" "$MEDIA_STATE_ROOT/state/media-gateway" "$MEDIA_STATE_ROOT/secure"
+mkdir -p "$PRIV/output" "$PRIV/z_image_outputs" "$PRIV/debug_outputs" "$PRIV/input" "$PRIV/temp" "$PRIV/temp-anima" "$PRIV/temp-ltx" "$LOG_DIR" "$MEDIA_STATE_ROOT/state/media-gateway" "$MEDIA_STATE_ROOT/secure"
 touch "$PRIV/.metadata_never_index" "$PRIV/output/.metadata_never_index" "$PRIV/z_image_outputs/.metadata_never_index" "$PRIV/debug_outputs/.metadata_never_index"
 chmod -R go-rwx "$PRIV" 2>/dev/null || true
 chflags hidden "$PRIV" 2>/dev/null || true
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$SUP_LOG"; }
+
+# Keep the last run's log instead of erasing it, and keep the pair bounded.
+# Only ever called before the children are started, so no writer holds an fd on
+# the file being renamed.
+LOG_ROLL_MAX_BYTES="${LOG_ROLL_MAX_BYTES:-33554432}"
+roll_log() {
+  local path="$1" size=0
+  [ -f "$path" ] || return 0
+  size=$(wc -c < "$path" 2>/dev/null | tr -d ' ') || size=0
+  if [ "${size:-0}" -gt "$LOG_ROLL_MAX_BYTES" ]; then
+    mv -f "$path" "$path.1" 2>/dev/null || true
+  fi
+}
 
 kill_port() {
   local port="$1"
@@ -92,131 +204,344 @@ kill_port() {
   fi
 }
 
+# Is there a ComfyUI checkout for THIS stack to run?
+#
+# ComfyUI is an optional engine, not a prerequisite: the studio boots without
+# one and the owner attaches theirs (or a cloud/rented lane) afterwards. This
+# predicate is also what keeps the stack off a ComfyUI it did not start — the
+# custom-node symlinks and every kill_port on a lane port are behind it, so a
+# machine where the only ComfyUI is somebody's Desktop install on :8188 keeps
+# it when this stack starts, restarts or stops.
+comfy_available() {
+  [ -f "$COMFY/main.py" ] && [ -x "$COMFY/.venv/bin/python" ]
+}
+
+# ── Health gates that say what actually failed ───────────────────────────────
+#
+# On 2026-09-04 this stack boot-looped for an hour and the log said only
+# "Z-Image frontend did not become healthy in time". The frontend was fine: it
+# bound its port and logged "listening" on all 29 attempts, and a hand-run
+# `curl -fsS --max-time 5 http://127.0.0.1:8788/healthz` answered 200 in 0.02s
+# within about four seconds of each child starting. The old message was
+# byte-identical whether the server never bound, bound and answered, or the
+# supervisor's own curl could not be executed — so an hour went into telling
+# those apart by hand.
+#
+# wait_http now records WHY the last probe failed and the gate beside it logs
+# that. These are globals because a bash function returns a status, not a
+# record, and printing a line to parse would be worse.
+WAIT_HTTP_URL=""
+WAIT_HTTP_CURL_EXIT=""
+WAIT_HTTP_STATUS=""
+WAIT_HTTP_ELAPSED=0
+WAIT_HTTP_PROBE_TIMEOUT=5
+# How long ONE probe may take by default. Separate from the gate's overall
+# budget, and overridable per call as wait_http's third argument.
+WAIT_HTTP_DEFAULT_PROBE_TIMEOUT="${WAIT_HTTP_DEFAULT_PROBE_TIMEOUT:-5}"
+
+# wait_http <url> [budget_seconds] [probe_seconds]
+# A budget of 0 makes this a single recorded probe, which is how the liveness
+# check gets a reason to log without duplicating any of this.
 wait_http() {
-  local url="$1" timeout="${2:-120}" elapsed=0
-  until curl -fsS --max-time 5 "$url" >/dev/null 2>&1; do
-    elapsed=$((elapsed + 2))
-    [ "$elapsed" -ge "$timeout" ] && return 1
+  local url="$1" timeout="${2:-120}" status="" rc=0 started=$SECONDS
+  WAIT_HTTP_URL="$url"
+  WAIT_HTTP_CURL_EXIT=""
+  WAIT_HTTP_STATUS=""
+  WAIT_HTTP_ELAPSED=0
+  WAIT_HTTP_PROBE_TIMEOUT="${3:-$WAIT_HTTP_DEFAULT_PROBE_TIMEOUT}"
+  while :; do
+    # No -f. `-f` collapses every 4xx and 5xx into exit 22 and throws the
+    # status away, so "the app is up and returning 503 while it warms" and
+    # "the app returns 404 because the route moved" were the same failure.
+    # Ask for the status and judge it here: both halves survive.
+    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$WAIT_HTTP_PROBE_TIMEOUT" "$url" 2>/dev/null)"
+    rc=$?
+    WAIT_HTTP_CURL_EXIT="$rc"
+    WAIT_HTTP_STATUS="$status"
+    WAIT_HTTP_ELAPSED=$((SECONDS - started))
+    # Healthy is what -f called healthy: a 2xx or 3xx curl actually received.
+    case "$rc:$status" in
+      0:2??|0:3??) return 0 ;;
+    esac
+    # 127 is not a transient condition — curl is not on this PATH, and no
+    # amount of waiting changes that. Sitting in the loop would only delay the
+    # report by the whole budget, and if curl is missing `sleep` may be too, in
+    # which case the loop below spins hot. Give up on the first one.
+    [ "$rc" -eq 127 ] && return 1
+    [ "$WAIT_HTTP_ELAPSED" -ge "$timeout" ] && return 1
     sleep 2
   done
-  return 0
 }
 
-write_tunnel_url_once() {
-  local cf_log="$PRIV/z-image-cloudflared.log"
-  local url
-  url=$(grep -Eo 'https://[-a-zA-Z0-9.]+\.trycloudflare\.com' "$cf_log" 2>/dev/null | tail -1 || true)
-  if [ -n "$url" ]; then
-    printf '%s\n' "$url" > "$URL_FILE"
-  fi
+# The last probe's verdict in the words of a bug report. The four that matter:
+# 7 is nothing listening, 28 is something listening that will not answer, 127
+# is curl itself failing to run (a PATH problem in this supervisor, not a child
+# problem at all), and exit 0 with a status the old -f would have rejected.
+wait_http_reason() {
+  case "${WAIT_HTTP_CURL_EXIT:-}" in
+    '') printf 'no probe was made' ;;
+    0) printf 'HTTP %s' "${WAIT_HTTP_STATUS:-000}" ;;
+    6) printf 'could not resolve host' ;;
+    7) printf 'connection refused' ;;
+    22) printf 'HTTP %s' "${WAIT_HTTP_STATUS:-000}" ;;
+    28) printf 'timed out after %ss with no reply' "$WAIT_HTTP_PROBE_TIMEOUT" ;;
+    35|60) printf 'TLS handshake failed' ;;
+    52) printf 'empty reply from server' ;;
+    56) printf 'connection reset' ;;
+    127) printf 'curl exited 127 (curl could not be executed; check PATH)' ;;
+    *) printf 'curl exited %s' "${WAIT_HTTP_CURL_EXIT}" ;;
+  esac
 }
 
-tailscale_ip() {
-  local ip=""
-  if [ -x "$TAILSCALE_CLI" ]; then
-    ip="$($TAILSCALE_CLI ip -4 2>/dev/null | head -1 || true)"
-    # The Tailscale CLI can report the account/device IP even when the backend is
-    # stopped and the address is not actually bound locally. Only use it if the
-    # interface is present; otherwise binding proxies to it fails with EADDRNOTAVAIL.
-    if [ -n "$ip" ] && ifconfig 2>/dev/null | grep -q "inet $ip "; then
-      printf '%s\n' "$ip"
-      return 0
+# Whoever holds a port right now, as a space-separated pid list (empty if free).
+port_listeners() {
+  local pids=""
+  pids="$(lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null)" || pids=""
+  # Unquoted on purpose: word splitting is what collapses lsof's newlines.
+  # shellcheck disable=SC2086
+  echo $pids
+}
+
+# The port out of a URL, using only shell builtins. A diagnosis that needs sed
+# to run is one more thing that can be missing at the moment it is wanted —
+# which is exactly the class of failure this whole block exists to name.
+url_port() {
+  local rest="${1#*://}"
+  rest="${rest%%/*}"
+  local port="${rest##*:}"
+  case "$port" in
+    ''|*[!0-9]*) printf '' ;;
+    *) printf '%s' "$port" ;;
+  esac
+}
+
+# The suffix every "did not become healthy in time" line now carries: the last
+# probe's verdict, whether anything holds the port at the moment we gave up,
+# and whether the child we started is still alive. A child that died before it
+# ever bound is the common case, and the old log never said so.
+wait_http_why() {
+  local pid="${1:-}" port="" listeners="" out=""
+  port="$(url_port "$WAIT_HTTP_URL")"
+  out="last probe after ${WAIT_HTTP_ELAPSED}s: $(wait_http_reason)"
+  if [ -n "$port" ]; then
+    if ! command -v lsof >/dev/null 2>&1; then
+      out="$out; cannot tell who holds :$port (no lsof)"
+    else
+      listeners="$(port_listeners "$port")"
+      if [ -n "$listeners" ]; then
+        out="$out; :$port held by pid(s) $listeners"
+      else
+        out="$out; nothing listening on :$port"
+      fi
     fi
   fi
-  ifconfig 2>/dev/null | awk '/inet 100\./ {print $2; exit}'
+  if [ -n "$pid" ]; then
+    if kill -0 "$pid" 2>/dev/null; then
+      out="$out; child pid=$pid still alive"
+    else
+      out="$out; child pid=$pid is gone"
+    fi
+  fi
+  printf '%s' "$out"
 }
 
+# tailscale_ip() lived here. Nothing binds a proxy to the tailnet address any
+# more, so the only question left is the MagicDNS name a served URL is built on.
 tailscale_dns() {
   if [ -x "$TAILSCALE_CLI" ]; then
     "$TAILSCALE_CLI" status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("Self") or {}).get("DNSName","").rstrip("."))' 2>/dev/null || true
   fi
 }
 
-ensure_tls_cert() {
-  local ts_ip="$1"
+# The published tailnet URL, or empty when nothing publishes the studio.
+# Read from `tailscale serve`, which is the only thing that publishes anything
+# now — so this reports what is actually true rather than what a boot-time
+# proxy would have made. The door is found by what it proxies, on whatever
+# HTTPS port it is on: an entry on 8789 (the retired proxy's number, kept as
+# the URL the owner's other devices open) counts the same as one on the
+# default. TAILNET_HTTPS_PORT only breaks a tie between two such doors.
+tailnet_studio_url() {
   local ts_dns
-  [ -n "$ts_ip" ] || return 1
+  [ -x "$TAILSCALE_CLI" ] || return 0
   ts_dns="$(tailscale_dns || true)"
-  if [ -s "$TLS_CERT" ] && [ -s "$TLS_KEY" ] && openssl x509 -checkend 604800 -noout -in "$TLS_CERT" >/dev/null 2>&1; then
-    if [ -z "$ts_dns" ] || openssl x509 -noout -subject -in "$TLS_CERT" 2>/dev/null | grep -q "$ts_dns" || openssl x509 -noout -text -in "$TLS_CERT" 2>/dev/null | grep -q "DNS:$ts_dns"; then
-      return 0
-    fi
-  fi
-  if [ -n "$ts_dns" ] && "$TAILSCALE_CLI" cert --cert-file "$TLS_CERT" --key-file "$TLS_KEY" "$ts_dns" >/dev/null 2>&1; then
-    chmod 600 "$TLS_KEY" "$TLS_CERT"
-    return 0
-  fi
-  cat > "$TLS_DIR/openssl-tailscale.cnf" <<EOF
-[req]
-default_bits = 2048
-prompt = no
-default_md = sha256
-distinguished_name = dn
-x509_extensions = v3_req
-
-[dn]
-CN = $ts_ip
-
-[v3_req]
-subjectAltName = @alt_names
-keyUsage = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-
-[alt_names]
-IP.1 = $ts_ip
-DNS.1 = localhost
-IP.2 = 127.0.0.1
-EOF
-  openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
-    -keyout "$TLS_KEY" \
-    -out "$TLS_CERT" \
-    -config "$TLS_DIR/openssl-tailscale.cnf" >/dev/null 2>&1
-  chmod 600 "$TLS_KEY" "$TLS_CERT"
+  [ -n "$ts_dns" ] || return 0
+  "$TAILSCALE_CLI" serve status --json 2>/dev/null | TS_DNS="$ts_dns" TS_PORT="$TAILNET_HTTPS_PORT" TS_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" python3 -c '
+import json, os, sys
+try:
+    served = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+host = os.environ["TS_DNS"]
+doors = []
+for key, entry in (served.get("Web") or {}).items():
+    entry_host, _, port = str(key).rpartition(":")
+    if entry_host.lower() != host.lower() or not port.isdigit():
+        continue
+    root = ((entry or {}).get("Handlers") or {}).get("/") or {}
+    if root.get("Proxy") == os.environ["TS_TARGET"]:
+        doors.append(int(port))
+if not doors:
+    sys.exit(0)
+wanted = int(os.environ["TS_PORT"])
+port = wanted if wanted in doors else min(doors)
+print("https://" + host + ("" if port == 443 else ":%d" % port) + "/")
+' 2>/dev/null || true
 }
+
+# The tailnet URL is not made here any more.
+#
+# This used to bind a hand-rolled Node HTTPS proxy to the Tailscale address at
+# every boot, in front of the Canvas port (8788), which authenticated nothing —
+# so every device on the tailnet could queue ComfyUI graphs and read the
+# library. When `tailscale cert` was unavailable it generated a SELF-SIGNED
+# certificate with openssl, which is a full-screen browser warning the person
+# reading it cannot fix. Remote access is now an explicit switch in the studio
+# (Rented GPUs > Open on my other devices) that runs `tailscale serve` — a real
+# certificate, no proxy process — and publishes ONLY this API's port. See
+# src/hivemind_content_studio/remote_access.py.
 
 children=()
 start_children() {
   children=()
   log "starting Hivemind Content Studio as one managed app"
+  # ComfyUI is OPTIONAL. This supervisor used to refuse to bring anything up
+  # until an external checkout answered on :8188 — it symlinked custom nodes
+  # into $COMFY, minted its secrets with $COMFY/.venv, waited 150s per lane and
+  # returned 1 on the first one that did not answer, which the loop below
+  # retried every 10s forever. A machine without a hand-built ComfyUI therefore
+  # never saw the studio at all. The control API and the gateway now come up on
+  # their own and lanes are engines you attach afterwards (the studio's Connect
+  # ComfyUI card, /api/comfy/connect).
+  comfy_available || log "no ComfyUI at $COMFY — bringing the studio up without local lanes; connect one from the studio (cloud and rented models need none)"
   log "hardware profile=$ZIMG_ACCELERATOR_PROFILE apple_silicon=$ZIMG_IS_APPLE_SILICON flux2_server=$ZIMG_ENABLE_FLUX2_SERVER asfp8_int8=$COMFY_DEFAULT_ASFP8_INT8_EXT asfp8_fp8=$COMFY_DEFAULT_ASFP8_FP8_EXT"
-	  : > "$PRIV/comfy.log"
-	  : > "$PRIV/comfy-ltx.log"
-	  : > "$PRIV/z-image-api.log"
-  : > "$PRIV/z-image-frontend.log"
-  : > "$PRIV/hivemind-content-studio.log"
-  : > "$PRIV/media-studio-mcp.log"
-  : > "$PRIV/z-image-cloudflared.log"
-  : > "$PRIV/z-image-tailscale-proxy.log"
-  : > "$PRIV/z-image-tailscale-https-proxy.log"
-  rm -f "$URL_FILE"
+  # These were truncated with ': >' here, on every start. The supervisor loop
+  # below restarts the whole stack automatically after any child exit or failed
+  # health check, so the truncation ran right after a crash — the evidence of a
+  # failure was deleted by the recovery from it, and there was nothing a person
+  # could attach to a report. Rolled instead: the previous run is kept as .1,
+  # and each file is bounded so nothing grows without end.
+  # Every child appends with '>>', so nothing here shares a file descriptor
+  # with the control API's own rotating log, which lives elsewhere entirely
+  # (~/Library/Logs/Hivemind Content Studio) and is never touched from a shell.
+  roll_log "$PRIV/comfy.log"
+  roll_log "$PRIV/comfy-ltx.log"
+  roll_log "$PRIV/z-image-api.log"
+  roll_log "$PRIV/z-image-frontend.log"
+  roll_log "$PRIV/hivemind-content-studio.log"
+  roll_log "$PRIV/media-studio-mcp.log"
+  # The tailnet HTTPS proxy no longer starts here — remote access is an opt-in
+  # toggle that publishes the control API through `tailscale serve` — so there
+  # is no proxy log to roll. The kill_port calls below stay, to clear a stale
+  # one left by an older build.
+  # Custom nodes only ever go into the checkout this stack runs. Nothing here
+  # touches a ComfyUI the app did not start.
+  if comfy_available; then
   if [ -L "$COMFY/custom_nodes/comfyui-mobile-frontend" ] || [ ! -e "$COMFY/custom_nodes/comfyui-mobile-frontend" ]; then
     ln -sfn "$MOBILE" "$COMFY/custom_nodes/comfyui-mobile-frontend"
   else
     log "cannot install embedded ComfyUI Mobile: custom node path is not a symlink"
     return 1
   fi
-  COMFY_PRIVATE_VIEW_TOKEN="$("$COMFY/.venv/bin/python" - <<'PY'
+  if [ -L "$COMFY/custom_nodes/hivemind-krea2-identity" ] || [ ! -e "$COMFY/custom_nodes/hivemind-krea2-identity" ]; then
+    ln -sfn "$KREA2_IDENTITY_NODE" "$COMFY/custom_nodes/hivemind-krea2-identity"
+  else
+    log "cannot install Krea2 identity adapter: custom node path is not a symlink"
+    return 1
+  fi
+  # SeedVR2 TensorRT VAE. Inert on Apple silicon (it reports "no CUDA device"
+  # and the decode runs on PyTorch), and installed anyway for two reasons: a
+  # local NVIDIA machine gets the same acceleration the rented boxes get, and a
+  # lane that HAS the node can say why it is not using it instead of looking
+  # like a box that is merely missing something.
+  if [ -L "$COMFY/custom_nodes/hivemind-seedvr2-trt" ] || [ ! -e "$COMFY/custom_nodes/hivemind-seedvr2-trt" ]; then
+    ln -sfn "$SEEDVR2_TRT_NODE" "$COMFY/custom_nodes/hivemind-seedvr2-trt"
+  else
+    log "cannot install SeedVR2 TensorRT adapter: custom node path is not a symlink"
+    return 1
+  fi
+  # Loads the owner's references straight out of the gateway's memory, so a
+  # decrypted reference never becomes a file in ComfyUI's input directory for
+  # anything on this machine to list and copy. The gateway checks each lane for
+  # this node before it rewrites a graph, so a lane without it keeps the
+  # filename it has always had and nothing breaks either way.
+  if [ -L "$COMFY/custom_nodes/hivemind-private-media" ] || [ ! -e "$COMFY/custom_nodes/hivemind-private-media" ]; then
+    ln -sfn "$PRIVATE_MEDIA_NODE" "$COMFY/custom_nodes/hivemind-private-media"
+  else
+    log "cannot install private media loader: custom node path is not a symlink"
+    return 1
+  fi
+  # Serves this lane's sampler counters at /hivemind/progress, the same path a
+  # rented lane answers. Without it a local generation's bar is a time estimate
+  # and nothing more — ComfyUI publishes its step counts over the websocket
+  # only, to the client that submitted, and our runner never holds that socket.
+  if [ -L "$COMFY/custom_nodes/hivemind-progress" ] || [ ! -e "$COMFY/custom_nodes/hivemind-progress" ]; then
+    ln -sfn "$PROGRESS_NODE" "$COMFY/custom_nodes/hivemind-progress"
+  else
+    log "cannot install the progress readout: custom node path is not a symlink"
+    return 1
+  fi
+  # Splits a finished clip's sound into dialogue, effects, music and a track per
+  # voice (the Video stage's download menu). The gateway links this itself on a
+  # stack that started before the pack existed, but it can only restart an idle
+  # lane to load it - linking here means a fresh start already has it.
+  if [ -L "$COMFY/custom_nodes/hivemind-audio-split" ] || [ ! -e "$COMFY/custom_nodes/hivemind-audio-split" ]; then
+    ln -sfn "$AUDIO_SPLIT_NODE" "$COMFY/custom_nodes/hivemind-audio-split"
+  else
+    log "cannot install the sound splitter: custom node path is not a symlink"
+    return 1
+  fi
+  fi
+  # Minted with the STUDIO's interpreter, not ComfyUI's: both secrets belong to
+  # this app and a machine with no ComfyUI still has to boot with them.
+  COMFY_PRIVATE_VIEW_TOKEN="$("$STUDIO_PYTHON" - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32))
+PY
+  )"
+  # What the tailnet HTTPS proxy shows the control API to prove it is the
+  # proxy. The studio believes x-forwarded-proto/host/for only from a request
+  # carrying this — those headers decide the session cookie's `secure` flag,
+  # the WebAuthn relying-party id and which bucket a failed password counts
+  # against, and any caller can write them. Minted per run and given to both
+  # ends here, so the two can never drift apart.
+  CONTENT_STUDIO_PROXY_SECRET="$("$STUDIO_PYTHON" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(32))
 PY
   )"
 
+  # Only the lanes this stack runs itself. With no checkout of ours, whatever
+  # answers on 8188 is the user's own ComfyUI and is not ours to reap.
+  if comfy_available; then
 	  kill_port "$COMFY_DEFAULT_PORT"
 	  kill_port "$COMFY_LTX_PORT"
 	  kill_port "$COMFY_ANIMA_PORT"
+  fi
   kill_port 8787
   kill_port 8788
+  kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
-  kill_port "$TAILSCALE_HTTPS_PORT"
   kill_port "$CONTENT_STUDIO_PORT"
+  # One process holds all four Node ports now, so a stale listener on any of
+  # them costs a whole surface rather than one child. `stop` already reaped
+  # this one; the start path did not.
+  kill_port "$OPEN_GEN_PORT"
   sleep 2
 
+  # FLUX2_CLEAR_CACHE_EVERY_N_STEPS is NOT cosmetic: the server's own default is
+  # 0 (never clear), and a process that lives across many edits then accumulates
+  # an MLX buffer cache that costs more than the model reload it saves. Measured
+  # 2026-08-14, Klein 9B @ 4 steps, same reference: at 1.57 MP the never-clear
+  # server ran 66.5s mean (n=5) — SLOWER than the 55.8s cold CLI (n=3) it was
+  # meant to beat — while clearing every 2 steps landed 52.6s (n=3). At 0.61 MP:
+  # 20.0s vs 35.7s cold on the same hot machine.
   if [ "${ZIMG_ENABLE_FLUX2_SERVER:-0}" = "1" ]; then
     cd "$FLUX2_SERVER_DIR" || return 1
       FLUX2_MODEL="${FLUX2_MODEL:-klein9B}" \
     FLUX2_TRANSFORMER_PATH="${FLUX2_TRANSFORMER_PATH:-$COMFY/models/diffusion_models/BigLoveKlein3_mxfp8_swift_mapped_mlx.safetensors}" \
     FLUX2_TRANSFORMER_QUANT="${FLUX2_TRANSFORMER_QUANT:-bf16}" \
+    FLUX2_CLEAR_CACHE_EVERY_N_STEPS="${FLUX2_CLEAR_CACHE_EVERY_N_STEPS:-2}" \
 	    FLUX2_SERVER_PORT="$FLUX2_SERVER_PORT" MLX_METAL_PATH="$HOME/comfy/Flux2CLI-v2.1.0/mlx.metallib" "$FLUX2_SERVER_BIN" \
 	      >> "$PRIV/z-image-flux2-server.log" 2>&1 &
 	    local pid="$!"
@@ -227,7 +552,7 @@ PY
 	      log "Flux2 persistent server is optional; not restarting whole stack if it exits"
 	    fi
     if ! wait_http "http://127.0.0.1:$FLUX2_SERVER_PORT/health" 45; then
-      log "Flux2 persistent server did not become healthy in time"
+      log "Flux2 persistent server did not become healthy in time; $(wait_http_why "$pid")"
       return 1
     fi
     local warm_input="$PRIV/input/mlx_test_selfie.jpg"
@@ -278,6 +603,25 @@ PY
 	    comfy_lane_rules="ltx=ltx,ltxv,ltxav,ltx23,eros,10eros;$comfy_lane_rules"
 	  fi
 
+	  # Attached GPU rentals overlay (written by the studio's /api/gpu-rentals
+	  # attach flow; see src/hivemind_content_studio/gpu_rentals.py). Rental
+	  # lane rules are PREPENDED so an attached machine wins over local lanes
+	  # for the models it serves. Tunnel URLs are loopback (SSH is the auth).
+	  RENTAL_LANES_ENV="$MEDIA_STATE_ROOT/rental-lanes.env"
+	  RENTAL_COMFY_LANES=""; RENTAL_COMFY_LANE_RULES=""; RENTAL_COMFY_REMOTE_LANES=""
+	  if [ -f "$RENTAL_LANES_ENV" ]; then
+	    . "$RENTAL_LANES_ENV"
+	    if [ -n "${RENTAL_COMFY_LANES:-}" ]; then comfy_lanes="$comfy_lanes,$RENTAL_COMFY_LANES"; fi
+	    if [ -n "${RENTAL_COMFY_LANE_RULES:-}" ]; then comfy_lane_rules="$RENTAL_COMFY_LANE_RULES;$comfy_lane_rules"; fi
+	    log "rental lanes overlay active: ${RENTAL_COMFY_REMOTE_LANES:-none}"
+	  fi
+
+  # ---- Local ComfyUI lanes: optional from here down --------------------------
+  # The lane URLs stay in $comfy_lanes either way. The gateway needs a populated
+  # lane map (~30 read sites assume a `default` lane exists) and reports each
+  # lane's liveness on /health, so "no ComfyUI" is a lane that does not answer —
+  # never a missing lane, and never a reason to hold the studio back.
+  if comfy_available; then
   cd "$COMFY" || return 1
   ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
   HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
@@ -306,8 +650,11 @@ PY
   log "ComfyUI default lane child pid=$pid port=$COMFY_DEFAULT_PORT"
 
   if ! wait_http "http://127.0.0.1:$COMFY_DEFAULT_PORT/system_stats" 150; then
-    log "ComfyUI default lane did not become healthy in time"
-    return 1
+    # Not fatal any more. A lane that will not start is one engine down, and
+    # holding the control API back over it is what made a machine without
+    # ComfyUI unable to open the app at all. The studio comes up, reports the
+    # lane as unreachable, and cloud and rented work carries on.
+    log "ComfyUI default lane did not become healthy in time; $(wait_http_why "$pid"); continuing without it"
   fi
 
   local comfy_warm_input="$PRIV/input/mlx_test_selfie.jpg"
@@ -373,8 +720,7 @@ PY
 	    log "ComfyUI LTX lane child pid=$pid port=$COMFY_LTX_PORT gpu_only=1 lora_bypass_mps=1"
 	
 	    if ! wait_http "http://127.0.0.1:$COMFY_LTX_PORT/system_stats" 150; then
-	      log "ComfyUI LTX lane did not become healthy in time"
-	      return 1
+	      log "ComfyUI LTX lane did not become healthy in time; $(wait_http_why "$pid"); continuing without it"
 	    fi
 	  else
 	    log "ComfyUI LTX lane disabled; non-Apple-Silicon path uses default Comfy lane"
@@ -404,9 +750,10 @@ PY
   log "ComfyUI Anima lane child pid=$pid port=$COMFY_ANIMA_PORT"
 
   if ! wait_http "http://127.0.0.1:$COMFY_ANIMA_PORT/system_stats" 150; then
-    log "ComfyUI Anima lane did not become healthy in time"
-    return 1
+    log "ComfyUI Anima lane did not become healthy in time; $(wait_http_why "$pid"); continuing without it"
   fi
+  fi
+  # ---- End of the optional local lanes --------------------------------------
 
   cd "$APP" || return 1
   ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
@@ -417,153 +764,155 @@ PY
   ZIMG_OUTPUT_DIR="$PRIV/z_image_outputs" \
   ZIMG_DEBUG_OUTPUT_DIR="$PRIV/debug_outputs" \
   ZIMG_OUTPUT_ENCRYPTION="${ZIMG_OUTPUT_ENCRYPTION:-1}" \
+  ZIMG_E2E_MEDIA="${ZIMG_E2E_MEDIA:-1}" \
+  ZIMG_AGENT_DUAL_SEAL="${ZIMG_AGENT_DUAL_SEAL:-1}" \
   ZIMG_USE_FLUX2_SERVER="${ZIMG_ENABLE_FLUX2_SERVER:-0}" \
   ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT="${ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT:-$ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS}" \
   ZIMG_ALLOW_MXFP8_COMFY_FALLBACK="${ZIMG_ALLOW_MXFP8_COMFY_FALLBACK:-0}" \
   SWIFT_FLUX2_SERVER_URL="http://127.0.0.1:$FLUX2_SERVER_PORT" \
 	  COMFY_LANES="$comfy_lanes" \
 	  COMFY_LANE_RULES="$comfy_lane_rules" \
+	  COMFY_REMOTE_LANES="${RENTAL_COMFY_REMOTE_LANES:-}" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
-  hive-env-run -- python3 app.py \
+  with_credentials z-image-api "$STUDIO_PYTHON" app.py \
     >> "$PRIV/z-image-api.log" 2>&1 &
   pid="$!"
   children+=("$pid")
   log "Z-Image API child pid=$pid"
 
   if ! wait_http http://127.0.0.1:8787/health 45; then
-    log "Z-Image API did not become healthy in time"
+    log "Z-Image API did not become healthy in time; $(wait_http_why "$pid"); see $PRIV/z-image-api.log"
     return 1
   fi
 
-	  cd "$APP" || return 1
-	  COMFY_PRIVATE_VIEW_TOKEN="$COMFY_PRIVATE_VIEW_TOKEN" \
-	  HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
-	  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
-	  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
-	  COMFY_MOBILE_DIST="$MOBILE/dist" \
+  # ── The three Node servers are one child now ────────────────────────────
+  #
+  # packages/media-gateway/node-services.mjs mounts all three Node surfaces on
+  # one port ($NODE_SERVICES_PORT) — /canvas, /bridge and /agent — and keeps the
+  # three old numbers answering as compatibility ports, so nothing that
+  # addresses 8788, 8794 or 8796 by number has to change yet. One process, one
+  # health endpoint, one thing to wait on.
+  #
+  # This replaced three separate children. Exactly what switched:
+  #
+  #   cd "$APP"
+  #   COMFY_PRIVATE_VIEW_TOKEN=… HIVEMIND_STUDIO_ROOT=… HIVEMIND_MEDIA_STATE_DIR=… \
+  #   ZIMG_TOKEN_FILE=… COMFY_MOBILE_DIST="$MOBILE/dist" COMFY_LANES=… \
+  #   COMFY_HTTP_DEFAULT=… COMFY_HTTP=… HIVEMIND_STUDIO_TARGET=… \
+  #   with_credentials z-image-frontend npm run start        # Canvas, :8788
+  #   wait_http http://127.0.0.1:8788/healthz 45
+  #
+  #   cd "$OPEN_GEN"
+  #   OGA_HOST=127.0.0.1 OGA_PORT="$OPEN_GEN_PORT" HIVEMIND_MEDIA_STATE_DIR=… \
+  #   ZIMAGE_TOKEN_FILE=… \
+  #   with_credentials open-generative-ai node hosted-server.js   # bridge, :8794
+  #   wait_http "http://127.0.0.1:$OPEN_GEN_PORT/health" 30
+  #
+  #   cd "$APP"                                              # after the control API
+  #   MEDIA_STUDIO_MCP_HOST=127.0.0.1 MEDIA_STUDIO_MCP_PORT="$MEDIA_STUDIO_MCP_PORT" \
+  #   MEDIA_STUDIO_MCP_BACKEND_URL=http://127.0.0.1:8787 \
+  #   MEDIA_STUDIO_MCP_STUDIO_URL=http://127.0.0.1:8788 \
+  #   MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL=http://127.0.0.1:8788 \
+  #   HIVEMIND_MEDIA_STATE_DIR=… MEDIA_STUDIO_TOKEN_FILE=… MEDIA_STUDIO_E2E_PUB_FILE=… \
+  #   with_credentials media-studio-mcp node "$APP/bin/media-studio-mcp.mjs" --http  # :8796
+  #   curl loop against http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp
+  #
+  # MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL is loopback, always. It used to be the
+  # 8789 proxy's address, which published the Canvas port to the whole tailnet;
+  # that proxy is gone. The tailnet URL the remote-access switch makes belongs
+  # to the CONTROL API, and the studio there resolves media through its own
+  # account-gated routes.
+  cd "$APP" || return 1
+  HIVEMIND_NODE_SERVICES_HOST="127.0.0.1" \
+  HIVEMIND_NODE_SERVICES_PORT="$NODE_SERVICES_PORT" \
+  NODE_ENV="production" \
+  HOST="127.0.0.1" \
+  PORT="8788" \
+  OGA_HOST="127.0.0.1" \
+  OGA_PORT="$OPEN_GEN_PORT" \
+  MEDIA_STUDIO_MCP_HOST="127.0.0.1" \
+  MEDIA_STUDIO_MCP_PORT="$MEDIA_STUDIO_MCP_PORT" \
+  COMFY_PRIVATE_VIEW_TOKEN="$COMFY_PRIVATE_VIEW_TOKEN" \
+  HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
+  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  ZIMAGE_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  MEDIA_STUDIO_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  MEDIA_STUDIO_E2E_PUB_FILE="${MEDIA_STUDIO_E2E_PUB_FILE:-$MEDIA_STATE_ROOT/secure/agent-e2e-pub}" \
+  MEDIA_STUDIO_MCP_BACKEND_URL="http://127.0.0.1:8787" \
+  MEDIA_STUDIO_MCP_STUDIO_URL="http://127.0.0.1:8788" \
+  MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL="http://127.0.0.1:8788" \
+  COMFY_MOBILE_DIST="$MOBILE/dist" \
 	  COMFY_LANES="$comfy_lanes" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
-  hive-env-run -- npm run start >> "$PRIV/z-image-frontend.log" 2>&1 &
+  HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" \
+  with_credentials hivemind-node-services node node-services.mjs >> "$PRIV/hivemind-node-services.log" 2>&1 &
   pid="$!"
   children+=("$pid")
-  log "Z-Image browser frontend child pid=$pid"
+  log "Node services child pid=$pid url=http://127.0.0.1:$NODE_SERVICES_PORT (canvas :8788, bridge :$OPEN_GEN_PORT, mcp :$MEDIA_STUDIO_MCP_PORT)"
 
-  if ! wait_http http://127.0.0.1:8788/ 45; then
-    log "Z-Image frontend did not become healthy in time"
-    return 1
-  fi
-
-  cd "$OPEN_GEN" || return 1
-  OGA_HOST="127.0.0.1" \
-  OGA_PORT="$OPEN_GEN_PORT" \
-  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
-  ZIMAGE_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
-  hive-env-run -- node hosted-server.js >> "$PRIV/open-generative-ai.log" 2>&1 &
-  pid="$!"
-  children+=("$pid")
-  log "OpenGen local inference bridge child pid=$pid url=http://127.0.0.1:$OPEN_GEN_PORT"
-
-  if ! wait_http "http://127.0.0.1:$OPEN_GEN_PORT/health" 30; then
-    log "OpenGen local inference bridge did not become healthy in time"
+  # One wait, not three. /healthz on the shared port is 200 only when all three
+  # surfaces came up; it names the one that did not when they did not.
+  if ! wait_http "http://127.0.0.1:$NODE_SERVICES_PORT/healthz" "$NODE_SERVICES_TIMEOUT"; then
+    log "Node services did not become healthy in time; $(wait_http_why "$pid"); see $PRIV/hivemind-node-services.log"
     return 1
   fi
 
   cd "$CONTENT_STUDIO" || return 1
+  # The studio's own rotating log, beside the supervisor's, where Console.app
+  # lists it and a person can find it — not in $PRIV, which is chflags hidden.
+  # A DIFFERENT file from the redirect below: a shell '>>' and a rotating
+  # handler on one path means the shell keeps writing to the rotated-away file.
+  #
+  # ZIMG_TOKEN_FILE is passed explicitly now: the control API presents that
+  # token when it proxies /local-ai to the gated bridge, so if this process and
+  # the Node child ever resolved the path differently, every local model call
+  # would 401. Both are handed the same file, by name.
   HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
+  CONTENT_STUDIO_LOG_DIR="$LOG_DIR/Hivemind Content Studio" \
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
-  hive-env-run -- uv run content-studio-api \
+  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+	  COMFY_LANES="$comfy_lanes" \
+  COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
+  CONTENT_STUDIO_PROXY_SECRET="$CONTENT_STUDIO_PROXY_SECRET" \
+  with_credentials hivemind-content-studio uv run content-studio-api \
     >> "$PRIV/hivemind-content-studio.log" 2>&1 &
   pid="$!"
   children+=("$pid")
   log "Hivemind Content Studio child pid=$pid url=http://127.0.0.1:$CONTENT_STUDIO_PORT"
 
-  if ! wait_http "http://127.0.0.1:$CONTENT_STUDIO_PORT/api/runtime" 60; then
-    log "Hivemind Content Studio did not become healthy in time"
+  # /readyz, not /api/runtime: the latter probes three engines, so "the API is
+  # up" and "the engines are up" used to be one answer. /readyz turns true only
+  # once the accounts bootstrap and the catalog warm have both run.
+  if ! wait_http "http://127.0.0.1:$CONTENT_STUDIO_PORT/readyz" 60; then
+    log "Hivemind Content Studio did not become healthy in time; $(wait_http_why "$pid"); see $PRIV/hivemind-content-studio.log"
     return 1
   fi
 
-  local ts_ip
-  local ts_dns
-  local media_studio_public_url
-  ts_ip="$(tailscale_ip || true)"
-  if [ -n "$ts_ip" ]; then
-    ts_dns="$(tailscale_dns || true)"
-    if [ -n "$ts_dns" ]; then
-      media_studio_public_url="https://$ts_dns:$TAILSCALE_HTTPS_PORT"
-    else
-      media_studio_public_url="https://$ts_ip:$TAILSCALE_HTTPS_PORT"
-    fi
-  fi
+  # The MCP endpoint used to start here as its own child on 8796. It is one of
+  # the three surfaces the collapsed Node service brings up above, and its old
+  # port still answers; the block it replaced is quoted there.
 
-  cd "$APP" || return 1
-  MEDIA_STUDIO_MCP_HOST="127.0.0.1" \
-  MEDIA_STUDIO_MCP_PORT="$MEDIA_STUDIO_MCP_PORT" \
-  MEDIA_STUDIO_MCP_BACKEND_URL="http://127.0.0.1:8787" \
-  MEDIA_STUDIO_MCP_STUDIO_URL="http://127.0.0.1:8788" \
-  MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL="${media_studio_public_url:-http://127.0.0.1:8788}" \
-  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
-  MEDIA_STUDIO_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
-  hive-env-run -- node "$APP/bin/media-studio-mcp.mjs" --http >> "$PRIV/media-studio-mcp.log" 2>&1 &
-  pid="$!"
-  children+=("$pid")
-  log "Media Studio MCP HTTP child pid=$pid url=http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp"
-
-  local mcp_ready=0
-  for _ in $(seq 1 30); do
-    # Streamable HTTP MCP intentionally returns 405 to GET /mcp, so accept any
-    # reachable HTTP response as the readiness signal here.
-    if curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp"; then
-      mcp_ready=1
-      break
-    fi
-    sleep 1
-  done
-  if [ "$mcp_ready" != "1" ]; then
-    log "Media Studio MCP HTTP did not become reachable in time"
-    return 1
-  fi
-
-  if [ -n "$ts_ip" ] && [ -x "$TAILSCALE_PROXY" ]; then
-    "$TAILSCALE_PROXY" --listen-host "$ts_ip" --listen-port 8788 --target-host 127.0.0.1 --target-port 8788 \
-      >> "$PRIV/z-image-tailscale-proxy.log" 2>&1 &
-    pid="$!"
-    children+=("$pid")
-    log "Tailscale proxy child pid=$pid url=http://$ts_ip:8788"
-
-    if [ -f "$TAILSCALE_HTTPS_PROXY" ] && ensure_tls_cert "$ts_ip"; then
-      cd "$APP" || return 1
-      TAILSCALE_IP="$ts_ip" TAILSCALE_HTTPS_PORT="$TAILSCALE_HTTPS_PORT" ZIMAGE_TLS_CERT="$TLS_CERT" ZIMAGE_TLS_KEY="$TLS_KEY" ZIMAGE_TARGET="http://127.0.0.1:8788" HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" MEDIA_STUDIO_MCP_TARGET="http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT" \
-        node "$TAILSCALE_HTTPS_PROXY" >> "$PRIV/z-image-tailscale-https-proxy.log" 2>&1 &
-      pid="$!"
-      children+=("$pid")
-      log "Tailscale HTTPS proxy child pid=$pid url=https://$ts_ip:$TAILSCALE_HTTPS_PORT"
-    else
-      log "Tailscale HTTPS proxy/cert unavailable; secure mobile URL disabled"
-    fi
-  else
-    log "Tailscale IP/proxy not available; tailnet URL disabled"
-  fi
-
-  if [ "${ZIMAGE_ENABLE_CLOUDFLARED:-0}" = "1" ] && [ -x "$CLOUDFLARED" ]; then
-    "$CLOUDFLARED" tunnel --no-autoupdate --loglevel info --logfile "$PRIV/z-image-cloudflared.log" --url http://127.0.0.1:8788 &
-    pid="$!"
-    children+=("$pid")
-    log "Cloudflare tunnel child pid=$pid"
-    for _ in $(seq 1 45); do
-      write_tunnel_url_once
-      [ -s "$URL_FILE" ] && break
-      sleep 1
-    done
-    [ -s "$URL_FILE" ] && log "remote URL: $(cat "$URL_FILE")" || log "remote URL not assigned yet"
-  else
-    log "cloudflared disabled; use Tailscale instead"
-  fi
+  # The API startup hook publishes only when explicitly requested. Serve
+  # persists independently of the children, including across stack restarts.
+  local tailnet_url
+  tailnet_url="$(tailnet_studio_url || true)"
+  log "tailnet URL: ${tailnet_url:-not published}"
 }
 
+# Recorded pids, never a name pattern.
+#
+# The other half of the 2026-09-04 incident: an agent cleaning up its own test
+# servers ran `pkill -f "hosted-server.js"` and the pattern matched the owner's
+# running child, because hosted-server.js is one of the three surfaces this
+# supervisor's Node child loads. Nothing in this repo may reap by name — every
+# stop goes through a pid this script wrote down, or through kill_port, which
+# asks lsof who actually holds one of OUR ports. test_supervisor_diagnosis.py
+# fails the build if a `pkill -f` or `killall` reappears anywhere in the tree.
 stop_children() {
-  log "stopping Z-Image stack children"
+  log "stopping studio stack children"
   for pid in "${children[@]:-}"; do
     kill "$pid" 2>/dev/null || true
   done
@@ -572,14 +921,18 @@ stop_children() {
     kill -9 "$pid" 2>/dev/null || true
   done
   children=()
+  # Only the lanes this stack runs itself. With no checkout of ours, whatever
+  # answers on 8188 is the user's own ComfyUI and is not ours to reap.
+  if comfy_available; then
 	  kill_port "$COMFY_DEFAULT_PORT"
 	  kill_port "$COMFY_LTX_PORT"
 	  kill_port "$COMFY_ANIMA_PORT"
+  fi
   kill_port 8787
   kill_port 8788
+  kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
-  kill_port "$TAILSCALE_HTTPS_PORT"
   kill_port "$CONTENT_STUDIO_PORT"
   kill_port "$OPEN_GEN_PORT"
 }
@@ -591,20 +944,62 @@ healthy() {
   # catches a real ComfyUI crash without killing active renders.
   curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null || return 1
   curl -fsS --max-time 5 "http://127.0.0.1:$CONTENT_STUDIO_PORT/api/runtime" >/dev/null || return 1
-  curl -fsS --max-time 5 "http://127.0.0.1:$OPEN_GEN_PORT/health" >/dev/null || return 1
-  if curl -fsS --max-time 10 http://127.0.0.1:8788/ >/dev/null; then
+  # One probe for all three Node surfaces. It stays a SOFT fail for the same
+  # reason the Canvas probe always was: a heavy Apple Silicon render can make
+  # this child miss a short deadline, and killing the stack mid-generation is
+  # worse than a slow health answer. Child-pid supervision still catches a real
+  # crash.
+  # A budget of 0 is one recorded probe, so the soft-fail line below can name
+  # the cause the same way the boot gates do rather than only that it failed.
+  if wait_http "http://127.0.0.1:$NODE_SERVICES_PORT/healthz" 0 10; then
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=0
   else
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=$(( ${ZIMG_FRONTEND_HEALTH_SOFT_FAILS:-0} + 1 ))
-    log "frontend health soft-failed ($ZIMG_FRONTEND_HEALTH_SOFT_FAILS/6); keeping Comfy lanes alive"
+    log "node services health soft-failed ($ZIMG_FRONTEND_HEALTH_SOFT_FAILS/6); $(wait_http_why); keeping Comfy lanes alive"
     if [ "$ZIMG_FRONTEND_HEALTH_SOFT_FAILS" -eq 6 ]; then
-      log "frontend remained unresponsive during a possible accelerator-heavy render; child-pid supervision stays active and the generation stack will not be restarted"
+      log "node services remained unresponsive during a possible accelerator-heavy render; child-pid supervision stays active and the generation stack will not be restarted"
     fi
   fi
   return 0
 }
 
+# The app's own settings document, exported for the children.
+#
+# The gateway, the bridge and ComfyUI read environment variables and nothing
+# else, so a person who moves their models folder on the Settings page needs
+# that choice to reach five processes that will never open a JSON file. It is
+# the same document the control API reads (settings.py), it emits only the keys
+# it actually sets, and the exporter shell-quotes every value — so what is
+# eval'd here is a list of `export NAME=value` lines, not arbitrary shell.
+load_studio_settings_env() {
+  [ -x "$STUDIO_PYTHON" ] || return 0
+  local exports=""
+  exports="$("$STUDIO_PYTHON" -m hivemind_content_studio.settings --env 2>/dev/null)" || return 0
+  [ -n "$exports" ] || return 0
+  eval "$exports"
+  log "settings document applied ($(printf '%s\n' "$exports" | grep -c '^export ') key(s))"
+}
+
+# Local stack overrides, dot-sourced the same way as the rental lanes overlay.
+# The supervisor runs under launchd with a FIXED inherited environment, so an
+# exported shell var never reaches the children — `FOO=1 zimage-stack restart`
+# silently keeps the old value. A file is the only handle that survives a
+# restart. Machine-local on purpose: never put secrets here (that is the shared
+# hive env's job) and never anything that should replicate across the fleet.
+load_stack_local_env() {
+  # Settings first, the hand-written overlay second: stack-local.env stays the
+  # developer escape hatch, so it has to win over the app's own document.
+  load_studio_settings_env
+  local overlay="$MEDIA_STATE_ROOT/stack-local.env"
+  if [ -f "$overlay" ]; then
+    # shellcheck disable=SC1090
+    . "$overlay"
+    log "local stack overlay loaded: $overlay"
+  fi
+}
+
 supervise() {
+  load_stack_local_env
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     local old_pid=""
     [ -f "$LOCK_DIR/pid" ] && old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
@@ -629,7 +1024,6 @@ supervise() {
     fi
     while true; do
       sleep 20
-      write_tunnel_url_once
       for pid in "${children[@]:-}"; do
         if ! kill -0 "$pid" 2>/dev/null; then
           log "child pid $pid exited; restarting whole stack"
@@ -645,6 +1039,8 @@ supervise() {
 }
 
 launch_start() {
+  launchctl setenv CONTENT_STUDIO_REMOTE_ACCESS "$REMOTE_ACCESS" || return 1
+  launchctl setenv CONTENT_STUDIO_TAILNET_PORT "$TAILNET_HTTPS_PORT" || return 1
   launchctl bootout "$DOMAIN/$OLD_CF_LABEL" 2>/dev/null || true
   launchctl bootout "$DOMAIN/$OLD_OPEN_GEN_LABEL" 2>/dev/null || true
   launchctl disable "$DOMAIN/$OLD_OPEN_GEN_LABEL" 2>/dev/null || true
@@ -660,42 +1056,64 @@ launch_start() {
 	  else
 	    launchctl unsetenv COMFY_ENABLE_LTX_LANE 2>/dev/null || true
 	  fi
-  local loaded=0
+  # The `launchctl bootout` above is ASYNCHRONOUS, so the first bootstrap here
+  # usually races it and fails with EIO ("Bootstrap failed: 5: Input/output
+  # error", plus launchd's own advice to re-run as root). That is a normal race
+  # this loop exists to absorb — it is not something the person restarting the
+  # stack has to do anything about, and telling them to try again as root sends
+  # them somewhere there is no problem. So the attempts are quiet, and only a
+  # real failure of all five speaks, carrying what launchd actually said.
+  local loaded=0 boot_error=''
   for _ in 1 2 3 4 5; do
-    if launchctl bootstrap "$DOMAIN" "$HOME/Library/LaunchAgents/$LABEL.plist"; then
+    if boot_error="$(launchctl bootstrap "$DOMAIN" "$HOME/Library/LaunchAgents/$LABEL.plist" 2>&1)"; then
       loaded=1
       break
     fi
     sleep 1
   done
   if [ "$loaded" -ne 1 ]; then
-    echo "Failed to load $LABEL" >&2
+    echo "Could not hand $LABEL to launchd after five attempts." >&2
+    [ -n "$boot_error" ] && echo "launchd said: ${boot_error//$'\n'/ }" >&2
+    echo "The old job may still be shutting down — wait a moment and run 'zimage-stack restart' again." >&2
     exit 1
   fi
   launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null || true
   echo "Hivemind Content Studio starting as one managed app."
   echo "Local URL: http://127.0.0.1:$CONTENT_STUDIO_PORT"
-  ts_ip="$(tailscale_ip || true)"
-  [ -n "$ts_ip" ] && { ts_dns="$(tailscale_dns || true)"; [ -n "$ts_dns" ] && echo "App URL: https://$ts_dns:$TAILSCALE_HTTPS_PORT" || echo "App URL: https://$ts_ip:$TAILSCALE_HTTPS_PORT"; }
+  local tailnet_url
+  tailnet_url="$(tailnet_studio_url || true)"
+  if [ -n "$tailnet_url" ]; then
+    echo "Tailnet URL: $tailnet_url (published; turn it off in the studio to stop)"
+  else
+    echo "Tailnet URL: not published. Turn on remote access in the studio to open it on your other devices."
+  fi
 }
 
 launch_stop() {
   launchctl bootout "$DOMAIN/$OLD_CF_LABEL" 2>/dev/null || true
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  # Only the lanes this stack runs itself. With no checkout of ours, whatever
+  # answers on 8188 is the user's own ComfyUI and is not ours to reap.
+  if comfy_available; then
 	  kill_port "$COMFY_DEFAULT_PORT"
 	  kill_port "$COMFY_LTX_PORT"
 	  kill_port "$COMFY_ANIMA_PORT"
+  fi
   kill_port 8787
   kill_port 8788
+  kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
-  kill_port "$TAILSCALE_HTTPS_PORT"
   kill_port "$CONTENT_STUDIO_PORT"
   kill_port "$OPEN_GEN_PORT"
   echo "Hivemind Content Studio stopped."
 }
 
 status() {
+  # Read the same overlay `supervise` runs with, or every flag below reports the
+  # pre-overlay default: with the Flux2 server forced on in stack-local.env this
+  # printed "server default: 0" next to a live listener on 8791.
+  load_stack_local_env >/dev/null 2>&1
   echo "LaunchAgent:"
   launchctl print "$DOMAIN/$LABEL" 2>/dev/null | sed -n '1,20p' || echo "  not loaded"
   echo
@@ -707,38 +1125,31 @@ status() {
 	  echo "Flux2 Swift/MLX server default: $ZIMG_ENABLE_FLUX2_SERVER"
   echo
   echo "Listeners:"
-	  for port in "$CONTENT_STUDIO_PORT" "$OPEN_GEN_PORT" "$COMFY_DEFAULT_PORT" "$COMFY_LTX_PORT" "$COMFY_ANIMA_PORT" 8787 8788 "$MEDIA_STUDIO_MCP_PORT" "$FLUX2_SERVER_PORT" "$TAILSCALE_HTTPS_PORT"; do
+	  for port in "$CONTENT_STUDIO_PORT" "$NODE_SERVICES_PORT" "$OPEN_GEN_PORT" "$COMFY_DEFAULT_PORT" "$COMFY_LTX_PORT" "$COMFY_ANIMA_PORT" 8787 8788 "$MEDIA_STUDIO_MCP_PORT" "$FLUX2_SERVER_PORT"; do
     pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
     if [ -n "$pids" ]; then echo "  :$port pid(s): $pids"; else echo "  :$port not listening"; fi
   done
   echo
-  if [ -s "$URL_FILE" ]; then
-    echo "Cloudflare URL: $(cat "$URL_FILE")"
+  local tailnet_url
+  echo "Local URL: http://127.0.0.1:$CONTENT_STUDIO_PORT"
+  tailnet_url="$(tailnet_studio_url || true)"
+  if [ -n "$tailnet_url" ]; then
+    echo "Tailnet URL: $tailnet_url"
+    echo "  Reachable by every device signed in to this tailnet. The Canvas port is NOT published."
   else
-    echo "Cloudflare URL: disabled"
-  fi
-  local ts_ip
-  ts_ip="$(tailscale_ip || true)"
-  if [ -n "$ts_ip" ]; then
-    local ts_dns
-    ts_dns="$(tailscale_dns || true)"
-    [ -n "$ts_dns" ] && echo "App URL: https://$ts_dns:$TAILSCALE_HTTPS_PORT" || echo "App URL: https://$ts_ip:$TAILSCALE_HTTPS_PORT"
-    echo "Plain HTTP fallback: http://$ts_ip:8788"
-  else
-    echo "App URL: Tailscale IP not found"
+    echo "Tailnet URL: not published (no tailscale serve entry proxies :$CONTENT_STUDIO_PORT). Turn on remote access in the studio to open it on your other devices."
   fi
 }
 
-case "${1:-status}" in
+case "$STACK_ACTION" in
   supervise) supervise ;;
   start) launch_start ;;
   stop) launch_stop ;;
   restart) launch_stop; sleep 2; launch_start ;;
   status) status ;;
   url)
-    ts_ip="$(tailscale_ip || true)"
-    ts_dns="$(tailscale_dns || true)"
-    if [ -n "$ts_dns" ]; then echo "https://$ts_dns:$TAILSCALE_HTTPS_PORT"; elif [ -n "$ts_ip" ]; then echo "https://$ts_ip:$TAILSCALE_HTTPS_PORT"; else echo "http://127.0.0.1:$CONTENT_STUDIO_PORT"; fi
+    tailnet_url="$(tailnet_studio_url || true)"
+    if [ -n "$tailnet_url" ]; then echo "$tailnet_url"; else echo "http://127.0.0.1:$CONTENT_STUDIO_PORT"; fi
     ;;
-  *) echo "Usage: zimage-stack {start|stop|restart|status|url|supervise}" >&2; exit 2 ;;
+  *) echo "Usage: zimage-stack {start|stop|restart|status|url|supervise} [--remote-access] [--tailnet-port PORT]" >&2; exit 2 ;;
 esac

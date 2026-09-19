@@ -1,0 +1,30 @@
+[project]
+name = "rife-mlx"
+version = "0.1.0"
+description = "Apple MLX port of Practical-RIFE 4.x — real-time video frame interpolation (MIT)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "MVS Collective (xocialize)" }]
+dependencies = [
+    "mlx>=0.31",
+    "numpy",
+    "huggingface_hub",
+    "pillow",
+    "av",                 # video decode/encode (PyAV)
+]
+
+[project.optional-dependencies]
+# DEV-only: torch for the parity oracle; gdown to fetch the Google-Drive weights.
+parity = ["torch>=2.2", "gdown"]
+dev = ["pytest"]
+
+[project.scripts]
+rife-mlx = "rife_mlx.pipeline_mlx:cli_main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["rife_mlx", "rife_mlx.model", "rife_mlx.ops", "rife_mlx.utils"]

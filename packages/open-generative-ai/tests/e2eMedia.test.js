@@ -1,0 +1,235 @@
+// Deliberately textual: the assertion on source here is that a decrypt path
+// has no second implementation — an absence claim over the tree.
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+// Resolved from this file, not from where the checkout happens to live: an
+// absolute path here breaks the moment the repository is moved, which is
+// exactly what happened on 2026-08-26.
+const ROOT = path.resolve(__dirname, '../../..');
+const PY = path.join(ROOT, '.venv/bin/python');
+const SEAL = path.join(ROOT, 'packages/media-gateway/media_seal.py');
+
+function stubStudioBrowser() {
+    const session = new Map([['hivemind.ownerPassphrase.once', JSON.stringify({ password: 'media-pass', expiresAt: Date.now() + 1e6 })]]);
+    global.window = { location: { search: '?hivemindStudio=1' }, dispatchEvent: () => {} };
+    global.CustomEvent = class { constructor(t, i) { this.type = t; Object.assign(this, i); } };
+    global.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+    global.sessionStorage = { getItem: (k) => (session.has(k) ? session.get(k) : null) };
+    const blobs = [];
+    global.URL = { createObjectURL: (blob) => { blobs.push(blob); return `blob:mock/${blobs.length - 1}`; }, revokeObjectURL: () => {} };
+    return blobs;
+}
+
+async function sealWithPython(publicKeyB64, plaintext) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'e2emedia-'));
+    fs.writeFileSync(path.join(dir, 'pub.txt'), publicKeyB64);
+    fs.writeFileSync(path.join(dir, 'in.bin'), plaintext);
+    execFileSync(PY, [SEAL, '--pub', `@${path.join(dir, 'pub.txt')}`, '--in', path.join(dir, 'in.bin'), '--out', path.join(dir, 'out.json')]);
+    const sealed = JSON.parse(fs.readFileSync(path.join(dir, 'out.json'), 'utf8'));
+    fs.rmSync(dir, { recursive: true, force: true });
+    return { ...sealed, v: 1, media_type: 'video/mp4' };
+}
+
+test('E2E media: the browser fetches the envelope and renders decrypted bytes', async () => {
+    const blobs = stubStudioBrowser();
+    // Bootstrap the vault (the media helper shares e2eVault's session via vaultSession).
+    const vault = { identity: null, blobs: new Map() };
+    global.fetch = async (url, options = {}) => {
+        const method = options.method || 'GET';
+        if (url === '/api/vault/identity' && method === 'GET') return { ok: true, json: async () => ({ ok: true, exists: !!vault.identity, identity: vault.identity }) };
+        if (url === '/api/vault/identity' && method === 'PUT') { vault.identity = JSON.parse(options.body).identity; return { ok: true, status: 200, json: async () => ({ ok: true }) }; }
+        throw new Error(`unexpected ${url}`);
+    };
+    const session = await import(`../src/lib/vaultSession.js?case=${Date.now()}-a`);
+    assert.equal(await session.ensureVaultReady(), true);
+    const pub = (await (await fetch('/api/vault/identity')).json()).identity.public_key;
+
+    const plaintext = Buffer.from('the actual generated video bytes '.repeat(64));
+    const envelope = await sealWithPython(pub, plaintext);
+
+    let bodyCancelled = false;
+    global.fetch = async (url) => {
+        // Cross-origin gateway media: the custom X-E2E-Media header is NOT readable,
+        // only Content-Type is — the detection must work off Content-Type alone.
+        if (url === 'http://127.0.0.1:8787/image/clip.mp4?token=x') {
+            return { ok: true, headers: { get: (h) => (h === 'Content-Type' ? 'application/vnd.hivemind.e2e+json' : null) }, json: async () => envelope, body: { cancel() { bodyCancelled = true; } } };
+        }
+        if (url === '/image/legacy.png') {
+            return { ok: true, headers: { get: (h) => (h === 'Content-Type' ? 'image/png' : null) }, body: { cancel() { bodyCancelled = true; } } };
+        }
+        throw new Error(`unexpected ${url}`);
+    };
+    const media = await import(`../src/lib/e2eMedia.js?case=${Date.now()}-a`);
+
+    const src = await media.resolveMediaSrc('http://127.0.0.1:8787/image/clip.mp4?token=x');
+    assert.match(src, /^blob:mock\//, 'cross-origin E2E media resolves to a decrypted blob URL via Content-Type');
+    const recovered = Buffer.from(await blobs[0].arrayBuffer());
+    assert.deepEqual(recovered, plaintext, 'the blob holds the decrypted plaintext');
+
+    // Legacy/plaintext media is passed through untouched (and not buffered here).
+    const legacy = await media.resolveMediaSrc('/image/legacy.png');
+    assert.equal(legacy, '/image/legacy.png');
+    assert.equal(bodyCancelled, true, 'legacy response body is not downloaded twice');
+});
+
+test('E2E media: fails open to the original URL on any error', async () => {
+    stubStudioBrowser();
+    global.fetch = async () => { throw new Error('network down'); };
+    const media = await import(`../src/lib/e2eMedia.js?case=${Date.now()}-b`);
+    assert.equal(await media.resolveMediaSrc('/image/x.png'), '/image/x.png');
+    assert.equal(await media.resolveMediaSrc(''), '');
+});
+
+test('E2E media: locked vault fails open AND flags the URL as vault-locked', async () => {
+    stubStudioBrowser();
+    // A fresh tab whose owner cookie is still valid: the lock screen never ran,
+    // so there is no per-tab passphrase and the vault cannot bootstrap.
+    global.sessionStorage = { getItem: () => null };
+    // e2eMedia's un-suffixed vaultSession/e2eVault instances are shared across
+    // cases; the first test left that vault unlocked, so lock it back down.
+    const session = await import('../src/lib/vaultSession.js');
+    session.resetVaultSession();
+
+    let bodyCancelled = false;
+    global.fetch = async (url) => {
+        if (url === '/api/canvas/history/42/media') {
+            return {
+                ok: true,
+                headers: { get: (h) => (h === 'X-E2E-Media' ? '1' : h === 'Content-Type' ? 'application/vnd.hivemind.e2e+json' : null) },
+                json: async () => { throw new Error('envelope must not be read while locked'); },
+                body: { cancel() { bodyCancelled = true; } },
+            };
+        }
+        throw new Error(`unexpected ${url}`);
+    };
+    const media = await import(`../src/lib/e2eMedia.js?case=${Date.now()}-locked`);
+
+    const src = await media.resolveMediaSrc('/api/canvas/history/42/media');
+    assert.equal(src, '/api/canvas/history/42/media', 'still fail-open: the original URL comes back');
+    assert.equal(media.isMediaVaultLocked('/api/canvas/history/42/media'), true, 'the URL is flagged so tiles can offer the unlock flow');
+    assert.equal(media.isMediaVaultLocked('/api/canvas/history/other/media'), false, 'only verified envelopes are flagged');
+    assert.equal(bodyCancelled, true, 'the undecryptable envelope body is not downloaded');
+});
+
+test('E2E media: bytes already in hand are shown without fetching them sealed', async () => {
+    stubStudioBrowser();
+    // Any fetch here is the bug: the picture was just generated in this tab.
+    global.fetch = async (url) => { throw new Error(`should not fetch ${url}`); };
+    const media = await import(`../src/lib/e2eMedia.js?case=${Date.now()}-primed`);
+    const url = '/api/media-studio/references/reference-abc.png';
+    const picture = 'data:image/png;base64,iVBORw0KGgo=';
+
+    assert.equal(media.primeResolvedMedia(url, picture), true);
+    assert.equal(media.peekResolvedMediaSrc(url), picture);
+    assert.equal(await media.resolveMediaSrc(url), picture);
+    // A priming never records a seal failure, and it clears one already there:
+    // the card must not keep saying "locked" over a picture it can show.
+    assert.equal(media.mediaSealFailure(url), null);
+    // Only provably plaintext shapes are accepted — an envelope URL primed as
+    // its own "resolved" form would be the broken image all over again.
+    assert.equal(media.primeResolvedMedia('/api/media-studio/references/other.png', '/api/media-studio/references/other.png'), false);
+    assert.equal(media.peekResolvedMediaSrc('/api/media-studio/references/other.png'), null);
+});
+
+// A locked vault is not a wrong key.
+//
+// Reported live 2026-09-06: every library tile read "Can't decrypt — Sealed for
+// a different key" while the vault identity, its 67 blobs and the machine's
+// field key were all provably intact. The verdict came from a blanket catch.
+// A browser holding a DEVICE identity but a locked vault has deviceReady true,
+// so it skips the `!vaultReady && !deviceReady` locked branch, fails
+// decryptWithDevice on an owner-sealed envelope, has no vault to fall back to,
+// and the throw was called "sealed to someone else" — a dead end offering no
+// way out, when the actual remedy was one unlock.
+//
+// Deliberately textual, and it is the honest form here: reaching that branch
+// needs deviceReady true with vaultReady false, which means a device keypair in
+// IndexedDB — this suite runs in node, where there is none. What can be pinned
+// without pretending otherwise is that the verdict is DERIVED from whether the
+// vault was open, rather than being the constant it used to be.
+test('the seal verdict is decided by whether the vault was open, not assumed', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/lib/e2eMedia.js'), 'utf8');
+    const start = source.indexOf('const bytes = await openEnvelope(');
+    assert.ok(start > 0, 'the decrypt call moved; this guard needs rewriting');
+    const tail = source.slice(start);
+    const verdict = tail.slice(tail.indexOf('} catch'), tail.indexOf('return url;'));
+
+    assert.match(
+        verdict, /noteSealFailure\(url,\s*vaultReady \? 'undecryptable' : 'locked'\)/,
+        'a failed decrypt must read as locked when the vault was shut: only an OPEN '
+        + 'vault that still cannot read an envelope is genuinely a different key',
+    );
+    assert.doesNotMatch(
+        verdict, /noteSealFailure\(url,\s*'undecryptable'\)/,
+        'the constant verdict is the 2026-09-06 bug: it told users their media was '
+        + 'sealed to someone else when their vault was simply not open',
+    );
+});
+
+// The stage and the viewer over it, resolving the same fresh output at once.
+//
+// Reported 2026-09-11: a local generation opened in the viewer and looked right,
+// and the stage behind it was a broken-image icon as soon as the viewer closed.
+// Both mounted against the same URL within a frame, both missed the cache, and
+// both decrypted it — the second object URL to land replaced the first, and
+// replacing used to revoke. Sharing the in-flight decrypt fixes the cause; the
+// holder-aware drop in mediaCacheBudget.test.js covers the symptom.
+test('E2E media: two components resolving one URL share a single decrypt', async () => {
+    const blobs = stubStudioBrowser();
+    const revoked = [];
+    global.URL = {
+        createObjectURL: (blob) => { blobs.push(blob); return `blob:mock/${blobs.length - 1}`; },
+        revokeObjectURL: (src) => revoked.push(src),
+    };
+    const session = await import('../src/lib/vaultSession.js');
+    session.resetVaultSession();
+    const vault = { identity: null };
+    global.fetch = async (url, options = {}) => {
+        const method = options.method || 'GET';
+        if (url === '/api/vault/identity' && method === 'GET') return { ok: true, json: async () => ({ ok: true, exists: !!vault.identity, identity: vault.identity }) };
+        if (url === '/api/vault/identity' && method === 'PUT') { vault.identity = JSON.parse(options.body).identity; return { ok: true, status: 200, json: async () => ({ ok: true }) }; }
+        throw new Error(`unexpected ${url}`);
+    };
+    assert.equal(await session.ensureVaultReady(), true);
+    const pub = vault.identity.public_key;
+    const envelope = await sealWithPython(pub, Buffer.from('a dog runs to his owner'.repeat(32)));
+
+    let fetches = 0;
+    global.fetch = async (url) => {
+        if (url === '/image/fresh.png') {
+            fetches += 1;
+            return {
+                ok: true,
+                headers: { get: (h) => (h === 'X-E2E-Media' ? '1' : h === 'Content-Type' ? 'application/vnd.hivemind.e2e+json' : null) },
+                json: async () => envelope,
+                body: { cancel() {} },
+            };
+        }
+        throw new Error(`unexpected ${url}`);
+    };
+    const media = await import(`../src/lib/e2eMedia.js?case=${Date.now()}-shared`);
+
+    // Both mount before either decrypt finishes — the real ordering on screen.
+    media.retainResolvedMedia('/image/fresh.png');
+    media.retainResolvedMedia('/image/fresh.png');
+    const [stage, viewer] = await Promise.all([
+        media.resolveMediaSrc('/image/fresh.png'),
+        media.resolveMediaSrc('/image/fresh.png'),
+    ]);
+
+    assert.match(stage, /^blob:mock\//);
+    assert.equal(stage, viewer, 'both components must point at the same object URL');
+    assert.equal(fetches, 1, 'the envelope is fetched and decrypted once, not once per component');
+    assert.equal(revoked.includes(stage), false, 'nothing revoked the URL either of them is showing');
+
+    // Closing the viewer leaves the stage's picture alone.
+    media.releaseResolvedMedia('/image/fresh.png');
+    assert.equal(media.peekResolvedMediaSrc('/image/fresh.png'), stage);
+    assert.equal(revoked.includes(stage), false);
+});

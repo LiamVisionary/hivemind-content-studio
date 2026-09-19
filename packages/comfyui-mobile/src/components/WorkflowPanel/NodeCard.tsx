@@ -12,6 +12,7 @@ import { useOverallProgress } from '@/hooks/useOverallProgress';
 import { useQueueStore } from '@/hooks/useQueue';
 import { useNodeErrorPopover } from '@/hooks/useNodeErrorPopover';
 import { getMediaType } from '@/utils/media';
+import { resolveMediaSrc } from '@/utils/e2eMedia';
 import { NodeCardMenu } from './NodeCard/Menu';
 import { NodeCardErrorPopover } from './NodeCard/ErrorPopover';
 import { NodeCardNote } from './NodeCard/Note';
@@ -183,7 +184,9 @@ export const NodeCard = memo(function NodeCard({
     const nextSrc = getHistoryImagePreviewUrl(latestImage);
     const img = new Image();
     img.onload = () => setPreviewImage(latestImage);
-    img.src = nextSrc;
+    // Sealed outputs resolve to a decrypted blob URL (and prime the shared
+    // cache the inline OutputPreview reads from); plaintext passes through.
+    void resolveMediaSrc(nextSrc).then((resolved) => { img.src = resolved; });
   }, [latestKey, previewKey, latestImage]);
 
   const typeDef = nodeTypes?.[node.type];

@@ -1,8 +1,137 @@
+import base64
+import io
+import contextlib
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import Request, urlopen
+
+import pytest
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MCP_SOURCE = ROOT / "packages" / "media-gateway" / "bin" / "media-studio-mcp.mjs"
+WORKFLOW_REGISTRY = ROOT / "packages" / "media-gateway" / "workflow-registry.json"
+
+# Seconds, not milliseconds: every test here starts the real Node MCP over
+# HTTP and probes clips with ffprobe.
+pytestmark = pytest.mark.slow
+
+COMFY_DIR = Path(os.environ.get("COMFY_DIR") or (Path.home() / "comfy" / "ComfyUI"))
+COMFY_PATH_PREFIX = "comfy:"
+
+
+def _resolve_workflow_path(raw_path: str) -> Path:
+    """The same three shapes media-studio-mcp.mjs `resolveWorkflowFile` reads:
+    `comfy:<rel>` is relative to the ComfyUI install, a bare relative path is
+    relative to the gateway package, and an absolute path is used as given."""
+    text = str(raw_path or "")
+    if text.startswith(COMFY_PATH_PREFIX):
+        return COMFY_DIR / text[len(COMFY_PATH_PREFIX):]
+    path = Path(text)
+    return path if path.is_absolute() else ROOT / "packages" / "media-gateway" / path
+
+
+def _skip_without_local_workflow(workflow_id: str) -> None:
+    """Skip when the graph this workflow renders from is not on this machine.
+
+    These tests spawn the real MCP, which resolves the row's `api_workflow` and
+    posts the graph it finds there. Some rows live inside the operator's own
+    ComfyUI install, so on any other machine the MCP posts nothing and the test
+    fails as an empty capture list — which says "the MCP is broken" when the
+    truth is "that graph is not here".
+    """
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    row = next((item for item in registry["workflows"] if item["id"] == workflow_id), None)
+    if row is None:
+        return
+    path = _resolve_workflow_path(row.get("api_workflow") or "")
+    if not path.is_file():
+        pytest.skip(f"{workflow_id}'s graph is not on this machine: {path}")
+
+
+def _file_or_skip(raw_path: str):
+    """The JSON at `raw_path`, or skip — same rule as `_graph_or_skip`, for the
+    files that are not a `{"prompt": …}` graph."""
+    path = _resolve_workflow_path(raw_path)
+    if not path.is_file():
+        pytest.skip(f"workflow file is not on this machine: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _graph_or_skip(raw_path: str):
+    """The workflow graph at `raw_path`, or skip.
+
+    Some registry rows live inside the operator's own ComfyUI install, so these
+    graphs exist on the machine that renders with them and nowhere else —
+    including CI. Skipping names the missing file instead of asserting the
+    shape of something that is not there.
+    """
+    graph_path = _resolve_workflow_path(raw_path)
+    if not graph_path.is_file():
+        pytest.skip(f"workflow graph is not on this machine: {graph_path}")
+    return json.loads(graph_path.read_text(encoding="utf-8"))["prompt"]
+
+
+
+def _resolved_registry_workflows(registry: dict) -> list[dict]:
+    definitions = {item["id"]: item for item in registry["workflows"]}
+    resolved: dict[str, dict] = {}
+
+    def merge(base: dict, override: dict) -> dict:
+        result = json.loads(json.dumps(base))
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = merge(result[key], value)
+            else:
+                result[key] = json.loads(json.dumps(value))
+        return result
+
+    def resolve(workflow_id: str) -> dict:
+        if workflow_id in resolved:
+            return resolved[workflow_id]
+        definition = definitions[workflow_id]
+        parent_id = str(definition.get("inherits") or "").strip()
+        workflow = merge(resolve(parent_id), definition) if parent_id else merge({}, definition)
+        workflow.pop("inherits", None)
+        resolved[workflow_id] = workflow
+        return workflow
+
+    return [resolve(item["id"]) for item in registry["workflows"]]
+
+
+def test_positive_prompt_schemas_do_not_cap_character_count():
+    source = MCP_SOURCE.read_text(encoding="utf-8")
+    image_tool = source.split("server.registerTool('media_generate_image'", 1)[1]
+    image_tool = image_tool.split("}, tool(async (args) =>", 1)[0]
+    video_tool = source.split("server.registerTool('media_generate_video'", 1)[1]
+    video_tool = video_tool.split("}, tool(async (args) =>", 1)[0]
+
+    assert "prompt: z.string().min(1).describe(" in image_tool
+    assert "prompt: z.string().min(1).optional().describe(" in video_tool
+    assert ".max(1200)" not in image_tool
+    assert ".max(4000)" not in video_tool
+
+
+def test_regular_fast_aliases_never_resolve_to_eros():
+    source = MCP_SOURCE.read_text()
+
+    for alias in ("fastregular", "fast-regular", "regular-fast", "regular"):
+        assert f"{alias}: 'ltx23-regular-fp8'" in source or f"'{alias}': 'ltx23-regular-fp8'" in source
+
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    regular = next(workflow for workflow in registry["workflows"] if workflow["id"] == "ltx23-regular-fp8")
+    assert regular["native_mlx"]["variant"] == "regular-q8-distilled"
+    assert "never selects an Eros checkpoint" in regular["description"]
+    assert regular["prompt_contract"]["native_mlx_distilled_extension"] == "positive-only"
 
 
 def test_video_tool_accepts_negative_prompt_before_building_workflow():
@@ -13,46 +142,3669 @@ def test_video_tool_accepts_negative_prompt_before_building_workflow():
     assert "negative_prompt: z.string().max(2000).optional()" in video_tool
 
 
-def test_backend_requests_do_not_reuse_the_inbound_mcp_token():
+def test_video_tool_carries_the_app_tab_lane_to_the_gateway():
     source = MCP_SOURCE.read_text(encoding="utf-8")
-    request_json = source.split("async function requestJson", 1)[1]
-    request_json = request_json.split("function ok", 1)[0]
+    video_tool = source.split("server.registerTool('media_generate_video'", 1)[1]
+    video_schema = video_tool.split("}, tool(async (args) =>", 1)[0]
 
-    assert "function backendToken()" in source
-    assert "MEDIA_STUDIO_BACKEND_TOKEN_FILE" in source
-    assert "const authToken = backendToken();" in request_json
-    assert "const authToken = token();" not in request_json
-    assert "[token(), backendToken()]" in source
+    assert "studio_lane: z.string().max(512).optional()" in video_schema
+    assert "...(args.studio_lane ? { studioLane: args.studio_lane } : {})" in source
+    assert "if (args.studio_lane) extraPngInfo.studioLane = args.studio_lane" in source
 
 
-def test_video_tool_preserves_long_prompts_and_accepts_all_anchor_shapes():
+def test_video_tool_carries_the_tabs_run_on_pin_to_the_gateway():
+    """The studio's per-tab "Run on" pin: accepted by the tool, priced against
+    the pinned lane by the motion-reference guard, and carried on the /prompt
+    body the gateway routes by — so two tabs can drive two rented boxes."""
+    source = MCP_SOURCE.read_text(encoding="utf-8")
+    video_tool = source.split("server.registerTool('media_generate_video'", 1)[1]
+    video_schema = video_tool.split("}, tool(async (args) =>", 1)[0]
+
+    assert "run_on: z.string().max(128).optional()" in video_schema
+    assert "resolveLaneForGraph(promptGraph, args.run_on)" in source
+    assert "body: { graph: promptGraph, ...(runOn ? { run_on: String(runOn) } : {}) }" in source
+    assert "built.body.run_on = String(args.run_on).slice(0, 128)" in source
+    # A refused pin is the job's answer, not something the guard swallows.
+    assert "if (error?.status === 409 && error?.machineSafe) throw error;" in source
+
+
+def test_video_loras_have_native_mlx_and_comfy_graph_parity():
     source = MCP_SOURCE.read_text(encoding="utf-8")
     video_tool = source.split("server.registerTool('media_generate_video'", 1)[1]
     video_tool = video_tool.split("}, tool(async (args) =>", 1)[0]
+    assert "loras: z.array(z.object({" in video_tool
+    assert "injectWorkflowLoras(promptGraph, settings.loras, workflow.lora_injection)" in source
+    assert "mergeNativeWorkflowLoras(nativeSpec.loras, settings.loras)" in source
 
-    assert "prompt: z.string().min(1).optional()" in video_tool
-    assert "prompt: z.string().min(1).max(4000)" not in video_tool
-    for field in (
-        "middle_image_path",
-        "middle_image_base64",
-        "middle_image_url",
-        "end_image_path",
-        "end_image_base64",
-        "end_image_url",
-        "keyframes",
-        "time_seconds",
-        "strength",
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    # Civitai's base-model category per family — what the studio's LoRA panel
+    # filters the installed catalog by.
+    # `minimax-eros` is its own family only so the reference/head-replacement
+    # siblings resolve within it (both families' lanes are matched by prefix
+    # everywhere else). Its LoRAs are the SAME Civitai category: Eros Max is
+    # itself published there under base model "MiniMax H3".
+    expected_bases = {"ltx-2.3": ["LTXV"], "minimax": ["MiniMax H3"],
+                      "minimax-eros": ["MiniMax H3"], "minimax-h3-native": ["MiniMax H3"]}
+    checked = 0
+    for workflow in (item for item in _resolved_registry_workflows(registry) if item["media_type"] == "video"):
+        if not workflow.get("supports_loras"):
+            assert "lora_injection" not in workflow
+            assert "loras" not in workflow.get("accepts", [])
+            continue
+        checked += 1
+        assert workflow["supports_loras"] is True
+        assert workflow["compatible_base_models"] == expected_bases[workflow["family"]]
+        assert "loras" in workflow["accepts"]
+        if workflow["builder"] == "h3-native":
+            # h3.c fuses LoRAs into its own weights as they load: there is no
+            # graph here, so no injection seam, and the engine patch is the seam.
+            assert "lora_injection" not in workflow
+            assert "patches/h3c-lora.patch" in workflow["h3_native"]["patches"]
+            continue
+        injection = workflow["lora_injection"]
+        graph = _graph_or_skip(workflow["api_workflow"])
+        sources = [graph[target["node"]]["inputs"][target["input"]] for target in injection["targets"]]
+        assert all(source_ref == sources[0] for source_ref in sources)
+    assert checked, "no LoRA-capable video workflows resolved — registry parse regressed"
+    # All three H3 graphs (base, turbo, reference) route the model through the
+    # SageAttention patch node the inherited injection contract targets, so the
+    # loop above just proved LoRA injection has a live seam in each of them.
+    h3 = [w for w in _resolved_registry_workflows(registry) if w.get("family") == "minimax"]
+    assert h3 and all(w["supports_loras"] is True for w in h3)
+
+
+def test_minimax_h3_registry_entry_matches_its_comfy_graph():
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflow = next(
+        item for item in _resolved_registry_workflows(registry) if item["id"] == "minimax-h3"
+    )
+    assert workflow["media_type"] == "video"
+    assert workflow["builder"] == "comfy-api"
+    # Comfy lanes reject an empty LoadImage filename, so prompt-only requests
+    # must prune the anchor loader instead of blanking it.
+    assert workflow["image_clear"] == "prune"
+    # H3's frame lattice: length must land on 17k+5 (the LTX 8k+1 snap in the
+    # builder would silently misreport what renders).
+    assert workflow["frame_grid"] == {"modulus": 17, "offset": 5}
+    assert "negative_prompt" not in workflow["accepts"], "H3 has no negative conditioning lane"
+
+    graph = _graph_or_skip(workflow["api_workflow"])
+
+    # Every declared slot must target a real node input in the graph.
+    for name, slot in workflow["slots"].items():
+        assert slot["node"] in graph, f"slot {name} targets missing node {slot['node']}"
+        assert slot["input"] in graph[slot["node"]]["inputs"], (
+            f"slot {name} targets missing input {slot['input']}"
+        )
+
+    # The accelerator chain must sit on the MODEL edge feeding both the
+    # scheduler and the guider, in this order. Sol-Attn and EasyCache are the
+    # optional ones — they ship inert (tau 0 / threshold 0) and the MCP lifts
+    # them out of the chain entirely unless a run asks for them.
+    # (Upstream KJNodes really does register the sage class with that typo.)
+    assert _model_chain(graph) == [
+        "EasyCache",
+        "SpectrumApplyMiniMaxH3",
+        "SolAttnPatch",
+        "PathchSageAttentionKJ",
+        "UNETLoader",
+    ]
+    spectrum = [nid for nid, node in graph.items() if node["class_type"] == "SpectrumApplyMiniMaxH3"]
+    assert len(spectrum) == 1
+    for consumer in ("9", "16"):
+        assert graph[consumer]["inputs"]["model"] == graph["9"]["inputs"]["model"]
+
+    # Spectrum's optional inputs must be pinned, never inherited: upstream
+    # dc6e1b3 flipped bootstrap_first_forecast's default to true and every H3
+    # job on a box provisioned after it died in the node's validate(). This
+    # mirrors that validate() so a future retune cannot reintroduce the clash.
+    tuning = graph[spectrum[0]]["inputs"]
+    assert "bootstrap_first_forecast" in tuning, "leaving it to the upstream default breaks H3"
+    # validate() on the pinned node rejects a preset that mixes the one-point
+    # bootstrap with a higher-order fit; on v0.1.8 that is a hard raise, and it
+    # is what took every rental H3 job down on 2026-08-07.
+    if tuning["bootstrap_first_forecast"]:
+        assert tuning["degree"] == 1
+        assert tuning["warmup_steps"] <= 1
+    # max_history must clear the fit's minimum point count for its degree.
+    assert tuning["max_history"] >= tuning["degree"] + 1
+    # v0.2.x: the trajectory modes are mutually exclusive, and every one of them
+    # must be stated — inheriting a Spectrum default is what broke H3 once.
+    modes = ("offline_smoothing_replay", "anchor_residual_feedback", "selective_rollback_correction")
+    assert all(mode in tuning for mode in modes)
+    assert sum(bool(tuning[mode]) for mode in modes) <= 1
+    # Joint video+audio output: upstream validated that leaving audio to the
+    # video blend reproduced degraded speech and stuttering.
+    assert tuning["audio_blend_weight"] == 0.0
+    assert tuning["offline_smoothing_replay"] is True
+    # Measured 2026-08-07 on a 5090: keeping the forecaster's latent history in
+    # system RAM shuttles it over PCIe every forecast step and takes sampling
+    # from 33s to 133s — worse than running with no forecaster at all.
+    assert tuning["history_storage"] == "vram"
+
+    # No model-freeing node between sampler and decode. Benchmarked on a rented
+    # 5090 (2026-08-08): unloading after sampling costs the NEXT job its model
+    # load and convrot re-init — 110-152s per clip against 104s without it.
+    assert not [n for n in graph.values() if n["class_type"] == "VRAM_Debug"], (
+        "freeing models after sampling is a measured regression, not an optimisation"
+    )
+    for decoder in ("10", "23"):
+        assert graph[decoder]["inputs"]["samples"] == ["14", 0]
+
+    # euler, not res_multistep: 49s vs 64s sampling at the same seed and shape,
+    # comparable frames, and res_multistep is the reported artifact source with
+    # the H3 turbo LoRA.
+    assert graph["17"]["inputs"]["sampler_name"] == "euler"
+
+    # The Spectrum forecaster is user-switchable per generation: it is an
+    # APPROXIMATION (measured 2026-08-08: 50s vs 105s sampling, at visibly
+    # softer fine detail), so the slot must reach the node's own enable input
+    # and both H3 graphs must put the forecaster on the same node id for the
+    # inherited turbo entry to reuse the slot.
+    assert "spectrum" in workflow["accepts"]
+    assert workflow["slots"]["spectrum"] == {"node": spectrum[0], "input": "enabled"}
+    assert workflow["defaults"]["spectrum"] is True
+
+    # t2v prune contract: the anchor image loader feeds only the optional
+    # first_frame input, so deleting it leaves a valid text-to-video graph.
+    image_node = workflow["slots"]["image_path"]["node"]
+    consumers = [
+        (nid, key)
+        for nid, node in graph.items()
+        for key, value in node["inputs"].items()
+        if isinstance(value, list) and value and str(value[0]) == image_node
+    ]
+    assert consumers == [("104", "first_frame")]
+
+
+def test_the_eros_lanes_are_the_h3_lanes_with_one_transformer_swapped():
+    """H3 Eros Max is a finetune, so its lanes are copies — and the value of a
+    copy is that it stayed a copy. Three things have to hold.
+
+    ONE: each eros graph loads the eros transformer and NOTHING ELSE changes
+    hands — same encoder, same two VAEs, same model chain as the lane it was
+    copied from. A stray official filename left in one of them would route and
+    render on the wrong weights with no error anywhere.
+
+    TWO: no turbo LoRA. This is the TURBO-hybrid build, with the ref/fl turbo
+    deltas already fused into the weights; MiniMaxH3TurboLoRA on top would be a
+    second distillation over a distilled model.
+
+    THREE: each row DECLARES the eros transformer. These lanes only ever run on
+    a rented box, and the preflight compares that list against the box's
+    inventory — inheriting the parent's list unnoticed would have it check for
+    the official DiT on a lane that never loads it.
+    """
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    resolved = {item["id"]: item for item in _resolved_registry_workflows(registry)}
+    eros_dit = "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors"
+    pairs = [
+        ("minimax-h3-eros", "minimax-h3"),
+        ("minimax-h3-eros-reference", "minimax-h3-reference"),
+        ("minimax-h3-eros-inpaint", "minimax-h3-inpaint"),
+    ]
+    for eros_id, parent_id in pairs:
+        eros, parent = resolved[eros_id], resolved[parent_id]
+        graph = _graph_or_skip(eros["api_workflow"])
+        parent_graph = _graph_or_skip(parent["api_workflow"])
+
+        assert graph["6"]["inputs"]["unet_name"] == eros_dit, eros_id
+        assert "minimax_h3_fl2va" not in json.dumps(graph), (
+            f"{eros_id} still names the official transformer somewhere"
+        )
+        assert "MiniMaxH3TurboLoRA" not in json.dumps(graph), eros_id
+        # Same graph, node for node — only the three tuned inputs may differ.
+        assert set(graph) == set(parent_graph), eros_id
+        assert _model_chain(graph) == _model_chain(parent_graph), eros_id
+        for node_id, node in graph.items():
+            assert node["class_type"] == parent_graph[node_id]["class_type"], (eros_id, node_id)
+        assert graph["17"]["inputs"]["sampler_name"] == "res_multistep", eros_id
+        assert graph["9"]["inputs"]["steps"] == eros["defaults"]["steps"] == 8, eros_id
+        # Spectrum costs accuracy on this model and has no history to forecast
+        # from at 8 steps, so it ships off — and the registry must agree with
+        # the graph, or the composer's toggle starts out lying.
+        assert graph["30"]["inputs"]["enabled"] is False, eros_id
+        assert eros["defaults"]["spectrum"] is False, eros_id
+
+        declared = {Path(dep["relativePath"]).name for dep in eros["model_dependencies"]}
+        assert eros_dit in declared, eros_id
+
+        # The swap is the ONLY difference in what gets loaded. Stated against
+        # the parent rather than against the declared list, because the parent
+        # leaves some on-demand weights out too (rife, sam3) and this lane is
+        # not the place to change that contract — it is the place to prove it
+        # was copied.
+        def weights(g):
+            return {v for node in g.values() for v in node["inputs"].values()
+                    if isinstance(v, str) and v.endswith(".safetensors")}
+        assert weights(graph) == (
+            weights(parent_graph) - {"minimax_h3_fl2va_pruned_int8_convrot.safetensors"}
+        ) | {eros_dit}, eros_id
+
+    # Its own family, and that is load-bearing rather than cosmetic: reference
+    # and head-replacement siblings resolve as "first lane of the same family
+    # with reference slots", so sharing `minimax` would have sent an eros run
+    # with references onto the OFFICIAL weights.
+    assert {resolved[i]["family"] for i, _ in pairs} == {"minimax-eros"}
+    assert resolved["minimax-h3-eros-reference"]["routing_only"] is True
+    assert resolved["minimax-h3-eros-inpaint"]["routing_only"] is True
+    assert "routing_only" not in resolved["minimax-h3-eros"]
+    # Prefix, not equality, is what every capability check uses (H3's duration
+    # ceiling, its prompt grammar, its quality controls) — so the new family
+    # keeps all of them.
+    assert resolved["minimax-h3-eros"]["family"].startswith("minimax")
+
+
+def test_minimax_h3_turbo_inherits_and_bakes_the_distill_contract():
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflow = next(
+        item for item in _resolved_registry_workflows(registry) if item["id"] == "minimax-h3-turbo"
+    )
+    # Experimental preview weights: surfaced as a beta badge, never the default.
+    assert workflow["beta"] is True
+    assert workflow["default"] is False
+    # Inherited contract from minimax-h3.
+    assert workflow["builder"] == "comfy-api"
+    assert workflow["frame_grid"] == {"modulus": 17, "offset": 5}
+    assert workflow["image_clear"] == "prune"
+    assert workflow["defaults"]["steps"] == 6
+    assert "negative_prompt" not in workflow["accepts"]
+
+    graph = _graph_or_skip(workflow["api_workflow"])
+
+    # MODEL chain: UNETLoader -> UPSTREAM's turbo LoRA loader -> SageAttention
+    # -> optional Sol-Attn -> the MANDATORY dual sigma shift -> Spectrum ->
+    # optional EasyCache, feeding scheduler+guider.
+    assert _model_chain(graph) == [
+        "EasyCache",
+        "SpectrumApplyMiniMaxH3",
+        "MiniMaxH3SigmaShift",
+        "SolAttnPatch",
+        "PathchSageAttentionKJ",
+        "MiniMaxH3TurboLoRA",
+        "UNETLoader",
+    ]
+    spectrum = next(nid for nid, node in graph.items()
+                    if node["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert graph["16"]["inputs"]["model"] == graph["9"]["inputs"]["model"]
+    shift = next(nid for nid, node in graph.items() if node["class_type"] == "MiniMaxH3SigmaShift")
+    assert graph[shift]["inputs"]["shift_video"] == 12.0
+    assert graph[shift]["inputs"]["shift_audio"] == 6.0
+    lora = next(nid for nid, node in graph.items() if node["class_type"] == "MiniMaxH3TurboLoRA")
+    # ComfyUI's plain loader CANNOT apply this LoRA to our pruned int8-convrot
+    # base: the 51 AdaLN pairs have nowhere to go, which is why we used to ship
+    # a conversion with them stripped out. Upstream's loader re-injects the time
+    # conditioning instead, so the full weights apply.
+    assert graph[lora]["class_type"] == "MiniMaxH3TurboLoRA", (
+        "a plain LoRA loader silently drops this LoRA's AdaLN adapters"
+    )
+    assert graph[lora]["inputs"]["lora_name"] == "minimax_h3_turbo_v4_step600_ema.safetensors"
+    assert graph[lora]["inputs"]["strength"] == 1.0
+    # Merging rounds the delta away on a quantized base — ours is int8-convrot.
+    assert graph[lora]["inputs"]["low_vram"] is False
+    assert graph[lora]["inputs"]["model"][0] == "6"
+    # NOT upstream's sampler: measured, it bypasses Spectrum's hooks and turns
+    # every step into a real eval (61s of sampling against 30s).
+    assert graph["17"]["class_type"] == "KSamplerSelect"
+    assert graph["17"]["inputs"]["sampler_name"] == "euler"
+    assert graph["9"]["inputs"]["steps"] == 6
+    # The inherited spectrum slot must land on THIS graph's forecaster too.
+    assert workflow["slots"]["spectrum"] == {"node": spectrum, "input": "enabled"}
+
+    # The two H3 workflows must stay DISTINCT: the quality tier carries no LoRA.
+    quality = json.loads((ROOT / "packages/media-gateway/workflows/minimax-h3.api.json").read_text())["prompt"]
+    assert not [n for n in quality.values() if "Lora" in n["class_type"] or "TurboLoRA" in n["class_type"]], (
+        "the full-weight workflow must never gain the turbo LoRA"
+    )
+    assert quality["9"]["inputs"]["steps"] == 15
+    # Slots inherited from minimax-h3 must still target real inputs here.
+    for name, slot in workflow["slots"].items():
+        assert slot["node"] in graph and slot["input"] in graph[slot["node"]]["inputs"], name
+
+
+def _free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _ltx_api_workflow():
+    return {
+        "client_id": "test",
+        "prompt": {
+            "510": {
+                "class_type": "SamplerCustomAdvanced",
+                "inputs": {"noise": ["812", 0], "guider": ["653", 0], "sampler": ["520", 0], "sigmas": ["527", 0]},
+            },
+            "520": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}},
+            "523": {"class_type": "LTXVConditioning", "inputs": {}},
+            "527": {"class_type": "ManualSigmas", "inputs": {"sigmas": "1.0,0.5,0.0"}},
+            "531": {
+                "class_type": "ImageResizeKJv2",
+                "inputs": {"image": ["773", 0], "width": ["809", 0], "height": ["811", 0]},
+            },
+            "542": {"class_type": "PrimitiveFloat", "inputs": {"value": 24}},
+            "597": {"class_type": "VHS_VideoCombine", "inputs": {"filename_prefix": "test"}},
+            "653": {
+                "class_type": "STGGuiderAdvanced",
+                "inputs": {"model": ["731", 0], "positive": ["767", 0], "negative": ["767", 1]},
+            },
+            "583": {
+                "class_type": "CFGGuider",
+                "inputs": {"model": ["753", 0], "positive": ["523", 0], "negative": ["523", 1], "cfg": 1},
+            },
+            "868": {
+                "class_type": "SamplerCustomAdvanced",
+                "inputs": {"noise": ["812", 0], "guider": ["583", 0], "sampler": ["870", 0], "sigmas": ["871", 0]},
+            },
+            "870": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "lcm"}},
+            "871": {"class_type": "ManualSigmas", "inputs": {"sigmas": "0.85,0.725,0.4219,0.0"}},
+            "753": {"class_type": "LTXTextAttentionAmplifier", "inputs": {"model": ["723", 0]}},
+            "646": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "ltx.safetensors"}},
+            "617": {"class_type": "LTXVAudioVAELoader", "inputs": {"ckpt_name": "ltx.safetensors"}},
+            "731": {
+                "class_type": "LTXLatentAnchorAware",
+                "inputs": {"model": ["723", 0], "reference_image": ["531", 0], "anchor_frame": 0},
+            },
+            "723": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["646", 0]}},
+            "719": {"class_type": "LTX2LoraLoaderAdvanced", "inputs": {"model": ["646", 0], "lora_name": "distilled.safetensors", "strength_model": 1.0}},
+            "722": {"class_type": "LTX2LoraLoaderAdvanced", "inputs": {"model": ["646", 0], "lora_name": "distilled.safetensors", "strength_model": 1.0}},
+            "767": {
+                "class_type": "LTXVAddGuide",
+                "inputs": {
+                    "positive": ["523", 0],
+                    "negative": ["523", 1],
+                    "vae": ["646", 2],
+                    "latent": ["772", 0],
+                    "image": ["531", 0],
+                    "strength": 1,
+                    "frame_idx": 0,
+                },
+            },
+            "770": {
+                "class_type": "LTXVImgToVideoInplaceKJ",
+                "inputs": {
+                    "vae": ["646", 2],
+                    "latent": ["744", 0],
+                    "num_images": "1",
+                    "num_images.image_1": ["531", 0],
+                    "num_images.index_1": 0,
+                    "num_images.strength_1": 1,
+                },
+            },
+            "772": {
+                "class_type": "LTXVImgToVideoInplaceKJ",
+                "inputs": {
+                    "vae": ["646", 2],
+                    "latent": ["534", 0],
+                    "num_images": "1",
+                    "num_images.image_1": ["531", 0],
+                    "num_images.index_1": 0,
+                    "num_images.strength_1": 1,
+                },
+            },
+            "773": {"class_type": "LoadImage", "inputs": {"image": "start.png"}},
+            "809": {"class_type": "PrimitiveInt", "inputs": {"value": 1024}},
+            "811": {"class_type": "PrimitiveInt", "inputs": {"value": 576}},
+            "812": {"class_type": "RandomNoise", "inputs": {"noise_seed": 42}},
+            "824": {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "prompt"}},
+        },
+    }
+
+
+def test_machine_private_job_receipt_never_returns_media_urls_even_when_requested():
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/api/job/job-private":
+                payload = json.dumps({
+                    "id": "job-private",
+                    "status": "success",
+                    "prompt": "private motion prompt",
+                    "outputs": ["/private/private-output.mp4"],
+                    "image_urls": ["/image/private-output.mp4?token=test-token"],
+                    "media_urls": ["http://127.0.0.1/private-output.mp4?token=test-token"],
+                    "result": {
+                        "prompt": "nested private prompt",
+                        "video_url": "http://127.0.0.1/nested-private-output.mp4?token=test-token",
+                    },
+                }).encode()
+                self.send_response(200)
+            else:
+                payload = json.dumps({"error": "not found"}).encode()
+                self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+    backend_thread.start()
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "1",
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("Media Studio MCP did not start")
+
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "media_get_job",
+                    "arguments": {"id": "job-private", "include_urls": True},
+                },
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=10) as response:
+            body = response.read().decode("utf-8")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+
+    assert "machine-redacted" in body
+    assert "prompts_redacted" in body
+    assert "media_redacted" in body
+    for forbidden in ("private motion prompt", "nested private prompt", "private-output.mp4", "image_urls", "media_urls", "test-token"):
+        assert forbidden not in body
+
+
+@pytest.mark.parametrize("workflow_id", ["ltx23-regular-fp8", "ltx23-eros-v14-dmd"])
+def test_video_mcp_compiles_shared_keyframes_into_comfy_cuda_graph(tmp_path, workflow_id):
+    api_workflow = tmp_path / "ltx-api.json"
+    api_workflow.write_text(json.dumps(_ltx_api_workflow()), encoding="utf-8")
+    mobile_dir = tmp_path / "mobile"
+    mobile_dir.mkdir()
+    mobile_workflow = {"nodes": [], "extra": {}}
+    for name in (
+        "LTX 2.3 Eros MLX v1.4 DMD Mobile.json",
+        "LTX 2.3 Eros MLX Exact v1 Merged q8 Mobile.json",
+        "LTX 2.3 Regular FP8 Mobile.json",
     ):
-        assert field in video_tool
+        (mobile_dir / name).write_text(json.dumps(mobile_workflow), encoding="utf-8")
+
+    registry = tmp_path / "workflow-registry.json"
+    registry.write_text(json.dumps({"workflows": [{
+        "id": "ltx23-regular-fp8",
+        "media_type": "video",
+        "title": "LTX regular test",
+        "family": "ltx-2.3",
+        "builder": "comfy-api",
+        "supports_loras": True,
+        "compatible_base_models": ["LTXV"],
+        "lora_injection": {
+            "class_type": "LTX2LoraLoaderAdvanced",
+            "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+            "name_input": "lora_name",
+            "strength_input": "strength_model",
+            "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1},
+        },
+        "api_workflow": str(api_workflow),
+        "mobile_workflow": str(mobile_dir / "LTX 2.3 Regular FP8 Mobile.json"),
+        "native_mlx": {"enabled": True, "variant": "regular-q8-distilled"},
+        "defaults": {"width": 1024, "height": 576, "frames": 121, "frame_rate": 24, "seed": 42},
+        "slots": {
+            "prompt": {"node": "824", "input": "value"},
+            "image_path": {"node": "773", "input": "image"},
+            "width": {"node": "809", "input": "value"},
+            "height": {"node": "811", "input": "value"},
+            "frame_rate": {"node": "542", "input": "value"},
+            "seed": {"node": "812", "input": "noise_seed"},
+        },
+    }]}), encoding="utf-8")
+
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(b"\x89PNG\r\n\x1a\nanchor-test")
+    captures = []
+
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("content-length", "0")))
+            if self.path == "/comfy/api/prompt":
+                captures.append(json.loads(body))
+                payload = json.dumps({"prompt_id": "cuda-parity-test"}).encode()
+                self.send_response(200)
+            else:
+                payload = json.dumps({"error": "not found"}).encode()
+                self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            payload = json.dumps({"error": "not found"}).encode()
+            self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+    backend_thread.start()
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "0",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
+        "MEDIA_STUDIO_LTX_EROS_API_WORKFLOW": str(api_workflow),
+        "MEDIA_STUDIO_LTX_EROS_MOBILE_WORKFLOW_DIR": str(mobile_dir),
+        "COMFY_INPUT_DIR": str(tmp_path / "input"),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("Media Studio MCP did not start")
+
+        long_prompt = "shared keyframe parity test " + ("cinematic motion detail " * 220)
+        assert len(long_prompt) > 4000
+        arguments = {
+            "workflow_id": workflow_id,
+            "prompt": long_prompt,
+            "image_path": str(reference),
+            "middle_image_path": str(reference),
+            "end_image_path": str(reference),
+            "keyframes": [{"image_path": str(reference), "frame": 30, "strength": 0.65}],
+            "loras": [{"id": "ltx/test-style.safetensors", "strength": 0.7}],
+            "frames": 121,
+            "frame_rate": 24,
+            "wait": False,
+        }
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "media_generate_video", "arguments": arguments},
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=10) as response:
+            assert response.status == 200
+            response.read()
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+
+    assert len(captures) == 1
+    graph = captures[0]["prompt"]
+    assert graph["824"]["inputs"]["value"].strip() == long_prompt.strip()
+    inplace_nodes = [node for node in graph.values() if node.get("class_type") == "LTXVImgToVideoInplaceKJ"]
+    guide_nodes = [node for node in graph.values() if node.get("class_type") == "LTXVAddGuide"]
+    load_nodes = [node for node in graph.values() if node.get("class_type") == "LoadImage"]
+
+    assert [node["inputs"]["num_images"] for node in inplace_nodes] == ["4", "4"]
+    assert all([
+        node["inputs"]["num_images.index_1"],
+        node["inputs"]["num_images.index_2"],
+        node["inputs"]["num_images.index_3"],
+        node["inputs"]["num_images.index_4"],
+    ] == [0, 30, 60, 120] for node in inplace_nodes)
+    assert all(node["inputs"]["num_images.strength_2"] == 0.65 for node in inplace_nodes)
+    assert sorted(node["inputs"]["frame_idx"] for node in guide_nodes) == [0, 30, 60, 120]
+    assert len(load_nodes) == 4
+    user_lora_nodes = [
+        node for node in graph.values()
+        if node.get("class_type") == "LTX2LoraLoaderAdvanced"
+        and node.get("inputs", {}).get("lora_name") == "ltx/test-style.safetensors"
+    ]
+    assert len(user_lora_nodes) == 1
+    assert user_lora_nodes[0]["inputs"]["strength_model"] == 0.7
+    assert user_lora_nodes[0]["inputs"]["audio"] == 0
+    metadata = captures[0]["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["nativeMlxLtx"]["keyframes"]
+    assert [item["frame"] for item in metadata] == [0, 30, 60, 120]
+    assert [item["strength"] for item in metadata] == [1, 0.65, 1, 1]
+    native_loras = captures[0]["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["nativeMlxLtx"]["loras"]
+    assert native_loras == [{"name": "ltx/test-style.safetensors", "strength": 0.7}]
 
 
-def test_video_keyframes_feed_native_metadata_and_polling_recovers_comfy_jobs():
-    source = MCP_SOURCE.read_text(encoding="utf-8")
+def test_native_h3_mcp_sends_the_lora_selection_to_the_gateway(tmp_path):
+    """h3.c fuses LoRAs itself, so MiniMax H3 (Apple Silicon) takes the studio's
+    LoRA selection like every other LoRA lane: checked in the MCP before any
+    media is staged, then carried by name and strength under
+    extra_pnginfo.nativeH3 for the gateway to resolve against its library."""
+    source = json.loads(WORKFLOW_REGISTRY.read_text())
+    lane = next(w for w in source["workflows"] if w["id"] == "minimax-h3-native")
+    assert lane["supports_loras"] is True
+    registry = tmp_path / "workflow-registry.json"
+    registry.write_text(json.dumps({"workflows": [lane]}), encoding="utf-8")
+    captures = []
 
-    assert "async function normalizeVideoKeyframes" in source
-    assert "keyframes: settings.keyframes" in source
-    get_job = source.split("server.registerTool('media_get_job'", 1)[1]
-    get_job = get_job.split("server.registerTool('media_list_history'", 1)[0]
-    assert "getWrapperJobIfPresent" in get_job
-    assert "getComfyHistoryIfPresent" in get_job
-    assert "comfyHistoryToJob" in get_job
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("content-length", "0")))
+            if self.path == "/comfy/api/prompt":
+                captures.append(json.loads(body))
+                payload = json.dumps({"prompt_id": "h3-native-lora-test"}).encode()
+                self.send_response(200)
+            else:
+                payload = json.dumps({"error": "not found"}).encode()
+                self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            payload = json.dumps({"error": "not found"}).encode()
+            self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    threading.Thread(target=backend.serve_forever, daemon=True).start()
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "0",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
+        "COMFY_INPUT_DIR": str(tmp_path / "input"),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    responses = []
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("Media Studio MCP did not start")
+
+        def generate(arguments):
+            request = Request(
+                f"http://127.0.0.1:{mcp_port}/mcp",
+                data=json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "media_generate_video", "arguments": arguments},
+                }).encode(),
+                headers={
+                    "authorization": "Bearer test-token",
+                    "content-type": "application/json",
+                    "accept": "application/json, text/event-stream",
+                },
+                method="POST",
+            )
+            with urlopen(request, timeout=10) as response:
+                assert response.status == 200
+                return response.read().decode("utf-8")
+
+        responses.append(generate({
+            "workflow_id": "minimax-h3-native",
+            "prompt": "a red balloon drifting over a harbour at dawn",
+            "duration_seconds": 1,
+            "loras": [
+                {"id": "H3_Deeper.safetensors", "strength": 0.6},
+                {"id": "styles/minimax-jav-voice.safetensors", "strength": -0.5},
+            ],
+            "wait": False,
+        }))
+        # An id that climbs out of the LoRA library never reaches the gateway.
+        responses.append(generate({
+            "workflow_id": "minimax-h3-native",
+            "prompt": "a red balloon",
+            "loras": [{"id": "../outside.safetensors", "strength": 1}],
+            "wait": False,
+        }))
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+
+    assert len(captures) == 1, responses
+    native = captures[0]["extra_data"]["extra_pnginfo"]["nativeH3"]
+    assert native["prompt"] == "a red balloon drifting over a harbour at dawn"
+    assert native["loras"] == [
+        {"name": "H3_Deeper.safetensors", "strength": 0.6},
+        {"name": "styles/minimax-jav-voice.safetensors", "strength": -0.5},
+    ]
+    assert "invalid LoRA id" in responses[1]
+
+
+def test_video_mcp_stages_inline_video_and_compiles_ltx_extension_graph(tmp_path):
+    api_workflow = tmp_path / "ltx-api.json"
+    api_workflow.write_text(json.dumps(_ltx_api_workflow()), encoding="utf-8")
+    mobile_workflow = tmp_path / "LTX 2.3 Regular FP8 Mobile.json"
+    mobile_workflow.write_text(json.dumps({"nodes": [], "extra": {}}), encoding="utf-8")
+    registry = tmp_path / "workflow-registry.json"
+    registry.write_text(json.dumps({"workflows": [{
+        "id": "ltx23-regular-fp8",
+        "media_type": "video",
+        "title": "LTX regular test",
+        "family": "ltx-2.3",
+        "builder": "comfy-api",
+        "api_workflow": str(api_workflow),
+        "mobile_workflow": str(mobile_workflow),
+        "native_mlx": {"enabled": True, "variant": "regular-q8-distilled"},
+        "accepts": ["prompt", "video_path", "video_base64", "video_url", "video_mode", "duration_seconds", "frame_rate", "seed"],
+        "defaults": {"frames": 121, "frame_rate": 24, "seed": 42},
+        "slots": {
+            "prompt": {"node": "824", "input": "value"},
+            "frame_rate": {"node": "542", "input": "value"},
+            "seed": {"node": "812", "input": "noise_seed"},
+        },
+    }]}), encoding="utf-8")
+    captures = []
+
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("content-length", "0")))
+            if self.path == "/comfy/api/prompt":
+                captures.append(json.loads(body))
+                payload = json.dumps({"prompt_id": "video-extension-test"}).encode()
+                self.send_response(200)
+            else:
+                payload = json.dumps({"error": "not found"}).encode()
+                self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            payload = json.dumps({"error": "not found"}).encode()
+            self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    threading.Thread(target=backend.serve_forever, daemon=True).start()
+    mcp_port = _free_port()
+    comfy_input = tmp_path / "input"
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
+        "COMFY_INPUT_DIR": str(comfy_input),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        source_path = tmp_path / "mute-source.mp4"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=64x64:r=24",
+                "-frames:v", "9", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-an", str(source_path),
+            ],
+            check=True,
+        )
+        source_video = source_path.read_bytes()
+        arguments = {
+            "workflow_id": "ltx23-regular-fp8",
+            "prompt": "continue the same shot with smooth forward motion",
+            "video_base64": "data:video/mp4;base64," + base64.b64encode(source_video).decode("ascii"),
+            "video_mode": "extend",
+            "duration_seconds": 2,
+            "frame_rate": 24,
+            "wait": False,
+        }
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "media_generate_video", "arguments": arguments},
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=10) as response:
+            assert response.status == 200
+            response_body = response.read().decode("utf-8")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+
+    assert len(captures) == 1
+    graph = captures[0]["prompt"]
+    load = next(node for node in graph.values() if node.get("class_type") == "VHS_LoadVideo")
+    extend = next(node for node in graph.values() if node.get("class_type") == "LTXVExtendSampler")
+    mask = next(node for node in graph.values() if node.get("class_type") == "LTXVSetAudioVideoMaskByTime")
+    extension_audio = next(node for node in graph.values() if node.get("class_type") == "LTXVEmptyLatentAudio")
+    audio_encode = next(node for node in graph.values() if node.get("class_type") == "LTXVAudioVAEEncode")
+    audio_decode = next(node for node in graph.values() if node.get("class_type") == "LTXVAudioVAEDecode")
+    audio_merge = next(node for node in graph.values() if node.get("class_type") == "AudioMerge")
+    sampler = [node for node in graph.values() if node.get("class_type") == "SamplerCustomAdvanced"][-1]
+    audio_guider = next(
+        node for node in graph.values()
+        if node.get("class_type") == "CFGGuider" and node["inputs"].get("positive") == [next(key for key, value in graph.items() if value is mask), 0]
+    )
+    separate = next(node for node in graph.values() if node.get("class_type") == "LTXVSeparateAVLatent")
+    outputs = [node for node in graph.values() if node.get("class_type") == "VHS_VideoCombine"]
+    assert load["inputs"]["video"].startswith("mcp_video_")
+    assert (comfy_input / load["inputs"]["video"]).read_bytes() == source_video
+    assert extend["inputs"]["num_new_frames"] == 48
+    assert extend["inputs"]["frame_overlap"] == 16
+    assert extension_audio["inputs"]["frames_number"] == 48
+    assert mask["inputs"]["mask_video"] is False
+    assert mask["inputs"]["mask_audio"] is True
+    assert mask["inputs"]["start_time"] == 0
+    assert '"audio_mode":"generate"' in response_body.replace(" ", "")
+    assert audio_merge["inputs"]["audio2"] == [next(key for key, value in graph.items() if value is load), 2]
+    assert audio_encode["inputs"]["audio"] == [next(key for key, value in graph.items() if value is audio_merge), 0]
+    assert sampler["inputs"]["latent_image"] == [next(key for key, value in graph.items() if value is mask), 2]
+    assert sampler["inputs"]["sampler"] == ["870", 0]
+    assert sampler["inputs"]["sigmas"] == ["871", 0]
+    assert audio_guider["inputs"]["model"] == ["753", 0]
+    assert separate["inputs"]["av_latent"] == [next(key for key, value in graph.items() if value is sampler), 1]
+    assert len(outputs) == 1
+    decode_video = graph[str(outputs[0]["inputs"]["images"][0])]
+    assert decode_video["inputs"]["samples"] == [next(key for key, value in graph.items() if value is extend), 0]
+    assert outputs[0]["inputs"]["audio"] == [next(key for key, value in graph.items() if value is audio_decode), 0]
+    metadata = captures[0]["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["nativeMlxLtx"]["video"]
+    assert metadata == {
+        "mode": "extend",
+        "path": load["inputs"]["video"],
+        "source_has_audio": False,
+        "duration_seconds": 2,
+        "frame_rate": 24,
+        "steps": 30,
+        "cfg_scale": 3,
+        "stg_scale": 1,
+    }
+
+
+def test_ltx_continuation_patches_are_installed_on_windows_and_cuda():
+    manifest_path = ROOT / "patches" / "ltx23-eros-anchor.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    patches = {item["file"]: item for item in manifest["patches"]}
+    shared = {
+        "patches/comfyui-ltxvideo/omit-null-noise-mask.patch",
+        "patches/comfyui-ltxvideo/align-overlap-latent-device.patch",
+    }
+
+    assert shared <= patches.keys()
+    assert all("platforms" not in patches[path] for path in shared)
+    overlap_patch = ROOT / "patches" / "comfyui-ltxvideo" / "align-overlap-latent-device.patch"
+    overlap_text = overlap_patch.read_text(encoding="utf-8")
+    assert "samples2 = samples2.to(samples1.device)" in overlap_text
+    assert "dtype=torch.int64" in overlap_text
+
+
+def test_ltx_ingredients_workflow_uses_real_ic_reference_conditioning():
+    registry_path = ROOT / "packages" / "media-gateway" / "workflow-registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    workflow = next(item for item in registry["workflows"] if item["id"] == "ltx23-ic-ingredients-lora")
+    graph = _graph_or_skip(workflow["api_workflow"])
+    mobile = _file_or_skip(workflow["mobile_workflow"])
+
+    assert workflow["requires"] == {"prompt": True, "image": True}
+    assert workflow["prompt_contract"]["type"] == "ltx23-ingredients"
+    assert "ingredient_images" in workflow["accepts"]
+    assert workflow["ingredient_inputs"] == {
+        "max_images": 12,
+        "layout": "adaptive-pack",
+        "conditioning_only": True,
+        "preserve_aspect_ratio": True,
+        "render_labels": False,
+    }
+    assert workflow["timeline_anchor_preparation"] == {
+        "mode": "generative-outpaint",
+        "preserve_source_aspect_ratio": True,
+        "preserve_source_pixels": True,
+        "apple": "native-preflight",
+        "windows_cuda": "embedded-comfy-graph",
+        "cache": True,
+    }
+    assert workflow["aspect_ratios"] == ["16:9", "9:16", "4:3", "3:4", "1:1"]
+    assert workflow["defaults"]["duration_seconds"] == 5
+    assert workflow["defaults"]["cfg"] == 1.0
+    assert workflow["native_mlx"]["pipeline"] == "ic-lora"
+    assert workflow["native_mlx"]["variant"] == "regular-q8-dev-ic"
+    assert workflow["benchmark_seconds"] == 270.75
+    assert workflow["native_mlx"]["ic_lora"]["single_stage"] is True
+    assert workflow["native_mlx"]["ic_lora"]["reference_min_frames"] == 121
+    assert workflow["native_mlx"]["ic_lora"]["target_min_frames"] == 121
+    assert workflow["native_mlx"]["ic_lora"]["image_crf"] == 0
+    assert workflow["native_mlx"]["ic_lora"]["dev_transformer"] == "transformer-dev.safetensors"
+    assert workflow["native_mlx"]["ic_lora"]["guided_dev"] is False
+    assert workflow["native_mlx"]["ic_lora"]["stage1_steps"] == 8
+    assert workflow["native_mlx"]["ic_lora"]["cfg_scale"] == 1.0
+    assert workflow["native_mlx"]["ic_lora"]["stg_scale"] == 0.0
+    assert workflow["native_mlx"]["ic_lora"]["runtime_timeout_seconds"] == 2400
+    assert workflow["native_mlx"]["ic_lora"]["distilled_lora"] == "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    assert workflow["native_mlx"]["ic_lora"]["distilled_lora_strength"] == 0.5
+    assert workflow["native_mlx"]["loras"][0]["strength"] == 1.4
+    assert graph["4922"] == {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {
+            "model": ["3940", 0],
+            "lora_name": "ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+            "strength_model": 0.5,
+        },
+    }
+    assert graph["5011"]["class_type"] == "LTXICLoRALoaderModelOnly"
+    assert graph["5011"]["inputs"]["model"] == ["4922", 0]
+    assert graph["5012"]["class_type"] == "LTXAddVideoICLoRAGuide"
+    assert graph["5012"]["inputs"]["image"] == ["5093", 0]
+    assert graph["5093"]["class_type"] == "RepeatImageBatch"
+    assert graph["5093"]["inputs"]["amount"] == 121
+    assert graph["5012"]["inputs"]["latent_downscale_factor"] == ["5011", 1]
+    assert graph["4828"]["class_type"] == "CFGGuider"
+    assert graph["4828"]["inputs"]["cfg"] == 1.0
+    assert graph["5025"] == {
+        "class_type": "ManualSigmas",
+        "inputs": {"sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"},
+    }
+    assert not any(node["class_type"] == "LTXVAddGuide" for node in graph.values())
+    assert mobile["extra"]["nativeMlxLtx"]["pipeline"] == "ic-lora"
+    mobile_nodes = {node["id"]: node for node in mobile["nodes"]}
+    assert mobile_nodes[4922]["type"] == "LoraLoaderModelOnly"
+    assert mobile_nodes[4922]["widgets_values"] == ["ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors", 0.5]
+    assert mobile_nodes[4828]["type"] == "CFGGuider"
+    assert mobile_nodes[4828]["widgets_values"] == [1]
+    assert mobile_nodes[5025]["type"] == "ManualSigmas"
+
+    eros = next(item for item in registry["workflows"] if item["id"] == "ltx23-eros-ic-ingredients-lora")
+    assert eros["inherits"] == workflow["id"]
+    assert eros["native_mlx"]["variant"] == "eros-q8-dev-ic"
+    assert eros["workflow_overrides"]["api_inputs"] == {
+        "3940": {"ckpt_name": "ltx/10Eros_v1-fp8mixed_learned.safetensors"},
+        "4010": {"ckpt_name": "ltx/10Eros_v1-fp8mixed_learned.safetensors"},
+    }
+    assert eros["workflow_overrides"]["editor_widgets"] == {
+        "3940": ["ltx/10Eros_v1-fp8mixed_learned.safetensors"],
+        "4010": ["ltx/10Eros_v1-fp8mixed_learned.safetensors"],
+    }
+    assert eros["model_dependencies"][0]["relativePath"] == "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+
+
+def test_ltx_ingredients_mcp_builds_prompt_contract_and_native_metadata(tmp_path):
+    _skip_without_local_workflow("ltx23-ic-ingredients-lora")
+    captures = []
+    square_response = ""
+
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("content-length", "0")))
+            if self.path == "/comfy/api/prompt":
+                captures.append(json.loads(body))
+                payload = json.dumps({"prompt_id": "ingredients-contract-test"}).encode()
+                self.send_response(200)
+            else:
+                payload = json.dumps({"error": "not found"}).encode()
+                self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            payload = json.dumps({"error": "not found"}).encode()
+            self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    threading.Thread(target=backend.serve_forever, daemon=True).start()
+    mcp_port = _free_port()
+    comfy_input = tmp_path / "input"
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(ROOT / "packages" / "media-gateway" / "workflow-registry.json"),
+        "COMFY_INPUT_DIR": str(comfy_input),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    def image_data_url(color: str) -> str:
+        buffer = io.BytesIO()
+        Image.new("RGB", (600, 400), color).save(buffer, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("Media Studio MCP did not start")
+
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "media_generate_video",
+                    "arguments": {
+                        "workflow_id": "ingredients",
+                        "prompt": "Character A crosses the location in one continuous shot.",
+                        "image_base64": image_data_url("green"),
+                        "ingredient_images": [
+                            {
+                                "image_base64": image_data_url("red"),
+                                "description": "Character A front view with exact face and wardrobe.",
+                            },
+                            {
+                                "image_base64": image_data_url("blue"),
+                                "description": "Character A right profile with the same face and wardrobe.",
+                            },
+                        ],
+                        "duration_seconds": 1,
+                        "frame_rate": 24,
+                        "wait": False,
+                    },
+                },
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=10) as response:
+            assert response.status == 200
+            response.read()
+
+        eros_request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "media_generate_video",
+                    "arguments": {
+                        "workflow_id": "eros-ingredients",
+                        "prompt": "Character A crosses the location in one continuous shot.",
+                        "ingredient_images": [{
+                            "image_base64": image_data_url("red"),
+                            "description": "Character A front view with exact face and wardrobe.",
+                        }],
+                        "duration_seconds": 1,
+                        "frame_rate": 24,
+                        "wait": False,
+                    },
+                },
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(eros_request, timeout=10) as response:
+            assert response.status == 200
+            response.read()
+
+        square_request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "media_generate_video",
+                    "arguments": {
+                        "workflow_id": "ingredients",
+                        "prompt": "One full-frame shot using the references.",
+                        "ingredient_images": [{"image_base64": image_data_url("red")}],
+                        "width": 576,
+                        "height": 576,
+                        "wait": False,
+                    },
+                },
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(square_request, timeout=10) as response:
+            assert response.status == 200
+            square_response = response.read().decode("utf-8")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+
+    assert len(captures) == 3
+    assert '"isError":true' not in square_response
+    assert "supports ${allowed.join(', ')} output; received ${width}x${height}" in MCP_SOURCE.read_text(encoding="utf-8")
+    graph = captures[0]["prompt"]
+    prompt = graph["2483"]["inputs"]["text"]
+    assert prompt == (
+        "### Reference Sheet Description\n"
+        "left panel: Character A front view with exact face and wardrobe.\n"
+        "right panel: Character A right profile with the same face and wardrobe.\n"
+        "### Target Description\n"
+        "Character A crosses the location in one continuous shot."
+    )
+    sheet_name = graph["2004"]["inputs"]["image"]
+    assert sheet_name.startswith("mcp_ingredients_")
+    with Image.open(comfy_input / sheet_name) as sheet:
+        assert sheet.size == (768, 448)
+        assert sheet.getpixel((198, 224)) == (255, 0, 0)
+        assert sheet.getpixel((570, 224)) == (0, 0, 255)
+        assert sheet.getpixel((384, 224)) == (0, 0, 0)
+    assert graph["5072"]["inputs"]["value"] == 121
+    assert graph["4828"]["inputs"]["cfg"] == 1.0
+    reference_repeat = next(node for node in graph.values() if node.get("class_type") == "RepeatImageBatch")
+    assert reference_repeat["inputs"]["amount"] == 121
+    anchor = next(node for node in graph.values() if node.get("class_type") == "LTXVImgToVideoConditionOnly")
+    anchor_id = next(key for key, node in graph.items() if node is anchor)
+    prepared_start = graph[str(anchor["inputs"]["image"][0])]
+    assert prepared_start["class_type"] == "ImageCompositeMasked"
+    outpaint_prompt = next(
+        node["inputs"]["prompt"]
+        for node in graph.values()
+        if node.get("class_type") == "Krea2IdentityOptionalEncode" and node.get("inputs", {}).get("prompt")
+    )
+    assert "Character A crosses the location" in outpaint_prompt
+    assert "front view with exact face" not in outpaint_prompt
+    assert "Reference Sheet Description" not in outpaint_prompt
+    outpaint_pad = graph[str(prepared_start["inputs"]["source"][0])]
+    assert outpaint_pad["class_type"] == "ImagePadForOutpaint"
+    assert outpaint_pad["inputs"]["left"] == 48
+    assert outpaint_pad["inputs"]["right"] == 48
+    start_scale = graph[str(outpaint_pad["inputs"]["image"][0])]
+    start_load = graph[str(start_scale["inputs"]["image"][0])]
+    assert start_load["class_type"] == "HivemindOptionalLoadImage"
+    assert start_load["inputs"]["image"] != sheet_name
+    with Image.open(comfy_input / start_load["inputs"]["image"]) as staged_start:
+        assert staged_start.size == (600, 400)
+        assert staged_start.getpixel((300, 200)) == (0, 128, 0)
+    assert not any(
+        node.get("class_type") == "SaveImage"
+        and str(node.get("inputs", {}).get("filename_prefix", "")).startswith("ltx_anchor")
+        for node in graph.values()
+    )
+    assert anchor["inputs"]["latent"] == ["3059", 0]
+    assert anchor["inputs"]["strength"] == 0.9
+    assert anchor["inputs"]["bypass"] is False
+    assert graph["5012"]["inputs"]["latent"] == [anchor_id, 0]
+    assert graph["4528"]["inputs"]["video_latent"] == ["5012", 2]
+    create_video = next(node for node in graph.values() if node.get("class_type") == "CreateVideo")
+    assert create_video["inputs"]["images"] == ["5065", 0]
+    metadata = captures[0]["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["nativeMlxLtx"]
+    assert captures[0]["extra_data"]["extra_pnginfo"]["nativeMlxLtx"] == metadata
+    assert metadata["pipeline"] == "ic-lora"
+    assert metadata["ingredientSheet"] == {
+        "sourceCount": 2,
+        "columns": 2,
+        "rows": 1,
+        "conditioningOnly": True,
+    }
+    assert metadata["keyframes"] == [{
+        "image_path": start_load["inputs"]["image"],
+        "frame": 0,
+        "strength": 0.9,
+        "role": "start",
+    }]
+    assert metadata["icLora"]["reference_image"] == graph["2004"]["inputs"]["image"]
+    assert metadata["icLora"]["single_stage"] is True
+    assert metadata["icLora"]["reference_min_frames"] == 121
+    assert metadata["icLora"]["target_min_frames"] == 121
+    assert metadata["variant"] == "regular-q8-dev-ic"
+    assert metadata["icLora"]["dev_transformer"] == "transformer-dev.safetensors"
+    assert metadata["icLora"]["guided_dev"] is False
+    assert metadata["icLora"]["stage1_steps"] == 8
+    assert metadata["icLora"]["cfg_scale"] == 1.0
+    assert metadata["icLora"]["stg_scale"] == 0.0
+    assert metadata["icLora"]["runtime_timeout_seconds"] == 2400
+    assert metadata["icLora"]["distilled_lora"] == "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    assert metadata["icLora"]["distilled_lora_strength"] == 0.5
+    assert metadata["defaults"]["frames"] == 121
+    assert metadata["loras"][0]["strength"] == 1.4
+
+    eros_graph = captures[1]["prompt"]
+    eros_checkpoint = "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+    assert eros_graph["3940"]["inputs"]["ckpt_name"] == eros_checkpoint
+    assert eros_graph["4010"]["inputs"]["ckpt_name"] == eros_checkpoint
+    eros_metadata = captures[1]["extra_data"]["extra_pnginfo"]["nativeMlxLtx"]
+    assert eros_metadata["variant"] == "eros-q8-dev-ic"
+    assert eros_metadata["pipeline"] == "ic-lora"
+    assert eros_metadata["ingredientSheet"] == {
+        "sourceCount": 1,
+        "columns": 1,
+        "rows": 1,
+        "conditioningOnly": True,
+    }
+    assert eros_metadata["icLora"]["dev_transformer"] == "transformer-dev.safetensors"
+    assert eros_metadata["icLora"]["distilled_lora"] == "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    eros_mobile_nodes = {
+        str(node["id"]): node
+        for node in captures[1]["extra_data"]["extra_pnginfo"]["workflow"]["nodes"]
+    }
+    assert eros_mobile_nodes["3940"]["widgets_values"] == [eros_checkpoint]
+    assert eros_mobile_nodes["4010"]["widgets_values"] == [eros_checkpoint]
+
+    square_graph = captures[2]["prompt"]
+    assert square_graph["809"]["inputs"]["value"] == 576
+    assert square_graph["811"]["inputs"]["value"] == 576
+    with Image.open(comfy_input / square_graph["2004"]["inputs"]["image"]) as square_sheet:
+        assert square_sheet.size == (576, 576)
+
+
+def test_ltx_eros_v14_comfy_registry_entry_matches_its_graph():
+    """The rented-ready eros v1.4 Comfy variant: same files the GPU-rental
+    video tier provisions, multi-target frames slot (video+audio latents)."""
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflow = next(
+        item for item in _resolved_registry_workflows(registry) if item["id"] == "ltx23-eros-v14-comfy"
+    )
+    assert workflow["media_type"] == "video"
+    assert workflow["builder"] == "comfy-api"
+    # LTX frame lattice is 8k+1.
+    assert workflow["frame_grid"] == {"modulus": 8, "offset": 1}
+
+    graph = _graph_or_skip(workflow["api_workflow"])
+
+    def _assert_slot(name, slot):
+        assert slot["node"] in graph, f"slot {name} targets missing node {slot['node']}"
+        assert slot["input"] in graph[slot["node"]]["inputs"], (
+            f"slot {name} targets missing input {slot['input']}"
+        )
+
+    for name, slot in workflow["slots"].items():
+        for target in (slot if isinstance(slot, list) else [slot]):
+            _assert_slot(name, target)
+
+    # Frames fan out to BOTH latents — a single-target slot here silently
+    # desyncs audio length from video length.
+    frames = workflow["slots"]["frames"]
+    assert isinstance(frames, list) and len(frames) == 2
+    assert {(t["node"], t["input"]) for t in frames} == {("7", "length"), ("9", "frames_number")}
+
+    # Rental-provisioning parity: every model file the graph references is in
+    # the video tier's serving set (same basenames the box downloads from R2).
+    from hivemind_content_studio import gpu_rentals
+    tier_files = {key.rsplit("/", 1)[-1] for key, _ in gpu_rentals.TIERS["video"]["models"]}
+    graph_files = {
+        value for node in graph.values() for value in node["inputs"].values()
+        if isinstance(value, str) and value.endswith(".safetensors")
+    }
+    assert graph_files <= tier_files, f"graph references files the video tier does not provision: {graph_files - tier_files}"
+
+    # The DMD LoRA is mandatory for v1.4 anatomy — assert it sits on the MODEL
+    # edge into the sampler.
+    sampler_model = graph["13"]["inputs"]["model"][0]
+    assert graph[sampler_model]["class_type"] == "LoraLoaderModelOnly"
+    assert graph[sampler_model]["inputs"]["lora_name"] == "ltx2310eros_v14_dmd_lora.safetensors"
+    assert graph[sampler_model]["inputs"]["strength_model"] == 1.0
+
+    # The sampled audio has to reach the muxer. Paying for a joint AV sample
+    # and then decoding only the picture half saves nothing and ships a silent
+    # clip, which is exactly what this graph did until 2026-08-10 — the
+    # separator's audio output was wired to nothing.
+    audio_decode = graph["16"]["inputs"]["audio"][0]
+    assert graph[audio_decode]["class_type"] == "LTXVAudioVAEDecode"
+    audio_latent = graph[audio_decode]["inputs"]["samples"]
+    assert audio_latent == ["14", 1], "audio decode must take LTXVSeparateAVLatent's audio output"
+    assert graph[audio_latent[0]]["class_type"] == "LTXVSeparateAVLatent"
+    # ...decoded by the AUDIO vae, not the picture one.
+    audio_vae = graph[audio_decode]["inputs"]["audio_vae"][0]
+    assert graph[audio_vae]["class_type"] == "LTXVAudioVAELoader"
+
+
+@pytest.mark.parametrize("workflow_id", ["minimax-h3", "minimax-h3-turbo"])
+@pytest.mark.parametrize("spectrum", [True, False])
+def test_spectrum_toggle_reaches_the_graph(tmp_path, workflow_id, spectrum):
+    """The user-facing Fast-sampling switch must actually disable the node.
+
+    Verified by capturing the graph the MCP POSTs, not by timing: on a small
+    clip the forecaster's saving is inside the noise, so a wall-clock check
+    cannot tell a working toggle from a dropped one.
+    """
+    registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflows = _resolved_registry_workflows(registry_src)
+    workflow = next(item for item in workflows if item["id"] == workflow_id)
+    graph_path = _resolve_workflow_path(workflow["api_workflow"])
+
+    registry = tmp_path / "workflow-registry.json"
+    entry = json.loads(json.dumps(workflow))
+    entry["api_workflow"] = str(graph_path)
+    registry.write_text(json.dumps({"workflows": [entry]}), encoding="utf-8")
+
+    captures = []
+
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if "prompt" in body:
+                captures.append(body["prompt"])
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"prompt_id": "p-1"}).encode())
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    threading.Thread(target=backend.serve_forever, daemon=True).start()
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "0",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
+        "COMFY_INPUT_DIR": str(tmp_path / "input"),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "media_generate_video", "arguments": {
+                    "workflow_id": workflow_id,
+                    "prompt": "a lighthouse at night",
+                    "spectrum": spectrum,
+                    "wait": False,
+                }},
+            }).encode(),
+            headers={"authorization": "Bearer test-token", "content-type": "application/json",
+                     "accept": "application/json, text/event-stream"},
+            method="POST",
+        )
+        with urlopen(request, timeout=20) as response:
+            response.read()
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+
+    assert captures, "the MCP posted no graph"
+    graph = captures[0]
+    node = next(n for n in graph.values() if n["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert node["inputs"]["enabled"] is spectrum
+
+
+def _model_chain(graph):
+    """Class names along the MODEL edge feeding the scheduler, sampler-first."""
+    chain = []
+    node = graph["9"]["inputs"]["model"][0]
+    while True:
+        chain.append(graph[node]["class_type"])
+        upstream = graph[node]["inputs"].get("model")
+        if not isinstance(upstream, list):
+            return chain
+        node = upstream[0]
+
+
+def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, return_body=False,
+                         with_reply=False, extra_workflow_ids=(), lane_resolution=None):
+    """Run the real MCP against a capture backend and return the posted graph.
+
+    The MCP is a separate node process with its own registry loading, staging
+    and pruning; only a real submission proves what a workflow actually sends.
+    The temp registry holds only `workflow_id` unless `extra_workflow_ids`
+    names siblings it should be able to route to; `with_reply` also returns
+    the raw JSON-RPC reply so a test can read the tool's own result.
+
+    `lane_resolution` is what the backend answers to POST /api/lanes/resolve —
+    the gateway's account of which lane the graph routes to and what that
+    lane's ComfyUI was launched with (the motion-reference guard asks before
+    pricing a reference job). None answers 404, the way a gateway from before
+    the route would.
+    """
+    registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    resolved = _resolved_registry_workflows(registry_src)
+    entries = []
+    for wanted in (workflow_id, *extra_workflow_ids):
+        workflow = next(item for item in resolved if item["id"] == wanted)
+        entry = json.loads(json.dumps(workflow))
+        entry["api_workflow"] = str(_resolve_workflow_path(workflow["api_workflow"]))
+        entries.append(entry)
+    registry = tmp_path / "workflow-registry.json"
+    registry.write_text(json.dumps({"workflows": entries}), encoding="utf-8")
+
+    captures = []
+
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if self.path == "/api/lanes/resolve":
+                # Asked with the graph, never a /prompt body: a resolve must not
+                # be mistakable for a submission by this harness or the gateway.
+                assert "graph" in body and "prompt" not in body
+                if lane_resolution is None:
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error": "not found"}')
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, **lane_resolution}).encode())
+                return
+            if "prompt" in body:
+                captures.append(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"prompt_id": "p-1"}).encode())
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    threading.Thread(target=backend.serve_forever, daemon=True).start()
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "0",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
+        "COMFY_INPUT_DIR": str(tmp_path / "input"),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "media_generate_video",
+                           "arguments": {"workflow_id": workflow_id, "wait": False, **arguments}},
+            }).encode(),
+            headers={"authorization": "Bearer test-token", "content-type": "application/json",
+                     "accept": "application/json, text/event-stream"},
+            method="POST",
+        )
+        with urlopen(request, timeout=25) as response:
+            reply = response.read().decode("utf-8", "replace")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+    if expect_refusal:
+        # The MCP's own error text, so a refusal is distinguishable from the
+        # harness simply never seeing a graph.
+        assert not captures, "the MCP submitted a graph it should have refused"
+        return reply
+    assert captures, "the MCP posted no graph"
+    result = captures[0] if return_body else captures[0]["prompt"]
+    return (result, reply) if with_reply else result
+
+
+def _mcp_tool_result(reply: str) -> dict:
+    """The tool's structured result out of a JSON-RPC reply, plain JSON or SSE-framed."""
+    text = reply.strip()
+    if not text.startswith("{"):
+        text = next(line[len("data:"):].strip() for line in text.splitlines() if line.startswith("data:"))
+    result = json.loads(text)["result"]
+    return result.get("structuredContent") or json.loads(result["content"][0]["text"])
+
+
+def test_video_mcp_submission_preserves_the_app_tab_lane(tmp_path):
+    _skip_without_local_workflow("ltx23-regular-fp8")
+    body = _capture_video_graph(
+        tmp_path,
+        "ltx23-regular-fp8",
+        {
+            "prompt": "slow camera move",
+            "studio_lane": "video:window-a:4",
+        },
+        return_body=True,
+    )
+
+    assert body["extra_data"]["extra_pnginfo"]["studioLane"] == "video:window-a:4"
+
+
+# A 1x1 PNG: enough for staging, nothing to decode.
+_TINY_PNG = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP8"
+    "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+# Eight samples of 16 kHz mono silence with a full RIFF/WAVE header: enough for
+# the MCP's magic-byte sniff to stage it as .wav, nothing to decode.
+_TINY_WAV = (
+    "data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YRAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAA"
+)
+
+
+@pytest.mark.parametrize("start,end,expect_first,expect_last", [
+    (False, False, False, False),   # T2VA
+    (True, False, True, False),     # I2VA
+    (True, True, True, True),       # FL2VA
+    (False, True, False, True),     # L2VA
+])
+def test_minimax_h3_maps_all_four_frame_modes(tmp_path, start, end, expect_first, expect_last):
+    """The checkpoint we serve is the fl2va (first-AND-last) build and
+    MiniMaxH3ImageToVideo takes an optional last_frame, so all four documented
+    modes are one graph input apart. An unused loader must be PRUNED, not left
+    with an empty filename: a real Comfy lane rejects that at submit.
+    """
+    arguments = {"prompt": "a courier waits on a platform"}
+    if start:
+        arguments["image_base64"] = _TINY_PNG
+    if end:
+        arguments["end_image_base64"] = _TINY_PNG
+
+    graph = _capture_video_graph(tmp_path, "minimax-h3", arguments)
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert ("first_frame" in node["inputs"]) is expect_first
+    assert ("last_frame" in node["inputs"]) is expect_last
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadImage"]
+    assert len(loaders) == int(expect_first) + int(expect_last)
+    assert all(n["inputs"]["image"] for n in loaders), "a staged loader must carry a filename"
+
+
+def _oriented_heic_bytes():
+    """A 120x80 HEIC — red left half, blue right half — stored with EXIF
+    orientation 6 (rotate 90° clockwise to display), the way a portrait iPhone
+    photo is written. Shown correctly it is 80x120 with red on top."""
+    pillow_heif = pytest.importorskip("pillow_heif")
+    pillow_heif.register_heif_opener()
+    image = Image.new("RGB", (120, 80), (255, 0, 0))
+    image.paste((0, 0, 255), (60, 0, 120, 80))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    buffer = io.BytesIO()
+    image.save(buffer, format="HEIF", exif=exif.tobytes(), quality=90)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("delivery", ["data_url", "raw_base64", "image_path", "already_staged"])
+def test_heic_references_are_staged_as_upright_jpegs(tmp_path, monkeypatch, delivery):
+    """An iPhone photo arrives as HEIC. Every lane opens staged pictures through
+    ComfyUI's LoadImage, i.e. plain Pillow, which cannot read HEIC — so the MCP
+    has to store it as a JPEG, orientation baked into the pixels so the lane and
+    the caller agree which way is up, however the bytes arrive: a data URL, bare
+    base64 (no mime to go on, only the ftyp brand), or an absolute local path."""
+    # The MCP transcodes with the project venv; in a bare worktree that falls
+    # back to a python without Pillow, so point it at the interpreter running
+    # this test, which has pillow-heif as a declared dependency.
+    monkeypatch.setenv("MEDIA_STUDIO_PYTHON", sys.executable)
+    heic = _oriented_heic_bytes()
+    if delivery == "data_url":
+        arguments = {"image_base64": "data:image/heic;base64," + base64.b64encode(heic).decode()}
+    elif delivery == "raw_base64":
+        arguments = {"image_base64": base64.b64encode(heic).decode()}
+    elif delivery == "image_path":
+        source = tmp_path / "IMG_0001.HEIC"
+        source.write_bytes(heic)
+        arguments = {"image_path": str(source)}
+    else:
+        # The case that got away: a file ALREADY inside the Comfy input dir was
+        # handed to the graph untouched, on the reasoning that re-copying it
+        # would only make a duplicate. Being in the right folder is not the same
+        # as being readable — and this is precisely where the studio's inline
+        # image_base64 route put Liam's seven iPhone photos, so a Hive Persona
+        # ID reached a rented GPU as .heic on every run.
+        staging = tmp_path / "input"
+        staging.mkdir(parents=True, exist_ok=True)
+        source = staging / "media-studio-input-abcdefgh.heic"
+        source.write_bytes(heic)
+        arguments = {"image_path": str(source)}
+
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a courier waits on a platform", **arguments})
+
+    loader = next(n for n in graph.values() if n["class_type"] == "LoadImage")
+    staged_name = loader["inputs"]["image"]
+    assert staged_name.endswith(".jpg"), staged_name
+    with Image.open(tmp_path / "input" / staged_name) as image:
+        assert image.format == "JPEG"
+        # Upright: the portrait orientation is in the pixels now, not in a tag
+        # a decoder may or may not honour.
+        assert image.size == (80, 120)
+        assert image.getexif().get(0x0112) in (None, 1)
+        rgb = image.convert("RGB")
+        top, bottom = rgb.getpixel((40, 10)), rgb.getpixel((40, 110))
+    assert top[0] > 200 and top[2] < 60, f"red should be on top after the rotation, got {top}"
+    assert bottom[2] > 200 and bottom[0] < 60, f"blue should be below after the rotation, got {bottom}"
+    staged = [path.name for path in (tmp_path / "input").iterdir()]
+    if delivery != "already_staged":
+        assert not [name for name in staged if name.lower().endswith((".heic", ".heif"))], staged
+    else:
+        # The original is left where it was found — it belongs to whoever staged
+        # it — but it is no longer what the graph points at, and only files the
+        # graph names are pushed to a lane.
+        assert source.name in staged
+
+
+def test_a_heic_that_cannot_be_converted_is_refused_not_staged_raw(tmp_path, monkeypatch):
+    """Before this, the raw .heic was written and the lane failed at LoadImage
+    with a stripped error. The refusal has to happen here, carry the decoder's
+    reason, and leave nothing behind for Comfy to choke on."""
+    fake_python = tmp_path / "python-without-heif"
+    fake_python.write_text("#!/bin/sh\necho 'no HEIF decoder here' >&2\nexit 3\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    monkeypatch.setenv("MEDIA_STUDIO_PYTHON", str(fake_python))
+    heic = _oriented_heic_bytes()
+
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3",
+        {"prompt": "a courier waits on a platform",
+         "image_base64": "data:image/heic;base64," + base64.b64encode(heic).decode()},
+        expect_refusal=True,
+    )
+
+    assert "HEIC/HEIF image could not be converted to JPEG" in reply
+    assert "no HEIF decoder here" in reply
+    input_dir = tmp_path / "input"
+    assert not input_dir.exists() or not list(input_dir.iterdir())
+
+
+def test_video_workflows_roll_a_fresh_seed_when_the_caller_omits_one(tmp_path):
+    """An omitted seed must vary per submission, and -1 must mean the same.
+
+    Every video workflow used to default to a literal 42, so an agent calling
+    media_generate_video without a seed got one clip forever. On a remote lane
+    it also tripped ComfyUI's result cache, which returns a path the privacy
+    sweeper has already deleted — the bare `HTTP Error 404` seen 2026-08-09.
+    The Video Studio rolls its own seed client-side, so only agent callers
+    ever saw it.
+    """
+    def seed_of(arguments):
+        graph = _capture_video_graph(tmp_path, "minimax-h3", arguments)
+        return graph["15"]["inputs"]["noise_seed"]
+
+    omitted = [seed_of({"prompt": "a kite over a harbour"}) for _ in range(3)]
+    assert all(isinstance(value, int) and value >= 0 for value in omitted)
+    assert len(set(omitted)) > 1, f"omitted seed did not vary across runs: {omitted}"
+
+    explicit_random = [seed_of({"prompt": "a kite over a harbour", "seed": -1}) for _ in range(3)]
+    assert all(value >= 0 for value in explicit_random), "-1 must resolve, never reach the graph"
+    assert len(set(explicit_random)) > 1, f"-1 did not roll a fresh seed: {explicit_random}"
+
+    # A caller who names a seed still gets exactly that seed.
+    assert seed_of({"prompt": "a kite over a harbour", "seed": 4242}) == 4242
+
+
+def test_minimax_h3_reference_mode_fills_slots_in_order_and_prunes_the_rest(tmp_path):
+    """Reference mode conditions through MiniMaxH3ReferenceToVideo's AUTOGROW
+    inputs, which serialise as ref_images.ref_image_N. Order is load-bearing:
+    the prompt names them <Picture 1>..<Picture N> by the same index, and an
+    unfilled slot must take its autogrow key with it when pruned.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "a courier in the style of these references",
+        "reference_images": [{"image_base64": _TINY_PNG}, {"image_base64": _TINY_PNG}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    keys = sorted(k for k in node["inputs"] if k.startswith("ref_images."))
+    assert keys == ["ref_images.ref_image_0", "ref_images.ref_image_1"]
+    # Combo, not a pixel size — an int here fails validation at submit.
+    assert node["inputs"]["ref_image_size"] == "match"
+    # Reference mode renders audio too, so the audio VAE has to be wired.
+    assert isinstance(node["inputs"]["audio_vae"], list)
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadImage"]
+    assert len(loaders) == 2, "the seven unused reference loaders must be pruned"
+    assert all(n["inputs"]["image"] for n in loaders)
+
+
+def test_reference_mode_refuses_a_request_with_no_references(tmp_path):
+    """Every reference loader pruned would leave the node with nothing to
+    condition on — a graph that only fails once it reaches the GPU."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference", {"prompt": "no references at all"}, expect_refusal=True)
+    assert "requires at least one reference picture or reference video" in reply
+
+
+def test_references_on_a_workflow_with_no_reference_sibling_are_refused(tmp_path):
+    """reference_* on a workflow with no reference slots used to be dropped on
+    the floor — the staging passes are slot-gated — so the call rendered plain
+    text-to-video with no error and no hint. A family with no reference
+    workflow cannot honour them at all, so it refuses by name: the workflow,
+    and the argument it would have dropped."""
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    ltx = next(item for item in _resolved_registry_workflows(registry) if item["id"] == "ltx23-regular-fp8")
+    assert not any(
+        item.get("reference_image_slots") or item.get("reference_video_slots") or item.get("reference_audio_slots")
+        for item in _resolved_registry_workflows(registry) if item.get("family") == ltx["family"]
+    ), "this test wants a family with NO reference lane; pick another workflow"
+
+    reply = _capture_video_graph(
+        tmp_path, "ltx23-regular-fp8",
+        {"prompt": "a kite over a harbour", "reference_images": [{"image_base64": _TINY_PNG}]},
+        expect_refusal=True)
+    assert "workflow ltx23-regular-fp8 takes no reference_images" in reply
+    assert "reference_slots" in reply, "the refusal must point at how to find a reference-capable workflow"
+
+
+def test_reference_mode_refuses_more_references_than_it_has_slots(tmp_path):
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "reference_images": [{"image_base64": _TINY_PNG}] * 10},
+        expect_refusal=True)
+    assert "at most 9 reference images" in reply or "Too big" in reply or "max" in reply
+
+
+def test_minimax_h3_reference_audio_fills_slots_in_order_and_prunes_the_rest(tmp_path):
+    """Voice cloning: standalone reference audio rides the same autogrow
+    contract as pictures — LoadAudio into ref_audios.ref_audio_N, clip N is the
+    prompt's <Audio N> (numbered independently of <Picture N>) — and an
+    unfilled audio slot must take its key and loader with it when pruned: a
+    real Comfy lane rejects an empty LoadAudio filename at submit.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she speaks new lines in the referenced voice",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_audios": [{"audio_base64": _TINY_WAV}, {"audio_base64": _TINY_WAV}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    audio_keys = sorted(k for k in node["inputs"] if k.startswith("ref_audios."))
+    assert audio_keys == ["ref_audios.ref_audio_0", "ref_audios.ref_audio_1"]
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadAudio"]
+    assert len(loaders) == 2, "the unused reference audio loader must be pruned"
+    assert all(n["inputs"]["audio"].endswith(".wav") for n in loaders), \
+        "staged reference audio must carry a real filename with its sniffed extension"
+    # Pictures are untouched by the audio pass.
+    assert [k for k in node["inputs"] if k.startswith("ref_images.")] == ["ref_images.ref_image_0"]
+
+
+def test_a_video_clip_sent_as_reference_audio_is_reduced_to_its_soundtrack(tmp_path):
+    """The studio's "sound only" motion reference: the clip travels in
+    reference_audios as the container it is, and only its audio track may reach
+    a lane — the MCP lifts the soundtrack into an AAC file and removes the
+    container it staged, so the frames the user chose not to send never leave
+    this machine. A silent clip has no soundtrack to lend and is refused by name."""
+    clip = _write_test_video(tmp_path / "talk.mp4", seconds=3, fps=24, with_audio=True)
+    data_url = "data:video/mp4;base64," + base64.b64encode(clip.read_bytes()).decode()
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "x", "duration_seconds": 5, "width": 1216, "height": 704,
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_audios": [{"audio_base64": data_url}],
+    })
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadAudio"]
+    assert len(loaders) == 1
+    staged = loaders[0]["inputs"]["audio"]
+    assert staged.endswith(".m4a"), staged
+    path = tmp_path / "input" / staged
+    assert path.exists()
+    assert _probe(path, "v", "stream=codec_type") == "", "no video stream may survive"
+    assert _probe(path, "a", "stream=codec_type") == "audio"
+    # The container the MCP staged on the way in is gone.
+    leftovers = sorted(p.name for p in (tmp_path / "input").glob("mcp_audio_*") if p.name != staged)
+    assert leftovers == [], leftovers
+
+    silent = _write_test_video(tmp_path / "silent.mp4", seconds=3, fps=24, with_audio=False)
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "x", "duration_seconds": 5, "width": 1216, "height": 704,
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_audios": [{"audio_base64": "data:video/mp4;base64," + base64.b64encode(silent.read_bytes()).decode()}],
+    }, expect_refusal=True)
+    assert "has no audio track" in reply
+
+
+def test_reference_audio_cannot_be_the_sole_reference(tmp_path):
+    """The model card is explicit: audio must accompany an image or video
+    reference and can never be the only conditioning. Without the guard this
+    only fails once the graph reaches the GPU."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "voice only", "reference_audios": [{"audio_base64": _TINY_WAV}]},
+        expect_refusal=True)
+    assert "cannot take reference audio alone" in reply
+
+
+def test_easycache_is_absent_from_the_graph_unless_it_is_asked_for(tmp_path):
+    """EasyCache reuses transformer steps whose latent barely moved. At a 0
+    threshold nothing ever qualifies, but the wrapper still does per-step
+    subsampling bookkeeping — so off has to mean LIFTED OUT, with the sampler
+    reconnected to whatever fed it, not left in the chain doing nothing."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+
+    assert not [n for n in graph.values() if n["class_type"] == "EasyCache"]
+    # The model chain closes back up: sampler and scheduler read the Spectrum node.
+    spectrum_id = next(k for k, v in graph.items() if v["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert graph["9"]["inputs"]["model"] == [spectrum_id, 0]
+    assert graph["16"]["inputs"]["model"] == [spectrum_id, 0]
+
+
+def test_fast_high_res_is_absent_from_the_graph_unless_it_is_asked_for(tmp_path):
+    """Off by default has to mean the single-pass graph, unchanged.
+
+    A second sampler that merely exists still doubles conditioning encodes and
+    sampler warmups, so "off" is checked as ABSENCE of the whole two-pass
+    apparatus rather than a flag somewhere set to false.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+
+    assert len([n for n in graph.values() if n["class_type"] == "SamplerCustomAdvanced"]) == 1
+    for absent in ("SplitSigmas", "LTXVSeparateAVLatent", "LTXVConcatAVLatent",
+                   "MinimaxH3LatentUpscaler3D"):
+        assert not [n for n in graph.values() if n["class_type"] == absent], absent
+    assert len([n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo"]) == 1
+    # And the sampler still reads the scheduler directly, not through a split.
+    assert graph["14"]["inputs"]["sigmas"] == ["9", 0]
+
+
+def test_fast_high_res_compiles_one_schedule_across_two_canvases(tmp_path):
+    """The whole point of the lane, checked structurally rather than by clock.
+
+    On a rented card the saving is obvious, but a graph that merely LOOKS
+    two-pass — refining from the noisy latent instead of the x0 estimate, or
+    conditioning the refine pass at the small canvas — produces a plausible
+    video and a silently wrong one. Every link that distinguishes those is
+    pinned here.
+    """
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    entry = next(w for w in registry["workflows"] if w["id"] == "minimax-h3")
+    cfg = entry["fast_high_res"]
+    steps = entry["defaults"]["steps"]
+    width, height = entry["defaults"]["width"], entry["defaults"]["height"]
+
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour",
+        "fast_high_res": True,
+    })
+
+    samplers = {k: v for k, v in graph.items() if v["class_type"] == "SamplerCustomAdvanced"}
+    assert len(samplers) == 2
+    first_id = "14"
+    refine_id = next(k for k in samplers if k != first_id)
+
+    # One schedule, cut once: the refine pass re-noises to exactly the sigma the
+    # first pass stopped at, because both halves come from the same scheduler.
+    split_id, split = next((k, v) for k, v in graph.items() if v["class_type"] == "SplitSigmas")
+    assert split["inputs"]["sigmas"] == ["9", 0]
+    assert split["inputs"]["step"] == steps - cfg["refine_steps"]
+    assert graph[first_id]["inputs"]["sigmas"] == [split_id, 0]
+    assert graph[refine_id]["inputs"]["sigmas"] == [split_id, 1]
+
+    # Two canvases. The first-pass conditioning shrinks; the refine pass gets
+    # its OWN encode at the delivered size, because H3 bakes the canvas into
+    # its conditioning.
+    conds = {k: v for k, v in graph.items() if v["class_type"] == "MiniMaxH3ImageToVideo"}
+    assert len(conds) == 2
+    small = graph["104"]["inputs"]
+    full_id = next(k for k in conds if k != "104")
+    full = graph[full_id]["inputs"]
+    assert (full["width"], full["height"]) == (width, height)
+    assert small["width"] < width and small["height"] < height
+    assert small["width"] % cfg["align"] == 0 and small["height"] % cfg["align"] == 0
+    # Same prompt and length on both — only the canvas differs.
+    assert small["prompt"] == full["prompt"] and small["length"] == full["length"]
+    assert graph[refine_id]["inputs"]["guider"] != graph[first_id]["inputs"]["guider"]
+    refine_guider = graph[graph[refine_id]["inputs"]["guider"][0]]
+    assert refine_guider["inputs"]["conditioning"] == [full_id, 0]
+    # Same patched model chain: the accelerators are applied once, not twice.
+    assert refine_guider["inputs"]["model"] == graph[graph[first_id]["inputs"]["guider"][0]]["inputs"]["model"]
+
+    # denoised_output (slot 1), not output (slot 0). The first pass stops at a
+    # non-zero sigma, so slot 0 is still noise; the upscaler was trained on
+    # clean latents.
+    sep_id, sep = next((k, v) for k, v in graph.items() if v["class_type"] == "LTXVSeparateAVLatent")
+    assert sep["inputs"]["av_latent"] == [first_id, 1]
+
+    # The video half is upscaled; the audio half crosses untouched and is
+    # rejoined, because H3 denoises the two together and the upscaler is a
+    # Conv3d that would choke on the nested pair.
+    ups_id, ups = next((k, v) for k, v in graph.items() if v["class_type"] == "MinimaxH3LatentUpscaler3D")
+    assert ups["inputs"]["latent"] == [sep_id, 0]
+    assert ups["inputs"]["mode"] == "target dimensions"
+    assert (ups["inputs"]["mode.width"], ups["inputs"]["mode.height"]) == (width, height)
+    assert ups["inputs"]["model_name"] == cfg["model_name"]
+    join_id, join = next((k, v) for k, v in graph.items() if v["class_type"] == "LTXVConcatAVLatent")
+    assert join["inputs"]["video_latent"] == [ups_id, 0]
+    assert join["inputs"]["audio_latent"] == [sep_id, 1]
+    assert graph[refine_id]["inputs"]["latent_image"] == [join_id, 0]
+
+    # Everything downstream now reads the REFINE pass — a graph that decoded the
+    # first sampler would deliver the small render and waste the second pass.
+    assert graph["10"]["inputs"]["samples"] == [refine_id, 0]
+    assert graph["23"]["inputs"]["samples"] == [refine_id, 0]
+
+
+def test_fast_high_res_declines_a_target_too_small_to_pay_for_two_passes(tmp_path):
+    """Below the upscale floor the overhead IS the saving, and at factor <= 1
+    the node refuses outright. The compiler has to leave the graph alone rather
+    than ship one that dies at render time."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour",
+        "fast_high_res": True,
+        "width": 384,
+        "height": 224,
+    })
+
+    assert len([n for n in graph.values() if n["class_type"] == "SamplerCustomAdvanced"]) == 1
+    assert not [n for n in graph.values() if n["class_type"] == "MinimaxH3LatentUpscaler3D"]
+    assert graph["104"]["inputs"]["width"] == 384
+
+
+def test_fast_high_res_is_registry_gated_to_the_workflows_that_declare_it(tmp_path):
+    """The switch is compiled from `accepts`, like every other capability.
+
+    minimax-h3-turbo INHERITS the base entry, so it carries the lane too — same
+    graph shape, and upstream's own reference workflow runs the two passes over
+    the distilled model. The reference lane declares its own accepts and does
+    not: it conditions through MiniMaxH3ReferenceToVideo, a topology this
+    compiler has never been measured against, and a toggle that silently did
+    nothing there would be worse than no toggle.
+    """
+    resolved = {w["id"]: w for w in _resolved_registry_workflows(
+        json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8")))}
+    assert "fast_high_res" in resolved["minimax-h3"]["accepts"]
+    assert "fast_high_res" in resolved["minimax-h3-turbo"]["accepts"]
+    assert "fast_high_res" not in resolved["minimax-h3-reference"]["accepts"]
+
+    # And the flag is inert where it is not declared, rather than half-applied.
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "a kite over a harbour",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "fast_high_res": True,
+    })
+    assert len([n for n in graph.values() if n["class_type"] == "SamplerCustomAdvanced"]) == 1
+    assert not [n for n in graph.values() if n["class_type"] == "MinimaxH3LatentUpscaler3D"]
+
+
+def test_easycache_threshold_wires_the_node_between_spectrum_and_the_sampler(tmp_path):
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour",
+        # Choosing the cache means turning the forecaster off — the two refuse
+        # to run together, so the caller has to say which one it wants.
+        "spectrum": False,
+        "params": {"easycache": 0.25},
+    })
+
+    cache_id = next(k for k, v in graph.items() if v["class_type"] == "EasyCache")
+    cache = graph[cache_id]
+    assert cache["inputs"]["reuse_threshold"] == 0.25
+    # Applied LAST, outermost of the model wrappers: loader -> sage -> spectrum -> cache.
+    spectrum_id = next(k for k, v in graph.items() if v["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert cache["inputs"]["model"] == [spectrum_id, 0]
+    assert graph["9"]["inputs"]["model"] == [cache_id, 0]
+    assert graph["16"]["inputs"]["model"] == [cache_id, 0]
+
+
+def test_frame_interpolation_is_absent_unless_asked_for(tmp_path):
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+
+    assert not [n for n in graph.values() if n["class_type"] == "FrameInterpolate"]
+    # The model loader goes with it — it existed only to feed the pruned node.
+    assert not [n for n in graph.values() if n["class_type"] == "FrameInterpolationModelLoader"]
+    assert graph["91"]["inputs"]["images"] == ["10", 0], "the muxer reads the decode directly"
+    assert graph["91"]["inputs"]["fps"] == 24
+
+
+def test_frame_interpolation_raises_the_mux_rate_but_not_the_sampled_frame_count(tmp_path):
+    """Interpolation invents frames AFTER the decode. Folding its multiplier
+    into the frame rate any earlier makes the frame-count maths sample the
+    longer grid — a 5s request generated 243 frames, ten seconds of content,
+    before RIFE had run at all."""
+    plain = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour", "duration_seconds": 5})
+    interpolated = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour", "duration_seconds": 5, "params": {"interpolate": 2}})
+
+    assert interpolated["104"]["inputs"]["length"] == plain["104"]["inputs"]["length"]
+    assert interpolated["91"]["inputs"]["fps"] == 48
+    interp = next(n for n in interpolated.values() if n["class_type"] == "FrameInterpolate")
+    assert interp["inputs"]["multiplier"] == 2
+    assert interp["inputs"]["images"] == ["10", 0]
+    assert interpolated["91"]["inputs"]["images"][1] == 0
+
+
+def test_solattn_is_opt_in_and_lifts_out_of_the_default_graph(tmp_path):
+    """Sol-Attn is an OPT-IN accelerator, not the default path.
+
+    It was made the default on 2026-08-11 on the strength of 34.3s against
+    38.6s for Spectrum alone — measured at 5s @ 960x544. Two things broke that
+    (2026-08-12), both of which the default hid until a fresh box hit them:
+
+    - Its node was pinned into the standalone provisioning script but never
+      into the rental onstart, so EVERY freshly rented H3 box rejected EVERY
+      job with "Node 'Sol-Attn (tau 0 = off)' not found" — acceleration or not,
+      because ComfyUI validates the whole prompt. The onstart installs it now.
+    - Its workspace scales with sequence length. At 8s/16:9 the sparse forward
+      asked for a single 14.54 GiB allocation and OOM'd a 31 GiB card, inside
+      _morton_h3.py. The measurement that justified the default never covered
+      the durations the studio offers.
+
+    So the default is what the workflow's own description always claimed: the
+    accelerators are off, and the default path is unchanged. Opting in still
+    works for anyone who wants the 11% on a short clip."""
+    plain = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+    assert not [n for n in plain.values() if n["class_type"] == "SolAttnPatch"]
+
+    sparse = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour", "params": {"solattn_tau": 1.3}})
+    node = next(n for n in sparse.values() if n["class_type"] == "SolAttnPatch")
+    assert node["inputs"]["tau"] == 1.3
+    # The model chain closes back up around it.
+    sage_id = next(k for k, v in plain.items() if v["class_type"] == "PathchSageAttentionKJ")
+    spectrum = next(v for v in plain.values() if v["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert spectrum["inputs"]["model"] == [sage_id, 0]
+    # Applied after sage attention, which stays as the dense fallback backend.
+    assert node["inputs"]["model"] == ["31", 0]
+    # H3 packs its conditioning as extra attention rows; those stay exact or
+    # sparsification eats the cloned voice and the reference identity.
+    assert node["inputs"]["sink_conditioning"] == "exact_kv_and_rows"
+
+
+def test_easycache_and_spectrum_cannot_both_be_asked_for(tmp_path):
+    """Measured: the Spectrum node disables itself whenever a cache wrapper
+    patches the same model, so the pair silently runs as easycache alone."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3",
+        {"prompt": "x", "spectrum": True, "params": {"easycache": 0.3}},
+        expect_refusal=True)
+    assert "cannot both be on" in reply
+
+
+def _write_test_video(path, *, seconds=3, fps=30, with_audio=False, size="320x240"):
+    """A real, decodable clip — the reference-video path re-encodes through
+    ffmpeg, so a fake byte blob proves nothing."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is required to build a reference-video fixture")
+    command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"testsrc=size={size}:rate={fps}:duration={seconds}",
+    ]
+    if with_audio:
+        command += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-c:a", "aac", "-shortest"]
+    else:
+        command += ["-an"]
+    command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)]
+    subprocess.run(command, check=True)
+    return path
+
+
+def _probe(path, stream, entries):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", stream, "-show_entries", entries,
+         "-of", "csv=p=0", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def test_minimax_h3_reference_video_wires_frames_and_resamples_to_24fps(tmp_path):
+    """A reference video is a MOTION reference: its frames ride ref_videos.
+    ref_video_N through core LoadVideo -> GetVideoComponents. The node reads
+    those frames AS 24 fps without asking how fast they were shot, so a 30 fps
+    source must be resampled on the way in or every gesture plays 25% slow.
+    """
+    source = _write_test_video(tmp_path / "motion.mp4", seconds=3, fps=30)
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she moves with the manner of the reference",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source)}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_0"]
+    # No use_audio, so the clip's own soundtrack must not claim an <Audio N>.
+    assert [k for k in node["inputs"] if k.startswith("ref_video_audios.")] == []
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadVideo"]
+    components = [n for n in graph.values() if n["class_type"] == "GetVideoComponents"]
+    assert len(loaders) == 1, "the two unused reference video loaders must be pruned"
+    assert len(components) == 1, "pruning a video loader must take its components node with it"
+
+    staged = tmp_path / "input" / loaders[0]["inputs"]["file"]
+    assert staged.is_file(), "the reference video must be staged into the Comfy input dir"
+    assert _probe(staged, "v:0", "stream=r_frame_rate") == "24/1"
+    assert _probe(staged, "a:0", "stream=index") == "", "audio must be stripped when use_audio is off"
+
+
+# MiniMaxH3ReferenceToVideo.adapt_canvas puts every reference video on a
+# 768-short-edge canvas capped at 768*1344 px, and never upscales. Both ways of
+# missing that budget cost something, which is why the cap is that number and
+# not a round one.
+REF_VIDEO_MAX_PIXELS = 768 * 1344
+
+
+@pytest.mark.parametrize("size,label", [
+    ("3840x2160", "landscape 4K"),
+    ("1080x2346", "portrait phone footage"),
+    ("1080x1920", "portrait 1080p"),
+])
+def test_reference_video_is_capped_to_the_nodes_own_frame_budget(tmp_path, size, label):
+    """Oversized references are downscaled to the budget the node works to.
+
+    The previous rule capped WIDTH at 1280 while its comment claimed a long
+    edge: it fired on landscape 4K and did nothing at all for portrait phone
+    footage, where the width is already under 1280 — so the lane encoded and
+    shipped frames the node immediately threw away.
+    """
+    source = _write_test_video(tmp_path / "big.mp4", seconds=3, fps=30, size=size)
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she moves with the manner of the reference",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source)}],
+    })
+    loader = next(n for n in graph.values() if n["class_type"] == "LoadVideo")
+    staged = tmp_path / "input" / loader["inputs"]["file"]
+    width = int(_probe(staged, "v:0", "stream=width"))
+    height = int(_probe(staged, "v:0", "stream=height"))
+
+    assert width * height <= REF_VIDEO_MAX_PIXELS * 1.01, (
+        f"{label} stayed above the node's frame budget at {width}x{height}"
+    )
+    source_w, source_h = (int(v) for v in size.split("x"))
+    assert abs((width / height) - (source_w / source_h)) < 0.02, "aspect must be preserved"
+    # Both axes even: yuv420p cannot encode an odd dimension.
+    assert width % 2 == 0 and height % 2 == 0
+
+
+def test_a_small_reference_video_is_never_upscaled(tmp_path):
+    """The node keeps OUR frames rather than upscaling to its canvas, so
+    inflating a small clip here would only cost bytes — and pre-scaling one
+    below the canvas would permanently coarsen the reference."""
+    source = _write_test_video(tmp_path / "small.mp4", seconds=3, fps=30, size="640x480")
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she moves with the manner of the reference",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source)}],
+    })
+    loader = next(n for n in graph.values() if n["class_type"] == "LoadVideo")
+    staged = tmp_path / "input" / loader["inputs"]["file"]
+    assert int(_probe(staged, "v:0", "stream=width")) == 640
+    assert int(_probe(staged, "v:0", "stream=height")) == 480
+
+
+def test_reference_video_soundtrack_claims_an_audio_label_before_its_video(tmp_path):
+    """use_audio conditions on the clip's own soundtrack, which the node labels
+    <Audio N> BEFORE its <Video N> — so a standalone voice clip alongside it
+    becomes <Audio 2>, not <Audio 1>."""
+    source = _write_test_video(tmp_path / "spoken.mp4", seconds=3, fps=24, with_audio=True)
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "the reference performance drives her delivery",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source), "use_audio": True}],
+        "reference_audios": [{"audio_base64": _TINY_WAV}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert [k for k in node["inputs"] if k.startswith("ref_video_audios.")] == \
+        ["ref_video_audios.ref_video_audio_0"]
+    components = next(n for n in graph.values() if n["class_type"] == "GetVideoComponents")
+    component_id = next(k for k, v in graph.items() if v is components)
+    # frames from output 0, soundtrack from output 1 of the SAME components node.
+    assert node["inputs"]["ref_videos.ref_video_0"] == [component_id, 0]
+    assert node["inputs"]["ref_video_audios.ref_video_audio_0"] == [component_id, 1]
+    staged = tmp_path / "input" / next(
+        n for n in graph.values() if n["class_type"] == "LoadVideo")["inputs"]["file"]
+    assert _probe(staged, "a:0", "stream=index") != "", "use_audio must keep the soundtrack"
+
+
+def test_reference_video_alone_is_a_valid_reference(tmp_path):
+    """A motion reference with no picture is legitimate conditioning — only
+    AUDIO is barred from being the sole reference."""
+    source = _write_test_video(tmp_path / "solo.mp4", seconds=3, fps=24)
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "a dancer moving like the reference",
+        "reference_videos": [{"video_path": str(source)}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_0"]
+    assert [k for k in node["inputs"] if k.startswith("ref_images.")] == []
+    assert not [n for n in graph.values() if n["class_type"] == "LoadImage"]
+
+
+def test_references_on_the_plain_h3_tier_route_to_its_reference_sibling(tmp_path):
+    """minimax-h3 has no reference slots — only minimax-h3-reference (inherits
+    it, routing_only) does — and the studio routes between them client-side.
+    An agent sending reference_* straight to minimax-h3 used to get plain
+    text-to-video with no error and no hint: on a rented lane (2026-08-21) a
+    reseeded resubmission still served the reference node from ComfyUI's cache,
+    proving no loader was in its ancestry, and several probes were read against
+    the wrong graph. The MCP now routes the way the studio does, compiles the
+    reference loaders, and the result names both the graph that ran and the
+    workflow the call came from."""
+    source = _write_test_video(tmp_path / "manner.mp4", seconds=3, fps=24)
+    graph, reply = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a courier who moves in the manner of the reference",
+        "reference_images": [{"image_base64": _TINY_PNG}, {"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source)}],
+    }, extra_workflow_ids=("minimax-h3-reference",), with_reply=True)
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert sorted(k for k in node["inputs"] if k.startswith("ref_images.")) == \
+        ["ref_images.ref_image_0", "ref_images.ref_image_1"]
+    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_0"]
+    assert len([n for n in graph.values() if n["class_type"] == "LoadImage"]) == 2
+    assert len([n for n in graph.values() if n["class_type"] == "LoadVideo"]) == 1
+    assert not [n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo"], \
+        "the plain text/image-to-video graph must not be what ran"
+    workflow = _mcp_tool_result(reply)["workflow"]
+    assert workflow["id"] == "minimax-h3-reference"
+    assert workflow["routed_from"] == "minimax-h3"
+    assert workflow["routed_for"] == ["reference_images", "reference_videos"]
+    # Reached by routing only: the reference tier stays out of the picker.
+    assert workflow["routing_only"] is True
+
+    # No references (an empty list counts as none): the plain tier is itself,
+    # untouched by the sibling sitting in the registry.
+    graph, reply = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a courier waits on a platform",
+        "reference_images": [],
+    }, extra_workflow_ids=("minimax-h3-reference",), with_reply=True)
+    assert next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert not [n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo"]
+    workflow = _mcp_tool_result(reply)["workflow"]
+    assert workflow["id"] == "minimax-h3"
+    assert "routed_from" not in workflow
+
+
+def test_reference_video_refuses_a_clip_shorter_than_the_model_card_allows(tmp_path):
+    source = _write_test_video(tmp_path / "blink.mp4", seconds=1, fps=24)
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "reference_videos": [{"video_path": str(source)}]},
+        expect_refusal=True)
+    assert "at least 2 seconds" in reply
+
+
+def test_a_long_clip_with_a_motion_reference_is_refused_before_it_is_staged(tmp_path):
+    """The budget is on the whole packed sequence — the clip, each motion clip
+    at the node's own reference canvas plus its soundtrack, the pictures — and
+    a reference is trimmed to min(its own length, the clip's), so a reference at
+    or beyond the clip's length makes the CLIP the thing that has to fit.
+
+    Anchored 2026-08-21 on a rented 5090: a 10s clip at 1216x704 with a 13.3s
+    phone reference (142,366 rows) ran out of memory three times, and the same
+    with the reference trimmed to 4s (95,092 rows) thrashed and died. The
+    failure used to arrive three minutes in as a CUDA allocator dump, and the
+    first version of this guard over-corrected by capping the CLIP whenever any
+    reference was attached."""
+    # A SHORT reference keeps its own length, so it costs only that and leaves
+    # the duration range open: a 2s clip against a 10s render (60,192 + 810
+    # clip rows + 12,672 for the reference at the pre-flight's worst canvas =
+    # 73,674 against 76,000) is the shape the first version refused outright.
+    short = _write_test_video(tmp_path / "motion-short.mp4", seconds=2, fps=24)
+    _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(short), "duration_seconds": 2}]})
+
+    # A reference at or beyond the clip's length is trimmed down to it, so the
+    # CLIP becomes the thing that has to fit — and 15s does not: 90,658 clip
+    # rows + 107,712 for 345 effective reference frames = 198,370.
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]},
+        expect_refusal=True)
+    assert "does not fit this card" in reply
+    # The refusal names the lattice point that DOES fit: 141 frames of clip with
+    # this reference (79,934 rows). Trimming the reference under the full clip
+    # would have to go below the card's 2s floor, so that lever is not offered.
+    assert "shorten the clip to 5.1s" in reply
+    assert "trim the reference" not in reply
+
+
+def test_a_long_clip_is_refused_when_pictures_or_sound_are_all_that_is_attached(tmp_path):
+    """The budget is on the whole packed sequence, so a run with no motion clip
+    is still priced. This guard used to return early unless a reference VIDEO
+    was attached — "pictures cost a flat amount however long the clip is, so
+    the full range stays available" — and that was measured false on 2026-08-22:
+    a 15s clip at 1216x704 with seven pictures and the motion clip's soundtrack
+    (its picture switched off) died in the MLP of block 0 on a 5090, 23.90 GiB
+    allocated + 5.24 GiB requested of 31.36 GiB. 5.24 GiB over the 57,344 bytes
+    a row costs there is 98,116 rows, against a budget of 85,000.
+
+    At 15s the OUTPUT alone is 90,658 rows, so on this card ANY reference puts
+    the run over — which is why one picture is enough to refuse."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+         "reference_images": [{"image_base64": _TINY_PNG}]},
+        expect_refusal=True)
+    assert "does not fit this card" in reply
+    # 90,658 clip + 836 for the one picture.
+    assert "91,494 packed rows" in reply
+    # It names what is attached, not the video that is not: a refusal reading
+    # "with 0 reference videos" sends the user hunting for one they removed.
+    assert "with 1 reference picture attached" in reply
+    assert "reference video" not in reply.split("Either")[0]
+
+    # The shape Liam actually sent: seven pictures and the motion clip's audio
+    # kept while its picture was switched off. 90,658 + 7x836 + 1,200 for a
+    # sound reference of unmeasured length (priced at the 15s allowance).
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+         "reference_images": [{"image_base64": _TINY_PNG}] * 7,
+         "reference_audios": [{"audio_base64": _TINY_WAV}]},
+        expect_refusal=True)
+    # Refused by the PRE-FLIGHT, before a byte is staged: it prices a sound
+    # reference of unmeasured length at the full 15s allowance (1,200 rows).
+    # 97,710 against the 98,116 the card itself reported — the difference is
+    # the text conditioning, which the budget deliberately does not count.
+    assert "97,710 packed rows" in reply
+    assert "with 7 reference pictures and 1 sound reference attached" in reply
+    # The levers are the ones that exist here: no video to trim or stage
+    # compact, so it offers a shorter clip and fewer references, and prices
+    # them so the user can choose.
+    # Floored, not rounded: 311 frames is 12.958s, and asking for 13.0s snaps
+    # UP to 328 frames — the advice used to name a length that was refused
+    # again with the same sentence (measured live 2026-08-22).
+    assert "shorten the clip to 10.8s" in reply
+    assert "send fewer reference pictures (7 of them cost 5,852 rows, 836 each)" in reply
+    assert "drop the sound reference (it costs 1,200 rows)" in reply
+    assert "trim the reference" not in reply and "compact" not in reply
+
+
+def test_a_clip_with_nothing_attached_keeps_its_full_range(tmp_path):
+    """The budget bites only on a run that carries references. A plain 15s
+    text-to-video is 90,658 rows and was MEASURED to run (torch pool 27.16 GiB
+    on a 5090), so nothing here may refuse it."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+    })
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert node["inputs"]["length"] == 362, "15s on the 17k+5 grid"
+
+
+_LANE_WITH_THE_FLAG = {"lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "probed": True, "error": None}
+_LANE_WITHOUT_THE_FLAG = {"lane": "rental48", "remote": True, "vram_headroom_gb": 0.0, "probed": True, "error": None}
+_LANE_WITH_TOO_LITTLE = {"lane": "rental48", "remote": True, "vram_headroom_gb": 4.0, "probed": True, "error": None}
+_LANE_THAT_WOULD_NOT_ANSWER = {"lane": "rental48", "remote": True, "vram_headroom_gb": None, "probed": False,
+                               "error": "URLError: Connection refused"}
+
+
+@pytest.mark.parametrize("lane, runs", [
+    (_LANE_WITHOUT_THE_FLAG, "without --vram-headroom"),
+    (_LANE_WITH_TOO_LITTLE, "with --vram-headroom 4"),
+])
+def test_a_lane_launched_without_vram_headroom_is_held_to_the_same_budget(tmp_path, lane, runs):
+    """--vram-headroom was measured INERT for the reference-mode OOM: Liam's
+    job died in block 0 with identical numbers (27.55 + 6.46 GiB) at headroom
+    12 and 20 (2026-08-21, jobs b9f5b32d / 103f6173). So the registry carries
+    the same 76,000-row ceiling for a lane with the flag and one without, and
+    the refusal must NOT send the operator off to re-provision for a flag that
+    does not help. The lane plumbing stays (the guard still asks which lane the
+    graph routes to and records what its ComfyUI runs) so a future measurement
+    that does separate the two can set max_packed_rows_without_vram_headroom
+    below max_packed_rows and the smaller budget, with its flag advice, comes
+    back on its own."""
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    # Priced before staging at the node's largest reference canvas: 89,452 clip
+    # rows + 1,206 audio rows + 107,712 for 345 effective reference frames =
+    # 198,370 — over the budget on ANY lane.
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=lane)
+    assert "does not fit this card" in reply
+    assert "198,370 packed rows" in reply
+    assert "the limit here is 76,000" in reply
+    assert "whose ComfyUI runs" not in reply, runs
+    assert "re-provision that machine" not in reply
+    assert "drop a reference video" in reply
+
+
+def test_a_lane_running_the_flag_keeps_the_measured_budget(tmp_path):
+    """A job inside the 76,000-row budget compiles on a flagged lane — the
+    5 s clip + 5 s reference shape measured at ~67k rows (job 1f9db575)."""
+    clip = _write_test_video(tmp_path / "motion-5s.mp4", seconds=5, fps=24)
+    request = {"prompt": "x", "duration_seconds": 5, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(clip), "duration_seconds": 5}]}
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 lane_resolution=_LANE_WITH_THE_FLAG)
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 124
+
+
+def test_a_lane_the_gateway_could_not_ask_keeps_the_measured_budget(tmp_path):
+    """Unknown is not "without". A lane that will not answer is the submit-time
+    liveness probe's to name, and a gateway that cannot answer enforces
+    nothing either way — refusing here would only add a failure mode to a job
+    that is fine on a lane provisioned the right way. (A gateway from before
+    the route, answering 404, is the case every other test in this file
+    exercises.)"""
+    clip = _write_test_video(tmp_path / "motion-5s.mp4", seconds=5, fps=24)
+    request = {"prompt": "x", "duration_seconds": 5, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(clip), "duration_seconds": 5}]}
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 lane_resolution=_LANE_THAT_WOULD_NOT_ANSWER)
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 124
+
+
+_LANE_ON_A_96GB_CARD = {"lane": "rental52", "remote": True, "vram_headroom_gb": 12.0, "vram_total_gb": 94.97,
+                        "probed": True, "error": None}
+_LANE_ON_A_32GB_CARD = {"lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "vram_total_gb": 31.36,
+                        "probed": True, "error": None}
+
+
+def test_the_budget_follows_the_card_the_lane_runs_on(tmp_path):
+    """The packed-row budget is a property of the CARD. 76,000 rows were
+    measured on a 32 GB 5090; the registry carries a per-card table and the
+    gateway reports the lane's card with its launch flags, so a job no 5090
+    holds compiles on a lane running a 96 GB RTX PRO 6000.
+
+    The shape is a 10 s clip with a 10 s full-canvas reference, which is
+    comfortably inside the 161,000 rows PROVEN on that card (2026-08-22, the
+    ~161k-row as-sent job ran at 134 s a step, 64.5 GB of 95 GB). It used to be
+    a 198,370-row job, which the old 240,000 entry allowed — but 240,000 was
+    interpolated, never measured, and a budget above what has run is the exact
+    mistake that put the 32 GB number 9,000 rows too high."""
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=10, fps=24)
+    request = {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 10}]}
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 lane_resolution=_LANE_ON_A_96GB_CARD)
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 243
+    # The 32 GB card keeps the measured base — and the refusal names the card,
+    # so "76,000" on a lane that should have been the PRO 6000 reads as a
+    # routing problem, not a capacity one.
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=_LANE_ON_A_32GB_CARD)
+    assert "the limit here is 76,000 on lane 'rental48' (a 32 GB card)" in reply
+    # A card the table does not list (or a lane the gateway could not size)
+    # is not assumed bigger: the measured base applies, plain.
+    unsized = {**_LANE_ON_A_96GB_CARD, "vram_total_gb": None}
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=unsized)
+    assert "the limit here is 76,000." in reply
+    tiny = {**_LANE_ON_A_96GB_CARD, "vram_total_gb": 23.5}
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=tiny)
+    assert "the limit here is 76,000." in reply
+
+
+def test_media_list_workflows_publishes_the_per_card_budget_table():
+    """The studio prices against the machine a run will land on, so the
+    listing carries the table next to the base number."""
+    raw = _call_mcp_tool("media_list_workflows", {"media_type": "video"})
+    # The HTTP body is the JSON-RPC envelope (SSE-framed or plain); the tool's
+    # own text is the JSON listing.
+    envelope = None
+    for line in raw.splitlines():
+        if line.startswith("data:"):
+            with contextlib.suppress(json.JSONDecodeError):
+                envelope = json.loads(line[5:].strip())
+    if envelope is None:
+        envelope = json.loads(raw)
+    text = next(part["text"] for part in envelope["result"]["content"] if part.get("type") == "text")
+    payload = json.loads(text)
+    h3 = next(w for w in payload["workflows"] if w["id"] == "minimax-h3")
+    assert h3["motion_reference_max_packed_rows"] == 76000
+    assert h3["motion_reference_max_packed_rows_by_vram_gb"]["32"] == 76000
+    assert h3["motion_reference_max_packed_rows_by_vram_gb"]["96"] > 76000
+    reference = next(w for w in payload["workflows"] if w["id"] == "minimax-h3-reference")
+    assert reference["motion_reference_max_packed_rows_by_vram_gb"] == h3["motion_reference_max_packed_rows_by_vram_gb"]
+
+
+def test_a_job_carrying_no_references_never_asks_the_gateway_which_lane(tmp_path):
+    """A plain text-to-video is never priced, so it must not pay the round trip
+    — the harness fails loudly if the resolve route is touched."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+    }, lane_resolution={"lane": "must-not-be-asked", "remote": True, "vram_headroom_gb": 0.0, "probed": True,
+                        "error": "the guard asked for a lane on a job with no references at all"})
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert node["inputs"]["length"] == 362
+
+
+def test_a_picture_only_job_is_priced_against_the_card_it_will_run_on(tmp_path):
+    """Pictures count toward the budget, so a picture-only job MUST resolve its
+    lane: the same 15s run that cannot fit a 32 GB card fits a 96 GB one
+    (240,000 rows), and gating the lookup on a motion clip meant it was priced
+    against the default budget instead of the card actually attached."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+        "reference_images": [{"image_base64": _TINY_PNG}],
+    }, lane_resolution={"lane": "rental6000", "remote": True, "vram_headroom_gb": 12.0, "probed": True,
+                        "vram_total_gb": 96.0, "error": None})
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362, "15s fits a 96 GB card with a picture attached"
+
+
+def test_reference_video_refuses_more_clips_than_it_has_slots(tmp_path):
+    source = _write_test_video(tmp_path / "many.mp4", seconds=3, fps=24)
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "reference_videos": [{"video_path": str(source)}] * 4},
+        expect_refusal=True)
+    assert "at most 3 reference videos" in reply or "Too big" in reply or "max" in reply
+
+
+def test_reference_audio_refuses_more_clips_than_it_has_slots(tmp_path):
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x",
+         "reference_images": [{"image_base64": _TINY_PNG}],
+         "reference_audios": [{"audio_base64": _TINY_WAV}] * 4},
+        expect_refusal=True)
+    assert "at most 3 reference audio clips" in reply or "Too big" in reply or "max" in reply
+
+
+def _tiny_video_data_url(tmp_path, *, with_audio=True, size="96x64", frames=30):
+    path = tmp_path / f"context-{'voiced' if with_audio else 'mute'}.mp4"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"color=c=gray:s={size}:r=24",
+    ]
+    if with_audio:
+        # 32 kHz on purpose: that is the rate H3 itself emits.
+        cmd += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=32000"]
+    cmd += ["-frames:v", str(frames), "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    cmd += ["-c:a", "aac", "-shortest"] if with_audio else ["-an"]
+    cmd += [str(path)]
+    subprocess.run(cmd, check=True)
+    return "data:video/mp4;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+@pytest.mark.parametrize("workflow_id", ["minimax-h3", "minimax-h3-turbo"])
+def test_minimax_h3_motion_context_grafts_chain_nodes(tmp_path, workflow_id):
+    """Scene chaining: the previous clip's tail frames AND audio must reach the
+    MiniMaxH3MotionContext node, the guider must consume the context-modified
+    conditioning, the trim node must remove the re-rendered context head before
+    mux, Spectrum must be forced off (it mispredicts the pinned rows), and the
+    canvas must match the context clip (a latent cannot be resized)."""
+    graph = _capture_video_graph(tmp_path, workflow_id, {
+        "prompt": "the scene continues from the previous shot",
+        "motion_context_base64": _tiny_video_data_url(tmp_path),
+        "duration_seconds": 5,
+    })
+
+    load = next((k, n) for k, n in graph.items() if n["class_type"] == "LoadVideo")
+    comps = next((k, n) for k, n in graph.items() if n["class_type"] == "GetVideoComponents")
+    context = next((k, n) for k, n in graph.items() if n["class_type"] == "MiniMaxH3MotionContext")
+    trim = next((k, n) for k, n in graph.items() if n["class_type"] == "MiniMaxH3MotionContextTrim")
+    create = next(n for n in graph.values() if n["class_type"] == "CreateVideo")
+
+    # Staged clip lands in the Comfy input dir under the private prefix, so the
+    # input sweeper expires it and remote lanes ship it via the existing push.
+    assert load[1]["inputs"]["file"].startswith("mcp_video_")
+    assert (tmp_path / "input" / load[1]["inputs"]["file"]).is_file()
+    assert comps[1]["inputs"]["video"] == [load[0], 0]
+
+    assert context[1]["inputs"]["conditioning"] == ["104", 0]
+    assert context[1]["inputs"]["vae"] == graph["104"]["inputs"]["vae"]
+    assert context[1]["inputs"]["latent"] == ["104", 1]
+    assert context[1]["inputs"]["context_length"] == "22"
+    assert context[1]["inputs"]["audio_context_length"] == 22
+    assert context[1]["inputs"]["context_frames"] == [comps[0], 0]
+    # Two wires that stop every join from restarting the room tone: the
+    # successor clip must HEAR the predecessor's tail.
+    assert context[1]["inputs"]["context_audio"] == [comps[0], 1]
+    assert context[1]["inputs"]["audio_vae"] == graph["23"]["inputs"]["vae"]
+
+    # The guider consumes the context-modified conditioning.
+    assert graph["16"]["inputs"]["conditioning"] == [context[0], 0]
+    # The sampler still samples the source latent.
+    assert graph["14"]["inputs"]["latent_image"] == ["104", 1]
+
+    # Post-decode trim removes the re-rendered context head from BOTH streams.
+    assert trim[1]["inputs"]["images"] == ["10", 0]
+    assert trim[1]["inputs"]["audio"] == ["23", 0]
+    assert trim[1]["inputs"]["trim_frames"] == [context[0], 1]
+    assert trim[1]["inputs"]["fps"] == 24
+    assert trim[1]["inputs"]["match_tail"] is True
+    assert create["inputs"]["images"] == [trim[0], 0]
+    assert create["inputs"]["audio"] == [trim[0], 1]
+
+    # Spectrum forced off on a chained graph even though the default is on.
+    assert graph["30"]["inputs"]["enabled"] is False
+
+    # 5s asked + 22 context frames = 142ish -> NEAREST lattice point 141, so
+    # the delivered clip (141-22=119 frames) stays within a frame of the ask.
+    assert graph["104"]["inputs"]["length"] == 141
+
+    # Canvas locked to the context clip, not the aspect-tier default.
+    assert graph["104"]["inputs"]["width"] == 96
+    assert graph["104"]["inputs"]["height"] == 64
+
+    # No start-frame anchor: the chain seed provides the opening frames.
+    assert not [n for n in graph.values() if n["class_type"] == "LoadImage"]
+
+
+def test_minimax_h3_motion_context_without_audio_skips_the_audio_wires(tmp_path):
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "continue the silent scene",
+        "motion_context_base64": _tiny_video_data_url(tmp_path, with_audio=False),
+        "duration_seconds": 5,
+    })
+    context = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3MotionContext")
+    assert "context_audio" not in context["inputs"]
+    assert "audio_vae" not in context["inputs"]
+    assert context["inputs"]["audio_context_length"] == 0
+    assert "context_frames" in context["inputs"]
+
+
+def test_minimax_h3_motion_context_refuses_a_start_frame(tmp_path):
+    """A first-frame pin at frame 0 and a context head both claim the opening
+    frames; H3 renders contradictions as unions, so refuse the combination."""
+    reply = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "x",
+        "motion_context_base64": _tiny_video_data_url(tmp_path),
+        "image_base64": _TINY_PNG,
+    }, expect_refusal=True)
+    assert "replaces the start frame" in reply
+
+
+def test_minimax_h3_reference_mode_supports_motion_context(tmp_path):
+    """Motion Context v0.2.0 keeps the reference list and adds the continuation
+    audio to it, so chaining and reference conditioning compose."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "the referenced courier keeps walking",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "motion_context_base64": _tiny_video_data_url(tmp_path),
+    })
+    context = next((k, n) for k, n in graph.items() if n["class_type"] == "MiniMaxH3MotionContext")
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert context[1]["inputs"]["conditioning"] == ["104", 0]
+    assert graph["16"]["inputs"]["conditioning"] == [context[0], 0]
+    assert "ref_images.ref_image_0" in node["inputs"]
+    assert graph["30"]["inputs"]["enabled"] is False
+
+
+def test_minimax_h3_motion_context_is_declared_on_every_h3_tier():
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    for workflow_id in ("minimax-h3", "minimax-h3-turbo", "minimax-h3-reference"):
+        workflow = next(
+            item for item in _resolved_registry_workflows(registry) if item["id"] == workflow_id
+        )
+        for field in ("motion_context_path", "motion_context_base64", "motion_context_url"):
+            assert field in workflow["accepts"], f"{workflow_id} must accept {field}"
+        # video_* stays LTX-only: it flips extend/head-swap behavior stack-wide.
+        assert not any(str(f).startswith("video_") for f in workflow["accepts"])
+
+
+def test_reference_mode_is_a_routing_target_not_a_tier(tmp_path):
+    """There is ONE MiniMax H3 with levers, not a separate Reference model.
+    Reference mode is where a run is ROUTED when references are attached, so
+    offering it in the picker only strands the user: its graph has no frame
+    inputs, so the Frames control vanishes, and it refuses to run at all
+    without a reference. A real session reloaded stuck exactly that way."""
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflows = {item["id"]: item for item in _resolved_registry_workflows(registry)}
+
+    assert workflows["minimax-h3-reference"]["routing_only"] is True
+    # The tier the user actually picks stays selectable, and does NOT take
+    # references itself — that is what makes the routing necessary.
+    assert not workflows["minimax-h3"].get("routing_only")
+    assert not workflows["minimax-h3-turbo"].get("routing_only")
+    assert "reference_images" not in workflows["minimax-h3"]["accepts"]
+
+
+def test_autogrow_reference_slots_are_zero_indexed_like_comfyui_names_them() -> None:
+    """ComfyUI builds autogrow slot names as [f"{prefix}{i}" for i in range(max)]
+    — zero-based. Ours were written 1..N, so 1..max-1 were coincidentally valid
+    indices and the LAST slot fell outside the range: with nine pictures
+    attached, `ref_images.ref_image_9` was passed to execute() as a literal
+    keyword argument instead of being folded into the ref_images dict, and the
+    node raised TypeError. It only ever failed at the maximum, which is why it
+    survived every test that attached fewer.
+    """
+    import json
+
+    graph = json.loads((ROOT / "packages/media-gateway/workflows/minimax-h3-reference.api.json").read_text())
+    inputs = graph["prompt"]["104"]["inputs"]
+
+    for group, expected in (("ref_images", 9), ("ref_videos", 3), ("ref_video_audios", 3), ("ref_audios", 3)):
+        indices = sorted(
+            int(key.rsplit("_", 1)[1])
+            for key in inputs
+            if key.startswith(f"{group}.")
+        )
+        assert indices == list(range(expected)), f"{group} must be 0..{expected - 1}, got {indices}"
+
+    # And the registry's audio links have to address the same slots, or a clip's
+    # soundtrack lands on a different clip than its frames.
+    registry = json.loads((ROOT / "packages/media-gateway/workflow-registry.json").read_text())
+    workflow = next(w for w in registry["workflows"] if w["id"] == "minimax-h3-reference")
+    links = [slot["audio_link"]["input"] for slot in workflow["reference_video_slots"]]
+    assert links == [f"ref_video_audios.ref_video_audio_{i}" for i in range(3)]
+    # Each video slot's audio link must carry the same ordinal as the video.
+    for index, slot in enumerate(workflow["reference_video_slots"]):
+        assert slot["audio_link"]["input"].endswith(f"_{index}")
+
+
+# The motion-reference ceiling exists in two places on purpose: the registry is
+# the source of truth, and media_catalog mirrors it so a DEGRADED catalog still
+# refuses a length the card cannot render. Two copies can drift, so pin them.
+# Every H3 video lane that runs on a rented NVIDIA card, and is therefore held
+# to a measured VRAM budget for motion references. Named in full rather than
+# matched by prefix: `minimax-h3-native` shares the prefix and is a Metal engine
+# in unified memory with SSD streaming as its relief valve, so a 5090's packed-row
+# ceiling is not a fact about it — and copying one over would be the same
+# interpolation the budget's own note warns against.
+_H3_CUDA_VIDEO_LANE_IDS = [
+    "minimax-h3-turbo",
+    "minimax-h3-reference",
+    "minimax-h3-inpaint",
+    "minimax-h3",
+    "minimax-h3-eros",
+    "minimax-h3-eros-reference",
+    "minimax-h3-eros-inpaint",
+]
+
+
+def _h3_cuda_video_lanes(registry):
+    """The resolved H3 lanes that declare a CUDA accelerator, in registry order."""
+    return [
+        workflow for workflow in _resolved_registry_workflows(registry)
+        if workflow["id"].startswith("minimax-h3")
+        and workflow.get("media_type") == "video"
+        and str((workflow.get("hardware") or {}).get("accelerator") or "").lower() == "cuda"
+    ]
+
+
+def test_motion_reference_budget_mirror_matches_the_registry():
+    from hivemind_content_studio.media_catalog import (
+        _H3_FRAME_GRID,
+        _H3_FRAME_RATE,
+        _H3_MOTION_REFERENCE_PACKED_ROWS,
+        _built_in_video_models_with_limits,
+    )
+
+    registry = json.loads(WORKFLOW_REGISTRY.read_text())
+    h3 = next(w for w in registry["workflows"] if w["id"] == "minimax-h3")
+    assert h3["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
+    assert h3["frame_grid"] == _H3_FRAME_GRID
+    assert h3["defaults"]["frame_rate"] == _H3_FRAME_RATE
+
+    # Reference mode is a SEPARATE workflow reached by routing, and it is the
+    # one that actually stages motion clips — the budget has to reach it, which
+    # it does by inheritance. A tier that lost it would offer 15s again.
+    covered = []
+    for workflow in _h3_cuda_video_lanes(registry):
+        covered.append(workflow["id"])
+        assert workflow["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
+            # And the per-card table: the base on the 32 GB card, more on a
+            # 96 GB RTX PRO 6000. The degraded catalog must carry the same.
+        from hivemind_content_studio.media_catalog import _H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB
+        assert workflow["motion_reference_budget"]["max_packed_rows_by_vram_gb"] == _H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB
+        assert workflow["motion_reference_budget"]["max_packed_rows_by_vram_gb"]["32"] == _H3_MOTION_REFERENCE_PACKED_ROWS
+    # What this guard actually walked, named rather than counted: a filter that
+    # silently stopped matching would otherwise pass by covering nothing.
+    assert covered == _H3_CUDA_VIDEO_LANE_IDS, covered
+
+    # And the fallback list the studio gets when the registry cannot be read
+    # carries the ceiling rather than silently restoring the full range.
+    fallback = {model.id: model for model in _built_in_video_models_with_limits()}
+    # 107 frames since the 2026-08-23 recalibration (was 124 at the interpolated
+    # 85,000 budget): the published ceiling shrinks with the budget, which is
+    # the point — it is what stops the picker offering a length that OOMs.
+    assert fallback["minimax-h3"].motion_reference_max_seconds["high|9:16"] == round(107 / 24, 3)
+    assert fallback["minimax-h3"].motion_reference_max_seconds["max|16:9"] == round(90 / 24, 3)
+    # Non-minimax workflows have no measured budget and keep the full range.
+    assert fallback["ltx23-eros-dmd-v12"].motion_reference_max_seconds is None
+
+
+def test_the_no_headroom_ceiling_reaches_every_h3_video_lane():
+    """The budget carries the headroom it was measured with and the ceiling a
+    lane without it is held to; both inherit to reference mode (the workflow
+    that actually stages motion clips), and the headroom is the one the
+    minimax-tier provisioning passes — otherwise the guard enforces a flag the
+    boxes never get."""
+    from hivemind_content_studio.gpu_rentals import TIERS
+
+    registry = json.loads(WORKFLOW_REGISTRY.read_text())
+    covered = []
+    for workflow in _h3_cuda_video_lanes(registry):
+        budget = workflow["motion_reference_budget"]
+        assert budget["vram_headroom_gb"] == TIERS["minimax"]["comfy_vram_headroom_gb"] == 12
+        # The flag was measured inert (identical OOM at 12 and 20), so a
+        # lane without it is held to the SAME ceiling — never a looser one.
+        assert budget["max_packed_rows_without_vram_headroom"] == budget["max_packed_rows"] == 76000
+        covered.append(workflow["id"])
+    assert covered == _H3_CUDA_VIDEO_LANE_IDS, covered
+    assert "minimax-h3-reference" in covered, "reference mode must inherit the budget"
+    # The rule since 2026-08-23, and the reason this assertion changed shape:
+    # a ceiling is AT OR BELOW the largest run PROVEN clean, never BETWEEN a
+    # success and a failure. This used to read `82000 < 85000 < 104000` — a
+    # ceiling interpolated into the gap between a clean ~82k run (job 69a108a5)
+    # and a ~104k thrash (job b2f76185) — and on 2026-08-23 a job of ~80,400
+    # counted rows OOM'd inside that gap (24.75 GiB + 4.32 GiB of 31.36 on a
+    # 32 GB 5090). Interpolation is not measurement; only the lower bound is.
+    assert 76000 <= 76600, "the ceiling may never exceed a run proven clean"
+    # The provisioning script the box actually runs passes the same value.
+    script = (ROOT / "packages" / "gpu-rentals" / "provisioning" / "comfyui-hivemind.sh").read_text()
+    assert f'--vram-headroom {TIERS["minimax"]["comfy_vram_headroom_gb"]}"' in script
+
+
+class _StubGateway(BaseHTTPRequestHandler):
+    """The one gateway answer the motion-reference guard needs, pinned.
+
+    The guard prices a job against the card the lane actually has, so a test
+    that lets the MCP resolve the LIVE gateway is asserting against whatever
+    hardware it happens to run on. On a 32 GB machine it passed; on an Apple
+    Silicon host, whose unified memory is published as VRAM, the same job priced
+    against the 96 GB bucket and the assertion failed for the hardware rather
+    than for the behaviour. Pin the card and the test measures the guard again.
+    """
+
+    card_vram_gb = 32.0
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        if self.path.rstrip("/") != "/api/lanes/resolve":
+            self.send_error(404)
+            return
+        body = json.dumps({
+            "lane": "default",
+            "remote": False,
+            "probed": True,
+            "vram_headroom_gb": 0.0,
+            "vram_total_gb": self.card_vram_gb,
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+@contextlib.contextmanager
+def _pinned_gateway(card_vram_gb: float = 32.0):
+    handler = type("_PinnedGateway", (_StubGateway,), {"card_vram_gb": card_vram_gb})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def _call_mcp_tool(name: str, arguments: dict, *, backend_url: str = "") -> str:
+    """Run the real MCP over HTTP with machine-private redaction ON."""
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "1",
+        **({"MEDIA_STUDIO_MCP_BACKEND_URL": backend_url} if backend_url else {}),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("Media Studio MCP did not start")
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=30) as response:
+            return response.read().decode("utf-8")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+# A clip that cannot render must be refused BEFORE its references are staged.
+# The authoritative check runs against the built graph, by which point every
+# picture and motion clip has been fetched, decoded and re-encoded to 24 fps —
+# twenty-odd seconds of work, with a progress bar, for a run that was never
+# going to start. The reference path below does not exist: if staging ran first
+# the failure would be about the missing file, so getting the capacity message
+# back is what proves the ordering.
+def test_an_impossible_motion_reference_clip_is_refused_before_anything_is_staged():
+    missing = "/nonexistent/never-staged-because-the-preflight-refused-first.mp4"
+    with _pinned_gateway(card_vram_gb=32.0) as backend:
+        body = _call_mcp_tool("media_generate_video", {
+            "workflow_id": "minimax-h3-reference",
+            "prompt": "x",
+            "width": 768,
+            "height": 1344,
+            "duration_seconds": 15,
+            # A reference as long as the clip on the native canvas: the node trims
+            # it to the clip, so the clip's own 15s is what has to fit — and at this
+            # canvas it does not (216,774 packed rows against 76,000).
+            "reference_videos": [{"video_path": missing, "use_audio": False, "duration_seconds": 15}],
+        }, backend_url=backend)
+
+    # The reason survives machine-private redaction, because it is the card's
+    # capacity and the canvas the caller already chose — no prompt, no media.
+    assert "does not fit this card" in body, body[:400]
+    # 124 frames of clip with this reference fit (76,782 rows) — 5.167s, quoted
+    # FLOORED as 5.1s. Rounded to "5.2s" it named a length that snaps up to the
+    # next lattice point (141) and is refused again.
+    assert "shorten the clip to 4.4s" in body
+    # Never reached the staging step, so it cannot have complained about the file.
+    assert "never-staged-because" not in body
+
+
+def test_a_short_motion_reference_leaves_the_duration_range_open():
+    """The bug this rule was rewritten for: a two-second reference on a long
+    render. The node keeps a short reference at its own length, so it costs only
+    that — but the first guard capped the clip whenever ANY reference was
+    attached, and refused this outright. (A 15s render at this canvas is 90,658
+    rows before any reference and sits over the budget on its own, so the
+    longest render that takes a motion clip here is 10s: 73,674 rows.)"""
+    with _pinned_gateway(card_vram_gb=32.0) as backend:
+        body = _call_mcp_tool("media_generate_video", {
+            "workflow_id": "minimax-h3-reference",
+            "prompt": "x",
+            "width": 704,
+            "height": 1216,
+            "duration_seconds": 10,
+            "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False, "duration_seconds": 2}],
+        }, backend_url=backend)
+    assert "does not fit this card" not in body, body[:400]
+
+
+def test_an_unmeasured_reference_is_treated_as_long():
+    """No duration hint means the pre-flight cannot know the clip is short, and
+    guessing short would let an over-budget run through to a three-minute OOM.
+    It assumes the longest the lane will stage (15s) at the node's largest
+    reference canvas; the authoritative check re-runs on the real staged file."""
+    with _pinned_gateway(card_vram_gb=32.0) as backend:
+        body = _call_mcp_tool("media_generate_video", {
+            "workflow_id": "minimax-h3-reference",
+            "prompt": "x",
+            "width": 768,
+            "height": 1344,
+            "duration_seconds": 15,
+            "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False}],
+        }, backend_url=backend)
+    assert "does not fit this card" in body, body[:400]
+
+
+def test_a_lying_duration_hint_is_caught_on_the_staged_file(tmp_path):
+    """The pre-flight trusts the caller's duration hint; the authoritative check
+    prices the STAGED file — its real length AND the node's canvas for its real
+    dimensions. A 2s hint on a 10s portrait phone clip sails through pre-flight
+    (60,192 + 810 + 12,672 = 73,674 rows) and is refused once staged: 704x1504
+    at the node is 1,034 rows per latent frame, 74,448 for its 243 effective
+    frames."""
+    phone = _write_test_video(tmp_path / "phone.mp4", seconds=10, fps=24, size="688x1496")
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(phone), "duration_seconds": 2}]},
+        expect_refusal=True)
+    assert "does not fit this card" in reply
+    # 60,192 + 810 + 74,448 = 135,450 rows. Priced at the clip's REAL canvas,
+    # 141 frames of clip fit (79,020 rows).
+    assert "shorten the clip to 5.1s" in reply
+
+
+def test_a_compact_reference_costs_a_third_and_is_staged_inside_384x1152(tmp_path):
+    """canvas "compact" stages a motion reference inside 384x1152 instead of the
+    node's 768-short-edge canvas. Priced before staging at the compact worst
+    case (432 rows per latent frame against 1,056): a 5s phone clip on a 10s
+    render at 1216x704 is 61,002 + 32 x 432 = 74,826 rows — inside the 76,000
+    budget — where the same clip staged full would be 61,002 + 32 x 1,056 =
+    94,794 and refused. That is the whole value of the lever: it is the
+    difference between a run that happens and one that does not. (The shape was
+    a 6s clip while the budget was 85,000; the 2026-08-23 recalibration put
+    79,146 rows out of reach, so the case is made one lattice step down.)
+    The staged file really is inside the box (688x1496 -> 384x834)."""
+    phone = _write_test_video(tmp_path / "phone6.mp4", seconds=5, fps=24, size="688x1496")
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(phone), "duration_seconds": 5}]},
+        expect_refusal=True)
+    assert "does not fit this card" in reply
+    # The refusal offers the compact lever by name.
+    assert "stage the reference video compact" in reply
+
+    graph = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(phone), "duration_seconds": 5, "canvas": "compact"}]})
+    staged = graph["140"]["inputs"]["file"]
+    width, height = _probe(tmp_path / "input" / staged, "v:0", "stream=width,height").split(",")[:2]
+    assert (int(width), int(height)) == (384, 834)
+
+
+def test_references_handed_to_a_workflow_without_slots_are_never_dropped_silently():
+    """The plain minimax-h3 workflow has no reference slots, and the staging
+    blocks are gated on the slots — so references sent with it used to vanish
+    silently and the clip rendered as plain text-to-video. Two sessions measured
+    "reference mode" VRAM ceilings against exactly that on 2026-08-21. The MCP
+    now ROUTES them to the family's Reference workflow (see
+    test_references_on_the_plain_h3_tier_route_to_its_reference_sibling) or refuses by
+    name when the family has none; either way the live, redaction-on path must
+    answer an error for references it cannot honour — never a silent success —
+    and never echo the caller's paths."""
+    body = _call_mcp_tool("media_generate_video", {
+        "workflow_id": "minimax-h3",
+        "prompt": "x",
+        "duration_seconds": 5,
+        "reference_images": [{"image_path": "/nonexistent/pic.png"}],
+        "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "duration_seconds": 3}],
+    })
+    assert '"isError":true' in body or '"ok": false' in body, body[:400]
+    assert '"status": "running"' not in body and '"status":"running"' not in body
+    # Nothing of the caller's in the reply.
+    assert "/nonexistent" not in body
+
+
+def test_the_guard_and_the_picker_price_a_run_the_same_way():
+    """One source of truth: the MCP's refusal and the studio's picker ceiling
+    are computed by two mirrors of the same pricing. The refusal above names
+    the clip length that fits for the native canvas without pictures or voice;
+    the picker's published ceiling assumes nine pictures and a voice clip. Both
+    must fall out of the Python mirror with those inputs."""
+    from hivemind_content_studio.media_studio import (
+        _grid_frames_at_most,
+        _h3_packed_rows,
+        motion_reference_duration_limits,
+    )
+    from hivemind_content_studio.media_catalog import _H3_MOTION_REFERENCE_PACKED_ROWS
+
+    grid = {"modulus": 17, "offset": 5}
+
+    def ceiling(**kwargs):
+        frames = 362
+        while frames >= 5:
+            if _h3_packed_rows(grid, 24, 1344, 768, frames, reference_seconds=15, **kwargs) <= _H3_MOTION_REFERENCE_PACKED_ROWS:
+                return frames
+            frames = _grid_frames_at_most(grid, frames - 1)
+        return None
+
+    # The MCP scenario: one reference without its soundtrack, no pictures, no voice.
+    assert ceiling(reference_audio=False, pictures=0, voice_seconds=0) == 107  # "4.4s"
+    # The picker scenario: slot maximum of pictures, the full voice allowance.
+    limits = motion_reference_duration_limits({
+        "motion_reference_max_packed_rows": _H3_MOTION_REFERENCE_PACKED_ROWS,
+        "frame_grid": grid, "defaults": {"frame_rate": 24},
+    })
+    assert round(limits["max|16:9"] * 24) == ceiling() == 90
+
+
+def test_a_motion_reference_clip_that_fits_is_not_refused_and_redaction_still_holds():
+    # 5s at the same canvas is inside the measured budget, so the guard must let
+    # it through — an over-eager cap would be its own bug. It then fails on the
+    # missing file, which is both the proof it reached staging AND the proof
+    # that machine-private redaction is untouched: an ordinary failure still
+    # arrives as a bare MediaStudioError, naming neither the path nor the job.
+    body = _call_mcp_tool("media_generate_video", {
+        "workflow_id": "minimax-h3-reference",
+        "prompt": "x",
+        "width": 704,
+        "height": 1216,
+        "duration_seconds": 5,
+        "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False}],
+    })
+    assert "does not fit this card" not in body, body[:400]
+    assert "MediaStudioError" in body
+    assert "/nonexistent/clip.mp4" not in body
+
+
+_LANE_THAT_OOMD = {
+    "lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "probed": True,
+    "vram_total_gb": 31.36, "error": None,
+    # This card ran out of memory BELOW the registry's prediction — the case
+    # that actually protects a user, and the one a static table can never know.
+    "row_observations": {"oom_rows": 70_000},
+}
+_LANE_THAT_PROVED_MORE = {
+    "lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "probed": True,
+    "vram_total_gb": 31.36, "error": None,
+    "row_observations": {"clean_rows": 79_000},
+}
+
+
+def test_a_card_that_ran_out_of_memory_lowers_the_ceiling_under_that_point(tmp_path):
+    """The card is the authority on its own limit. A budget is a PREDICTION —
+    85,000 was interpolated between a clean 76,600 and a fatal 95,092, and a job
+    at ~80,400 rows died inside that gap on 2026-08-23. An OOM now pulls the
+    ceiling under the point that failed, so the same run cannot be offered
+    twice, and the refusal says the card taught it rather than the registry."""
+    long_clip = _write_test_video(tmp_path / "m.mp4", seconds=10, fps=24)
+    request = {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 10}]}
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=_LANE_THAT_OOMD)
+    # 70,000 x 0.95 = 66,500 — UNDER the failure, not at it: the exact point
+    # moves with the allocator's fragmentation, so the observed number is a
+    # boundary to stay clear of rather than a target to aim at.
+    assert "the limit here is 66,500" in reply
+    assert "running out of memory at 70,000 rows" in reply
+    # And an OOM never RAISES anything: a card that died at 70,000 is not
+    # thereby licensed to attempt the registry's 76,000.
+    assert "76,000" not in reply.split("the limit here is")[1][:40]
+
+
+def test_a_run_that_finished_is_the_only_thing_that_raises_a_ceiling(tmp_path):
+    """The other direction, and the rule that keeps it honest: a budget may rise
+    to a run that ACTUALLY COMPLETED on that card, never to a guess between
+    one that did and one that did not."""
+    long_clip = _write_test_video(tmp_path / "m2.mp4", seconds=10, fps=24)
+    request = {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 10}]}
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=_LANE_THAT_PROVED_MORE)
+    assert "the limit here is 79,000" in reply
+    assert "largest run this card size has completed" in reply
+    # And with nothing observed it is the registry's number, plainly.
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=_LANE_ON_A_32GB_CARD)
+    assert "the limit here is 76,000 on lane 'rental48' (a 32 GB card)" in reply
+    assert "running out of memory at" not in reply
+
+
+# ── MiniMax H3 head replacement (inpainting) ────────────────────────────────
+#
+# The graph ships with BOTH mask branches wired and the MCP prunes one, so a
+# capture is the only thing that proves which survived. Everything here is
+# asserted against the posted graph rather than the registry, because the
+# registry says what should happen and the graph says what does.
+
+def _inpaint_source(tmp_path, *, frames=60, with_audio=True, size="128x96"):
+    return _tiny_video_data_url(tmp_path, with_audio=with_audio, size=size, frames=frames)
+
+
+def test_h3_inpaint_manual_mask_prunes_sam3_and_keeps_the_painted_branch(tmp_path):
+    """Manual masking must not drag SAM3's 3.4GB checkpoint onto the lane.
+
+    The painted mask is one still, so it is conformed to the footage and
+    repeated to its frame count — the subject crop refuses a mask whose batch
+    or dimensions disagree with the frames, which is what those two nodes are
+    for.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "manual",
+        "mask_image_base64": _TINY_PNG,
+    })
+
+    classes = [n["class_type"] for n in graph.values()]
+    assert "CheckpointLoaderSimple" not in classes, "the SAM3 checkpoint must be pruned for a painted mask"
+    assert "SAM3_VideoTrack" not in classes and "SAM3_TrackToMask" not in classes
+    assert "RepeatImageBatch" in classes and "ImageToMask" in classes
+
+    crop = next(n for n in graph.values() if n["class_type"] == "MVEx_SubjectCrop")
+    mask_feed = crop["inputs"]["masks"]
+    assert isinstance(mask_feed, list), "the crop must read a linked mask, not a literal"
+    assert graph[str(mask_feed[0])]["class_type"] == "ImageToMask"
+
+    # The repeat count and the conform size are read off the footage, so neither
+    # the MCP nor the browser has to know the clip's dimensions.
+    repeat = next(n for n in graph.values() if n["class_type"] == "RepeatImageBatch")
+    assert isinstance(repeat["inputs"]["amount"], list)
+
+
+def test_h3_inpaint_sam3_mask_prunes_the_painted_branch_and_carries_its_dials(tmp_path):
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "sam3",
+        "sam3_prompt": "the man's head",
+        "sam3_detection_threshold": 0.35,
+        "sam3_max_objects": 2,
+        "sam3_detect_interval": 3,
+    })
+
+    classes = [n["class_type"] for n in graph.values()]
+    assert "RepeatImageBatch" not in classes, "the painted-mask branch must be pruned for SAM3"
+    track = next(n for n in graph.values() if n["class_type"] == "SAM3_VideoTrack")
+    assert track["inputs"]["detection_threshold"] == 0.35
+    assert track["inputs"]["max_objects"] == 2
+    assert track["inputs"]["detect_interval"] == 3
+    text = next(n for n in graph.values() if n["class_type"] == "CLIPTextEncode")
+    assert text["inputs"]["text"] == "the man's head"
+
+    crop = next(n for n in graph.values() if n["class_type"] == "MVEx_SubjectCrop")
+    assert graph[str(crop["inputs"]["masks"][0])]["class_type"] == "SAM3_TrackToMask"
+
+
+def test_h3_inpaint_canvas_and_length_stay_linked_to_the_crop(tmp_path):
+    """width, height and length are decided at runtime by the mask, so they must
+    reach the conditioner as LINKS. A scalar written over any of them silently
+    detaches the model's canvas from the footage it is painting into."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_image_base64": _TINY_PNG,
+        # Deliberately supplied: they must trim the SOURCE, never the canvas.
+        "duration_seconds": 2,
+    })
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    for key in ("width", "height", "length"):
+        assert isinstance(node["inputs"][key], list), f"{key} must stay linked to the crop"
+
+
+def test_h3_inpaint_holds_the_soundtrack_so_the_new_head_lip_syncs(tmp_path):
+    """The joint AV latent keeps the audio (audio_mode 'keep'), and the muxed
+    output takes the SOURCE's soundtrack rather than a VAE round trip of it."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_image_base64": _TINY_PNG,
+    })
+    latent = next(n for n in graph.values() if n["class_type"] == "NKDAVLatent")
+    assert latent["inputs"]["audio_mode"] == "keep"
+    assert isinstance(latent["inputs"]["latent_mask"], list)
+    components = next(k for k, n in graph.items() if n["class_type"] == "GetVideoComponents")
+    assert latent["inputs"]["audio"] == [components, 1]
+    create = next(n for n in graph.values() if n["class_type"] == "CreateVideo")
+    assert create["inputs"]["audio"] == [components, 1]
+
+
+def test_h3_inpaint_trims_the_source_down_onto_the_frame_lattice(tmp_path):
+    """A 60-frame clip is 2.5s, and 5s was asked for. The trim is capped by the
+    footage that exists and then snapped DOWN to 17n+5 — 60 becomes 56, never 73,
+    because padding up would invent footage to inpaint over."""
+    _graph, reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path, frames=60),
+        "mask_image_base64": _TINY_PNG,
+        "duration_seconds": 5,
+    }, with_reply=True)
+    settings = _mcp_tool_result(reply)["workflow"]["settings"]
+    assert settings["frames"] == 56, settings
+    # And the REPORTED length is the measurement, not the 5s that was asked for.
+    assert settings["durationSeconds"] == pytest.approx(56 / 24, abs=0.01), settings
+    assert settings["inpaint"]["maskSource"] == "manual"
+
+
+def test_h3_inpaint_refuses_a_run_with_no_source_clip(tmp_path):
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "mask_image_base64": _TINY_PNG,
+    }, expect_refusal=True)
+    assert "needs the clip being inpainted" in reply
+
+
+def test_h3_inpaint_refuses_manual_masking_with_no_painted_mask(tmp_path):
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "manual",
+    }, expect_refusal=True)
+    assert "manual masking needs the painted mask" in reply
+
+
+def test_h3_inpaint_refuses_a_clip_shorter_than_the_shortest_lattice_point(tmp_path):
+    """Under 5 frames there is no legal length at all, and the refusal has to
+    say so in seconds — the caller trimmed a clip, not a frame count."""
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path, frames=3),
+        "mask_image_base64": _TINY_PNG,
+    }, expect_refusal=True)
+    assert "frame lattice" in reply and "of footage is needed" in reply
+
+
+def test_h3_inpaint_still_requires_a_picture_of_the_new_head(tmp_path):
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "replace the head",
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_image_base64": _TINY_PNG,
+    }, expect_refusal=True)
+    assert "requires at least one reference picture" in reply
+
+
+def test_h3_inpaint_mask_sequence_prunes_both_other_branches(tmp_path):
+    """A mask CLIP — what the hosted SAM3 service returns, and what a lane with
+    no SAM3 checkpoint needs. It must arrive as its own LoadVideo, conformed to
+    the footage, with neither the painted still nor the on-lane tracker left in
+    the graph."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "sequence",
+        "mask_video_base64": _inpaint_source(tmp_path, with_audio=False),
+    })
+    classes = [n["class_type"] for n in graph.values()]
+    assert "SAM3_VideoTrack" not in classes and "CheckpointLoaderSimple" not in classes
+    assert "RepeatImageBatch" not in classes, "the painted-still branch must be pruned"
+    # Two clips in, and they are different files: the footage and its mask.
+    loaders = [n["inputs"]["file"] for n in graph.values() if n["class_type"] == "LoadVideo"]
+    assert len(loaders) == 2 and len(set(loaders)) == 2, loaders
+    crop = next(n for n in graph.values() if n["class_type"] == "MVEx_SubjectCrop")
+    assert graph[str(crop["inputs"]["masks"][0])]["class_type"] == "ImageToMask"
+
+
+def test_h3_inpaint_mask_sequence_without_a_clip_is_refused(tmp_path):
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "sequence",
+    }, expect_refusal=True)
+    assert "needs the mask clip" in reply
+
+
+# ── a refusal the lane can name survives redaction as a classification ─────
+#
+# Liam generated with MiniMax H3 Turbo on the Mac (2026-09-06) and got "the
+# backend redacted the reason (machine-private mode)". ComfyUI had answered
+# 400 missing_node_type — the local lane has no SpectrumApplyMiniMaxH3 custom
+# node — and that reason was reduced to "MediaStudioError" on its way to the
+# studio, because a refusal's message can carry the prompt. The node CLASS
+# cannot: it is the name of an installed package. So the MCP classifies the
+# refusal into identifiers, and the receipt keeps the classification and a
+# sentence made only of it — with the prompt still nowhere in it.
+class _RefusingGateway(_StubGateway):
+    """The lane rejects the graph the way ComfyUI does, prompt echoed back in
+    node_errors the way ComfyUI does it too."""
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        if self.path.rstrip("/") == "/api/lanes/resolve":
+            return _StubGateway.do_POST_lanes(self)
+        if self.path.rstrip("/") in {"/comfy/api/prompt", "/comfy/prompt"}:
+            body = json.dumps({
+                "error": {
+                    "type": "missing_node_type",
+                    "message": "Node 'SpectrumApplyMiniMaxH3' not found. The custom node may not be installed.",
+                    "details": "Node ID '#30'",
+                    "extra_info": {"node_id": "30", "class_type": "SpectrumApplyMiniMaxH3", "node_title": "SpectrumApplyMiniMaxH3"},
+                },
+                "node_errors": {
+                    "30": {
+                        "class_type": "SpectrumApplyMiniMaxH3",
+                        "errors": [{"type": "value_not_in_list", "message": "prompt: NEVER-SHOWN-PROMPT-TEXT not in list", "details": "NEVER-SHOWN-PROMPT-TEXT"}],
+                    },
+                },
+            }).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(404)
+
+
+def _lanes_resolve_reply(self) -> None:
+    body = json.dumps({
+        "lane": "default", "remote": False, "probed": True, "vram_headroom_gb": 0.0, "vram_total_gb": self.card_vram_gb,
+    }).encode()
+    self.send_response(200)
+    self.send_header("Content-Type", "application/json")
+    self.send_header("Content-Length", str(len(body)))
+    self.end_headers()
+    self.wfile.write(body)
+
+
+_StubGateway.do_POST_lanes = _lanes_resolve_reply
+
+
+@contextlib.contextmanager
+def _refusing_gateway():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RefusingGateway)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def test_a_missing_custom_node_is_named_through_machine_private_redaction():
+    with _refusing_gateway() as backend:
+        body = _call_mcp_tool("media_generate_video", {
+            "workflow_id": "minimax-h3-turbo",
+            "prompt": "NEVER-SHOWN-PROMPT-TEXT a red fox trotting through snow",
+            "width": 704,
+            "height": 1216,
+            "duration_seconds": 2,
+        }, backend_url=backend)
+
+    # The HTTP transport answers as an event stream; the receipt is its data line.
+    data_lines = [line[len("data:"):].strip() for line in body.splitlines() if line.startswith("data:")]
+    receipt = json.loads(data_lines[-1] if data_lines else body)
+    result = receipt["result"]
+    assert result["isError"] is True
+    content = result["structuredContent"]
+    assert content["ok"] is False
+    # The raw gateway body (which echoed the prompt) is not forwarded.
+    assert "response" not in content
+    # The classification: identifiers only.
+    assert content["failure"] == {
+        "code": "missing_node_type",
+        "node_class": "SpectrumApplyMiniMaxH3",
+        "node_id": "30",
+        "node_classes": ["SpectrumApplyMiniMaxH3"],
+    }
+    # The sentence with the fix, in place of a bare MediaStudioError.
+    assert "SpectrumApplyMiniMaxH3" in content["error"]
+    assert "Install that node pack" in content["error"]
+    # And the one thing redaction exists for is still not there: not in the
+    # sentence, not in the classification, not anywhere in the receipt.
+    assert "NEVER-SHOWN-PROMPT-TEXT" not in body
+    assert "red fox" not in body
+    assert "not in list" not in body

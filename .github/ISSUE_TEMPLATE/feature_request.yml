@@ -1,5 +1,5 @@
-name: ✨ 增加功能 | Feature Request
-description: 为此项目提出一个新想法或建议 | Suggest a new idea for this project
+name: Feature request
+description: Propose something the studio should be able to do.
 title: "[Feature]: "
 labels:
   - enhancement
@@ -7,23 +7,37 @@ labels:
 body:
   - type: textarea
     attributes:
-      label: 需求描述 | Problem Statement
+      label: The problem
       description: |
-        请描述您希望解决的问题或需求 
-        Please describe the problem you want to solve
+        What you are trying to get done, and where the studio gets in the way.
+        Describe the work, not the implementation — the shape of the fix is
+        easier to get right when the task it serves is on the page.
       placeholder: |
-        我在使用过程中遇到了...
-        I encountered... when using this project
+        When I ... I have to ... every time, because ...
     validations:
       required: true
+
   - type: textarea
     attributes:
-      label: 建议的解决方案 | Proposed Solution
-      description: |
-        请描述您认为可行的解决方案或实现方式
-        Please describe your suggested solution or implementation
-      placeholder: |
-        可以考虑添加...功能来解决这个问题
-        Consider adding... feature to address this issue
+      label: What you would like instead
     validations:
       required: true
+
+  - type: dropdown
+    attributes:
+      label: Where it belongs
+      options:
+        - Studio frontend (browser or desktop app)
+        - Control API / stack scripts
+        - Media gateway
+        - Canvas (comfyui-mobile)
+        - GPU rentals / Machines
+        - Agent CLI or MCP server
+        - Somewhere else / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: What you do today instead
+      description: The workaround, if there is one, and what it costs you.

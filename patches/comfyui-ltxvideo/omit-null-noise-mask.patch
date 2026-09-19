@@ -1,0 +1,19 @@
+diff --git a/latents.py b/latents.py
+index 84cdfd2..e4fee4a 100644
+--- a/latents.py
++++ b/latents.py
+@@ -152,9 +152,13 @@ class LTXVAddLatents:
+             s["samples"] = torch.cat([video_latent1, video_latent2], dim=2)
+ 
+             # Handle noise masks
+-            s["noise_mask"] = self._merge_noise_masks(
++            noise_mask = self._merge_noise_masks(
+                 latents1, latents2, video_latent1.shape[2], video_latent2.shape[2]
+             )
++            if noise_mask is not None:
++                s["noise_mask"] = noise_mask
++            else:
++                s.pop("noise_mask", None)
+ 
+             return (s,)
+ 

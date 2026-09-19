@@ -1,9 +1,21 @@
 import importlib.util
+import sys
+import io
+import base64
+import contextlib
+import hashlib
 import json
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 BASE = Path(__file__).resolve().parent
 APPLE_SILICON_ENV = {'ZIMG_ACCELERATOR_PROFILE': 'apple-silicon'}
@@ -11,61 +23,914 @@ CUDA_ENV = {'ZIMG_ACCELERATOR_PROFILE': 'cuda'}
 
 
 def load_app():
+    # A fresh world per load: the gateway's state lives in the modules under
+    # gateway/, so a cached one would carry the previous test's caches and
+    # threads into this one.
+    for _cached in [n for n in sys.modules if n == 'gateway' or n.startswith('gateway.')]:
+        del sys.modules[_cached]
     spec = importlib.util.spec_from_file_location('zimg_app', BASE / 'app.py')
     app = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(app)
     return app
 
 
+def gateway_source():
+    """The whole gateway as text: the entry point plus every module under
+    gateway/. Asserting on one file would silently stop covering a default the
+    moment it moved into a module."""
+    files = [BASE / 'app.py'] + sorted((BASE / 'gateway').glob('*.py'))
+    return '\n'.join(path.read_text(encoding='utf-8') for path in files)
+
+
+def open_sealed_envelope(path, key_path):
+    """The plaintext inside an enc:v1 envelope, via the real unseal helper.
+
+    Sealing is only worth asserting on with real keys: a mocked cipher cannot
+    show that one recipient's key opens its envelope and not the other's."""
+    import media_unseal
+    envelope = json.loads(Path(path).read_text(encoding='utf-8'))
+    return media_unseal.unseal(envelope, media_unseal.load_private_key(key_path))
+
+
 class ZImageAppTests(unittest.TestCase):
+    def test_ltx_mlx_runtime_prefers_persistent_checkout_over_temp(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            studio = root / 'comfy' / 'hivemind-content-studio'
+            persistent = root / 'comfy' / 'ltx-2-mlx-opt'
+            legacy_temp = root / 'tmp' / 'ltx-2-mlx-opt'
+            studio.mkdir(parents=True)
+            persistent.mkdir(parents=True)
+            legacy_temp.mkdir(parents=True)
+            (persistent / 'pyproject.toml').write_text('[project]\nname="ltx-pipelines-mlx"\n')
+            (legacy_temp / 'pyproject.toml').write_text('[project]\nname="ltx-pipelines-mlx"\n')
+
+            resolved = app.config.resolve_ltx2_mlx_dir(
+                env={},
+                studio_root=studio,
+                home=root / 'home',
+                temp_root=root / 'tmp',
+            )
+
+            self.assertEqual(resolved, persistent.resolve())
+
+    def test_ltx_mlx_runtime_honors_explicit_override(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            override = Path(td) / 'custom-ltx-runtime'
+            resolved = app.config.resolve_ltx2_mlx_dir(
+                env={'LTX2_MLX_DIR': str(override)},
+                studio_root=Path(td) / 'studio',
+                home=Path(td) / 'home',
+                temp_root=Path(td) / 'tmp',
+            )
+
+            self.assertEqual(resolved, override.resolve())
+
     def test_active_output_is_not_encryptable_until_native_writer_finishes(self):
         app = load_app()
         with TemporaryDirectory() as td:
             output_dir = Path(td) / 'output'
             output_dir.mkdir()
-            output = output_dir / 'render.png'
+            output = output_dir / 'render.mp4'
             output.write_bytes(b'x' * 1000)
 
-            with patch.object(app, 'OUT_DIR', output_dir), patch.object(app, 'COMFY_OUTPUT_DIR', Path(td) / 'comfy'):
-                app.mark_output_active(output)
-                self.assertTrue(app.output_path_is_active(output))
-                self.assertFalse(app.is_encryptable_output(output))
+            with patch.object(app.config, 'OUT_DIR', output_dir), patch.object(app.config, 'COMFY_OUTPUT_DIR', Path(td) / 'comfy'):
+                app.media.mark_output_active(output)
+                self.assertTrue(app.media.output_path_is_active(output))
+                self.assertFalse(app.media.is_encryptable_output(output))
 
-                app.mark_output_inactive(output)
-                self.assertFalse(app.output_path_is_active(output))
-                self.assertTrue(app.is_encryptable_output(output))
+                app.media.mark_output_inactive(output)
+                self.assertFalse(app.media.output_path_is_active(output))
+                self.assertTrue(app.media.is_encryptable_output(output))
+
+    def test_generate_api_accepts_prompt_over_previous_character_limit(self):
+        app = load_app()
+        long_prompt = 'detailed image prompt ' * 200
+        completed = app.jobs.threading.Event()
+        captured = {}
+
+        def fake_run_generation(job_id, prompt, loras, options):
+            captured.update(job_id=job_id, prompt=prompt, loras=loras, options=options)
+            completed.set()
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with patch.object(app.config, 'TOKEN', 'test-token'), \
+             patch.object(app.jobs, 'jobs', {}), \
+             patch.object(app.models, 'load_selected_loras', return_value=[]), \
+             patch.object(app.runners, 'run_generation', side_effect=fake_run_generation):
+            server_thread.start()
+            try:
+                request = app.net.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/generate',
+                    data=json.dumps({'prompt': long_prompt}).encode('utf-8'),
+                    headers={
+                        'Authorization': 'Bearer test-token',
+                        'Content-Type': 'application/json',
+                    },
+                    method='POST',
+                )
+                with app.net.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                    self.assertEqual(response.status, 202)
+                self.assertTrue(completed.wait(1))
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+        self.assertGreater(len(long_prompt), 1200)
+        self.assertEqual(captured['prompt'], long_prompt.strip())
+        self.assertEqual(captured['job_id'], payload['id'])
+
+    def test_private_media_is_encrypted_before_serve_and_never_cacheable(self):
+        app = load_app()
+
+        class Handler:
+            def __init__(self):
+                self.headers = {}
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status): self.status = status
+            def cors_headers(self): pass
+            def send_header(self, key, value): self.headers[key] = value
+            def end_headers(self): pass
+
+        handler = Handler()
+        logical_path = Path('/private/output.mp4')
+        with patch.object(app.media, 'encrypt_output_file', return_value=logical_path) as encrypt, \
+             patch.object(app.media, 'decrypt_output_bytes', return_value=(b'private-video', 'video/mp4')):
+            app.media.send_output_file(handler, logical_path)
+
+        encrypt.assert_called_once_with(logical_path)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.headers['Cache-Control'], 'private, no-store, max-age=0')
+        self.assertEqual(handler.headers['Pragma'], 'no-cache')
+        self.assertEqual(handler.wfile.getvalue(), b'private-video')
+
+    def test_output_encryption_failure_deletes_plaintext_and_fails_closed(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output = Path(td) / 'private.png'
+            output.write_bytes(b'private-image')
+            with patch.object(app.config, 'OUT_DIR', Path(td)), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', Path(td)), \
+                 patch.object(app.media, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app.media, 'encrypt_output_file', side_effect=RuntimeError('cipher unavailable')):
+                    with self.assertRaises(RuntimeError):
+                        app.media.encrypt_outputs([output])
+            self.assertFalse(output.exists())
+
+    def test_no_response_offers_a_wildcard_origin(self):
+        """8787 answered every origin with `*`, so any page that had ever seen
+        the capability token could spend it cross-origin from a browser. Only
+        pages served from this machine are echoed now."""
+        app = load_app()
+
+        def headers_for(origin):
+            handler = object.__new__(app.http.Handler)
+            handler.headers = {'Origin': origin} if origin else {}
+            sent = []
+            handler.send_header = lambda key, value: sent.append((key, value))
+            handler.cors_headers()
+            return sent
+
+        for origin in (None, 'https://evil.example', 'http://not-loopback.test'):
+            sent = headers_for(origin)
+            self.assertNotIn('Access-Control-Allow-Origin', dict(sent))
+            self.assertNotIn('*', [value for _, value in sent])
+            self.assertEqual(dict(sent)['Referrer-Policy'], 'no-referrer')
+            self.assertEqual(dict(sent)['Vary'], 'Origin')
+
+        echoed = dict(headers_for('http://127.0.0.1:8788'))
+        self.assertEqual(echoed['Access-Control-Allow-Origin'], 'http://127.0.0.1:8788')
+        self.assertEqual(dict(headers_for('http://localhost:8788'))['Access-Control-Allow-Origin'],
+                         'http://localhost:8788')
+
+    def test_history_urls_carry_no_capability_token(self):
+        """A saved /api/history response used to be a permanent key to the whole
+        library: the token was in every image URL."""
+        app = load_app()
+        record = app.history.public_record({
+            'id': 'job-1', 'status': 'success', 'outputs': ['/private/out/a b.png'],
+        })
+        self.assertEqual(record['image_urls'], ['/image/a_b.png'])
+        self.assertNotIn('token', json.dumps(record).lower())
+
+    def test_access_log_redacts_query_credentials(self):
+        app = load_app()
+        handler = object.__new__(app.http.Handler)
+        handler.client_address = ('127.0.0.1', 1234)
+        handler.log_date_time_string = lambda: 'now'
+        stderr = io.StringIO()
+
+        with patch.object(app.config.sys, 'stderr', stderr):
+            handler.log_message('"%s"', 'GET /image/a.png?token=super-secret&name=ok HTTP/1.1')
+
+        rendered = stderr.getvalue()
+        self.assertNotIn('super-secret', rendered)
+        self.assertIn('token=%5Bredacted%5D', rendered)
+
+    def test_private_input_deletion_is_confined_to_comfy_input(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_root = Path(td) / 'input'
+            input_root.mkdir()
+            staged = input_root / 'media-studio-input-private.png'
+            staged.write_bytes(b'private-reference')
+            outside = Path(td) / 'outside.png'
+            outside.write_bytes(b'keep')
+
+            with patch.object(app.config, 'COMFY_INPUT_DIR', input_root):
+                self.assertTrue(app.media.delete_private_input(staged.name))
+                with self.assertRaises(ValueError):
+                    app.media.delete_private_input('../outside.png')
+
+            self.assertFalse(staged.exists())
+            self.assertTrue(outside.exists())
+
+    def test_private_input_cleanup_covers_reference_and_ingredient_sheet_staging(self):
+        # The Ingredients lane stages private references as media-studio-reference-*
+        # and composes the conditioning sheet as mcp_ingredients_*; both are plaintext
+        # in ComfyUI's input dir, so delete-input and the sweeper must cover them.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_root = Path(td) / 'input'
+            input_root.mkdir()
+            reference = input_root / 'media-studio-reference-abc123.png'
+            sheet = input_root / 'mcp_ingredients_1721600000_deadbeef.png'
+            inline = input_root / 'media-studio-inline-0123456789abcdef.png'
+            unrelated = input_root / 'user-photo.png'
+            for path in (reference, sheet, inline, unrelated):
+                path.write_bytes(b'pixels')
+            old = time.time() - app.media.PRIVATE_INPUT_MAX_AGE_SECONDS - 60
+            for path in (reference, sheet, inline, unrelated):
+                os.utime(path, (old, old))
+
+            with patch.object(app.config, 'COMFY_INPUT_DIR', input_root):
+                self.assertTrue(app.media.delete_private_input(reference.name))
+                self.assertEqual(app.media.cleanup_staged_private_inputs_once(), 2)
+
+            self.assertFalse(reference.exists())
+            self.assertFalse(sheet.exists())
+            self.assertFalse(inline.exists())
+            # User-named uploads outlive pipeline staging, but only up to the
+            # longer upload budget — they are plaintext the generator must read,
+            # so they must not live in the input directory indefinitely.
+            self.assertTrue(unrelated.exists())
+
+    def test_user_named_uploads_expire_on_the_upload_budget(self):
+        # Uploads through the generic ComfyUI route keep the caller's filename and
+        # match no staging prefix. They used to persist forever in plaintext.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_root = Path(td) / 'input'
+            (input_root / '.ltx-reference').mkdir(parents=True)
+            photo = input_root / 'bigref.jpg'
+            nested = input_root / '.ltx-reference' / 'clip.mkv'
+            sealed = input_root / 'kept.png.e2e'
+            fresh = input_root / 'today.png'
+            for path in (photo, nested, sealed, fresh):
+                path.write_bytes(b'pixels')
+            stale = time.time() - app.media.PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS - 60
+            for path in (photo, nested, sealed):
+                os.utime(path, (stale, stale))
+
+            with patch.object(app.config, 'COMFY_INPUT_DIR', input_root):
+                removed = app.media.cleanup_staged_private_inputs_once()
+
+            self.assertEqual(removed, 2)
+            self.assertFalse(photo.exists(), 'stale user upload must be expired')
+            self.assertFalse(nested.exists(), 'nested reference folders must be swept too')
+            self.assertTrue(sealed.exists(), 'sealed envelopes are already client-only')
+            self.assertTrue(fresh.exists(), 'recent uploads stay usable')
+
+    # --- staged plaintext goes when the machine goes quiet --------------------
+    #
+    # The ceiling on pipeline staging is two hours and cannot simply come down:
+    # a staged input is read when its graph EXECUTES, so a short timer would
+    # delete inputs out from under running generations. Idleness is the signal
+    # instead. These fix the behaviour that let another process on this machine
+    # find and copy the owner's upscale source hours after the job finished.
+
+    def _staged(self, root, name, age):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'pixels')
+        when = time.time() - age
+        os.utime(path, (when, when))
+        return path
+
+    def test_pipeline_staging_goes_as_soon_as_nothing_can_be_reading_it(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'input'
+            staged = self._staged(root, 'media-studio-inline-abc.png', 600)
+            guide = self._staged(root, '.ltx-reference/job-headswap.mp4', 600)
+            upload = self._staged(root, 'user-photo.png', 600)
+            with patch.object(app.config, 'COMFY_INPUT_DIR', root), \
+                 patch.object(app.media, '_nothing_can_be_reading_staged_inputs', lambda: True):
+                removed = app.media.cleanup_staged_private_inputs_once()
+            self.assertEqual(removed, 2)
+            self.assertFalse(staged.exists())
+            self.assertFalse(guide.exists(), 'the composed head-swap guide is pipeline staging')
+            self.assertTrue(upload.exists(), "a person's own upload is theirs to come back to")
+
+    def test_a_running_job_keeps_its_staged_input(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'input'
+            staged = self._staged(root, 'media-studio-inline-abc.png', 600)
+            with patch.object(app.config, 'COMFY_INPUT_DIR', root), \
+                 patch.object(app.media, '_nothing_can_be_reading_staged_inputs', lambda: False):
+                self.assertEqual(app.media.cleanup_staged_private_inputs_once(), 0)
+            self.assertTrue(staged.exists(), 'a generation must never lose its input mid-run')
+
+    def test_freshly_staged_input_is_never_raced(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'input'
+            staged = self._staged(root, 'media-studio-inline-abc.png', 5)
+            with patch.object(app.config, 'COMFY_INPUT_DIR', root), \
+                 patch.object(app.media, '_nothing_can_be_reading_staged_inputs', lambda: True):
+                self.assertEqual(app.media.cleanup_staged_private_inputs_once(), 0)
+            self.assertTrue(staged.exists(), 'accepted-but-not-yet-recorded jobs must survive')
+
+    def test_idleness_counts_an_unreachable_lane_as_busy(self):
+        # Being wrong in this direction costs one sweep of delay; being wrong in
+        # the other kills a generation on a missing file.
+        app = load_app()
+        with patch.object(app.jobs, 'active_jobs', lambda: []), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:1'}), \
+             patch.object(app.lanes, 'comfy_lane_is_remote', lambda lane: False):
+            def refuse(*args, **kwargs):
+                raise OSError('connection refused')
+            with patch.object(app.net, 'urlopen', refuse):
+                self.assertFalse(app.media._nothing_can_be_reading_staged_inputs())
+
+    def test_idleness_needs_an_empty_gateway_and_an_empty_lane_queue(self):
+        app = load_app()
+
+        class _Answer:
+            def __init__(self, payload):
+                self._payload = json.dumps(payload).encode('utf-8')
+
+            def read(self):
+                return self._payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'comfy_lane_is_remote', lambda lane: False):
+            with patch.object(app.jobs, 'active_jobs', lambda: [{'id': 'j1'}]), \
+                 patch.object(app.net, 'urlopen', lambda *a, **k: _Answer({})):
+                self.assertFalse(app.media._nothing_can_be_reading_staged_inputs())
+            with patch.object(app.jobs, 'active_jobs', lambda: []), \
+                 patch.object(app.net, 'urlopen', lambda *a, **k: _Answer({'queue_pending': [['x']]})):
+                self.assertFalse(app.media._nothing_can_be_reading_staged_inputs())
+            with patch.object(app.jobs, 'active_jobs', lambda: []), \
+                 patch.object(app.net, 'urlopen', lambda *a, **k: _Answer({'queue_running': [], 'queue_pending': []})):
+                self.assertTrue(app.media._nothing_can_be_reading_staged_inputs())
+
+    # --- an output is read back before it is sealed ---------------------------
+    #
+    # ComfyUI writes a plaintext PNG and run_z_image_turbo.py fetches it over
+    # HTTP the moment the history entry appears. With no grace at all the sweep
+    # could seal and delete that file in the sub-second gap before the fetch,
+    # and the generation failed with a 404 after the model had already run
+    # (measured 2026-09-11: the envelope existed 207 ms after the write). The
+    # same pass also stole outputs from `encrypt_outputs`, which is the only
+    # path that knows the job's own owner and agent recipients.
+
+    def _plaintext_output(self, root, name, age):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'pixels')
+        when = time.time() - age
+        os.utime(path, (when, when))
+        return path
+
+    def _sweep_outputs(self, app, root, idle, **kwargs):
+        sealed = []
+        with patch.object(app.config, 'OUT_DIR', root.parent / 'z_image_outputs'), \
+             patch.object(app.config, 'COMFY_OUTPUT_DIR', root), \
+             patch.object(app.config, 'DEBUG_OUTPUT_DIR', root / '.debug'), \
+             patch.object(app.media, '_nothing_can_be_reading_staged_inputs', lambda: idle), \
+             patch.object(app.media, 'encrypt_output_file', lambda p, **kw: sealed.append(Path(p)) or Path(p)):
+            app.media.encrypt_existing_outputs_once(max_age_seconds=0, **kwargs)
+        return sealed
+
+    def test_a_running_job_keeps_the_output_it_is_reading_back(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            fresh = self._plaintext_output(root, 'z_image_turbo_00026_.png', 0.2)
+            self.assertEqual(self._sweep_outputs(app, root, idle=False), [])
+            self.assertTrue(fresh.exists(), 'the runner still has to read this back over HTTP')
+
+    def test_an_output_is_sealed_the_moment_nothing_can_be_reading_it(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            fresh = self._plaintext_output(root, 'z_image_turbo_00026_.png', 0.2)
+            self.assertEqual(self._sweep_outputs(app, root, idle=True), [fresh])
+
+    def test_plaintext_nobody_came_back_for_is_sealed_even_while_busy(self):
+        # A crashed runner, or a render driven straight from ComfyUI's own UI,
+        # must not stay readable because some unrelated job is running.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            orphan = self._plaintext_output(
+                root, 'z_image_turbo_00026_.png', app.media.OUTPUT_PLAINTEXT_MAX_AGE_SECONDS + 60)
+            self.assertEqual(self._sweep_outputs(app, root, idle=False), [orphan])
+
+    # --- the bar reads real sampler steps, not a guess -----------------------
+    #
+    # ComfyUI counts sampler steps exactly, but publishes them over the
+    # websocket only, to the client id that submitted — and run_z_image_turbo.py
+    # submits over HTTP and never holds that socket. So a 23s render ran against
+    # a 10s estimate and the bar sat at its cap for the second half. The
+    # hivemind-progress node serves those counters at /hivemind/progress and
+    # this is what carries them into the job record.
+
+    def _progress_answer(self, payload, status=200):
+        class _Answer:
+            def __init__(self):
+                self._payload = json.dumps(payload).encode('utf-8')
+
+            def read(self):
+                return self._payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+        if status != 200:
+            raise AssertionError('use a raising stub for non-200')
+        return _Answer()
+
+    def test_real_sampler_counters_reach_the_job_record(self):
+        app = load_app()
+        stop = threading.Event()
+        app.jobs.jobs['j1'] = {'id': 'j1', 'status': 'running'}
+        def answer(*args, **kwargs):
+            return self._progress_answer({'prompt_id': 'p1', 'node_id': '3', 'value': 6, 'max': 8})
+        with patch.object(app.net, 'urlopen', answer), \
+             patch.object(app.lanes, 'comfy_lane_request', lambda lane, path: path):
+            threading.Thread(
+                target=app.graphs.poll_local_comfy_progress,
+                args=('j1', 'default', 'p1', stop), kwargs={'poll_seconds': 0.01},
+                daemon=True,
+            ).start()
+            deadline = time.time() + 3
+            while time.time() < deadline and 'progress' not in app.jobs.jobs['j1']:
+                time.sleep(0.01)
+            stop.set()
+        record = app.jobs.jobs['j1']
+        self.assertEqual(record['current_step'], 6)
+        self.assertEqual(record['total_steps'], 8)
+        # The SAMPLER's own fraction, unscaled: where that belongs on a bar is
+        # the client's call, and only the client knows where its bar had reached.
+        self.assertEqual(record['progress'], 75.0)
+        self.assertEqual(record['progress_phase'], 'sampling')
+
+    def test_a_lane_without_the_progress_node_just_keeps_the_estimate(self):
+        app = load_app()
+        stop = threading.Event()
+        app.jobs.jobs['j2'] = {'id': 'j2', 'status': 'running'}
+
+        def refuse(*args, **kwargs):
+            raise OSError('404 no counters for this prompt')
+
+        with patch.object(app.net, 'urlopen', refuse), \
+             patch.object(app.lanes, 'comfy_lane_request', lambda lane, path: path):
+            thread = threading.Thread(
+                target=app.graphs.poll_local_comfy_progress,
+                args=('j2', 'default', 'p2', stop), kwargs={'poll_seconds': 0.01},
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.1)
+            stop.set()
+            thread.join(timeout=2)
+        self.assertNotIn('progress', app.jobs.jobs['j2'])
+
+    def test_a_finished_job_is_never_reopened_by_a_late_counter(self):
+        app = load_app()
+        stop = threading.Event()
+        app.jobs.jobs['j3'] = {'id': 'j3', 'status': 'success'}
+        def answer(*args, **kwargs):
+            return self._progress_answer({'prompt_id': 'p3', 'value': 8, 'max': 8})
+        with patch.object(app.net, 'urlopen', answer), \
+             patch.object(app.lanes, 'comfy_lane_request', lambda lane, path: path):
+            thread = threading.Thread(
+                target=app.graphs.poll_local_comfy_progress,
+                args=('j3', 'default', 'p3', stop), kwargs={'poll_seconds': 0.01},
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(0.1)
+            stop.set()
+            thread.join(timeout=2)
+        self.assertNotIn('progress', app.jobs.jobs['j3'])
+
+    def test_without_a_prompt_id_there_is_nothing_to_ask_about(self):
+        app = load_app()
+        called = []
+        with patch.object(app.net, 'urlopen', lambda *a, **k: called.append(1)):
+            app.graphs.poll_local_comfy_progress('j4', 'default', '', threading.Event())
+        self.assertEqual(called, [])
+
+    def test_the_runner_hands_over_its_prompt_id_while_it_is_still_running(self):
+        """The whole point of reading the runner's first line.
+
+        `subprocess.run` only returns at the end, so the prompt id — the only
+        way to ask the lane about THIS generation's steps — used to arrive too
+        late to be worth anything. Reading one flushed line first is what makes
+        the progress mirror possible at all, and it must not break the stdout
+        parsing that finds the outputs."""
+        app = load_app()
+        with TemporaryDirectory() as td:
+            out = Path(td) / 'pic.png'
+            out.write_bytes(b'pixels')
+            runner = Path(td) / 'fake_runner.py'
+            runner.write_text(
+                '#!/usr/bin/env python3\n'
+                'import json, sys, time\n'
+                'print(json.dumps({"submitted": "prompt-42", "seed": 1, "loras": []}), flush=True)\n'
+                'time.sleep(0.2)\n'
+                'print(json.dumps({"status": "success", "outputs": [%r]}))\n' % str(out)
+            )
+            runner.chmod(0o755)
+            started = []
+            recorded = []
+            app.jobs.jobs['jr'] = {'id': 'jr', 'status': 'queued'}
+            with patch.object(app.config, 'RUNNER', runner), \
+                 patch.object(app.config, 'COMFY', Path(td)), \
+                 patch.object(app.graphs, 'poll_local_comfy_progress',
+                              lambda job_id, lane, prompt_id, stop, **kw: started.append((job_id, prompt_id))), \
+                 patch.object(app.media, 'encrypt_outputs', lambda paths, job_id=None: [str(p) for p in paths]), \
+                 patch.object(app.runners._history, 'append_history', recorded.append):
+                app.runners.run_generation('jr', 'a prompt')
+
+            self.assertEqual(started, [('jr', 'prompt-42')], 'the mirror never learned the prompt id')
+            record = app.jobs.jobs['jr']
+            self.assertEqual(record['status'], 'success', record.get('error'))
+            # The first line was consumed for the prompt id and must still be
+            # part of the stdout the output parsing reads.
+            self.assertEqual([Path(p).name for p in record['outputs']], ['pic.png'])
+            self.assertEqual(len(recorded), 1)
+
+    # --- one question, one answer: whose key seals this? ---------------------
+    #
+    # 2026-09-12: three places decided this independently and disagreed the
+    # moment the machine held two workspaces. A user working in account 2 got
+    # their video sealed to account 1 and read "Can't decrypt - Sealed for a
+    # different key" over their own clip. The precedence now lives in exactly
+    # one function, and these are it.
+
+    def test_the_key_the_request_presented_is_the_one_that_seals(self):
+        app = load_app()
+        caller = 'C' * 392
+        with patch.object(app.media, 'vault_public_key_spki', lambda: 'M' * 392):
+            spki, source = app.media.seal_recipient(caller, media_name='clip.mp4')
+        self.assertEqual(spki, caller)
+        self.assertEqual(source, app.media.SEAL_SOURCE_CALLER)
+
+    def test_falling_back_to_the_machine_owner_is_never_silent(self):
+        # Sanctioned for a headless agent run that presents nothing — and a
+        # loud line every time, because for a browser-initiated job this is
+        # the moment the output becomes unopenable in the workspace that
+        # asked for it.
+        app = load_app()
+        app.media._machine_seal_warned.clear()
+        machine = 'M' * 392
+        with patch.object(app.media, 'vault_public_key_spki', lambda: machine):
+            with patch('sys.stderr', new_callable=io.StringIO) as err:
+                spki, source = app.media.seal_recipient('', media_name='clip.mp4')
+        self.assertEqual(spki, machine)
+        self.assertEqual(source, app.media.SEAL_SOURCE_MACHINE)
+        self.assertIn('X-E2E-Owner-Pub', err.getvalue())
+        self.assertIn('clip.mp4', err.getvalue())
+
+    def test_a_malformed_caller_key_is_not_treated_as_a_key(self):
+        app = load_app()
+        app.media._machine_seal_warned.clear()
+        machine = 'M' * 392
+        with patch.object(app.media, 'vault_public_key_spki', lambda: machine):
+            spki, source = app.media.seal_recipient('not-a-key', media_name='x.png')
+        self.assertEqual((spki, source), (machine, app.media.SEAL_SOURCE_MACHINE))
+
+    def test_no_vault_anywhere_means_no_recipient_at_all(self):
+        # The caller's cue to fall back to legacy at-rest encryption rather
+        # than leaving plaintext on disk.
+        app = load_app()
+        with patch.object(app.media, 'vault_public_key_spki', lambda: None):
+            spki, _source = app.media.seal_recipient('', media_name='x.png')
+        self.assertIsNone(spki)
+
+    def test_a_natively_intercepted_job_still_registers_its_seal_recipients(self):
+        """The 202 hook cannot see these, and that is the whole bug.
+
+        A prompt posted to /comfy/api/prompt that the gateway runs natively gets
+        a Comfy-shaped 200 carrying `prompt_id`, not a 202 carrying `id`, so
+        send_json's registration never fired. The job then had no owner key and
+        the seal fell back to whichever account is is_owner — a workspace-2
+        user's LTX clips came back "Can't decrypt - Sealed for a different key"
+        (2026-09-12). Every native intercept must register explicitly.
+        """
+        app = load_app()
+        source = (BASE / 'gateway/http.py').read_text(encoding='utf-8')
+        # Each native queue call is followed by the registration.
+        for queue in ('queue_native_mlx_ltx_job', 'queue_native_mlx_biglove_job'):
+            index = source.index(queue)
+            following = source[index:index + 400]
+            self.assertIn('register_native_job_seal_recipients(job_id)', following,
+                          f'{queue} mints a job id without registering its seal recipients')
+        # And the helper takes BOTH keys off the request, not from the machine.
+        helper = source[source.index('def register_native_job_seal_recipients'):][:1400]
+        self.assertIn('REQUESTER_PUB_HEADER', helper)
+        self.assertIn('OWNER_PUB_HEADER', helper)
+        self.assertTrue(hasattr(app.media, 'register_owner_seal_recipient'))
+
+    def test_the_job_that_made_a_file_may_seal_it_while_its_own_guard_is_held(self):
+        """The bug that made every LTX clip unopenable in its own workspace.
+
+        A runner marks its output active for the whole render and then seals it
+        INSIDE that window (native_mlx.py: mirror_output_to_comfy_output sits in
+        the try, mark_output_inactive in the finally). The active guard rejected
+        that seal, so the one call carrying the job's own recipients silently
+        no-oped and the SWEEPER sealed the file seconds later with none — to
+        this machine's default vault. Proven live 2026-09-12: "sealing
+        ..._f933ce989953_233f.mp4: owner fp e066c756... (machine-default), agent
+        fp none", four seconds after the job reported success. Images were never
+        affected because they never take this guard.
+        """
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            root.mkdir(parents=True)
+            made = root / 'clip.mp4'
+            made.write_bytes(b'pixels')
+            with patch.object(app.config, 'OUT_DIR', root.parent / 'out'), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', root), \
+                 patch.object(app.config, 'DEBUG_OUTPUT_DIR', root / '.debug'):
+                app.media.mark_output_active(made)
+                try:
+                    # The sweeper must still keep its hands off a live file...
+                    self.assertFalse(app.media.is_encryptable_output(made))
+                    # ...while the job that made it can seal it.
+                    self.assertTrue(app.media.is_encryptable_output(made, ignore_active=True))
+                finally:
+                    app.media.mark_output_inactive(made)
+
+    def test_the_runner_seal_carries_its_recipients_past_the_guard(self):
+        app = load_app()
+        source = (BASE / 'gateway/jobs.py').read_text(encoding='utf-8')
+        call = source[source.index('def mirror_output_to_comfy_output'):][:900]
+        self.assertIn('ignore_active=True', call,
+                      'the runner seal honours its own guard again and loses its recipients')
+        self.assertIn('owner_spki=_media.owner_seal_recipient_for(job_id)', call)
+
+    def test_the_startup_migration_does_not_wait_for_a_lane_that_is_not_up(self):
+        # Before the server listens there is no readback of ours to protect, and
+        # an unreachable lane reads as busy — which would leave the last run's
+        # plaintext sitting there until the ceiling.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'output'
+            fresh = self._plaintext_output(root, 'z_image_turbo_00026_.png', 0.2)
+            self.assertEqual(
+                self._sweep_outputs(app, root, idle=False, defer_to_readers=False), [fresh])
+
+    def test_every_prefix_the_pipeline_stages_can_also_be_deleted_on_demand(self):
+        # The prefix tuple is both the sweeper's budget and the delete route's
+        # allowlist, so a staging prefix missing from it is undeletable too.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td) / 'input'
+            root.mkdir()
+            for name in ('mcp_audio_1_a.m4a', 'mcp_refvideo_1_a.mp4',
+                         'mcp_inpaint_src_1_a.mp4', 'restore-p1-0001.mp4'):
+                staged = root / name
+                staged.write_bytes(b'pixels')
+                with patch.object(app.config, 'COMFY_INPUT_DIR', root):
+                    self.assertTrue(app.media.delete_private_input(name), name)
+                self.assertFalse(staged.exists(), name)
+
+    def test_private_media_defaults_do_not_allow_plaintext_grace_or_token_printing(self):
+        source = gateway_source()
+        comfy_proxy = (BASE / 'app/comfy/[[...path]]/route.js').read_text(encoding='utf-8')
+
+        self.assertIn('ZIMG_OUTPUT_PLAINTEXT_GRACE", "0"', source)
+        self.assertNotIn('print(f"Token: {TOKEN}"', source)
+        self.assertNotIn('max-age=10800', comfy_proxy)
+        self.assertIn("cache-control', 'private, no-store, max-age=0'", comfy_proxy)
+
+    def test_tailscale_https_proxy_routes_next_assets_to_gateway(self):
+        proxy_source = (BASE / 'tailscale-https-proxy.js').read_text(encoding='utf-8')
+        self.assertIn("pathname === '/_next'", proxy_source)
+        self.assertIn("pathname.startsWith('/_next/')", proxy_source)
+        self.assertIn("'/api/models'", proxy_source)
+        self.assertIn("'/api/civitai'", proxy_source)
+        self.assertIn("'/image'", proxy_source)
+
+    def test_output_encryption_covers_images_and_videos(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output_root = Path(td)
+            image = output_root / 'image.png'
+            video = output_root / 'video.mp4'
+            model = output_root / 'model.safetensors'
+            with patch.object(app.config, 'OUT_DIR', output_root), patch.object(app.media, 'OUTPUT_ENCRYPTION_ENABLED', True):
+                self.assertTrue(app.media.is_encryptable_output(image))
+                self.assertTrue(app.media.is_encryptable_output(video))
+                self.assertFalse(app.media.is_encryptable_output(model))
+
+    def test_exact_output_lookup_is_confined_to_private_media_roots(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output_root = Path(td) / 'output'
+            output_root.mkdir()
+            logical = output_root / 'nested-video.mp4'
+            logical.with_name(logical.name + '.zenc').write_bytes(b'opaque-encrypted-payload')
+            outside = Path(td) / 'outside.mp4'
+            outside.write_bytes(b'outside')
+            with patch.object(app.config, 'OUT_DIR', output_root), patch.object(app.config, 'COMFY_OUTPUT_DIR', output_root):
+                self.assertEqual(app.media.find_exact_output_logical_path(logical), logical.resolve())
+                self.assertIsNone(app.media.find_exact_output_logical_path(outside))
+                self.assertIsNone(app.media.find_exact_output_logical_path(output_root / 'model.safetensors'))
+
+    def test_output_encryption_preserves_original_mtime(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output_root = Path(td)
+            source = output_root / 'preserve-time.mp4'
+            source.write_bytes(b'plaintext-video')
+            original_ns = 1_700_000_000_123_456_789
+            os.utime(source, ns=(original_ns, original_ns))
+
+            def fake_openssl(command, **_kwargs):
+                target = Path(command[command.index('-out') + 1])
+                target.write_bytes(b'opaque-encrypted-payload' * 2)
+                return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+
+            with patch.object(app.config, 'OUT_DIR', output_root), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_root), \
+                 patch.object(app.media, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app.media, 'output_encryption_password', return_value='test-secret'), \
+                 patch.object(app.media.subprocess, 'run', side_effect=fake_openssl):
+                app.media.encrypt_output_file(source)
+
+            encrypted = source.with_name(source.name + '.zenc')
+            self.assertFalse(source.exists())
+            self.assertEqual(encrypted.stat().st_mtime_ns, original_ns)
+
+    def test_delete_output_everywhere_purges_copies_history_workflow_index_and_preview_cache(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            comfy_output = root / 'comfy-output'
+            native_output = root / 'native-output'
+            preview_cache = root / 'preview-cache'
+            comfy_output.mkdir()
+            native_output.mkdir()
+            preview_cache.mkdir()
+            (comfy_output / 'purge-me.png.zenc').write_bytes(b'ciphertext-a')
+            (native_output / 'purge-me.png.zenc').write_bytes(b'ciphertext-b')
+            (native_output / 'keep-me.png.zenc').write_bytes(b'ciphertext-c')
+            (preview_cache / 'cached-preview.jpg').write_bytes(b'preview')
+            history_file = root / 'history.jsonl'
+            history_file.write_text(
+                json.dumps({'id': 'job-1', 'outputs': [str(native_output / 'purge-me.png'), str(native_output / 'keep-me.png')], 'prompt': '[private]'}) + '\n',
+                encoding='utf-8',
+            )
+            workflow_index = root / 'output-workflow-index.jsonl'
+            workflow_index.write_text(
+                json.dumps({'prompt_id': 'prompt-1', 'filenames': ['purge-me.png'], 'workflow': {'encrypted': True, 'format': 'comfyui-mobile-encrypted-workflow'}}) + '\n',
+                encoding='utf-8',
+            )
+            app.workflow_index._workflow_index = {'purge-me.png': {'encrypted': True}}
+            app.workflow_index._workflow_index_records = {'purge-me.png': {'prompt_id': 'prompt-1', 'lane': 'default'}}
+            app.workflow_index._workflow_index_prompts = {'prompt-1'}
+
+            with patch.object(app.config, 'OUT_DIR', native_output), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', comfy_output), \
+                 patch.object(app.history, 'HISTORY_FILE', history_file), \
+                 patch.object(app.workflow_index, 'WORKFLOW_INDEX_FILE', workflow_index), \
+                 patch.object(app.config, 'PREVIEW_CACHE_ROOTS', [preview_cache]), \
+                 patch.object(app.jobs, '_delete_prompt_ids_from_comfy', return_value=[]):
+                result = app.jobs.delete_output_everywhere('purge-me.png')
+
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['deleted_files'], 2)
+            self.assertFalse((comfy_output / 'purge-me.png.zenc').exists())
+            self.assertFalse((native_output / 'purge-me.png.zenc').exists())
+            self.assertTrue((native_output / 'keep-me.png.zenc').exists())
+            remaining_history = json.loads(history_file.read_text(encoding='utf-8'))
+            self.assertEqual([Path(value).name for value in remaining_history['outputs']], ['keep-me.png'])
+            self.assertEqual(workflow_index.read_text(encoding='utf-8'), '')
+            self.assertFalse(any(preview_cache.iterdir()))
+            self.assertNotIn('purge-me.png', app.workflow_index._workflow_index)
+
+    def test_delete_output_everywhere_cleans_shared_prompt_trace_without_deleting_sibling_output(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            output_root = root / 'output'
+            output_root.mkdir()
+            (output_root / 'purge-me.png.zenc').write_bytes(b'ciphertext-a')
+            (output_root / 'keep-me.png.zenc').write_bytes(b'ciphertext-b')
+            workflow_index = root / 'output-workflow-index.jsonl'
+            workflow_index.write_text(
+                json.dumps({
+                    'prompt_id': 'shared-prompt',
+                    'filenames': ['purge-me.png', 'keep-me.png'],
+                    'workflow': {'encrypted': True, 'format': 'comfyui-mobile-encrypted-workflow'},
+                }) + '\n',
+                encoding='utf-8',
+            )
+            app.workflow_index._workflow_index = {
+                'purge-me.png': {'encrypted': True},
+                'keep-me.png': {'encrypted': True},
+            }
+            app.workflow_index._workflow_index_records = {
+                'purge-me.png': {'prompt_id': 'shared-prompt', 'lane': 'default'},
+                'keep-me.png': {'prompt_id': 'shared-prompt', 'lane': 'default'},
+            }
+            app.workflow_index._workflow_index_prompts = {'shared-prompt'}
+
+            with patch.object(app.config, 'OUT_DIR', output_root), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_root), \
+                 patch.object(app.history, 'HISTORY_FILE', root / 'missing-history.jsonl'), \
+                 patch.object(app.workflow_index, 'WORKFLOW_INDEX_FILE', workflow_index), \
+                 patch.object(app.config, 'PREVIEW_CACHE_ROOTS', []), \
+                 patch.object(app.jobs, '_delete_prompt_ids_from_comfy', return_value=[]) as delete_from_comfy:
+                result = app.jobs.delete_output_everywhere('purge-me.png')
+
+            self.assertTrue(result['ok'])
+            delete_from_comfy.assert_called_once_with({'shared-prompt'})
+            self.assertFalse((output_root / 'purge-me.png.zenc').exists())
+            self.assertTrue((output_root / 'keep-me.png.zenc').exists())
+            record = json.loads(workflow_index.read_text(encoding='utf-8'))
+            self.assertEqual(record['filenames'], ['keep-me.png'])
+            self.assertNotIn('purge-me.png', app.workflow_index._workflow_index)
+            self.assertIn('keep-me.png', app.workflow_index._workflow_index)
+            self.assertIn('shared-prompt', app.workflow_index._workflow_index_prompts)
 
     def test_hardware_profile_cuda_disables_apple_specific_routes(self):
         app = load_app()
         with patch.dict('os.environ', CUDA_ENV, clear=False):
-            self.assertEqual(app.accelerator_profile(), 'cuda')
-            self.assertFalse(app.supports_apple_silicon_optimizations())
-            self.assertFalse(app.supports_native_mlx_biglove_route())
-            self.assertFalse(app.supports_native_mlx_ltx_route())
-            self.assertFalse(app.use_swift_flux2_server())
+            self.assertEqual(app.config.accelerator_profile(), 'cuda')
+            self.assertFalse(app.config.supports_apple_silicon_optimizations())
+            self.assertFalse(app.config.supports_native_mlx_biglove_route())
+            self.assertFalse(app.config.supports_native_mlx_ltx_route())
+            self.assertFalse(app.config.use_swift_flux2_server())
 
     def test_hardware_profile_apple_silicon_enables_native_routes(self):
         app = load_app()
         with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_USE_FLUX2_SERVER': '1'}, clear=False):
-            self.assertEqual(app.accelerator_profile(), 'apple-silicon')
-            self.assertTrue(app.supports_apple_silicon_optimizations())
-            self.assertTrue(app.supports_native_mlx_biglove_route())
-            self.assertTrue(app.supports_native_mlx_ltx_route())
-            self.assertTrue(app.use_swift_flux2_server())
+            self.assertEqual(app.config.accelerator_profile(), 'apple-silicon')
+            self.assertTrue(app.config.supports_apple_silicon_optimizations())
+            self.assertTrue(app.config.supports_native_mlx_biglove_route())
+            self.assertTrue(app.config.supports_native_mlx_ltx_route())
+            self.assertTrue(app.config.use_swift_flux2_server())
 
-    def test_civitai_token_uses_env_or_canonical_file_and_ignores_legacy_save(self):
+    def test_civitai_token_uses_env_alias_or_canonical_file_and_ignores_legacy_save(self):
         app = load_app()
         with TemporaryDirectory() as td:
             tmp_path = Path(td)
             token_file = tmp_path / 'civitai-token'
-            with patch.object(app, 'CIVITAI_TOKEN_FILE', token_file), patch.dict('os.environ', {'CIVITAI_TOKEN': ''}, clear=False):
+            with patch.object(app.models, 'CIVITAI_TOKEN_FILE', token_file), patch.dict('os.environ', {
+                'CIVITAI_TOKEN': '',
+                'CIVITAI_API_TOKEN': '',
+                'CIVITAI_API_KEY': '',
+                'CIVITAI_KEY': '',
+                'CIVITAI_ACCESS_TOKEN': '',
+                'CIVITAI_BEARER_TOKEN': '',
+                'CIVITAI_PAT': '',
+            }, clear=False):
                 token_file.write_text('canonical-token\n')
                 (tmp_path / 'civitai_token.txt.save').write_text('saved-token\n')
-                self.assertEqual(app.civitai_token(), 'canonical-token')
+                self.assertEqual(app.models.civitai_token(), 'canonical-token')
+                self.assertTrue(app.models.civitai_token_status()['configured'])
                 token_file.unlink()
-                self.assertEqual(app.civitai_token(), '')
+                self.assertEqual(app.models.civitai_token(), '')
             with patch.dict('os.environ', {'CIVITAI_TOKEN': 'env-token'}, clear=False):
-                self.assertEqual(app.civitai_token(), 'env-token')
+                self.assertEqual(app.models.civitai_token(), 'env-token')
+            with patch.dict('os.environ', {'CIVITAI_TOKEN': '', 'CIVITAI_API_KEY': 'api-key-token'}, clear=False):
+                self.assertEqual(app.models.civitai_token(), 'api-key-token')
+            with patch.dict('os.environ', {'CIVITAI_TOKEN': '', 'CIVITAI_API_KEY': '', 'CIVITAI_PAT': 'pat-token'}, clear=False):
+                self.assertEqual(app.models.civitai_token(), 'pat-token')
 
     def test_download_progress_callback_receives_bytes_and_total(self):
         app = load_app()
@@ -95,23 +960,339 @@ class ZImageAppTests(unittest.TestCase):
                     return self.chunks.pop(0)
 
             progress = []
-            with patch.object(app, 'COMFY', tmp_path), patch.object(app, 'civitai_json', return_value=version), patch.object(app, 'urlopen', return_value=FakeResponse()):
-                result = app.download_civitai_version(123, 456, progress_cb=lambda done, total: progress.append((done, total)))
+            with patch.object(app.config, 'COMFY', tmp_path), patch.object(app.models, 'civitai_json', return_value=version), patch.object(app.net, 'urlopen', return_value=FakeResponse()):
+                result = app.models.download_civitai_version(123, 456, progress_cb=lambda done, total: progress.append((done, total)))
 
             self.assertTrue(result['ok'])
             self.assertEqual(Path(result['path']).read_bytes(), b'abcdef')
             self.assertEqual(Path(result['path']).parent.resolve(), (tmp_path / 'models' / 'loras').resolve())
             self.assertEqual(progress[-1], (6, 6))
             self.assertGreaterEqual(len(progress), 3)
+
+    def test_civitai_expected_type_accepts_lora_families_and_rejects_checkpoints(self):
+        app = load_app()
+
+        app.models.validate_civitai_expected_type({'model': {'type': 'LORA'}}, 'LORA')
+        app.models.validate_civitai_expected_type({'model': {'type': 'LoCon'}}, 'LORA')
+        with self.assertRaisesRegex(RuntimeError, 'Expected a Civitai LoRA URL'):
+            app.models.validate_civitai_expected_type({'model': {'type': 'Checkpoint'}}, 'LORA')
+
+    def test_downloads_without_an_expected_type_accept_any_model_and_file_it_by_type(self):
+        # The studio downloader does not pin a type: a checkpoint URL must download
+        # and land in models/checkpoints instead of being rejected as "not a LoRA".
+        app = load_app()
+
+        app.models.validate_civitai_expected_type({'model': {'type': 'Checkpoint'}}, None)
+        app.models.validate_civitai_expected_type({'model': {'type': 'VAE'}}, '')
+
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            version = {
+                'id': 321,
+                'baseModel': 'SDXL 1.0',
+                'model': {'type': 'Checkpoint'},
+                'downloadUrl': 'https://example.test/checkpoint.safetensors',
+                'files': [{
+                    'id': 654,
+                    'name': 'checkpoint.safetensors',
+                    'type': 'Model',
+                    'primary': True,
+                    'downloadUrl': 'https://example.test/checkpoint.safetensors',
+                }],
+            }
+
+            class FakeResponse:
+                headers = {'Content-Length': '4'}
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def read(self, n):
+                    if not hasattr(self, 'chunks'):
+                        self.chunks = [b'abcd', b'']
+                    return self.chunks.pop(0)
+
+            with patch.object(app.config, 'COMFY', tmp_path), patch.object(app.models, 'civitai_json', return_value=version), patch.object(app.net, 'urlopen', return_value=FakeResponse()):
+                result = app.models.download_civitai_version(321, 654)
+
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['modelType'], 'Checkpoint')
+            self.assertEqual(Path(result['directory']).resolve(), (tmp_path / 'models' / 'checkpoints').resolve())
+            self.assertEqual(Path(result['path']).parent.resolve(), (tmp_path / 'models' / 'checkpoints').resolve())
+
+    def test_cancelling_a_download_stops_the_transfer_and_removes_the_partial_file(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            version = {
+                'id': 555,
+                'baseModel': 'SDXL 1.0',
+                'model': {'type': 'LORA', 'name': 'Look'},
+                'downloadUrl': 'https://example.test/model.safetensors',
+                'files': [{
+                    'id': 777,
+                    'name': 'model.safetensors',
+                    'type': 'Model',
+                    'primary': True,
+                    'downloadUrl': 'https://example.test/model.safetensors',
+                }],
+            }
+
+            class FakeResponse:
+                headers = {'Content-Length': '12'}
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def read(self, n):
+                    if not hasattr(self, 'chunks'):
+                        self.chunks = [b'aa', b'bb', b'cc', b'']
+                    return self.chunks.pop(0)
+
+            # Cancel after the first chunk lands, the way a click mid-download does.
+            reads = []
+            def should_cancel():
+                reads.append(1)
+                return len(reads) > 1
+
+            with patch.object(app.config, 'COMFY', tmp_path), patch.object(app.models, 'civitai_json', return_value=version), patch.object(app.net, 'urlopen', return_value=FakeResponse()):
+                with self.assertRaises(app.models.DownloadCancelled):
+                    app.models.download_civitai_version(555, 777, should_cancel=should_cancel)
+
+            loras = tmp_path / 'models' / 'loras'
+            self.assertEqual(sorted(p.name for p in loras.iterdir()), [])  # no file, no .part leftover
+
+    def test_cancel_flag_only_applies_to_live_jobs_and_names_come_from_the_version(self):
+        app = load_app()
+        with patch.dict(app.history.download_jobs, {}, clear=True):
+            app.history.download_jobs['live'] = {'id': 'live', 'status': 'running'}
+            app.history.download_jobs['done'] = {'id': 'done', 'status': 'success'}
+            with patch.object(app.history, 'save_download_jobs_unlocked', lambda: None):
+                self.assertTrue(app.models.cancel_civitai_download_job('live').get('cancel_requested'))
+                self.assertTrue(app.models.download_job_cancel_requested('live'))
+                # A finished job is not retroactively cancellable.
+                self.assertNotIn('cancel_requested', app.models.cancel_civitai_download_job('done'))
+                self.assertFalse(app.models.download_job_cancel_requested('done'))
+                self.assertIsNone(app.models.cancel_civitai_download_job('missing'))
+
+        self.assertEqual(
+            app.models.civitai_version_display_name({'name': 'v2', 'model': {'name': 'Look'}}),
+            'Look · v2',
+        )
+        # No duplicated name when the version label already carries the model name.
+        self.assertEqual(
+            app.models.civitai_version_display_name({'name': 'Look v2', 'model': {'name': 'Look v2'}}),
+            'Look v2',
+        )
+        self.assertEqual(app.models.civitai_version_display_name({}), '')
+
+    def test_lora_cards_carry_their_installed_version_identity(self):
+        app = load_app()
+        # Sidecar shape Civitai actually writes: modelId on the version, and a
+        # nested `model` with a name but NO id.
+        record = app.models.compact_lora_record({
+            'id': 'look.safetensors',
+            'name': 'look.safetensors',
+            'path': '/x/look.safetensors',
+            'baseModel': 'SDXL 1.0',
+            'metadata': {'modelVersion': {'id': 111, 'modelId': 42, 'name': 'v2.0', 'model': {'name': 'Look', 'type': 'LORA'}}},
+        })
+
+        self.assertEqual(record['versionId'], '111')
+        self.assertEqual(record['versionName'], 'v2.0')
+        self.assertEqual(record['modelId'], '42')
+        self.assertEqual(record['displayName'], 'Look')
+        # Older/hand-written sidecars that nest the id instead still resolve.
+        nested = app.models.compact_lora_record({
+            'id': 'old.safetensors', 'name': 'old.safetensors', 'path': '/x/old.safetensors',
+            'metadata': {'modelVersion': {'id': 7, 'model': {'id': 99, 'name': 'Old'}}},
+        })
+        self.assertEqual(nested['modelId'], '99')
+        # Hand-placed files have no Civitai identity and must not fake one.
+        bare = app.models.compact_lora_record({'id': 'hand.safetensors', 'name': 'hand.safetensors', 'path': '/x/hand.safetensors', 'metadata': {}})
+        self.assertEqual((bare['versionId'], bare['versionName'], bare['modelId']), ('', '', ''))
+
+    def test_update_detection_compares_version_ids_not_list_order(self):
+        app = load_app()
+        versions = [
+            {'id': '300', 'name': 'v3'},
+            {'id': '100', 'name': 'v1'},
+            {'id': '200', 'name': 'v2'},
+        ]
+
+        self.assertEqual(app.models.newer_civitai_version(versions, '100')['id'], '300')
+        self.assertEqual(app.models.newer_civitai_version(versions, '200')['id'], '300')
+        self.assertIsNone(app.models.newer_civitai_version(versions, '300'))  # newest installed
+        self.assertIsNone(app.models.newer_civitai_version(versions, '400'))  # ahead of Civitai
+        self.assertIsNone(app.models.newer_civitai_version(versions, ''))     # unknown install
+        self.assertIsNone(app.models.newer_civitai_version([], '100'))
+
+    def test_a_newer_version_for_another_base_model_is_not_an_update(self):
+        # Real shape (Civitai model 2173844 / 1862761): one model publishes a version
+        # per base model, so the newest id is often a DIFFERENT adapter. Replacing a
+        # ZImageTurbo LoRA with the Krea 2 version would break the workflow using it.
+        app = load_app()
+        versions = [
+            {'id': '3075498', 'name': 'v1.0 Krea2', 'baseModel': 'Krea 2'},
+            {'id': '2882216', 'name': 'v0.5 Anima', 'baseModel': 'Anima'},
+            {'id': '2683561', 'name': 'v1.0 ZImageBase', 'baseModel': 'ZImageBase'},
+            {'id': '2526600', 'name': 'Z-Image (Asian edition)', 'baseModel': 'ZImageTurbo'},
+            {'id': '2465980', 'name': 'v1.0 Z-Image Turbo', 'baseModel': 'ZImageTurbo'},
+        ]
+
+        # Installed is already the newest ZImageTurbo version: no update.
+        self.assertIsNone(app.models.newer_civitai_version(versions, '2526600', ['ZImageTurbo']))
+        # The older ZImageTurbo build does have one — and it is the ZImageTurbo build,
+        # not the higher-id Krea 2 one.
+        found = app.models.newer_civitai_version(versions, '2465980', ['ZImageTurbo'])
+        self.assertEqual(found['id'], '2526600')
+        # ZImageBase must not be treated as ZImageTurbo.
+        self.assertIsNone(app.models.newer_civitai_version(versions, '2683561', ['ZImageBase']))
+        # A version with no declared base is not assumed to match.
+        self.assertIsNone(app.models.newer_civitai_version([{'id': '9', 'name': 'x'}], '1', ['ZImageTurbo']))
+        # No base filter at all keeps the old id-only behaviour.
+        self.assertEqual(app.models.newer_civitai_version(versions, '2526600')['id'], '3075498')
+
+    def test_a_sibling_option_is_not_an_update(self):
+        # Real case (Civitai model 2535622, "LTX 2.3 - Enhancers"): the model ships
+        # "Soft Enhance" and "Crisp Enhance" as separate versions of the SAME base.
+        # The higher id is the other option, not a newer one — offering it as an
+        # update replaced an installed Soft with Crisp.
+        app = load_app()
+        versions = [
+            {'id': '2849716', 'name': 'Crisp Enhance', 'baseModel': 'LTXV 2.3'},
+            {'id': '2849706', 'name': 'Soft Enhance', 'baseModel': 'LTXV 2.3'},
+        ]
+
+        self.assertIsNone(app.models.newer_civitai_version(versions, '2849706', ['LTXV 2.3'], 'Soft Enhance'))
+        self.assertIsNone(app.models.newer_civitai_version(versions, '2849716', ['LTXV 2.3'], 'Crisp Enhance'))
+        # A newer build of the SAME option is still an update.
+        with_revision = versions + [{'id': '2900000', 'name': 'Soft Enhance v2', 'baseModel': 'LTXV 2.3'}]
+        found = app.models.newer_civitai_version(with_revision, '2849706', ['LTXV 2.3'], 'Soft Enhance')
+        self.assertEqual(found['id'], '2900000')
+
+    def test_version_lineage_keeps_real_revisions_and_rejects_options(self):
+        app = load_app()
+
+        # Revisions seen in the installed library — these must keep updating.
+        for installed, candidate in [
+            ('v1.0', 'v1.1'),
+            ('Krea 2 v1.0', 'Krea 2 v1.1'),
+            ('V4.1 Exp, pre', 'v4.3_EXP'),      # descriptive words narrow, still one lineage
+            ('v3', 'v4.3_EXP'),
+            ('2vector', '3vector'),             # digits glued to the label
+            ('small breast-flat chest', 'V2.1'),  # renamed to a bare version
+            ('Krea-2_v1', 'Krea-2_v2'),
+        ]:
+            self.assertTrue(app.models.same_version_lineage(installed, candidate), f'{installed} -> {candidate}')
+
+        # Options published side by side — never an upgrade path.
+        for installed, candidate in [
+            ('Soft Enhance', 'Crisp Enhance'),
+            ('Crisp Enhance', 'Soft Enhance'),
+            ('SDXL', 'Pony'),
+            ('anime style', 'realistic style'),
+        ]:
+            self.assertFalse(app.models.same_version_lineage(installed, candidate), f'{installed} -> {candidate}')
+
+    def test_lora_updates_skip_uncheckable_entries_and_survive_api_failures(self):
+        app = load_app()
+        installed = [
+            {'id': 'look.safetensors', 'name': 'look.safetensors', 'path': '/x/look.safetensors', 'baseModel': 'SDXL 1.0',
+             'metadata': {'modelVersion': {'id': 100, 'name': 'v1', 'model': {'id': 42, 'name': 'Look'}}}},
+            {'id': 'hand.safetensors', 'name': 'hand.safetensors', 'path': '/x/hand.safetensors', 'baseModel': 'SDXL 1.0',
+             'metadata': {}},
+            {'id': 'boom.safetensors', 'name': 'boom.safetensors', 'path': '/x/boom.safetensors', 'baseModel': 'SDXL 1.0',
+             'metadata': {'modelVersion': {'id': 1, 'name': 'v1', 'model': {'id': 99, 'name': 'Boom'}}}},
+        ]
+
+        def versions(model_id, force=False):
+            if str(model_id) == '99':
+                raise RuntimeError('Civitai rate limited')
+            return [
+                {'id': '900', 'name': 'v3 Pony', 'baseModel': 'Pony'},  # different base: not an update
+                {'id': '500', 'name': 'v2', 'baseModel': 'SDXL 1.0'},
+            ]
+
+        with patch.object(app.models, 'local_loras_unfiltered', return_value=installed), \
+             patch.object(app.models, 'civitai_model_versions', side_effect=versions):
+            updates = app.models.civitai_lora_updates(['SDXL 1.0'])
+
+        # The rate-limited model is skipped, not fatal; the sidecar-less file cannot be checked.
+        self.assertEqual(list(updates), ['look.safetensors'])
+        entry = updates['look.safetensors']
+        self.assertEqual(entry['latestVersionId'], '500')
+        self.assertEqual(entry['currentVersionId'], '100')
+        self.assertEqual(entry['url'], 'https://civitai.com/models/42?modelVersionId=500')
+
+    def test_replacing_a_lora_removes_the_old_file_only_after_the_new_one_lands(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            loras = tmp_path / 'models' / 'loras'
+            loras.mkdir(parents=True)
+            old = loras / 'look-v1.safetensors'
+            old.write_bytes(b'old')
+            (loras / 'look-v1.safetensors.civitai.json').write_text('{}')
+            new = loras / 'look-v2.safetensors'
+
+            with patch.object(app.config, 'COMFY', tmp_path):
+                # The replacement is not on disk yet: the old file must survive.
+                app.models.replace_installed_lora(old, {'path': str(new)})
+                self.assertTrue(old.exists())
+
+                new.write_bytes(b'new')
+                with patch.object(app.models, 'load_selected_loras', return_value=[{'id': 'look-v1.safetensors', 'strength': 0.7}]), \
+                     patch.object(app.models, 'save_selected_loras') as save:
+                    outcome = app.models.replace_installed_lora(old, {'path': str(new)})
+
+            self.assertFalse(old.exists())
+            self.assertFalse((loras / 'look-v1.safetensors.civitai.json').exists())
+            self.assertTrue(new.exists())
+            self.assertEqual(Path(outcome['replacedBy']).name, 'look-v2.safetensors')
+            # The generation selection follows the file instead of silently dropping it.
+            save.assert_called_once_with([{'id': 'look-v2.safetensors', 'strength': 0.7}])
+
+    def test_a_same_filename_update_overwrites_in_place_and_removes_nothing(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            loras = tmp_path / 'models' / 'loras'
+            loras.mkdir(parents=True)
+            same = loras / 'look.safetensors'
+            same.write_bytes(b'new bytes from the update')
+
+            with patch.object(app.config, 'COMFY', tmp_path):
+                outcome = app.models.replace_installed_lora(same, {'path': str(same)})
+
+            self.assertEqual(outcome['removed'], '')
+            self.assertTrue(same.exists())
+
+    def test_replace_targets_are_confined_to_the_loras_directory(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            (tmp_path / 'models' / 'loras').mkdir(parents=True)
+            (tmp_path / 'models' / 'checkpoints').mkdir(parents=True)
+            outside = tmp_path / 'models' / 'checkpoints' / 'base.safetensors'
+            outside.write_bytes(b'not a lora')
+
+            with patch.object(app.config, 'COMFY', tmp_path):
+                with self.assertRaisesRegex(RuntimeError, 'outside the ComfyUI loras directory'):
+                    app.models.resolve_installed_lora_path('../checkpoints/base.safetensors')
+                with self.assertRaisesRegex(RuntimeError, 'No installed LoRA named'):
+                    app.models.resolve_installed_lora_path('missing.safetensors')
+            self.assertTrue(outside.exists())
+
     def test_civitai_download_url_uses_query_token_not_bearer_redirect_header(self):
         app = load_app()
         with TemporaryDirectory() as td:
             tmp_path = Path(td)
-            with patch.object(app, 'CIVITAI_TOKEN_FILE', tmp_path / 'civitai_token.txt'), patch.object(app, 'BASE', tmp_path), patch.dict('os.environ', {'CIVITAI_TOKEN': 'test-token'}, clear=False):
-                url = app.civitai_download_url('https://civitai.com/api/download/models/2960556')
+            with patch.object(app.models, 'CIVITAI_TOKEN_FILE', tmp_path / 'civitai_token.txt'), patch.object(app.config, 'BASE', tmp_path), patch.dict('os.environ', {'CIVITAI_TOKEN': 'test-token'}, clear=False):
+                url = app.models.civitai_download_url('https://civitai.com/api/download/models/2960556')
                 self.assertIn('token=test-token', url)
-                self.assertEqual(app.civitai_download_headers(), {'User-Agent': 'Hermes-ZImage-ComfyUI/1.0'})
-                self.assertNotIn('Authorization', app.civitai_download_headers())
+                self.assertEqual(app.models.civitai_token(' request-token '), 'request-token')
+                override_url = app.models.civitai_download_url('https://civitai.com/api/download/models/2960556', token_override='body-token')
+                self.assertIn('token=body-token', override_url)
+                self.assertNotIn('token=test-token', override_url)
+                self.assertEqual(app.models.civitai_download_headers(), {'User-Agent': 'Hermes-ZImage-ComfyUI/1.0'})
+                self.assertNotIn('Authorization', app.models.civitai_download_headers())
 
     def test_equip_lora_adds_generation_selection_and_unequip_removes_it(self):
         app = load_app()
@@ -123,24 +1304,24 @@ class ZImageAppTests(unittest.TestCase):
             Path(str(lora) + '.civitai.json').write_text('{"baseModel":"ZImageTurbo"}')
             equipped_file = tmp_path / 'equipped_models.json'
             selected_file = tmp_path / 'selected_loras.json'
-            with patch.object(app, 'COMFY', tmp_path), patch.object(app, 'EQUIPPED_FILE', equipped_file), patch.object(app, 'SELECTED_LORAS_FILE', selected_file), patch.object(app, 'ram_info', return_value={'total': 128 * 1024**3, 'free': 100 * 1024**3, 'used': 28 * 1024**3, 'reserved_equipped': 0}), patch.object(app, 'comfy_json', return_value={}):
-                ok, msg = app.equip_model('loras/style.safetensors')
+            with patch.object(app.config, 'COMFY', tmp_path), patch.object(app.models, 'EQUIPPED_FILE', equipped_file), patch.object(app.models, 'SELECTED_LORAS_FILE', selected_file), patch.object(app.models, 'ram_info', return_value={'total': 128 * 1024**3, 'free': 100 * 1024**3, 'used': 28 * 1024**3, 'reserved_equipped': 0}), patch.object(app.net, 'comfy_json', return_value={}):
+                ok, msg = app.models.equip_model('loras/style.safetensors')
                 self.assertTrue(ok)
                 self.assertIn('added to generation selection', msg)
-                selected = app.load_selected_loras()
+                selected = app.models.load_selected_loras()
                 self.assertEqual([x['id'] for x in selected], ['style.safetensors'])
 
-                changed = app.unequip_model('loras/style.safetensors')
+                changed = app.models.unequip_model('loras/style.safetensors')
                 self.assertTrue(changed)
-                self.assertEqual(app.load_selected_loras(), [])
+                self.assertEqual(app.models.load_selected_loras(), [])
 
     def test_generation_request_has_loras_checks_request_or_saved_selection(self):
         app = load_app()
-        with patch.object(app, 'load_selected_loras', return_value=[]):
-            self.assertFalse(app._generation_request_has_loras({'loras': []}))
-            self.assertTrue(app._generation_request_has_loras({'loras': [{'id': 'style.safetensors'}]}))
-        with patch.object(app, 'load_selected_loras', return_value=[{'id': 'style.safetensors'}]):
-            self.assertTrue(app._generation_request_has_loras({}))
+        with patch.object(app.models, 'load_selected_loras', return_value=[]):
+            self.assertFalse(app.loras._generation_request_has_loras({'loras': []}))
+            self.assertTrue(app.loras._generation_request_has_loras({'loras': [{'id': 'style.safetensors'}]}))
+        with patch.object(app.models, 'load_selected_loras', return_value=[{'id': 'style.safetensors'}]):
+            self.assertTrue(app.loras._generation_request_has_loras({}))
 
     def test_native_mlx_ltx_prompt_marker_extracts_fast_variant(self):
         app = load_app()
@@ -150,7 +1331,7 @@ class ZImageAppTests(unittest.TestCase):
                 '597': {
                     'class_type': 'VHS_VideoCombine',
                     'inputs': {
-                        'filename_prefix': 'Eros/native_mlx_ltx__fast-q8-v12',
+                        'filename_prefix': 'Eros/native_mlx_ltx__eros-v14-q8-dmd',
                         'frame_rate': ['542', 0],
                         'save_output': True,
                     },
@@ -166,10 +1347,10 @@ class ZImageAppTests(unittest.TestCase):
         }).encode('utf-8')
 
         with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
-            native = app.detect_native_mlx_ltx_prompt(body)
+            native = app.graphs.detect_native_mlx_ltx_prompt(body)
 
         self.assertIsNotNone(native)
-        self.assertEqual(native['variant'], 'fast-q8-v12')
+        self.assertEqual(native['variant'], 'eros-v14-q8-dmd')
         self.assertEqual(native['prompt'], 'private video prompt')
         self.assertEqual(native['image_path'], 'source.png')
         self.assertEqual(native['options']['width'], 480)
@@ -177,6 +1358,843 @@ class ZImageAppTests(unittest.TestCase):
         self.assertEqual(native['options']['frames'], 233)
         self.assertEqual(native['options']['frame_rate'], 24)
         self.assertEqual(native['options']['seed'], 42)
+        self.assertEqual(native['images'], [{'image_path': 'source.png', 'frame': 0, 'strength': 1.0, 'role': 'start'}])
+
+    def test_native_mlx_ltx_fast_extension_keeps_distilled_model_and_labels_frame_units(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            model_dir = Path(td) / 'fast-distilled'
+            model_dir.mkdir()
+            variants = {key: dict(value) for key, value in app.config.LTX2_MLX_VARIANTS.items()}
+            variants['eros-v14-q8-dmd'].update({
+                'model': str(model_dir),
+                'video_model': str(model_dir),
+                'video_distilled': True,
+            })
+            body = json.dumps({
+                'prompt': {
+                    '597': {'class_type': 'VHS_VideoCombine', 'inputs': {'filename_prefix': 'Eros/native_mlx_ltx__eros-v14-q8-dmd'}},
+                    '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                    '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'continue the same shot'}},
+                },
+                'extra_data': {
+                    'extra_pnginfo': {
+                        'workflow': {
+                            'extra': {
+                                'nativeMlxLtx': {
+                                    'enabled': True,
+                                    'variant': 'eros-v14-q8-dmd',
+                                    'defaults': {'frame_rate': 24, 'duration_seconds': 4},
+                                    'video': {'path': 'source.mp4', 'mode': 'extend'},
+                                },
+                            },
+                        },
+                    },
+                },
+            }).encode('utf-8')
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                 patch.object(app.config, 'LTX2_MLX_VARIANTS', variants):
+                native = app.graphs.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['operation'], 'extend')
+        self.assertEqual(native['options']['model'], str(model_dir))
+        self.assertEqual(native['options']['extension_output_frames'], 96)
+        self.assertEqual(native['options']['extension_latent_frames'], 12)
+        self.assertTrue(native['options']['distilled'])
+
+    def test_native_mlx_ltx_extension_carries_the_tail_request_through(self):
+        """`return_tail_only` decides whether one press makes one shot.
+
+        The extension regenerates the source AND the new frames as one file —
+        that is how the soundtrack carries. A sequence asks for the tail so a
+        shot card holds the new shot rather than every shot before it; the
+        standalone "extend this clip" surface asks for nothing and keeps the
+        grown clip it has always had, which is why the default must stay off.
+        """
+        app = load_app()
+
+        def spec_for(video_meta):
+            with TemporaryDirectory() as td:
+                model_dir = Path(td) / 'regular'
+                model_dir.mkdir()
+                variants = {key: dict(value) for key, value in app.config.LTX2_MLX_VARIANTS.items()}
+                variants['regular-q8-distilled'].update({
+                    'model': str(model_dir), 'video_model': str(model_dir),
+                })
+                body = json.dumps({
+                    'prompt': {
+                        '597': {'class_type': 'VHS_VideoCombine', 'inputs': {'filename_prefix': 'LTX23/native_mlx_ltx__regular-q8-distilled'}},
+                        '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                        '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'the dog lands and runs on'}},
+                    },
+                    'extra_data': {'extra_pnginfo': {'workflow': {'extra': {'nativeMlxLtx': {
+                        'enabled': True,
+                        'variant': 'regular-q8-distilled',
+                        'defaults': {'frame_rate': 24, 'duration_seconds': 4},
+                        'video': video_meta,
+                    }}}}},
+                }).encode('utf-8')
+                with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                     patch.object(app.config, 'LTX2_MLX_VARIANTS', variants):
+                    return app.graphs.detect_native_mlx_ltx_prompt(body)
+
+        asked = spec_for({'path': 'source.mp4', 'mode': 'extend', 'return_tail_only': True})
+        self.assertIsNotNone(asked)
+        self.assertEqual(asked['operation'], 'extend')
+        self.assertTrue(asked['options']['return_tail_only'])
+
+        # Off unless asked, and a literal False — the runner branches on it, and
+        # a missing key would read the same as "no" only by accident.
+        plain = spec_for({'path': 'source.mp4', 'mode': 'extend'})
+        self.assertIs(plain['options']['return_tail_only'], False)
+
+    def test_native_mlx_ltx_regular_variant_uses_metadata_frames(self):
+        app = load_app()
+        body = json.dumps({
+            'prompt': {
+                '542': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                '597': {
+                    'class_type': 'VHS_VideoCombine',
+                    'inputs': {
+                        'filename_prefix': 'LTX23/native_mlx_ltx__regular-q8-distilled',
+                        'frame_rate': ['542', 0],
+                        'save_output': True,
+                    },
+                },
+                '773': {'class_type': 'LoadImage', 'inputs': {'image': 'source.png'}},
+                '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 480}},
+                '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 832}},
+                '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private regular ltx prompt'}},
+                '534': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': 233}},
+            },
+            'extra_data': {
+                'extra_pnginfo': {
+                    'workflow': {
+                        'extra': {
+                            'nativeMlxLtx': {
+                                'enabled': True,
+                                'variant': 'regular-q8-distilled',
+                                'defaults': {'frames': 25},
+                            },
+                        },
+                    },
+                },
+            },
+        }).encode('utf-8')
+
+        with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+            native = app.graphs.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['variant'], 'regular-q8-distilled')
+        self.assertEqual(native['prompt'], 'private regular ltx prompt')
+        self.assertEqual(native['options']['frames'], 25)
+        self.assertEqual(native['options']['title'], 'LTX 2.3 regular q8 distilled')
+
+    def test_ltx_snap_render_dimensions_matches_pipeline_grid(self):
+        app = load_app()
+        # Two-stage (generate) renders stage 1 at half res: multiples of 64.
+        self.assertEqual(app.graphs._ltx_snap_render_dimensions(928, 928), (896, 896))
+        self.assertEqual(app.graphs._ltx_snap_render_dimensions(896, 896), (896, 896))
+        self.assertEqual(app.graphs._ltx_snap_render_dimensions(480, 832), (448, 832))
+        # Single-stage keeps the VAE's 32 grid.
+        self.assertEqual(app.graphs._ltx_snap_render_dimensions(640, 480, single_stage=True), (640, 480))
+        self.assertEqual(app.graphs._ltx_snap_render_dimensions(30, 30), (64, 64))
+
+    def test_native_mlx_ltx_metadata_keyframes_are_normalized(self):
+        app = load_app()
+        body = json.dumps({
+            'prompt': {
+                '542': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                '597': {
+                    'class_type': 'VHS_VideoCombine',
+                    'inputs': {
+                        'filename_prefix': 'LTX23/native_mlx_ltx__regular-q8-distilled',
+                        'frame_rate': ['542', 0],
+                        'save_output': True,
+                    },
+                },
+                '773': {'class_type': 'LoadImage', 'inputs': {'image': 'start.png'}},
+                '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 480}},
+                '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 832}},
+                '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private keyed ltx prompt'}},
+                '534': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': 25}},
+            },
+            'extra_data': {
+                'extra_pnginfo': {
+                    'workflow': {
+                        'extra': {
+                            'nativeMlxLtx': {
+                                'enabled': True,
+                                'variant': 'regular-q8-distilled',
+                                'defaults': {'frames': 25},
+                                'keyframes': [
+                                    {'image': 'middle.png', 'role': 'middle', 'strength': 0.75},
+                                    {'image': 'end.png', 'role': 'end'},
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        }).encode('utf-8')
+
+        with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+            native = app.graphs.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['images'], [
+            {'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'},
+            {'image_path': 'middle.png', 'frame': 12, 'strength': 0.75, 'role': 'middle'},
+            {'image_path': 'end.png', 'frame': 24, 'strength': 1.0, 'role': 'end'},
+        ])
+
+    def test_native_mlx_ltx_metadata_loras_and_cfg_are_normalized(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            lora = root / 'models' / 'loras' / 'ltx' / '2.3' / 'ltx2.3-transition.safetensors'
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'lora')
+            body = json.dumps({
+                'prompt': {
+                    '542': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                    '583': {'class_type': 'CFGGuider', 'inputs': {'cfg': 4.0}},
+                    '597': {
+                        'class_type': 'VHS_VideoCombine',
+                        'inputs': {
+                            'filename_prefix': 'LTX23/native_mlx_ltx__regular-q8-distilled',
+                            'frame_rate': ['542', 0],
+                            'save_output': True,
+                        },
+                    },
+                    '773': {'class_type': 'LoadImage', 'inputs': {'image': 'start.png'}},
+                    '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 480}},
+                    '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 832}},
+                    '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                    '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private transition prompt zhuanchang'}},
+                    '534': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': 25}},
+                },
+                'extra_data': {
+                    'extra_pnginfo': {
+                        'workflow': {
+                            'extra': {
+                                'nativeMlxLtx': {
+                                    'enabled': True,
+                                    'variant': 'regular-q8-distilled',
+                                    'defaults': {'frames': 25},
+                                    'loras': [
+                                        {'name': 'ltx/2.3/ltx2.3-transition.safetensors', 'strength': 1.0},
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                },
+            }).encode('utf-8')
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                 patch.object(app.config, 'COMFY', root):
+                native = app.graphs.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['options']['cfg_scale'], 4.0)
+        self.assertEqual(native['options']['loras'], [{
+            'name': 'ltx2.3-transition.safetensors',
+            'source': 'ltx/2.3/ltx2.3-transition.safetensors',
+            'scale': 1.0,
+            'filePath': str(lora.resolve()),
+        }])
+
+    def test_ltx_denoise_mode_is_normalized_and_off_by_default(self):
+        app = load_app()
+
+        self.assertEqual(app.native_mlx.normalize_ltx_denoise_mode('light'), 'light')
+        self.assertEqual(app.native_mlx.normalize_ltx_denoise_mode('STRONG'), 'strong')
+        self.assertEqual(app.native_mlx.normalize_ltx_denoise_mode('on'), 'light')
+        for value in ('', None, 'off', 'false', 'nope', 0):
+            self.assertEqual(app.native_mlx.normalize_ltx_denoise_mode(value), '')
+        # Off means the output file is never touched.
+        self.assertIsNone(app.native_mlx.apply_ltx_denoise_pass('/nonexistent.mp4', ''))
+
+    def test_ltx_denoise_pass_never_fails_a_finished_generation(self):
+        app = load_app()
+
+        with patch.object(app.jobs.shutil, 'which', return_value=None):
+            detail = app.native_mlx.apply_ltx_denoise_pass('/nonexistent.mp4', 'light')
+        self.assertEqual(detail, {'mode': 'light', 'applied': False, 'error': 'ffmpeg not found'})
+
+        # A failing ffmpeg leaves the original clip in place and reports, not raises.
+        with TemporaryDirectory() as td:
+            clip = Path(td) / 'clip.mp4'
+            clip.write_bytes(b'x' * 2048)
+            with patch.object(app.jobs.shutil, 'which', return_value='/usr/bin/false'), \
+                 patch.object(app.media.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='', stderr='boom')):
+                detail = app.native_mlx.apply_ltx_denoise_pass(clip, 'strong')
+            self.assertFalse(detail['applied'])
+            self.assertIn('boom', detail['error'])
+            self.assertEqual(clip.read_bytes(), b'x' * 2048)
+
+    def test_ltx_denoise_filters_stay_motion_safe(self):
+        app = load_app()
+
+        # Both tiers lead with atadenoise (motion-adaptive). Any hqdn3d pass must
+        # keep its two TEMPORAL terms at 0 — a temporal blur here would trade the
+        # grain for exactly the ghosting this is meant to avoid.
+        for mode, spec in app.native_mlx.LTX_DENOISE_FILTERS.items():
+            self.assertTrue(spec.startswith('atadenoise='), mode)
+            for stage in spec.split(','):
+                if stage.startswith('hqdn3d='):
+                    luma_s, chroma_s, luma_t, chroma_t = stage[len('hqdn3d='):].split(':')
+                    self.assertEqual((float(luma_t), float(chroma_t)), (0.0, 0.0), mode)
+                    self.assertGreater(float(luma_s), 0.0)
+                    self.assertGreater(float(chroma_s), 0.0)
+
+    def test_native_mlx_ltx_metadata_carries_the_denoise_choice(self):
+        app = load_app()
+        body = json.dumps({
+            'prompt': {
+                '542': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                '597': {
+                    'class_type': 'VHS_VideoCombine',
+                    'inputs': {
+                        'filename_prefix': 'Eros/native_mlx_ltx__eros-v14-q8-dmd',
+                        'frame_rate': ['542', 0],
+                        'save_output': True,
+                    },
+                },
+                '773': {'class_type': 'LoadImage', 'inputs': {'image': 'start.png'}},
+                '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 576}},
+                '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 576}},
+                '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private prompt'}},
+                '534': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': 121}},
+            },
+            'extra_data': {'extra_pnginfo': {'workflow': {'extra': {'nativeMlxLtx': {
+                'enabled': True,
+                'variant': 'eros-v14-q8-dmd',
+                'defaults': {'frames': 121, 'denoise': 'strong'},
+            }}}}},
+        }).encode('utf-8')
+
+        with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+            native = app.graphs.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['options']['denoise'], 'strong')
+
+    def test_native_mlx_ltx_ingredients_metadata_uses_ic_reference_path(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            lora = root / 'models' / 'loras' / 'ltx' / '2.3' / 'ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors'
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'ingredients-lora')
+            body = json.dumps({
+                'prompt': {
+                    '2004': {'class_type': 'LoadImage', 'inputs': {'image': 'reference-sheet.png'}},
+                    '2483': {'class_type': 'CLIPTextEncode', 'inputs': {'text': '### Reference Sheet Description\na cartoon character panel\n### Target Description\nshot'}},
+                    '3059': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': ['5072', 0]}},
+                    '4832': {'class_type': 'RandomNoise', 'inputs': {'noise_seed': 7}},
+                    '5011': {'class_type': 'LTXICLoRALoaderModelOnly', 'inputs': {'lora_name': 'ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors', 'strength_model': 1.4}},
+                    '5012': {'class_type': 'LTXAddVideoICLoRAGuide', 'inputs': {'image': ['2004', 0], 'strength': 1.0}},
+                    '5072': {'class_type': 'PrimitiveInt', 'inputs': {'value': 121}},
+                    '5098': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                    '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 768}},
+                    '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 448}},
+                },
+                'extra_data': {
+                    'extra_pnginfo': {
+                        'workflow': {
+                            'extra': {
+                                'nativeMlxLtx': {
+                                    'enabled': True,
+                                    'variant': 'regular-q8-dev-ic',
+                                    'pipeline': 'ic-lora',
+                                    'defaults': {'image': 'reference-sheet.png', 'width': 768, 'height': 448, 'frames': 121, 'frame_rate': 24, 'seed': 7},
+                                    'keyframes': [{'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'}],
+                                    'ingredientSheet': {
+                                        'sourceCount': 4,
+                                        'columns': 2,
+                                        'rows': 2,
+                                        'conditioningOnly': True,
+                                    },
+                                    'icLora': {
+                                        'single_stage': True,
+                                        'reference_min_frames': 121,
+                                        'target_min_frames': 121,
+                                        'image_crf': 0,
+                                        'conditioning_strength': 1.0,
+                                        'reference_strength': 1.0,
+                                        'dev_transformer': 'transformer-dev.safetensors',
+                                        'distilled_lora': 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
+                                        'distilled_lora_strength': 0.5,
+                                        'guided_dev': False,
+                                        'stage1_steps': 8,
+                                        'cfg_scale': 1.0,
+                                        'stg_scale': 0.0,
+                                        'runtime_timeout_seconds': 2400,
+                                    },
+                                    'loras': [{'name': 'ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors', 'strength': 1.4}],
+                                },
+                            },
+                        },
+                    },
+                },
+            }).encode('utf-8')
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), patch.object(app.config, 'COMFY', root):
+                native = app.graphs.detect_native_mlx_ltx_prompt(body)
+                fallback_data = json.loads(body.decode('utf-8'))
+                fallback_data.pop('extra_data')
+                fallback_native = app.graphs.detect_native_mlx_ltx_prompt(json.dumps(fallback_data).encode('utf-8'))
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['operation'], 'ic-lora')
+        self.assertEqual(native['reference_image_path'], 'reference-sheet.png')
+        self.assertEqual(native['images'], [{'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'}])
+        self.assertEqual(native['options']['width'], 768)
+        self.assertEqual(native['options']['height'], 448)
+        self.assertEqual(native['options']['frames'], 121)
+        self.assertTrue(native['options']['single_stage'])
+        self.assertEqual(native['options']['reference_min_frames'], 121)
+        self.assertEqual(native['options']['target_min_frames'], 121)
+        self.assertEqual(native['options']['ingredient_source_count'], 4)
+        self.assertEqual(native['options']['ingredient_sheet_columns'], 2)
+        self.assertEqual(native['options']['ingredient_sheet_rows'], 2)
+        self.assertTrue(native['options']['ingredient_conditioning_only'])
+        self.assertEqual(native['options']['image_crf'], 0)
+        self.assertEqual(native['variant'], 'regular-q8-dev-ic')
+        self.assertEqual(native['options']['dev_transformer'], 'transformer-dev.safetensors')
+        self.assertFalse(native['options']['guided_dev'])
+        self.assertEqual(native['options']['stage1_steps'], 8)
+        self.assertEqual(native['options']['cfg_scale'], 1.0)
+        self.assertEqual(native['options']['stg_scale'], 0.0)
+        self.assertEqual(native['options']['runtime_timeout_seconds'], 2400)
+        self.assertEqual(native['options']['distilled_lora'], 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors')
+        self.assertEqual(native['options']['distilled_lora_strength'], 0.5)
+        self.assertEqual(native['options']['loras'][0]['scale'], 1.4)
+        self.assertEqual(fallback_native['operation'], 'ic-lora')
+        self.assertEqual(fallback_native['reference_image_path'], 'reference-sheet.png')
+        self.assertEqual(fallback_native['options']['loras'][0]['scale'], 1.4)
+
+    def test_ingredients_aliases_fall_back_to_the_regular_dev_lane(self):
+        # The eros dev build (ltx-2.3-10eros-v1-mlx-q8-dev) was retired when the
+        # model set was trimmed to v1.4 DMD / v1.2 DMD / regular, so the
+        # ingredients aliases now resolve to the regular dev IC lane. Asserted
+        # because an alias pointing at a deleted variant fails only at run time,
+        # after the caller has already committed to a generation.
+        app = load_app()
+
+        spec = app.config.LTX2_MLX_VARIANTS['regular-q8-dev-ic']
+
+        self.assertEqual(spec['model'], str(app.config.MLX_MODELS_ROOT / 'ltx-2.3-mlx-q8-dev'))
+        self.assertFalse(spec['video_distilled'])
+        self.assertEqual(app.graphs._normalize_ltx_mlx_variant('eros-ingredients'), 'regular-q8-dev-ic')
+
+    def test_no_variant_alias_points_at_a_retired_variant(self):
+        # An alias for a variant that no longer exists resolves fine at import
+        # and fails only once a caller has committed to a generation, so it is
+        # asserted here instead. No exemptions: an alias the studio still offers
+        # but cannot run is exactly the thing this catches.
+        app = load_app()
+        dangling = {
+            alias: target for alias, target in app.config.LTX2_MLX_VARIANT_ALIASES.items()
+            if target not in app.config.LTX2_MLX_VARIANTS
+        }
+        self.assertEqual(dangling, {})
+
+    def test_every_offered_variant_has_its_model_directory(self):
+        # The studio should not advertise a model whose weights were deleted.
+        app = load_app()
+        missing = {
+            name: spec.get('model') for name, spec in app.config.LTX2_MLX_VARIANTS.items()
+            if spec.get('model') and not Path(str(spec['model'])).is_dir()
+        }
+        self.assertEqual(missing, {})
+
+    def test_native_mlx_ltx_runner_uses_ic_lora_with_lossless_reference_video(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            input_dir = root / 'input'
+            output_dir = root / 'output'
+            ltx_dir = root / 'ltx-2-mlx'
+            model_dir = root / 'model'
+            lora = root / 'models' / 'loras' / 'ltx' / '2.3' / 'ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors'
+            input_dir.mkdir()
+            output_dir.mkdir()
+            ltx_dir.mkdir()
+            model_dir.mkdir()
+            (model_dir / 'transformer-dev.safetensors').write_bytes(b'dev-transformer')
+            (model_dir / 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors').write_bytes(b'distilled-lora')
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'ingredients-lora')
+            (input_dir / 'reference-sheet.png').write_bytes(b'reference-sheet')
+            (input_dir / 'start.png').write_bytes(b'start-frame')
+            captured = {}
+
+            def fake_reference_video(_image, output, frames, _fps):
+                captured['reference_frames'] = frames
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b'lossless-reference-video')
+                return output
+
+            def fake_run(_job_id, _rec, command, **_kwargs):
+                captured['command'] = command
+                captured['env'] = _kwargs['env']
+                out = Path(command[command.index('-o') + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b'video' * 600)
+                return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
+
+            variants = {key: dict(value) for key, value in app.config.LTX2_MLX_VARIANTS.items()}
+            variants['regular-q8-dev-ic']['model'] = str(model_dir)
+            with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app.config, 'COMFY', root), \
+                 patch.object(app.config, 'OUT_DIR', output_dir), \
+                 patch.object(app.config, 'LTX2_MLX_DIR', ltx_dir), \
+                 patch.object(app.config, 'LTX2_MLX_VARIANTS', variants), \
+                 patch.object(app.native_mlx, '_create_native_ltx_static_reference_video', side_effect=fake_reference_video), \
+                 patch.object(app.native_mlx, '_prepare_native_ltx_anchor_canvas',
+                     side_effect=lambda source, *_args: (source, {'mode': 'passthrough', 'cached': False}),
+                 ), \
+                 patch.object(app.native_mlx, '_run_native_ltx_subprocess', side_effect=fake_run), \
+                 patch.object(app.history, 'append_history'), \
+                patch.object(app.jobs, 'mirror_output_to_comfy_output', side_effect=lambda path, job_id=None: path):
+                app.native_mlx.run_native_mlx_ltx_video('job-ingredients', {
+                    'variant': 'regular-q8-dev-ic',
+                    'operation': 'ic-lora',
+                    'prompt': '### Reference Sheet Description\na cartoon character panel\n### Target Description\nshot',
+                    'reference_image_path': 'reference-sheet.png',
+                    'images': [{'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'}],
+                    'options': {
+                        'width': 768,
+                        'height': 448,
+                        'frames': 25,
+                        'frame_rate': 24,
+                        'seed': 7,
+                        'single_stage': True,
+                        'conditioning_strength': 1.0,
+                        'reference_strength': 1.0,
+                        'reference_min_frames': 121,
+                        'target_min_frames': 121,
+                        'image_crf': 0,
+                        'dev_transformer': 'transformer-dev.safetensors',
+                        'distilled_lora': 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
+                        'distilled_lora_strength': 0.5,
+                        'guided_dev': False,
+                        'stage1_steps': 8,
+                        'cfg_scale': 1.0,
+                        'stg_scale': 0.0,
+                        'runtime_timeout_seconds': 2400,
+                        'loras': [{'name': 'ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors', 'strength': 1.4}],
+                    },
+                })
+
+            command = captured['command']
+            self.assertEqual(captured['reference_frames'], 121)
+            self.assertEqual(command[:4], ['uv', 'run', 'ltx-2-mlx', 'ic-lora'])
+            self.assertEqual(command[command.index('--lora') + 1:command.index('--lora') + 3], [str(lora.resolve()), '1.4'])
+            reference_arg = Path(command[command.index('--video-conditioning') + 1])
+            self.assertEqual(command[command.index('--video-conditioning') + 2], '1.0')
+            self.assertEqual(os.path.realpath(reference_arg.parent), os.path.realpath(input_dir / '.ltx-reference'))
+            self.assertIn('--single-stage', command)
+            self.assertEqual(command[command.index('--dev-transformer') + 1], 'transformer-dev.safetensors')
+            self.assertNotIn('--guided-dev', command)
+            self.assertNotIn('--stage1-steps', command)
+            self.assertNotIn('--cfg-scale', command)
+            self.assertNotIn('--stg-scale', command)
+            self.assertEqual(
+                command[command.index('--distilled-lora') + 1],
+                'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
+            )
+            self.assertEqual(command[command.index('--distilled-lora-strength') + 1], '0.5')
+            image_arg = command.index('--image')
+            self.assertEqual(
+                command[image_arg + 1:image_arg + 5],
+                [str((input_dir / 'start.png').resolve()), '0', '1.0', '0'],
+            )
+            self.assertEqual(command[command.index('-f') + 1], '121')
+            self.assertFalse(reference_arg.exists())
+            self.assertEqual(app.jobs.jobs['job-ingredients']['status'], 'success')
+
+    def test_native_mlx_ltx_runner_passes_repeated_image_anchors(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            input_dir = root / 'input'
+            output_dir = root / 'output'
+            ltx_dir = root / 'ltx-2-mlx'
+            model_path = root / 'model.safetensors'
+            lora = root / 'models' / 'loras' / 'ltx' / '2.3' / 'ltx2.3-transition.safetensors'
+            input_dir.mkdir()
+            output_dir.mkdir()
+            ltx_dir.mkdir()
+            lora.parent.mkdir(parents=True)
+            model_path.write_bytes(b'model')
+            lora.write_bytes(b'lora')
+            (input_dir / 'start.png').write_bytes(b'start-image')
+            (input_dir / 'end.png').write_bytes(b'end-image')
+            captured = {}
+
+            def fake_run(_job_id, _rec, command, **_kwargs):
+                captured['command'] = command
+                out = Path(command[command.index('-o') + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b'video' * 600)
+                return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
+
+            variants = {key: dict(value) for key, value in app.config.LTX2_MLX_VARIANTS.items()}
+            variants['regular-q8-distilled']['model'] = str(model_path)
+
+            with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app.config, 'COMFY', root), \
+                 patch.object(app.config, 'OUT_DIR', output_dir), \
+                 patch.object(app.config, 'LTX2_MLX_DIR', ltx_dir), \
+                 patch.object(app.config, 'LTX2_MLX_VARIANTS', variants), \
+                 patch.object(app.native_mlx, '_run_native_ltx_subprocess', side_effect=fake_run), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'mirror_output_to_comfy_output', side_effect=lambda path, job_id=None: path):
+                app.native_mlx.run_native_mlx_ltx_video('job-keyed', {
+                    'variant': 'regular-q8-distilled',
+                    'prompt': 'private keyed ltx prompt',
+                    'image_path': 'start.png',
+                    'images': [
+                        {'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'},
+                        {'image_path': 'end.png', 'frame': 24, 'strength': 0.8, 'role': 'end'},
+                    ],
+                    'options': {
+                        'width': 480,
+                        'height': 832,
+                        'frames': 25,
+                        'frame_rate': 24,
+                        'seed': 7,
+                        'cfg_scale': 4.0,
+                        'loras': [{'name': 'ltx/2.3/ltx2.3-transition.safetensors', 'strength': 1.0}],
+                    },
+                })
+
+            command = captured['command']
+            first = command.index('--image')
+            second = command.index('--image', first + 1)
+            lora_arg = command.index('--lora')
+            cfg_arg = command.index('--cfg-scale')
+            self.assertEqual(command[first + 1:first + 4], [str((input_dir / 'start.png').resolve()), '0', '1.0'])
+            self.assertEqual(command[second + 1:second + 4], [str((input_dir / 'end.png').resolve()), '24', '0.8'])
+            self.assertEqual(command[lora_arg + 1:lora_arg + 3], [str(lora.resolve()), '1.0'])
+            self.assertEqual(command[cfg_arg + 1], '4.0')
+            self.assertEqual(app.jobs.jobs['job-keyed']['status'], 'success')
+
+    def test_native_mlx_ltx_runner_clears_the_keyframes_it_was_handed(self):
+        """A native runner hands its media to a subprocess by PATH, so the file
+        has to exist while ltx-2-mlx reads it. It does not have to outlive the
+        job: before this, the owner's start/middle/end keyframes waited on the
+        idle sweeper, which on a machine that generates all day is hours."""
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            input_dir = root / 'input'
+            output_dir = root / 'output'
+            ltx_dir = root / 'ltx-2-mlx'
+            model_path = root / 'model.safetensors'
+            input_dir.mkdir()
+            output_dir.mkdir()
+            ltx_dir.mkdir()
+            model_path.write_bytes(b'model')
+            # Staged by the pipeline from what the browser decrypted...
+            staged = input_dir / 'media-studio-inline-deadbeefdeadbeef.png'
+            staged.write_bytes(b'a keyframe the owner chose')
+            # ...and a picture the owner uploaded to the Canvas themselves.
+            own_upload = input_dir / 'holiday.png'
+            own_upload.write_bytes(b'their own file')
+
+            def fake_run(_job_id, _rec, command, **_kwargs):
+                # The file must still be readable while the subprocess runs.
+                self.assertTrue(staged.exists(), 'the runner must not lose its input mid-run')
+                out = Path(command[command.index('-o') + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b'video' * 600)
+                return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
+
+            variants = {key: dict(value) for key, value in app.config.LTX2_MLX_VARIANTS.items()}
+            variants['regular-q8-distilled']['model'] = str(model_path)
+
+            with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app.config, 'COMFY', root), \
+                 patch.object(app.config, 'OUT_DIR', output_dir), \
+                 patch.object(app.config, 'LTX2_MLX_DIR', ltx_dir), \
+                 patch.object(app.config, 'LTX2_MLX_VARIANTS', variants), \
+                 patch.object(app.native_mlx, '_run_native_ltx_subprocess', side_effect=fake_run), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'mirror_output_to_comfy_output', side_effect=lambda path, job_id=None: path):
+                app.native_mlx.run_native_mlx_ltx_video('job-cleanup', {
+                    'variant': 'regular-q8-distilled',
+                    'prompt': 'private keyed ltx prompt',
+                    'image_path': staged.name,
+                    'images': [
+                        {'image_path': staged.name, 'frame': 0, 'strength': 1.0, 'role': 'start'},
+                        {'image_path': own_upload.name, 'frame': 24, 'strength': 0.8, 'role': 'end'},
+                    ],
+                    'options': {'width': 480, 'height': 832, 'frames': 25, 'frame_rate': 24, 'seed': 7},
+                })
+
+            self.assertEqual(app.jobs.jobs['job-cleanup']['status'], 'success')
+            self.assertFalse(staged.exists(), 'pipeline staging must not outlive its job')
+            self.assertTrue(own_upload.exists(), "a person's own upload is theirs to come back to")
+
+    def test_a_native_input_goes_to_the_subprocess_with_no_name(self):
+        """A native runner reads a PATH, so the bytes cannot come from memory —
+        but the path does not have to be one that exists. The file is copied
+        into a temporary that is unlinked while still open, and the child is
+        handed /dev/fd/N. For the length of the render there is nothing in any
+        directory to list."""
+        app = load_app()
+        with TemporaryDirectory() as td:
+            staged = Path(td) / 'media-studio-inline-deadbeef.png'
+            staged.write_bytes(b'\x89PNG\r\n\x1a\n' + b'the owner\'s keyframe')
+            cmd = ['uv', 'run', 'ltx-2-mlx', '--image', str(staged), '0', '1.0']
+
+            with app.native_mlx._anonymous_input_arguments(cmd, [str(staged)]) as (rewritten, inherited):
+                self.assertEqual(len(inherited), 1)
+                swapped = rewritten[rewritten.index('--image') + 1]
+                self.assertTrue(swapped.startswith('/dev/fd/'), swapped)
+                self.assertNotIn(str(staged), rewritten, 'no filename may reach the command line')
+                self.assertFalse(staged.exists(), 'the named copy goes as soon as the nameless one exists')
+                # And the bytes are really there for a process holding the fd.
+                self.assertEqual(os.pread(inherited[0], 8, 0), b'\x89PNG\r\n\x1a\n')
+            with self.assertRaises(OSError):
+                os.fstat(inherited[0])  # closed when the render is over
+
+    def test_a_child_process_can_read_the_nameless_input(self):
+        # The whole point: an inherited descriptor, no directory entry.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            staged = Path(td) / 'media-studio-inline-deadbeef.bin'
+            staged.write_bytes(b'exactly these bytes')
+            with app.native_mlx._anonymous_input_arguments(['x', str(staged)], [str(staged)]) as (rewritten, inherited):
+                path = rewritten[1]
+                result = subprocess.run(
+                    [sys.executable, '-c', 'import sys;sys.stdout.write(open(sys.argv[1],"rb").read().decode())', path],
+                    pass_fds=inherited, capture_output=True, text=True, timeout=60,
+                )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'exactly these bytes')
+
+    def test_a_file_that_cannot_be_made_nameless_keeps_its_filename(self):
+        # Failing here must cost privacy, never the render.
+        app = load_app()
+        cmd = ['uv', 'run', '--image', '/does/not/exist.png']
+        with app.native_mlx._anonymous_input_arguments(cmd, ['/does/not/exist.png']) as (rewritten, inherited):
+            self.assertEqual(rewritten, cmd)
+            self.assertEqual(inherited, ())
+
+    def test_the_anonymous_path_can_be_turned_off_without_a_deploy(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            staged = Path(td) / 'media-studio-inline-deadbeef.png'
+            staged.write_bytes(b'pixels')
+            with patch.object(app.native_mlx, 'ANONYMOUS_NATIVE_INPUTS', False):
+                with app.native_mlx._anonymous_input_arguments(['x', str(staged)], [str(staged)]) as (rewritten, inherited):
+                    self.assertEqual(rewritten, ['x', str(staged)])
+                    self.assertEqual(inherited, ())
+            self.assertTrue(staged.exists())
+
+    def test_native_mlx_ltx_runner_uses_extend_command_for_source_video(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            input_dir = root / 'input'
+            output_dir = root / 'output'
+            ltx_dir = root / 'ltx-2-mlx'
+            model_dir = root / 'ltx-distilled-model'
+            input_dir.mkdir()
+            output_dir.mkdir()
+            ltx_dir.mkdir()
+            model_dir.mkdir()
+            source = input_dir / 'source.mp4'
+            source.write_bytes(b'source-video')
+            captured = {}
+
+            def fake_run(_job_id, _rec, command, **_kwargs):
+                captured['command'] = command
+                out = Path(command[command.index('-o') + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b'video' * 600)
+                return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
+
+            variants = {key: dict(value) for key, value in app.config.LTX2_MLX_VARIANTS.items()}
+            variants['eros-v14-q8-dmd']['video_model'] = str(model_dir)
+
+            with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app.config, 'COMFY', root), \
+                 patch.object(app.config, 'OUT_DIR', output_dir), \
+                 patch.object(app.config, 'LTX2_MLX_DIR', ltx_dir), \
+                 patch.object(app.config, 'LTX2_MLX_VARIANTS', variants), \
+                 patch.object(app.native_mlx, '_run_native_ltx_subprocess', side_effect=fake_run), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'mirror_output_to_comfy_output', side_effect=lambda path, job_id=None: path):
+                app.native_mlx.run_native_mlx_ltx_video('job-extend', {
+                    'variant': 'eros-v14-q8-dmd',
+                    'operation': 'extend',
+                    'prompt': 'continue the same cinematic shot',
+                    'video_path': 'source.mp4',
+                    'images': [],
+                    'options': {
+                        'model': str(model_dir),
+                        'duration_seconds': 2,
+                        'extension_output_frames': 48,
+                        'extension_latent_frames': 6,
+                        'extend_latent_frames': 6,
+                        'distilled': True,
+                        'frame_rate': 24,
+                        'seed': 7,
+                        'steps': 30,
+                        'cfg_scale': 3.0,
+                        'stg_scale': 1.0,
+                    },
+                })
+
+            command = captured['command']
+            self.assertEqual(command[:4], ['uv', 'run', 'ltx-2-mlx', 'extend'])
+            self.assertEqual(command[command.index('--video') + 1], str(source.resolve()))
+            self.assertEqual(command[command.index('--extend-frames') + 1], '6')
+            self.assertIn('--distilled', command)
+            self.assertNotIn('--steps', command)
+            self.assertNotIn('--cfg-scale', command)
+            self.assertNotIn('--stg-scale', command)
+            self.assertNotIn('--image', command)
+            self.assertEqual(app.jobs.jobs['job-extend']['status'], 'success')
+            self.assertEqual(app.jobs.jobs['job-extend']['options']['extension_output_frames'], 48)
+            self.assertEqual(app.jobs.jobs['job-extend']['options']['extension_latent_frames'], 6)
+            self.assertEqual(app.jobs.jobs['job-extend']['options']['extension_pipeline'], 'distilled')
+
+    def test_native_mlx_ltx_progress_tracks_real_denoise_steps(self):
+        app = load_app()
+        rec = {'id': 'job-progress', 'status': 'running'}
+
+        app.native_mlx._update_native_ltx_process_progress(
+            'job-progress',
+            rec,
+            '\rDenoising:  50%|#####     | 4/8 [00:12<00:12, 3.00s/it]',
+        )
+
+        self.assertEqual(rec['current_step'], 4)
+        self.assertEqual(rec['total_steps'], 8)
+        self.assertEqual(rec['progress'], 50)
+        self.assertEqual(rec['progress_phase'], 'denoising')
 
     def test_native_mlx_ltx_prompt_marker_is_ignored_on_cuda(self):
         app = load_app()
@@ -189,7 +2207,7 @@ class ZImageAppTests(unittest.TestCase):
         }).encode('utf-8')
 
         with patch.dict('os.environ', CUDA_ENV, clear=False):
-            self.assertIsNone(app.detect_native_mlx_ltx_prompt(body))
+            self.assertIsNone(app.graphs.detect_native_mlx_ltx_prompt(body))
 
     def test_krea2_turbo_legacy_runtime_lora_prompt_rewrites_to_pre_lora_route(self):
         app = load_app()
@@ -246,8 +2264,8 @@ class ZImageAppTests(unittest.TestCase):
             model_dir = tmp_path / 'models' / 'diffusion_models'
             model_dir.mkdir(parents=True)
             (model_dir / 'krea2_turbo_bf16.safetensors').write_bytes(b'placeholder')
-            with patch.object(app, 'COMFY', tmp_path):
-                rewritten = app.exact_comfy_krea2_turbo_pre_lora_prompt_body(body)
+            with patch.object(app.config, 'COMFY', tmp_path):
+                rewritten = app.graphs.exact_comfy_krea2_turbo_pre_lora_prompt_body(body)
 
         data = json.loads(rewritten.decode('utf-8'))
         self.assertEqual(data['prompt']['1']['class_type'], 'OTUNetLoaderW8A8')
@@ -262,6 +2280,932 @@ class ZImageAppTests(unittest.TestCase):
         self.assertEqual(data['prompt']['7']['inputs']['scheduler'], 'beta')
         self.assertEqual(data['prompt']['4']['inputs']['prompt'], 'private prompt')
 
+    def test_krea2_identity_graph_uses_optional_reference_on_apple_turbo_path(self):
+        app = load_app()
+        options = {
+            'width': 1031,
+            'height': 777,
+            'steps': 10,
+            'cfg': 1,
+            'seed': 42,
+            'ref_boost': 4,
+            'identity_strength': 1,
+            'grounding_px': 768,
+        }
+
+        with TemporaryDirectory() as td:
+            comfy = Path(td)
+            model_dir = comfy / 'models' / 'diffusion_models'
+            model_dir.mkdir(parents=True)
+            (model_dir / app.config.KREA2_IDENTITY_CONVROT_MODEL).write_bytes(b'checkpoint')
+            with patch.object(app.config, 'COMFY', comfy):
+                fallback_graph = app.graphs.build_krea2_turbo_identity_prompt(
+                    'private prompt', options=options, profile='apple-silicon'
+                )
+                template_graph = app.graphs.build_krea2_turbo_identity_prompt(
+                    'private prompt', image_name='None', options=options, profile='apple-silicon'
+                )
+                edit_graph = app.graphs.build_krea2_turbo_identity_prompt(
+                    'private prompt', image_name='reference.png', options=options, profile='apple-silicon'
+                )
+                custom_strength_graph = app.graphs.build_krea2_turbo_identity_prompt(
+                    'private prompt',
+                    image_name='reference.png',
+                    options={**options, 'identity_strength': 0.8},
+                    profile='apple-silicon',
+                )
+
+        self.assertEqual(fallback_graph['1']['class_type'], 'MultiLoRAStackToPreLora')
+        self.assertEqual(fallback_graph['1']['inputs']['lora_stack'], '[]')
+        self.assertEqual(fallback_graph['2']['class_type'], 'OTUNetLoaderW8A8')
+        self.assertEqual(fallback_graph['4']['class_type'], 'TextEncodeKrea2')
+        self.assertNotIn('HivemindOptionalLoadImage', {item['class_type'] for item in fallback_graph.values()})
+        self.assertNotIn('HivemindOptionalLoadImage', {item['class_type'] for item in template_graph.values()})
+        self.assertEqual(edit_graph['1']['inputs']['image'], 'reference.png')
+        self.assertNotIn('2', edit_graph)
+        self.assertEqual(edit_graph['3']['class_type'], 'OTUNetLoaderW8A8')
+        self.assertEqual(edit_graph['3']['inputs']['unet_name'], app.config.KREA2_IDENTITY_CONVROT_MODEL)
+        self.assertFalse(edit_graph['3']['inputs']['on_the_fly_quantization'])
+        self.assertTrue(edit_graph['3']['inputs']['enable_convrot'])
+        self.assertEqual(edit_graph['5']['class_type'], 'Krea2IdentityOptionalEncode')
+        self.assertEqual(edit_graph['9']['class_type'], 'Krea2IdentityOptionalModelPatch')
+        # Stale expectation: the cached identity forward was turned OFF by default
+        # on 2026-07-22 (grain regression) — see krea2_identity_workflow.py.
+        self.assertFalse(edit_graph['9']['inputs']['cache_static_tokens'])
+        self.assertEqual(edit_graph['7']['inputs']['width'], 1024)
+        self.assertEqual(edit_graph['7']['inputs']['height'], 768)
+        self.assertEqual(edit_graph['9']['inputs']['ref_boost'], 4.0)
+        self.assertEqual(custom_strength_graph['2']['inputs']['lora_name'], 'krea2_identity_edit_v1_2.safetensors')
+        self.assertTrue(custom_strength_graph['3']['inputs']['on_the_fly_quantization'])
+
+    def test_krea2_identity_sampler_pair_follows_step_count_and_explicit_overrides(self):
+        app = load_app()
+
+        low_step = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt', options={'steps': 2}, profile='apple-silicon',
+        )
+        tuned = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt', options={'steps': 10}, profile='apple-silicon',
+        )
+        override = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt',
+            options={'steps': 2, 'sampler_name': 'res_2s', 'scheduler': 'karras'},
+            profile='apple-silicon',
+        )
+        garbage = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt',
+            options={'steps': 10, 'sampler_name': 'not_a_sampler', 'scheduler': 'nope'},
+            profile='apple-silicon',
+        )
+
+        # Low step counts get the schedule that survives 2-3 steps; the tuned
+        # 8-10 step pair is unchanged.
+        self.assertEqual(low_step['7']['inputs']['sampler_name'], 'deis_3m')
+        self.assertEqual(low_step['7']['inputs']['scheduler'], 'bong_tangent')
+        self.assertEqual(tuned['7']['inputs']['sampler_name'], 'euler_ancestral')
+        self.assertEqual(tuned['7']['inputs']['scheduler'], 'beta')
+        self.assertEqual(override['7']['inputs']['sampler_name'], 'res_2s')
+        self.assertEqual(override['7']['inputs']['scheduler'], 'karras')
+        # Unknown names fall back instead of failing inside ComfyUI.
+        self.assertEqual(garbage['7']['inputs']['sampler_name'], 'euler_ancestral')
+        self.assertEqual(garbage['7']['inputs']['scheduler'], 'beta')
+
+    def test_krea2_identity_edit_graph_also_honours_the_sampler_pair(self):
+        app = load_app()
+
+        edit_graph = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt',
+            image_name='reference.png',
+            options={'steps': 3},
+            profile='apple-silicon',
+        )
+
+        self.assertEqual(edit_graph['10']['inputs']['sampler_name'], 'deis_3m')
+        self.assertEqual(edit_graph['10']['inputs']['scheduler'], 'bong_tangent')
+
+    def test_krea2_identity_job_record_reports_the_sampler_that_ran(self):
+        app = load_app()
+
+        self.assertEqual(app.runners._krea2_sampler_choice({'steps': 2}), ('deis_3m', 'bong_tangent'))
+        self.assertEqual(app.runners._krea2_sampler_choice({'steps': 8}), ('euler_ancestral', 'beta'))
+        self.assertEqual(
+            app.runners._krea2_sampler_choice({'steps': 8, 'sampler_name': 'deis_3m', 'scheduler': 'bong_tangent'}),
+            ('deis_3m', 'bong_tangent'),
+        )
+
+    def test_krea2_identity_graph_uses_regular_portable_turbo_without_an_image(self):
+        app = load_app()
+
+        text_graph = app.graphs.build_krea2_turbo_identity_prompt('private prompt', profile='cuda')
+        edit_graph = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='reference.png', profile='cuda'
+        )
+
+        self.assertEqual(text_graph['2']['class_type'], 'UNETLoader')
+        self.assertNotIn('LoraLoaderModelOnly', {item['class_type'] for item in text_graph.values()})
+        self.assertEqual(text_graph['7']['inputs']['model'], ['2', 0])
+        self.assertEqual(text_graph['4']['class_type'], 'TextEncodeKrea2')
+        template_graph = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='None', profile='cuda'
+        )
+        self.assertNotIn('Krea2IdentityOptionalLoraModel', {item['class_type'] for item in template_graph.values()})
+        self.assertEqual(edit_graph['3']['class_type'], 'Krea2IdentityOptionalLoraModel')
+        self.assertEqual(edit_graph['3']['inputs']['model'], ['2', 0])
+        self.assertEqual(edit_graph['3']['inputs']['image'], ['1', 0])
+        self.assertEqual(edit_graph['9']['inputs']['model'], ['3', 0])
+
+    def test_krea2_seed_minus_one_randomizes_instead_of_clamping_to_zero(self):
+        app = load_app()
+        import krea2_identity_workflow as workflow
+
+        with patch.object(workflow.random, 'randint', return_value=123456789) as randint:
+            text_graph = app.graphs.build_krea2_turbo_identity_prompt(
+                'private prompt', options={'seed': -1}, profile='cuda'
+            )
+            edit_graph = app.graphs.build_krea2_turbo_identity_prompt(
+                'private prompt', image_name='reference.png', options={'seed': -1}, profile='cuda'
+            )
+        self.assertEqual(text_graph['7']['inputs']['seed'], 123456789)
+        self.assertEqual(edit_graph['10']['inputs']['seed'], 123456789)
+        randint.assert_called_with(0, workflow.SEED_MAX)
+
+        with patch.object(workflow.random, 'randint', return_value=555):
+            self.assertEqual(app.config.resolve_seed_option({'seed': -1}), 555)
+            self.assertEqual(app.config.resolve_seed_option({}), 555)
+            self.assertEqual(app.config.resolve_seed_option({'seed': 'garbage'}), 555)
+        self.assertEqual(app.config.resolve_seed_option({'seed': 0}), 0)
+        self.assertEqual(app.config.resolve_seed_option({'seed': 7}), 7)
+        self.assertEqual(app.config.resolve_seed_option({'seed': 2_147_483_647}), workflow.SEED_MAX)
+
+    def test_ltx_anchor_outpaint_preserves_source_aspect_and_has_apple_cuda_parity(self):
+        app = load_app()
+
+        apple = app.config.build_krea2_turbo_outpaint_prompt(
+            'locked scene',
+            'portrait.png',
+            source_width=720,
+            source_height=1024,
+            options={'width': 768, 'height': 448, 'seed': 42},
+            profile='apple-silicon',
+            identity_checkpoint_available=True,
+        )
+        cuda = app.config.build_krea2_turbo_outpaint_prompt(
+            'locked scene',
+            'portrait.png',
+            source_width=720,
+            source_height=1024,
+            options={'width': 768, 'height': 448, 'seed': 42},
+            profile='cuda',
+        )
+
+        self.assertEqual(apple['geometry']['scaled_width'], 315)
+        self.assertEqual(apple['geometry']['scaled_height'], 448)
+        self.assertEqual(apple['geometry']['left'], 226)
+        self.assertEqual(apple['geometry']['right'], 227)
+        self.assertEqual(apple['output'], ['18', 0])
+        self.assertEqual(apple['graph']['18']['class_type'], 'ImageCompositeMasked')
+        self.assertEqual(apple['graph']['14']['class_type'], 'ImagePadForOutpaint')
+        self.assertEqual(apple['graph']['15']['class_type'], 'InpaintModelConditioning')
+        self.assertEqual(apple['graph']['16']['class_type'], 'DifferentialDiffusion')
+        self.assertEqual(apple['graph']['20']['class_type'], 'ImageBlur')
+        self.assertEqual(apple['graph']['15']['inputs']['pixels'], ['21', 0])
+        self.assertEqual(apple['graph']['10']['inputs']['denoise'], 0.7)
+        self.assertEqual(apple['graph']['3']['class_type'], 'OTUNetLoaderW8A8')
+        self.assertEqual(cuda['geometry'], apple['geometry'])
+        self.assertEqual(cuda['graph']['2']['class_type'], 'UNETLoader')
+        self.assertEqual(cuda['graph']['3']['class_type'], 'Krea2IdentityOptionalLoraModel')
+        self.assertEqual(cuda['graph']['18']['inputs'], apple['graph']['18']['inputs'])
+
+    def test_ltx_anchor_context_excludes_reference_sheet_inventory(self):
+        app = load_app()
+        prompt = (
+            '### Reference Sheet Description\n'
+            'Character B and several optional props.\n'
+            '### Target Description\n'
+            'Character A remains alone beside the counter.'
+        )
+
+        self.assertEqual(
+            app.native_mlx._ltx_target_description(prompt),
+            'Character A remains alone beside the counter.',
+        )
+
+    def test_krea2_user_loras_use_pre_lora_on_apple_and_model_loaders_on_cuda(self):
+        app = load_app()
+        options = {'loras': [{'id': 'styles/look.safetensors', 'strength': 0.65}]}
+
+        apple_text = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt', options=options, profile='apple-silicon'
+        )
+        apple_edit = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='reference.png', options=options, profile='apple-silicon'
+        )
+        cuda_text = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt', options=options, profile='cuda'
+        )
+        cuda_edit = app.graphs.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='reference.png', options=options, profile='cuda'
+        )
+
+        self.assertEqual(
+            json.loads(apple_text['1']['inputs']['lora_stack']),
+            [{'on': True, 'lora': 'styles/look.safetensors', 'strength': 0.65}],
+        )
+        apple_edit_stack = json.loads(apple_edit['2']['inputs']['lora_stack'])
+        self.assertEqual(apple_edit_stack[0]['lora'], 'krea2_identity_edit_v1_2.safetensors')
+        self.assertEqual(apple_edit_stack[1]['lora'], 'styles/look.safetensors')
+        self.assertEqual(apple_edit['3']['inputs']['pre_lora'], ['2', 0])
+        self.assertEqual(cuda_text['20']['class_type'], 'LoraLoaderModelOnly')
+        self.assertEqual(cuda_text['20']['inputs']['model'], ['2', 0])
+        self.assertEqual(cuda_text['7']['inputs']['model'], ['20', 0])
+        self.assertEqual(cuda_edit['20']['inputs']['model'], ['3', 0])
+        self.assertEqual(cuda_edit['9']['inputs']['model'], ['20', 0])
+
+    def test_model_scoped_lora_catalog_and_selection_do_not_mutate_global_state(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            comfy = Path(td) / 'ComfyUI'
+            lora_root = comfy / 'models' / 'loras'
+            lora_root.mkdir(parents=True)
+            krea = lora_root / 'krea-look.safetensors'
+            zimage = lora_root / 'z-look.safetensors'
+            krea.write_bytes(b'not-a-real-safetensor')
+            zimage.write_bytes(b'not-a-real-safetensor')
+            Path(str(krea) + '.civitai.json').write_text(json.dumps({
+                'baseModel': 'Krea 2',
+                'name': 'Krea Look',
+                'trainedWords': ['krea-look'],
+            }))
+            Path(str(zimage) + '.civitai.json').write_text(json.dumps({
+                'baseModel': 'ZImageTurbo',
+                'name': 'Z Look',
+            }))
+            krea.with_suffix('.webp').write_bytes(b'preview')
+            selected_file = Path(td) / 'selected.json'
+
+            with patch.object(app.config, 'COMFY', comfy), patch.object(app.models, 'SELECTED_LORAS_FILE', selected_file):
+                catalog = app.models.local_lora_catalog(['Krea 2'])
+                selected = app.models.resolve_lora_selection(
+                    [
+                        {'id': 'krea-look.safetensors', 'strength': 0.75},
+                        {'id': 'z-look.safetensors', 'strength': 1.0},
+                    ],
+                    ['Krea 2'],
+                )
+
+            self.assertEqual([item['id'] for item in catalog], ['krea-look.safetensors'])
+            self.assertEqual(catalog[0]['displayName'], 'Krea Look')
+            self.assertTrue(catalog[0]['hasPreview'])
+            self.assertEqual([(item['id'], item['strength']) for item in selected], [('krea-look.safetensors', 0.75)])
+            self.assertFalse(selected_file.exists())
+
+    def test_generate_api_routes_optional_image_to_krea2_identity_backend(self):
+        app = load_app()
+        completed = app.jobs.threading.Event()
+        captured = {}
+
+        def fake_run(job_id, prompt, image_path, options):
+            captured.update(
+                job_id=job_id,
+                prompt=prompt,
+                image_path=image_path,
+                image_bytes=image_path.read_bytes(),
+                options=options,
+            )
+            completed.set()
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            comfy = Path(td) / 'ComfyUI'
+            lora = comfy / 'models' / 'loras' / 'krea-look.safetensors'
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'lora')
+            Path(str(lora) + '.civitai.json').write_text('{"baseModel":"Krea 2"}')
+            server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.config, 'COMFY', comfy), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.runners, 'run_comfy_krea2_identity', side_effect=fake_run):
+                server_thread.start()
+                try:
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'comfy-krea2-turbo-identity-edit',
+                            'prompt': 'preserve this identity in a studio portrait',
+                            'image_base64': 'data:image/png;base64,' + base64.b64encode(b'image').decode(),
+                            'ref_boost': 5,
+                            'loras': [{'id': 'krea-look.safetensors', 'strength': 0.7}],
+                        }).encode('utf-8'),
+                        headers={
+                            'Authorization': 'Bearer test-token',
+                            'Content-Type': 'application/json',
+                        },
+                        method='POST',
+                    )
+                    with app.net.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                        self.assertEqual(response.status, 202)
+                    self.assertTrue(completed.wait(1))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+        self.assertEqual(payload['backend'], 'comfy-krea2-turbo-identity-edit')
+        self.assertEqual(payload['mode'], 'identity-edit')
+        self.assertEqual(captured['image_path'].parent, input_dir)
+        self.assertTrue(captured['image_path'].name.startswith('media-studio-inline-'))
+        self.assertEqual(captured['image_bytes'], b'image')
+        self.assertEqual(captured['options']['ref_boost'], 5)
+        self.assertEqual(captured['options']['loras'], [{'id': 'krea-look.safetensors', 'strength': 0.7}])
+
+    def test_generate_api_collects_multiple_klein_reference_images(self):
+        app = load_app()
+        captured = {}
+
+        def fake_queue(prompt, image_path, options, workflow=None):
+            captured.update(prompt=prompt, image_path=image_path, options=options)
+            return 'job-multi-ref'
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True), \
+                 patch.object(app.native_mlx, 'queue_native_mlx_biglove_job', side_effect=fake_queue):
+                server_thread.start()
+                try:
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'mlx-mxfp8-bigloves-klein3-edit',
+                            'studio_lane': 'image:window-a:2',
+                            'prompt': 'reference sheet of the subject',
+                            'image_base64': 'data:image/png;base64,' + base64.b64encode(b'front').decode(),
+                            'images_base64': [
+                                'data:image/png;base64,' + base64.b64encode(b'side').decode(),
+                                'data:image/png;base64,' + base64.b64encode(b'back').decode(),
+                                'data:image/png;base64,' + base64.b64encode(b'three-quarter').decode(),
+                                # A 5th reference is dropped: the engine conditions on 4.
+                                'data:image/png;base64,' + base64.b64encode(b'extra').decode(),
+                            ],
+                        }).encode('utf-8'),
+                        headers={
+                            'Authorization': 'Bearer test-token',
+                            'Content-Type': 'application/json',
+                        },
+                        method='POST',
+                    )
+                    with app.net.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                        self.assertEqual(response.status, 202)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+            self.assertEqual(payload['id'], 'job-multi-ref')
+            self.assertEqual(captured['options']['studio_lane'], 'image:window-a:2')
+            refs = captured['options']['image_paths']
+            self.assertEqual(len(refs), 4)
+            self.assertEqual(str(captured['image_path']), refs[0])
+            contents = [Path(p).read_bytes() for p in refs]
+            self.assertEqual(contents, [b'front', b'side', b'back', b'three-quarter'])
+            for p in refs:
+                self.assertEqual(Path(p).parent, input_dir.resolve())
+
+    def _dual_seal_fixture(self, app, root):
+        """Real RSA keys + a real output file, wired for the E2E seal path.
+
+        Uses the actual seal/unseal helpers rather than fakes: the whole point
+        of the feature is that two independent private keys each open their own
+        envelope, which a mocked cipher would not prove.
+        """
+        import media_unseal
+
+        out_dir = Path(root) / 'out'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        owner_key = out_dir.parent / 'owner.pem'
+        agent_key = out_dir.parent / 'agent.pem'
+        owner_spki = media_unseal.generate_keypair(owner_key)
+        agent_spki = media_unseal.generate_keypair(agent_key)
+        media = out_dir / 'gen.png'
+        media.write_bytes(b'\x89PNG\r\n\x1a\n' + b'pixels-that-only-a-key-holder-sees')
+        return {
+            'out_dir': out_dir, 'media': media,
+            'owner_key': owner_key, 'owner_spki': owner_spki,
+            'agent_key': agent_key, 'agent_spki': agent_spki,
+        }
+
+    def test_agent_dual_seal_gives_each_recipient_its_own_openable_envelope(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            fx = self._dual_seal_fixture(app, td)
+            with patch.object(app.config, 'OUT_DIR', fx['out_dir']), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', fx['out_dir']), \
+                 patch.object(app.media, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app.media, 'E2E_MEDIA_ENABLED', True), \
+                 patch.object(app.media, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app.media, '_agent_seal_jobs', {}), \
+                 patch.object(app.media, 'vault_public_key_spki', return_value=fx['owner_spki']):
+                app.media.register_agent_seal_recipient('job-agent', fx['agent_spki'])
+                app.media.encrypt_outputs([str(fx['media'])], job_id='job-agent')
+
+                owner_envelope = app.media.e2e_envelope_path_for(fx['media'])
+                agent_envelope = app.media.agent_envelope_path_for(
+                    fx['media'], app.promptroutes.requester_fingerprint(fx['agent_spki']))
+
+                # Plaintext is gone; each recipient has a sealed copy.
+                self.assertFalse(fx['media'].exists())
+                self.assertTrue(owner_envelope.is_file())
+                self.assertTrue(agent_envelope.is_file())
+                # Distinct envelopes (fresh DEK + IV each), same plaintext.
+                self.assertNotEqual(owner_envelope.read_bytes(), agent_envelope.read_bytes())
+                expected = b'\x89PNG\r\n\x1a\n' + b'pixels-that-only-a-key-holder-sees'
+                self.assertEqual(open_sealed_envelope(owner_envelope, fx['owner_key']), expected)
+                self.assertEqual(open_sealed_envelope(agent_envelope, fx['agent_key']), expected)
+                # Neither key opens the other's envelope.
+                with self.assertRaises(Exception):
+                    open_sealed_envelope(owner_envelope, fx['agent_key'])
+                with self.assertRaises(Exception):
+                    open_sealed_envelope(agent_envelope, fx['owner_key'])
+
+    def test_agent_dual_seal_only_touches_jobs_that_registered_a_key(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            fx = self._dual_seal_fixture(app, td)
+            other = fx['out_dir'] / 'owner-only.png'
+            other.write_bytes(b'\x89PNG\r\n\x1a\nowner-only')
+            with patch.object(app.config, 'OUT_DIR', fx['out_dir']), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', fx['out_dir']), \
+                 patch.object(app.media, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app.media, 'E2E_MEDIA_ENABLED', True), \
+                 patch.object(app.media, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app.media, '_agent_seal_jobs', {}), \
+                 patch.object(app.media, 'vault_public_key_spki', return_value=fx['owner_spki']):
+                app.media.register_agent_seal_recipient('job-agent', fx['agent_spki'])
+                # A generation the owner started in their own studio: no key
+                # presented, so no second envelope may appear for it.
+                app.media.encrypt_outputs([str(other)], job_id='job-owner')
+                app.media.encrypt_outputs([str(fx['media'])], job_id='job-agent')
+
+            fp = app.promptroutes.requester_fingerprint(fx['agent_spki'])
+            self.assertTrue(app.media.e2e_envelope_path_for(other).is_file())
+            self.assertFalse(app.media.agent_envelope_path_for(other, fp).exists())
+            self.assertTrue(app.media.agent_envelope_path_for(fx['media'], fp).is_file())
+            # And nothing anywhere in the output dir is readable as plaintext.
+            self.assertEqual(sorted(p.name for p in fx['out_dir'].glob('*.png')), [])
+
+    def test_agent_dual_seal_stays_off_without_the_flag(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            fx = self._dual_seal_fixture(app, td)
+            with patch.object(app.config, 'OUT_DIR', fx['out_dir']), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', fx['out_dir']), \
+                 patch.object(app.media, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app.media, 'E2E_MEDIA_ENABLED', True), \
+                 patch.object(app.media, 'AGENT_DUAL_SEAL_ENABLED', False), \
+                 patch.object(app.media, '_agent_seal_jobs', {}), \
+                 patch.object(app.media, 'vault_public_key_spki', return_value=fx['owner_spki']):
+                # Registration is refused outright, so a stale caller key
+                # cannot become a silent recipient when the flag is off.
+                self.assertIsNone(app.media.register_agent_seal_recipient('job-agent', fx['agent_spki']))
+                app.media.encrypt_outputs([str(fx['media'])], job_id='job-agent')
+
+            self.assertTrue(app.media.e2e_envelope_path_for(fx['media']).is_file())
+            self.assertEqual(
+                [p.name for p in fx['out_dir'].glob('*.agent-*')], [])
+
+    def test_generate_api_routes_character_sheet_without_prompt(self):
+        app = load_app()
+        captured = {}
+
+        def fake_queue(prompt, reference_images, options, views, preset=None):
+            captured.update(prompt=prompt, reference_images=reference_images, options=options, views=views, preset=preset)
+            return 'job-sheet'
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True), \
+                 patch.object(app.native_mlx, 'queue_klein_character_sheet', side_effect=fake_queue):
+                server_thread.start()
+                try:
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'mlx-mxfp8-bigloves-klein3-edit',
+                            # No prompt: the sheet's view prompts are built
+                            # server-side, the user text is an optional suffix.
+                            'image_base64': 'data:image/png;base64,' + base64.b64encode(b'ref').decode(),
+                            'character_sheet': {'preset': 'turnaround'},
+                        }).encode('utf-8'),
+                        headers={
+                            'Authorization': 'Bearer test-token',
+                            'Content-Type': 'application/json',
+                        },
+                        method='POST',
+                    )
+                    with app.net.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                        self.assertEqual(response.status, 202)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+        self.assertEqual(payload['id'], 'job-sheet')
+        self.assertEqual(payload['backend'], 'mlx-klein3-character-sheet')
+        self.assertEqual(payload['mode'], 'character-sheet')
+        self.assertEqual(captured['prompt'], '')
+        self.assertEqual(captured['preset'], 'turnaround')
+        self.assertEqual([v['id'] for v in captured['views']], ['front', 'right', 'back', 'left'])
+        self.assertEqual(len(captured['reference_images']), 1)
+
+    def test_generate_api_character_sheet_accepts_image_path_reference(self):
+        # MCP/agent callers reference staged files by image_path instead of
+        # inline base64 — the sheet guard must not 400 before the Klein branch
+        # collects them.
+        app = load_app()
+        captured = {}
+
+        def fake_queue(prompt, reference_images, options, views, preset=None):
+            captured.update(reference_images=reference_images, preset=preset)
+            return 'job-sheet-path'
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            (input_dir / 'ref.png').write_bytes(b'image')
+            server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True), \
+                 patch.object(app.native_mlx, 'queue_klein_character_sheet', side_effect=fake_queue):
+                server_thread.start()
+                try:
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'mlx-mxfp8-bigloves-klein3-edit',
+                            'image_path': 'ref.png',
+                            'character_sheet': {'preset': 'turnaround'},
+                        }).encode('utf-8'),
+                        headers={
+                            'Authorization': 'Bearer test-token',
+                            'Content-Type': 'application/json',
+                        },
+                        method='POST',
+                    )
+                    with app.net.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                        self.assertEqual(response.status, 202)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+        self.assertEqual(payload['id'], 'job-sheet-path')
+        self.assertEqual(len(captured['reference_images']), 1)
+        self.assertEqual(Path(captured['reference_images'][0]).name, 'ref.png')
+
+    def test_generate_api_character_sheet_requires_reference_image(self):
+        app = load_app()
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with patch.object(app.config, 'TOKEN', 'test-token'), \
+             patch.object(app.jobs, 'jobs', {}):
+            server_thread.start()
+            try:
+                request = app.net.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/generate',
+                    data=json.dumps({
+                        'prompt': 'a character sheet',
+                        'character_sheet': {'preset': 'turnaround'},
+                    }).encode('utf-8'),
+                    headers={
+                        'Authorization': 'Bearer test-token',
+                        'Content-Type': 'application/json',
+                    },
+                    method='POST',
+                )
+                with self.assertRaises(app.http.HTTPError) as ctx:
+                    app.net.urlopen(request, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+    def test_generate_api_character_sheet_rejects_unknown_preset(self):
+        app = load_app()
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with patch.object(app.config, 'TOKEN', 'test-token'), \
+             patch.object(app.jobs, 'jobs', {}), \
+             patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True):
+            server_thread.start()
+            try:
+                request = app.net.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/generate',
+                    data=json.dumps({
+                        'backend': 'mlx-mxfp8-bigloves-klein3-edit',
+                        'image_base64': 'data:image/png;base64,' + base64.b64encode(b'ref').decode(),
+                        'character_sheet': {'preset': 'everything'},
+                    }).encode('utf-8'),
+                    headers={
+                        'Authorization': 'Bearer test-token',
+                        'Content-Type': 'application/json',
+                    },
+                    method='POST',
+                )
+                with self.assertRaises(app.http.HTTPError) as ctx:
+                    app.net.urlopen(request, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+    def test_klein_character_sheet_runner_leads_with_sheet_and_shares_seed(self):
+        app = load_app()
+        calls = []
+        history = []
+
+        def fake_edit_once(prompt, reference_images, out, **kwargs):
+            calls.append({'prompt': prompt, 'out': Path(out), **kwargs})
+            Path(out).write_bytes(b'x' * 2048)
+            return {'elapsed': 1.0, 'stdout': '', 'stderr': '', 'warm_fallback': None}
+
+        def fake_compose(sheet_path, rows, cols, square, tiles, header_lines, tag='sheet'):
+            self.assertEqual(len(tiles), 4)
+            self.assertEqual([t['label'] for t in tiles], ['Front', 'Right', 'Back', 'Left'])
+            Path(sheet_path).write_bytes(b's' * 2048)
+            return Path(sheet_path)
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            out_dir = root / 'out'
+            out_dir.mkdir()
+            ref = out_dir / 'ref.png'
+            ref.write_bytes(b'image')
+            swift_bin = root / 'swift-flux2'
+            swift_bin.write_bytes(b'bin')
+            metallib = root / 'mlx.metallib'
+            metallib.write_bytes(b'lib')
+            views = app.config.resolve_character_sheet_views({'preset': 'turnaround'})
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                 patch.object(app.config, 'OUT_DIR', out_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'SWIFT_FLUX2_BIN', swift_bin), \
+                 patch.object(app.config, 'SWIFT_MLX_METALLIB', metallib), \
+                 patch.object(app.native_mlx, '_klein3_native_edit_once', side_effect=fake_edit_once), \
+                 patch.object(app.runners, '_compose_labeled_sheet', side_effect=fake_compose), \
+                 patch.object(app.jobs, 'mirror_output_to_comfy_output', side_effect=lambda p, job_id=None: Path(p)), \
+                 patch.object(app.history, 'append_history', side_effect=history.append), \
+                 patch.object(app.jobs, 'jobs', {}) as jobs:
+                app.native_mlx.run_klein_character_sheet(
+                    'job-1', 'silver armor', [ref], {'seed': 7}, views, preset='turnaround')
+                rec = jobs['job-1']
+
+        self.assertEqual(rec['status'], 'success')
+        # The sheet leads the outputs: single-url clients get the sheet, the
+        # per-view images stay behind it for History.
+        self.assertEqual(len(rec['outputs']), 5)
+        self.assertIn('_sheet', Path(rec['outputs'][0]).name)
+        self.assertEqual(rec['character_sheet']['completed'], 4)
+        self.assertTrue(rec['character_sheet']['sheet'])
+        self.assertEqual(len(calls), 4)
+        # Every view runs the SAME seed so identity holds across tiles.
+        self.assertEqual({c['seed'] for c in calls}, {7})
+        for call, view in zip(calls, views):
+            self.assertIn(view['phrase'], call['prompt'])
+            self.assertTrue(call['prompt'].startswith('White background.'))
+            self.assertTrue(call['prompt'].endswith('silver armor'))
+        self.assertEqual(history, [rec])
+
+    def test_klein_character_sheet_runner_keeps_partial_views_on_error(self):
+        app = load_app()
+
+        def fake_edit_once(prompt, reference_images, out, **kwargs):
+            if 'back view' in prompt:
+                raise RuntimeError('forced failure')
+            Path(out).write_bytes(b'x' * 2048)
+            return {'elapsed': 1.0, 'stdout': '', 'stderr': '', 'warm_fallback': None}
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            out_dir = root / 'out'
+            out_dir.mkdir()
+            ref = out_dir / 'ref.png'
+            ref.write_bytes(b'image')
+            swift_bin = root / 'swift-flux2'
+            swift_bin.write_bytes(b'bin')
+            metallib = root / 'mlx.metallib'
+            metallib.write_bytes(b'lib')
+            views = app.config.resolve_character_sheet_views({'preset': 'turnaround'})
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                 patch.object(app.config, 'OUT_DIR', out_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'SWIFT_FLUX2_BIN', swift_bin), \
+                 patch.object(app.config, 'SWIFT_MLX_METALLIB', metallib), \
+                 patch.object(app.native_mlx, '_klein3_native_edit_once', side_effect=fake_edit_once), \
+                 patch.object(app.jobs, 'mirror_output_to_comfy_output', side_effect=lambda p, job_id=None: Path(p)), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'jobs', {}) as jobs:
+                app.native_mlx.run_klein_character_sheet(
+                    'job-1', '', [ref], {}, views, preset='turnaround')
+                rec = jobs['job-1']
+
+        self.assertEqual(rec['status'], 'error')
+        self.assertIn('forced failure', rec['error'])
+        # front + right finished before the back view failed; they survive.
+        self.assertEqual(len(rec['outputs']), 2)
+        self.assertEqual(rec['character_sheet']['completed'], 2)
+
+    def test_generate_api_routes_strength_hunt_to_hunt_runner(self):
+        app = load_app()
+        completed = app.jobs.threading.Event()
+        captured = {}
+
+        def fake_hunt(job_id, prompt, image_path, options, hunt):
+            captured.update(job_id=job_id, prompt=prompt, image_path=image_path, options=options, hunt=hunt)
+            completed.set()
+
+        with TemporaryDirectory() as td:
+            comfy = Path(td) / 'ComfyUI'
+            lora = comfy / 'models' / 'loras' / 'krea-look.safetensors'
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'lora')
+            Path(str(lora) + '.civitai.json').write_text('{"baseModel":"Krea 2"}')
+            server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.config, 'COMFY', comfy), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.runners, 'run_comfy_krea2_strength_hunt', side_effect=fake_hunt):
+                server_thread.start()
+                try:
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'comfy-krea2-turbo-identity-edit',
+                            'prompt': 'a lighthouse keeper at dusk',
+                            'seed': 42,
+                            'loras': [{'id': 'krea-look.safetensors', 'strength': 0.6}],
+                            'strength_hunt': {'lora_ids': ['krea-look.safetensors']},
+                        }).encode('utf-8'),
+                        headers={
+                            'Authorization': 'Bearer test-token',
+                            'Content-Type': 'application/json',
+                        },
+                        method='POST',
+                    )
+                    with app.net.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                        self.assertEqual(response.status, 202)
+                    self.assertTrue(completed.wait(1))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+        self.assertEqual(payload['backend'], 'comfy-krea2-strength-hunt')
+        self.assertIsNone(captured['image_path'])
+        self.assertEqual(captured['hunt'], {'lora_ids': ['krea-look.safetensors']})
+        self.assertEqual(captured['options']['loras'], [{'id': 'krea-look.safetensors', 'strength': 0.6}])
+        self.assertEqual(captured['options']['seed'], 42)
+
+    def test_generate_api_routes_outpaint_to_outpaint_runner(self):
+        app = load_app()
+        completed = app.jobs.threading.Event()
+        captured = {}
+
+        def fake_outpaint(job_id, prompt, image_path, options, outpaint):
+            captured.update(job_id=job_id, prompt=prompt, image_path=image_path, options=options, outpaint=outpaint)
+            completed.set()
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            comfy = Path(td) / 'ComfyUI'
+            comfy.mkdir()
+            server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.config, 'COMFY', comfy), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.runners, 'run_comfy_krea2_outpaint', side_effect=fake_outpaint):
+                server_thread.start()
+                try:
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'comfy-krea2-turbo-identity-edit',
+                            'prompt': 'extend the scene naturally',
+                            'image_base64': 'data:image/png;base64,' + base64.b64encode(b'image').decode(),
+                            'outpaint': {'width': 1536, 'height': 640},
+                        }).encode('utf-8'),
+                        headers={
+                            'Authorization': 'Bearer test-token',
+                            'Content-Type': 'application/json',
+                        },
+                        method='POST',
+                    )
+                    with app.net.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                        self.assertEqual(response.status, 202)
+                    self.assertTrue(completed.wait(1))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+        self.assertEqual(payload['backend'], 'comfy-krea2-outpaint')
+        self.assertEqual(captured['outpaint'], {'width': 1536, 'height': 640})
+        self.assertEqual(captured['image_path'].parent, input_dir)
+
+    def test_generate_api_routes_inpaint_to_inpaint_runner(self):
+        app = load_app()
+        completed = app.jobs.threading.Event()
+        captured = {}
+
+        def fake_inpaint(job_id, prompt, image_path, mask_path, options):
+            captured.update(
+                job_id=job_id,
+                prompt=prompt,
+                image_path=image_path,
+                mask_path=mask_path,
+                mask_bytes=mask_path.read_bytes(),
+                options=options,
+            )
+            completed.set()
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            comfy = Path(td) / 'ComfyUI'
+            comfy.mkdir()
+            server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.config, 'COMFY', comfy), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.runners, 'run_comfy_krea2_inpaint', side_effect=fake_inpaint):
+                server_thread.start()
+                try:
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'comfy-krea2-turbo-identity-edit',
+                            'prompt': 'make the jacket red',
+                            'image_base64': 'data:image/png;base64,' + base64.b64encode(b'source').decode(),
+                            'inpaint': {
+                                'mask_base64': 'data:image/png;base64,' + base64.b64encode(b'mask').decode(),
+                                'mask_expand': 20,
+                                'mask_influence': 60,
+                            },
+                        }).encode('utf-8'),
+                        headers={
+                            'Authorization': 'Bearer test-token',
+                            'Content-Type': 'application/json',
+                        },
+                        method='POST',
+                    )
+                    with app.net.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                        self.assertEqual(response.status, 202)
+                    self.assertTrue(completed.wait(1))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+        self.assertEqual(payload['backend'], 'comfy-krea2-inpaint')
+        self.assertEqual(captured['mask_bytes'], b'mask')
+        self.assertEqual(captured['mask_path'].parent, input_dir)
+        self.assertEqual(captured['options']['mask_expand'], 20)
+        self.assertEqual(captured['options']['mask_influence'], 60)
+
     def test_native_loras_from_generation_request_resolves_selected_loras(self):
         app = load_app()
         with TemporaryDirectory() as td:
@@ -271,8 +3215,8 @@ class ZImageAppTests(unittest.TestCase):
             lora.write_bytes(b'1234')
             Path(str(lora) + '.civitai.json').write_text('{"baseModel":"ZImageTurbo"}')
             selected_file = tmp_path / 'selected_loras.json'
-            with patch.object(app, 'COMFY', tmp_path), patch.object(app, 'SELECTED_LORAS_FILE', selected_file):
-                native_loras = app._native_loras_from_generation_request({'loras': [{'id': 'style.safetensors', 'strength': 0.7}]})
+            with patch.object(app.config, 'COMFY', tmp_path), patch.object(app.models, 'SELECTED_LORAS_FILE', selected_file):
+                native_loras = app.loras._native_loras_from_generation_request({'loras': [{'id': 'style.safetensors', 'strength': 0.7}]})
 
         self.assertEqual(native_loras, [{'filePath': str(lora.resolve()), 'scale': 0.7}])
 
@@ -285,18 +3229,18 @@ class ZImageAppTests(unittest.TestCase):
             lora.write_bytes(b'1234')
             Path(str(lora) + '.civitai.json').write_text('{"baseModel":"ZImageTurbo"}')
             selected_file = tmp_path / 'selected_loras.json'
-            with patch.object(app, 'COMFY', tmp_path), patch.object(app, 'SELECTED_LORAS_FILE', selected_file):
-                selected = app.save_selected_loras([{'id': 'style.safetensors', 'strength': 25.0}])
+            with patch.object(app.config, 'COMFY', tmp_path), patch.object(app.models, 'SELECTED_LORAS_FILE', selected_file):
+                selected = app.models.save_selected_loras([{'id': 'style.safetensors', 'strength': 25.0}])
                 self.assertEqual(selected[0]['strength'], 25.0)
 
-                selected = app.save_selected_loras([{'id': 'style.safetensors', 'strength': 250.0}])
+                selected = app.models.save_selected_loras([{'id': 'style.safetensors', 'strength': 250.0}])
                 self.assertEqual(selected[0]['strength'], 250.0)
 
-                selected = app.save_selected_loras([{'id': 'style.safetensors', 'strength': 250000.0}])
-                self.assertEqual(selected[0]['strength'], app.LORA_STRENGTH_MAX)
+                selected = app.models.save_selected_loras([{'id': 'style.safetensors', 'strength': 250000.0}])
+                self.assertEqual(selected[0]['strength'], app.loras.LORA_STRENGTH_MAX)
 
-                selected = app.save_selected_loras([{'id': 'style.safetensors', 'strength': -250000.0}])
-                self.assertEqual(selected[0]['strength'], app.LORA_STRENGTH_MIN)
+                selected = app.models.save_selected_loras([{'id': 'style.safetensors', 'strength': -250000.0}])
+                self.assertEqual(selected[0]['strength'], app.loras.LORA_STRENGTH_MIN)
 
     def test_mxfp8_biglove_flux_graph_uses_exact_comfy_route_by_default(self):
         app = load_app()
@@ -318,7 +3262,7 @@ class ZImageAppTests(unittest.TestCase):
             'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '0',
             'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '1',
         }, clear=False):
-            self.assertIsNone(app.detect_native_mlx_biglove_prompt(body))
+            self.assertIsNone(app.graphs.detect_native_mlx_biglove_prompt(body))
 
     def test_exact_comfy_biglove_rewrites_mxfp8_to_clean_bf16(self):
         app = load_app()
@@ -339,8 +3283,8 @@ class ZImageAppTests(unittest.TestCase):
             (model_dir / 'BigLoveKlein3_mxfp8.safetensors').write_bytes(b'')
             (model_dir / 'BigLoveKlein3_mxfp8_dequant_bf16.safetensors').write_bytes(b'')
             (model_dir / 'BigLoveKlein3_bf16.safetensors').write_bytes(b'')
-            with patch.object(app, 'COMFY', tmp_path), patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
-                rewritten = app.exact_comfy_biglove_prompt_body(body)
+            with patch.object(app.config, 'COMFY', tmp_path), patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+                rewritten = app.graphs.exact_comfy_biglove_prompt_body(body)
 
         data = json.loads(rewritten.decode('utf-8'))
         self.assertEqual(
@@ -366,8 +3310,8 @@ class ZImageAppTests(unittest.TestCase):
             model_dir.mkdir(parents=True)
             (model_dir / 'BigLoveKlein3_mxfp8_dequant_bf16.safetensors').write_bytes(b'')
             (model_dir / 'BigLoveKlein3_bf16.safetensors').write_bytes(b'')
-            with patch.object(app, 'COMFY', tmp_path), patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
-                rewritten = app.exact_comfy_biglove_prompt_body(body)
+            with patch.object(app.config, 'COMFY', tmp_path), patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+                rewritten = app.graphs.exact_comfy_biglove_prompt_body(body)
 
         data = json.loads(rewritten.decode('utf-8'))
         self.assertEqual(
@@ -392,8 +3336,8 @@ class ZImageAppTests(unittest.TestCase):
             model_dir.mkdir(parents=True)
             (model_dir / 'BigLoveKlein3_mxfp8_dequant_bf16.safetensors').write_bytes(b'')
             (model_dir / 'BigLoveKlein3_bf16.safetensors').write_bytes(b'')
-            with patch.object(app, 'COMFY', tmp_path), patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
-                rewritten = app.exact_comfy_biglove_prompt_body(body)
+            with patch.object(app.config, 'COMFY', tmp_path), patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+                rewritten = app.graphs.exact_comfy_biglove_prompt_body(body)
 
         data = json.loads(rewritten.decode('utf-8'))
         self.assertEqual(
@@ -420,15 +3364,15 @@ class ZImageAppTests(unittest.TestCase):
             'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '1',
             'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '0',
         }, clear=False):
-            native = app.detect_native_mlx_biglove_prompt(body)
+            native = app.graphs.detect_native_mlx_biglove_prompt(body)
 
         self.assertIsNotNone(native)
         self.assertEqual(native['image_path'], 'source.png')
         self.assertEqual(native['options']['steps'], 4)
         self.assertEqual(native['options']['requested_width'], 1024)
         self.assertEqual(native['options']['requested_height'], 1536)
-        self.assertEqual(native['options']['width'], 448)
-        self.assertEqual(native['options']['height'], 672)
+        self.assertEqual(native['options']['width'], 1024)
+        self.assertEqual(native['options']['height'], 1536)
 
     def test_mxfp8_biglove_exact_feature_graph_can_force_native_speed_route(self):
         app = load_app()
@@ -450,14 +3394,16 @@ class ZImageAppTests(unittest.TestCase):
             'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '1',
             'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '0',
         }, clear=False):
-            native = app.detect_native_mlx_biglove_prompt(body)
+            native = app.graphs.detect_native_mlx_biglove_prompt(body)
 
         self.assertIsNotNone(native)
         self.assertEqual(native['options']['steps'], 4)
         self.assertEqual(native['options']['requested_width'], 1024)
         self.assertEqual(native['options']['requested_height'], 1536)
-        self.assertEqual(native['options']['width'], 448)
-        self.assertEqual(native['options']['height'], 672)
+        # Uncapped by default: the native route renders the full trained
+        # bucket (the old 448x672 draft cap is now opt-in via env).
+        self.assertEqual(native['options']['width'], 1024)
+        self.assertEqual(native['options']['height'], 1536)
 
     def test_mxfp8_biglove_lora_graph_uses_native_route_with_lora_payload(self):
         app = load_app()
@@ -487,15 +3433,754 @@ class ZImageAppTests(unittest.TestCase):
                 },
             }).encode('utf-8')
 
-            with patch.object(app, 'COMFY', tmp_path), patch.dict('os.environ', {
+            with patch.object(app.config, 'COMFY', tmp_path), patch.dict('os.environ', {
                 **APPLE_SILICON_ENV,
                 'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '1',
                 'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '0',
             }, clear=False):
-                native = app.detect_native_mlx_biglove_prompt(body)
+                native = app.graphs.detect_native_mlx_biglove_prompt(body)
 
         self.assertIsNotNone(native)
         self.assertEqual(native['options']['loras'], [{'filePath': str(lora.resolve()), 'scale': 0.8}])
+
+    def test_comfy_biglove_fallback_chains_selected_loras_before_sampling(self):
+        app = load_app()
+        captured = {}
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            comfy = root / 'ComfyUI'
+            input_dir = comfy / 'input'
+            output_dir = comfy / 'output'
+            lora = comfy / 'models' / 'loras' / 'looks' / 'style.safetensors'
+            input_dir.mkdir(parents=True)
+            output_dir.mkdir(parents=True)
+            lora.parent.mkdir(parents=True)
+            source = input_dir / 'source.png'
+            source.write_bytes(b'image')
+            lora.write_bytes(b'lora')
+
+            def fake_urlopen(request, timeout=0):
+                if isinstance(request, app.net.Request):
+                    captured.update(json.loads(request.data.decode('utf-8')))
+                    return io.BytesIO(b'{"prompt_id":"prompt-1"}')
+                return io.BytesIO(json.dumps({
+                    'prompt-1': {
+                        'status': {'status_str': 'error', 'completed': False},
+                        'outputs': {},
+                    },
+                }).encode('utf-8'))
+
+            with patch.object(app.config, 'COMFY', comfy), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app.config, 'OUT_DIR', output_dir), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_urlopen), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'jobs', {}):
+                app.runners.run_comfy_klein3_edit(
+                    'job-1',
+                    'private prompt',
+                    source,
+                    {'loras': [{'filePath': str(lora), 'scale': 0.6}]},
+                )
+
+        graph = captured['prompt']
+        self.assertEqual(graph['11']['class_type'], 'LoraLoaderModelOnly')
+        self.assertEqual(graph['11']['inputs']['model'], ['1', 0])
+        self.assertEqual(graph['11']['inputs']['lora_name'], str(Path('looks') / 'style.safetensors'))
+        self.assertEqual(graph['11']['inputs']['strength_model'], 0.6)
+        self.assertEqual(graph['8']['inputs']['model'], ['11', 0])
+
+    def test_reshape_dims_to_image_aspect_follows_the_reference(self):
+        app = load_app()
+        # A square reference keeps a square canvas at the same pixel budget —
+        # the old fixed 1024x1536 bucket stretched it vertically.
+        with patch.object(app.graphs, '_image_dimensions', return_value=(1000, 1000)):
+            width, height = app.graphs._reshape_dims_to_image_aspect('ref.png', 1024, 1536)
+        self.assertEqual(width, height)
+        self.assertEqual(width % 32, 0)
+        self.assertAlmostEqual(width * height, 1024 * 1536, delta=1024 * 1536 * 0.12)
+        # A landscape reference comes out landscape, near its own aspect.
+        with patch.object(app.graphs, '_image_dimensions', return_value=(1920, 1080)):
+            width, height = app.graphs._reshape_dims_to_image_aspect('ref.png', 1024, 1536)
+        self.assertGreater(width, height)
+        self.assertAlmostEqual(width / height, 1920 / 1080, delta=0.15)
+        # An unreadable reference keeps the caller's dims rather than guessing.
+        with patch.object(app.graphs, '_image_dimensions', return_value=None):
+            self.assertEqual(app.graphs._reshape_dims_to_image_aspect('ref.png', 512, 768), (512, 768))
+        # A degenerate strip clamps at 3:1 so one side cannot blow up.
+        with patch.object(app.graphs, '_image_dimensions', return_value=(10000, 100)):
+            width, height = app.graphs._reshape_dims_to_image_aspect('ref.png', 1024, 1024)
+        self.assertLessEqual(width / height, 3.6)
+
+    def test_native_mx_dimension_cap_is_off_by_default(self):
+        app = load_app()
+        # Quality by default: the trained ~1.5MP bucket passes through uncapped
+        # (the old 448x672 default cap made every Klein edit come out blurry).
+        with patch.dict(app.config.os.environ, {}, clear=False):
+            app.config.os.environ.pop('ZIMAGE_NATIVE_MX_MAX_PIXELS', None)
+            self.assertEqual(app.graphs._cap_native_mx_dimensions(1024, 1536), (1024, 1536))
+        # The draft-speed envelope stays available as an explicit opt-in.
+        with patch.dict(app.config.os.environ, {'ZIMAGE_NATIVE_MX_MAX_PIXELS': str(448 * 672)}):
+            width, height = app.graphs._cap_native_mx_dimensions(1024, 1536)
+        self.assertLess(width * height, 1024 * 1536)
+        self.assertLessEqual(width * height, 448 * 672 * 1.1)
+        self.assertAlmostEqual(width / height, 1024 / 1536, delta=0.15)
+
+    def test_comfy_biglove_edit_canvas_follows_reference_aspect(self):
+        app = load_app()
+        captured = {}
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            comfy = root / 'ComfyUI'
+            input_dir = comfy / 'input'
+            output_dir = comfy / 'output'
+            input_dir.mkdir(parents=True)
+            output_dir.mkdir(parents=True)
+            source = input_dir / 'source.png'
+            source.write_bytes(b'image')
+
+            def fake_urlopen(request, timeout=0):
+                if isinstance(request, app.net.Request):
+                    captured.update(json.loads(request.data.decode('utf-8')))
+                    return io.BytesIO(b'{"prompt_id":"prompt-1"}')
+                return io.BytesIO(json.dumps({
+                    'prompt-1': {
+                        'status': {'status_str': 'error', 'completed': False},
+                        'outputs': {},
+                    },
+                }).encode('utf-8'))
+
+            with patch.object(app.config, 'COMFY', comfy), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app.config, 'OUT_DIR', output_dir), \
+                 patch.object(app.graphs, '_image_dimensions', return_value=(1000, 1000)), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_urlopen), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'jobs', {}):
+                app.runners.run_comfy_klein3_edit('job-1', 'private prompt', source, {'width': 512, 'height': 768})
+
+        scale = captured['prompt']['4b']['inputs']
+        # Square reference → square canvas at the requested pixel budget, so the
+        # crop:'disabled' resize no longer stretches the source.
+        self.assertEqual(scale['width'], scale['height'])
+        self.assertEqual(scale['width'] % 16, 0)
+        self.assertAlmostEqual(scale['width'] * scale['height'], 512 * 768, delta=512 * 768 * 0.12)
+
+    def test_native_mlx_biglove_edit_canvas_follows_reference_aspect(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            out_dir = root / 'out'
+            out_dir.mkdir()
+            ref = out_dir / 'ref.png'
+            ref.write_bytes(b'image')
+            swift_bin = root / 'swift-flux2'
+            swift_bin.write_bytes(b'bin')
+            metallib = root / 'mlx.metallib'
+            metallib.write_bytes(b'lib')
+            failed = SimpleNamespace(returncode=1, stdout='', stderr='forced failure')
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                 patch.object(app.config, 'OUT_DIR', out_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'SWIFT_FLUX2_BIN', swift_bin), \
+                 patch.object(app.config, 'SWIFT_MLX_METALLIB', metallib), \
+                 patch.object(app.config, 'use_swift_flux2_server', return_value=False), \
+                 patch.object(app.graphs, '_image_dimensions', return_value=(1000, 1000)), \
+                 patch.object(app.media.subprocess, 'run', return_value=failed), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'jobs', {}) as jobs:
+                app.native_mlx.run_mlx_klein3_edit('job-1', 'private prompt', ref, {'width': 1024, 'height': 1536})
+                options = jobs['job-1']['options']
+
+        # A square reference must not inherit the fixed portrait bucket: the
+        # recorded canvas is square, on-grid, and keeps the full ~1.5MP budget
+        # (no draft-speed cap by default).
+        self.assertEqual(options['width'], options['height'])
+        self.assertEqual(options['width'] % 32, 0)
+        self.assertAlmostEqual(
+            options['width'] * options['height'], 1024 * 1536, delta=1024 * 1536 * 0.12)
+
+    def test_native_mlx_biglove_cli_repeats_images_flag_per_reference(self):
+        app = load_app()
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured['cmd'] = [str(part) for part in cmd]
+            return SimpleNamespace(returncode=1, stdout='', stderr='forced failure')
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            out_dir = root / 'out'
+            out_dir.mkdir()
+            refs = []
+            for name in ('front.png', 'side.png', 'back.png', 'three-quarter.png'):
+                p = out_dir / name
+                p.write_bytes(b'image')
+                refs.append(p)
+            swift_bin = root / 'swift-flux2'
+            swift_bin.write_bytes(b'bin')
+            metallib = root / 'mlx.metallib'
+            metallib.write_bytes(b'lib')
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                 patch.object(app.config, 'OUT_DIR', out_dir), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'SWIFT_FLUX2_BIN', swift_bin), \
+                 patch.object(app.config, 'SWIFT_MLX_METALLIB', metallib), \
+                 patch.object(app.config, 'use_swift_flux2_server', return_value=False), \
+                 patch.object(app.graphs, '_image_dimensions', return_value=(1000, 1000)), \
+                 patch.object(app.media.subprocess, 'run', side_effect=fake_run), \
+                 patch.object(app.history, 'append_history'), \
+                 patch.object(app.jobs, 'jobs', {}):
+                app.native_mlx.run_mlx_klein3_edit('job-1', 'private prompt', refs[0], {
+                    'image_paths': [str(p) for p in refs],
+                })
+
+        cmd = captured['cmd']
+        # Swift ArgumentParser array options take one value per flag occurrence:
+        # a single --images followed by several paths dies with "unexpected
+        # arguments" — every reference needs its own --images flag. Four is the
+        # engine's full reference budget, so none of them may be dropped here.
+        self.assertEqual(cmd.count('--images'), 4)
+        for ref in refs:
+            index = cmd.index(str(ref.resolve()))
+            self.assertEqual(cmd[index - 1], '--images')
+
+    def test_native_mlx_biglove_queue_coalesces_duplicate_inflight_edits(self):
+        app = load_app()
+        started = app.jobs.threading.Event()
+        release = app.jobs.threading.Event()
+        calls = []
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            calls.append(job_id)
+            started.set()
+            release.wait(2)
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            refs = []
+            for index in range(27):
+                ref = root / f'media-studio-inline-{index}.jpg'
+                ref.write_bytes(b'the exact same staged image')
+                refs.append(ref)
+
+            try:
+                with patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app.jobs, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app.native_mlx, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app.jobs, 'jobs', {}) as jobs:
+                    job_ids = [
+                        app.native_mlx.queue_native_mlx_biglove_job(
+                            'same edit prompt', ref, {'width': 1120, 'height': 1408})
+                        for ref in refs
+                    ]
+                    self.assertTrue(started.wait(1))
+
+                    self.assertEqual(len(set(job_ids)), 1)
+                    self.assertEqual(calls, [job_ids[0]])
+                    self.assertEqual(jobs[job_ids[0]]['coalesced_requests'], 26)
+            finally:
+                release.set()
+
+    def test_generate_api_coalesces_the_27_request_klein_retry_storm(self):
+        app = load_app()
+        started = app.jobs.threading.Event()
+        release = app.jobs.threading.Event()
+        calls = []
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            calls.append(job_id)
+            started.set()
+            release.wait()
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+            server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+            payload = json.dumps({
+                'backend': 'mlx-mxfp8-bigloves-klein3-edit',
+                'studio_lane': 'image:window-a:1',
+                'prompt': 'same edit prompt',
+                'image_base64': 'data:image/jpeg;base64,' + base64.b64encode(b'the exact same staged image').decode(),
+                'width': 1120,
+                'height': 1408,
+            }).encode('utf-8')
+            try:
+                with patch.object(app.config, 'TOKEN', 'test-token'), \
+                     patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                     patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app.jobs, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app.native_mlx, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app.jobs, 'jobs', {}) as jobs:
+                    server_thread.start()
+                    job_ids = []
+                    for _index in range(27):
+                        request = app.net.Request(
+                            f'http://127.0.0.1:{server.server_port}/api/generate',
+                            data=payload,
+                            headers={
+                                'Authorization': 'Bearer test-token',
+                                'Content-Type': 'application/json',
+                            },
+                            method='POST',
+                        )
+                        with app.net.urlopen(request, timeout=5) as response:
+                            self.assertEqual(response.status, 202)
+                            job_ids.append(json.loads(response.read().decode('utf-8'))['id'])
+
+                    self.assertTrue(started.wait(1))
+                    self.assertEqual(len(set(job_ids)), 1)
+                    self.assertEqual(calls, [job_ids[0]])
+                    self.assertEqual(jobs[job_ids[0]]['coalesced_requests'], 26)
+                    self.assertEqual(len(list(input_dir.glob('media-studio-inline-*'))), 27)
+            finally:
+                release.set()
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+    def test_generate_api_queues_non_klein_images_in_the_studio_lane(self):
+        app = load_app()
+        captured = {}
+
+        def fake_start(media_type, options, runner, args):
+            captured.update(
+                media_type=media_type,
+                options=dict(options),
+                runner=runner,
+                args=args,
+            )
+            return None
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.jobs, 'start_studio_generation_thread', side_effect=fake_start):
+                server_thread.start()
+                request = app.net.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/generate',
+                    data=json.dumps({
+                        'backend': 'comfy-api-image',
+                        'studio_lane': 'image:window-a:3',
+                        'prompt': 'a non-Klein request',
+                    }).encode('utf-8'),
+                    headers={
+                        'Authorization': 'Bearer test-token',
+                        'Content-Type': 'application/json',
+                    },
+                    method='POST',
+                )
+                with app.net.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                    self.assertEqual(response.status, 202)
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertEqual(payload['backend'], 'comfy-api-image')
+        self.assertEqual(captured['media_type'], 'image')
+        self.assertEqual(captured['options']['studio_lane'], 'image:window-a:3')
+        self.assertIs(captured['runner'], app.runners.run_comfy_api_image)
+        self.assertEqual(captured['args'][0], payload['id'])
+
+    def test_native_mlx_biglove_queue_serializes_distinct_edits(self):
+        app = load_app()
+        first_started = app.jobs.threading.Event()
+        second_started = app.jobs.threading.Event()
+        release_first = app.jobs.threading.Event()
+        both_finished = app.jobs.threading.Event()
+        calls = []
+        calls_lock = app.jobs.threading.Lock()
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            with calls_lock:
+                calls.append(job_id)
+                call_number = len(calls)
+            if call_number == 1:
+                first_started.set()
+                release_first.wait(2)
+            else:
+                second_started.set()
+                both_finished.set()
+
+        with TemporaryDirectory() as td:
+            ref = Path(td) / 'source.jpg'
+            ref.write_bytes(b'image')
+            try:
+                with patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app.jobs, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app.native_mlx, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app.jobs, 'jobs', {}):
+                    first_id = app.native_mlx.queue_native_mlx_biglove_job('first edit', ref, {})
+                    self.assertTrue(first_started.wait(1))
+                    second_id = app.native_mlx.queue_native_mlx_biglove_job('second edit', ref, {})
+
+                    self.assertNotEqual(first_id, second_id)
+                    self.assertFalse(second_started.wait(0.2))
+                    release_first.set()
+                    self.assertTrue(both_finished.wait(1))
+                    self.assertEqual(calls, [first_id, second_id])
+            finally:
+                release_first.set()
+
+    def test_native_mlx_biglove_queue_allows_distinct_tab_lanes_to_overlap(self):
+        app = load_app()
+        both_started = app.jobs.threading.Event()
+        release = app.jobs.threading.Event()
+        calls = []
+        calls_lock = app.jobs.threading.Lock()
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            with calls_lock:
+                calls.append((job_id, options['studio_lane']))
+                if len(calls) == 2:
+                    both_started.set()
+            release.wait(2)
+
+        with TemporaryDirectory() as td:
+            ref = Path(td) / 'source.jpg'
+            ref.write_bytes(b'image')
+            try:
+                with patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app.jobs, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app.jobs, 'gpu_slot_capacity', return_value=2), \
+                     patch.object(app.native_mlx, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app.jobs, 'jobs', {}):
+                    first_id = app.native_mlx.queue_native_mlx_biglove_job(
+                        'first tab', ref, {'studio_lane': 'image:window-a:1'})
+                    second_id = app.native_mlx.queue_native_mlx_biglove_job(
+                        'second tab', ref, {'studio_lane': 'image:window-a:2'})
+
+                    self.assertTrue(both_started.wait(1))
+                    self.assertEqual({job_id for job_id, _lane in calls}, {first_id, second_id})
+                    self.assertEqual(
+                        {lane for _job_id, lane in calls},
+                        {'image:window-a:1', 'image:window-a:2'},
+                    )
+            finally:
+                release.set()
+
+    def test_native_mlx_biglove_does_not_coalesce_identical_edits_across_tabs(self):
+        app = load_app()
+        both_started = app.jobs.threading.Event()
+        release = app.jobs.threading.Event()
+        calls = []
+        calls_lock = app.jobs.threading.Lock()
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            with calls_lock:
+                calls.append((job_id, options['studio_lane']))
+                if len(calls) == 2:
+                    both_started.set()
+            release.wait(2)
+
+        with TemporaryDirectory() as td:
+            ref = Path(td) / 'source.jpg'
+            ref.write_bytes(b'identical image')
+            try:
+                with patch.object(app.config, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app.jobs, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app.jobs, 'gpu_slot_capacity', return_value=2), \
+                     patch.object(app.native_mlx, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app.jobs, 'jobs', {}):
+                    first_id = app.native_mlx.queue_native_mlx_biglove_job(
+                        'same edit', ref, {'studio_lane': 'image:window-a:1'})
+                    second_id = app.native_mlx.queue_native_mlx_biglove_job(
+                        'same edit', ref, {'studio_lane': 'image:window-a:2'})
+
+                    self.assertNotEqual(first_id, second_id)
+                    self.assertTrue(both_started.wait(1))
+            finally:
+                release.set()
+
+    def test_generation_lane_serializes_non_klein_image_backends_in_one_tab(self):
+        app = load_app()
+        first_started = app.jobs.threading.Event()
+        second_started = app.jobs.threading.Event()
+        release_first = app.jobs.threading.Event()
+        calls = []
+
+        def first_runner():
+            calls.append('comfy-api-image')
+            first_started.set()
+            release_first.wait(2)
+
+        def second_runner():
+            calls.append('krea2')
+            second_started.set()
+
+        try:
+            app.jobs.start_studio_generation_thread(
+                'image', {'studio_lane': 'image:window-a:1'}, first_runner, ())
+            self.assertTrue(first_started.wait(1))
+            second = app.jobs.start_studio_generation_thread(
+                'image', {'studio_lane': 'image:window-a:1'}, second_runner, ())
+
+            self.assertFalse(second_started.wait(0.2))
+            release_first.set()
+            second.join(timeout=1)
+            self.assertTrue(second_started.is_set())
+            self.assertEqual(calls, ['comfy-api-image', 'krea2'])
+        finally:
+            release_first.set()
+
+    def test_generation_lanes_keep_tabs_and_media_studios_independent(self):
+        app = load_app()
+        all_started = app.jobs.threading.Event()
+        release = app.jobs.threading.Event()
+        calls = []
+        calls_lock = app.jobs.threading.Lock()
+
+        def runner(label):
+            with calls_lock:
+                calls.append(label)
+                if len(calls) == 3:
+                    all_started.set()
+            release.wait(2)
+
+        # Lanes stay independent queues; what limits them is the GPU slot count
+        # above them, so this asserts the lanes with the ceiling lifted.
+        try:
+            with patch.object(app.jobs, 'gpu_slot_capacity', return_value=3):
+                threads = [
+                    app.jobs.start_studio_generation_thread(
+                        'image', {'studio_lane': 'window-a:1'}, runner, ('image-tab-1',)),
+                    app.jobs.start_studio_generation_thread(
+                        'image', {'studio_lane': 'window-a:2'}, runner, ('image-tab-2',)),
+                    app.jobs.start_studio_generation_thread(
+                        'video', {'studio_lane': 'window-a:1'}, runner, ('video-tab-1',)),
+                ]
+
+                self.assertTrue(all_started.wait(1))
+                self.assertEqual(set(calls), {'image-tab-1', 'image-tab-2', 'video-tab-1'})
+        finally:
+            release.set()
+            for thread in locals().get('threads', []):
+                thread.join(timeout=1)
+
+    def test_one_gpu_slot_holds_a_second_tab_behind_the_first(self):
+        """Two tabs, one GPU: the second waits instead of loading a second model."""
+        app = load_app()
+        first_started = app.jobs.threading.Event()
+        release_first = app.jobs.threading.Event()
+        second_started = app.jobs.threading.Event()
+        calls = []
+
+        def runner(job_id):
+            calls.append(job_id)
+            if job_id == 'job-one':
+                first_started.set()
+                release_first.wait(2)
+            else:
+                second_started.set()
+
+        jobs = {
+            'job-one': {'id': 'job-one', 'status': 'queued'},
+            'job-two': {'id': 'job-two', 'status': 'queued'},
+        }
+        threads = []
+        try:
+            with patch.object(app.jobs, 'jobs', jobs):
+                threads.append(app.jobs.start_studio_generation_thread(
+                    'image', {'studio_lane': 'window-a:1'}, runner, ('job-one',)))
+                self.assertTrue(first_started.wait(1))
+                threads.append(app.jobs.start_studio_generation_thread(
+                    'video', {'studio_lane': 'window-b:1'}, runner, ('job-two',)))
+                # A different lane, so the old scheduler would have started it.
+                self.assertFalse(second_started.wait(0.4))
+                self.assertEqual(calls, ['job-one'])
+                # …and it says so on the record, with how many are ahead of it.
+                self.assertEqual(jobs['job-two']['status'], 'queued')
+                self.assertEqual(jobs['job-two']['queue_position'], 1)
+                self.assertEqual(jobs['job-two']['progress_phase'], 'waiting for the GPU')
+                release_first.set()
+                self.assertTrue(second_started.wait(2))
+                self.assertEqual(calls, ['job-one', 'job-two'])
+                self.assertNotIn('queue_position', jobs['job-two'])
+        finally:
+            release_first.set()
+            for thread in threads:
+                thread.join(timeout=2)
+
+    def test_gpu_slot_capacity_defaults_to_one_and_reads_the_settings_export(self):
+        app = load_app()
+        with patch.dict(app.config.os.environ, {}, clear=False):
+            app.config.os.environ.pop('ZIMG_GPU_SLOTS', None)
+            self.assertEqual(app.jobs.gpu_slot_capacity(), 1)
+            app.config.os.environ['ZIMG_GPU_SLOTS'] = '3'
+            self.assertEqual(app.jobs.gpu_slot_capacity(), 3)
+            app.config.os.environ['ZIMG_GPU_SLOTS'] = 'not a number'
+            self.assertEqual(app.jobs.gpu_slot_capacity(), 1)
+            app.config.os.environ['ZIMG_GPU_SLOTS'] = '0'
+            self.assertEqual(app.jobs.gpu_slot_capacity(), 1)
+
+    def test_history_tail_read_does_not_scale_with_the_file(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            history = Path(td) / 'history.jsonl'
+            with history.open('w', encoding='utf-8') as handle:
+                for index in range(5000):
+                    handle.write(json.dumps({'id': f'job-{index}', 'pad': 'x' * 200}) + '\n')
+            reads = []
+            real_open = Path.open
+
+            def counting_open(self, *args, **kwargs):
+                handle = real_open(self, *args, **kwargs)
+                if self == history:
+                    reads.append(handle)
+                return handle
+
+            with patch.object(app.history, 'HISTORY_FILE', history), \
+                 patch.object(Path, 'open', counting_open):
+                recs = app.history.load_history(10)
+            self.assertEqual([rec['id'] for rec in recs[:3]], ['job-4999', 'job-4998', 'job-4997'])
+            self.assertEqual(len(recs), 10)
+            # One handle, and it never read the whole file: the seek started
+            # inside the last 10 records' worth of bytes.
+            self.assertEqual(len(reads), 1)
+
+    def test_history_tail_read_widens_when_records_are_small(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            history = Path(td) / 'history.jsonl'
+            with history.open('w', encoding='utf-8') as handle:
+                for index in range(500):
+                    handle.write(json.dumps({'id': index}) + '\n')
+            with patch.object(app.history, 'HISTORY_FILE', history):
+                recs = app.history.load_history(400)
+            self.assertEqual(len(recs), 400)
+            self.assertEqual(recs[0]['id'], 499)
+            self.assertEqual(recs[-1]['id'], 100)
+
+    def test_history_rotates_and_the_purge_covers_both_generations(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            history = Path(td) / 'history.jsonl'
+            previous = Path(td) / 'history.1.jsonl'
+            with patch.object(app.history, 'HISTORY_FILE', history), \
+                 patch.object(app.history, 'HISTORY_PREVIOUS_FILE', previous), \
+                 patch.object(app.history, 'HISTORY_KEEP_ON_ROTATE', 4), \
+                 patch.object(app.history, 'HISTORY_ROTATE_BYTES', 400):
+                for index in range(12):
+                    app.history.append_history({
+                        'id': f'job-{index}', 'status': 'success',
+                        'outputs': [f'/out/pic-{index}.png'],
+                    })
+                self.assertTrue(previous.exists())
+                # The live file keeps the recent tail — a rotation must never
+                # leave the History tab blank.
+                self.assertEqual(
+                    [rec['id'] for rec in app.history.load_history(10)][:2], ['job-11', 'job-10'],
+                )
+                # A delete reaches the rotated generation too, or it would leave
+                # the reference it promises to remove sitting on disk.
+                rotated = previous.read_text(encoding='utf-8')
+                name = json.loads(rotated.splitlines()[0])['outputs'][0].rsplit('/', 1)[-1]
+                self.assertEqual(app.jobs._rewrite_gateway_history_without_output(name), 1)
+                self.assertNotIn(name, previous.read_text(encoding='utf-8'))
+
+    def test_native_mlx_ltx_queue_serializes_video_jobs_in_one_tab(self):
+        app = load_app()
+        first_started = app.jobs.threading.Event()
+        second_started = app.jobs.threading.Event()
+        release_first = app.jobs.threading.Event()
+        calls = []
+
+        def fake_run(job_id, native, workflow):
+            calls.append((job_id, native['options']['studio_lane']))
+            if len(calls) == 1:
+                first_started.set()
+                release_first.wait(2)
+            else:
+                second_started.set()
+
+        def native(prompt):
+            return {
+                'variant': 'regular-q8-distilled',
+                'prompt': prompt,
+                'images': [],
+                'options': {
+                    'width': 768,
+                    'height': 448,
+                    'frames': 97,
+                    'frame_rate': 24,
+                    'seed': 42,
+                    'studio_lane': 'video:window-a:1',
+                },
+            }
+
+        try:
+            with patch.object(app.config, 'supports_native_mlx_ltx_route', return_value=True), \
+                 patch.object(app.native_mlx, 'run_native_mlx_ltx_video', side_effect=fake_run), \
+                 patch.object(app.jobs, 'jobs', {}):
+                first_id = app.native_mlx.queue_native_mlx_ltx_job(native('first'))
+                self.assertTrue(first_started.wait(1))
+                second_id = app.native_mlx.queue_native_mlx_ltx_job(native('second'))
+
+                self.assertFalse(second_started.wait(0.2))
+                release_first.set()
+                self.assertTrue(second_started.wait(1))
+                self.assertEqual(
+                    calls,
+                    [
+                        (first_id, 'video:window-a:1'),
+                        (second_id, 'video:window-a:1'),
+                    ],
+                )
+        finally:
+            release_first.set()
+
+    def test_comfy_prompt_body_exposes_the_opaque_studio_lane(self):
+        app = load_app()
+        body = json.dumps({
+            'prompt': {},
+            'extra_data': {
+                'extra_pnginfo': {
+                    'studioLane': 'video:window-a:7',
+                },
+            },
+        }).encode('utf-8')
+
+        self.assertEqual(
+            app.graphs._studio_lane_from_comfy_prompt_body(body),
+            'video:window-a:7',
+        )
+
+    def test_native_mlx_biglove_memory_reservations_close_parallel_start_race(self):
+        app = load_app()
+        gib = 1024 ** 3
+        second_admitted = app.jobs.threading.Event()
+        jobs = {
+            'job-1': {'id': 'job-1', 'status': 'queued'},
+            'job-2': {'id': 'job-2', 'status': 'queued'},
+        }
+
+        with patch.object(app.jobs, 'jobs', jobs), \
+             patch.object(app.jobs, '_available_memory_bytes', return_value=60 * gib):
+            first = app.jobs._acquire_klein_memory_reservation('job-1')
+
+            def admit_second():
+                reservation = app.jobs._acquire_klein_memory_reservation('job-2')
+                second_admitted.set()
+                app.jobs._release_klein_memory_reservation(reservation)
+
+            thread = app.jobs.threading.Thread(target=admit_second, daemon=True)
+            thread.start()
+            try:
+                self.assertFalse(second_admitted.wait(0.2))
+                app.jobs._release_klein_memory_reservation(first)
+                self.assertTrue(second_admitted.wait(1))
+            finally:
+                app.jobs._release_klein_memory_reservation(first)
+                thread.join(timeout=1)
 
     def test_mxfp8_biglove_multi_lora_stack_string_uses_native_route_with_lora_payload(self):
         app = load_app()
@@ -525,12 +4210,12 @@ class ZImageAppTests(unittest.TestCase):
                 },
             }).encode('utf-8')
 
-            with patch.object(app, 'COMFY', tmp_path), patch.dict('os.environ', {
+            with patch.object(app.config, 'COMFY', tmp_path), patch.dict('os.environ', {
                 **APPLE_SILICON_ENV,
                 'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '1',
                 'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '0',
             }, clear=False):
-                native = app.detect_native_mlx_biglove_prompt(body)
+                native = app.graphs.detect_native_mlx_biglove_prompt(body)
 
         self.assertIsNotNone(native)
         self.assertEqual(native['options']['loras'], [{'filePath': str(lora.resolve()), 'scale': 0.65}])
@@ -554,18 +4239,18 @@ class ZImageAppTests(unittest.TestCase):
                 },
             }).encode('utf-8')
 
-            with patch.object(app, 'COMFY', tmp_path), patch.dict('os.environ', {
+            with patch.object(app.config, 'COMFY', tmp_path), patch.dict('os.environ', {
                 **APPLE_SILICON_ENV,
                 'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '1',
                 'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '0',
             }, clear=False):
-                native = app.detect_native_mlx_biglove_prompt(body)
+                native = app.graphs.detect_native_mlx_biglove_prompt(body)
 
         self.assertIsNotNone(native)
         self.assertEqual(native['prompt'], 'private prompt stays in memory')
         self.assertEqual(native['options']['loras'], [{'filePath': str(lora.resolve()), 'scale': 0.6}])
-        self.assertEqual(native['options']['width'], 448)
-        self.assertEqual(native['options']['height'], 672)
+        self.assertEqual(native['options']['width'], 1024)
+        self.assertEqual(native['options']['height'], 1536)
 
     def test_mxfp8_biglove_preserves_repeated_reference_conditioning_images(self):
         app = load_app()
@@ -596,7 +4281,7 @@ class ZImageAppTests(unittest.TestCase):
             'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '1',
             'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '0',
         }, clear=False):
-            native = app.detect_native_mlx_biglove_prompt(body)
+            native = app.graphs.detect_native_mlx_biglove_prompt(body)
 
         self.assertIsNotNone(native)
         self.assertEqual(native['image_path'], 'source.png')
@@ -622,7 +4307,7 @@ class ZImageAppTests(unittest.TestCase):
             'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '1',
             'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '1',
         }, clear=False):
-            self.assertIsNone(app.detect_native_mlx_biglove_prompt(body))
+            self.assertIsNone(app.graphs.detect_native_mlx_biglove_prompt(body))
 
     def test_mxfp8_biglove_native_intercept_is_blocked_on_cuda_profile(self):
         app = load_app()
@@ -643,7 +4328,7 @@ class ZImageAppTests(unittest.TestCase):
             'ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT': '1',
             'ZIMG_ALLOW_MXFP8_COMFY_FALLBACK': '0',
         }, clear=False):
-            self.assertIsNone(app.detect_native_mlx_biglove_prompt(body))
+            self.assertIsNone(app.graphs.detect_native_mlx_biglove_prompt(body))
 
     def test_exact_comfy_biglove_rewrite_is_blocked_on_cuda_profile(self):
         app = load_app()
@@ -661,11 +4346,143 @@ class ZImageAppTests(unittest.TestCase):
             model_dir = tmp_path / 'models' / 'diffusion_models'
             model_dir.mkdir(parents=True)
             (model_dir / 'BigLoveKlein3_bf16.safetensors').write_bytes(b'')
-            with patch.object(app, 'COMFY', tmp_path), patch.dict('os.environ', CUDA_ENV, clear=False):
-                rewritten = app.exact_comfy_biglove_prompt_body(body)
+            with patch.object(app.config, 'COMFY', tmp_path), patch.dict('os.environ', CUDA_ENV, clear=False):
+                rewritten = app.graphs.exact_comfy_biglove_prompt_body(body)
 
         data = json.loads(rewritten.decode('utf-8'))
         self.assertEqual(data['prompt']['1']['inputs']['unet_name'], 'BigLoveKlein3_mxfp8.safetensors')
+
+
+class CoupleModeTests(unittest.TestCase):
+    """Regional (couple) auto-workflows: single-subject by default, explicit regions when enabled."""
+
+    @staticmethod
+    def _regional_graph():
+        return {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "waiANIMA_v10Base10.safetensors"}},
+            "2": {"class_type": "LoadQwen35AnimaCLIP", "inputs": {"clip_name": "qwen35_4b.safetensors"}},
+            "11": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": "turbo.safetensors"}},
+            "4": {"class_type": "ForgeCoupleRegionalPrompt", "inputs": {
+                "model": ["11", 0], "clip": ["2", 0],
+                "positive_text": "a\nb", "width": 1024, "height": 1344,
+                "mode": "Basic", "background": "None", "background_weight": 0.2,
+                "advanced_mapping": "[[0.0, 0.5, 0.0, 1.0, 1.0], [0.5, 1.0, 0.0, 1.0, 1.0]]",
+            }},
+            "6": {"class_type": "EmptyQwenImageLayeredLatentImage", "inputs": {"width": 1024, "height": 1344}},
+            "7": {"class_type": "KSampler", "inputs": {
+                "model": ["4", 0], "positive": ["4", 1], "negative": ["4", 1],
+                "latent_image": ["6", 0], "seed": 1, "steps": 8, "cfg": 1.0,
+            }},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0]}},
+        }
+
+    def test_couple_off_splices_regional_node_for_full_canvas(self):
+        app = load_app()
+        graph = self._regional_graph()
+        self.assertTrue(app.graphs._auto_bypass_regional_prompt_node(graph, "4", "a person by a bonfire", "lowres"))
+        self.assertNotIn("4", graph)
+        sampler = graph["7"]["inputs"]
+        self.assertEqual(sampler["model"], ["11", 0])
+        pos_id, neg_id = sampler["positive"][0], sampler["negative"][0]
+        self.assertNotEqual(pos_id, neg_id)
+        self.assertEqual(graph[pos_id]["class_type"], "CLIPTextEncode")
+        self.assertEqual(graph[pos_id]["inputs"], {"clip": ["2", 0], "text": "a person by a bonfire"})
+        self.assertEqual(graph[neg_id]["inputs"], {"clip": ["2", 0], "text": "lowres"})
+
+    def test_couple_on_builds_advanced_mapping_with_split_and_anchor(self):
+        app = load_app()
+        node = self._regional_graph()["4"]
+        app.graphs._auto_apply_couple_regions(node, "positive_text", "sakura\nblack hair", {"couple_split": 0.7, "couple_direction": "horizontal"})
+        self.assertEqual(node["inputs"]["mode"], "Advanced")
+        self.assertEqual(node["inputs"]["background"], "None")
+        rows = json.loads(node["inputs"]["advanced_mapping"])
+        self.assertEqual(rows, [[0.0, 0.7, 0.0, 1.0, 1.0], [0.7, 1.0, 0.0, 1.0, 1.0]])
+        # Composition anchor per line — without it regions blend into ONE subject.
+        self.assertEqual(node["inputs"]["positive_text"], "2girls, sakura\n2girls, black hair")
+
+    def test_couple_pair_anchor_replaces_conflicting_solo_tags(self):
+        app = load_app()
+        node = self._regional_graph()["4"]
+        app.graphs._auto_apply_couple_regions(
+            node, "positive_text", "1girl, sakura\nSOLO, 1boy, dark knight",
+            {"couple_pair": "mixed"},
+        )
+        self.assertEqual(node["inputs"]["positive_text"], "1boy, 1girl, sakura\n1boy, 1girl, dark knight")
+
+    def test_couple_shared_scene_adds_full_canvas_row_and_vertical_split(self):
+        app = load_app()
+        node = self._regional_graph()["4"]
+        app.graphs._auto_apply_couple_regions(
+            node, "positive_text", "bonfire night\nsakura\nblack hair",
+            {"couple_shared": True, "couple_split": 0.5, "couple_direction": "vertical"},
+        )
+        rows = json.loads(node["inputs"]["advanced_mapping"])
+        self.assertEqual(rows[0], [0.0, 1.0, 0.0, 1.0, 0.2])  # shared scene at the node's background weight
+        self.assertEqual(rows[1], [0.0, 1.0, 0.0, 0.5, 1.0])
+        self.assertEqual(rows[2], [0.0, 1.0, 0.5, 1.0, 1.0])
+        # Shared scene line stays un-anchored; character lines get the pair anchor.
+        self.assertEqual(node["inputs"]["positive_text"], "bonfire night\n2girls, sakura\n2girls, black hair")
+
+    def test_couple_single_line_duplicates_character(self):
+        app = load_app()
+        node = self._regional_graph()["4"]
+        app.graphs._auto_apply_couple_regions(node, "positive_text", "one line", {})
+        self.assertEqual(node["inputs"]["positive_text"], "2girls, one line\n2girls, one line")
+
+    def test_couple_on_gets_real_negative_conditioning(self):
+        app = load_app()
+        graph = self._regional_graph()
+        sampler = graph["7"]["inputs"]
+        self.assertEqual(sampler["negative"], ["4", 1])  # template: neg == pos, cfg is a no-op
+        self.assertTrue(app.graphs._auto_split_regional_negative(graph, sampler, "4", "blurry, lowres"))
+        self.assertIn("4", graph)  # regional node stays for couple mode
+        self.assertEqual(sampler["positive"], ["4", 1])
+        neg_id = sampler["negative"][0]
+        self.assertNotEqual(neg_id, "4")
+        self.assertEqual(graph[neg_id]["class_type"], "CLIPTextEncode")
+        self.assertEqual(graph[neg_id]["inputs"], {"clip": ["2", 0], "text": "blurry, lowres"})
+
+    def test_regional_negative_rewire_skips_distinct_negative_nodes(self):
+        app = load_app()
+        graph = self._regional_graph()
+        graph["12"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": "already separate"}}
+        sampler = graph["7"]["inputs"]
+        sampler["negative"] = ["12", 0]
+        self.assertFalse(app.graphs._auto_split_regional_negative(graph, sampler, "4", "blurry"))
+        self.assertEqual(sampler["negative"], ["12", 0])
+
+    def test_user_loras_chain_above_the_model_loader(self):
+        app = load_app()
+        graph = self._regional_graph()
+        sampler = graph["7"]["inputs"]
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            lora_dir = root / "models" / "loras"
+            lora_dir.mkdir(parents=True)
+            (lora_dir / "sakura_anima.safetensors").write_bytes(b"")
+            with patch.object(app.config, "COMFY", root):
+                applied = app.graphs._auto_apply_model_loras(graph, sampler, [
+                    {"id": "sakura_anima.safetensors", "path": str(lora_dir / "sakura_anima.safetensors"), "strength": 0.8},
+                ])
+        self.assertEqual(applied, 1)
+        new_id = graph["11"]["inputs"]["model"][0]
+        self.assertNotEqual(new_id, "1")  # turbo lora now feeds from the user lora...
+        self.assertEqual(graph[new_id]["class_type"], "LoraLoaderModelOnly")
+        self.assertEqual(graph[new_id]["inputs"]["lora_name"], "sakura_anima.safetensors")
+        self.assertEqual(graph[new_id]["inputs"]["strength_model"], 0.8)
+        self.assertEqual(graph[new_id]["inputs"]["model"], ["1", 0])  # ...which feeds from the loader
+        self.assertEqual(sampler["model"], ["4", 0])  # sampler wiring untouched
+
+    def test_normalize_couple_options_coerces_types(self):
+        app = load_app()
+        options = {"couple_mode": "true", "couple_shared": 0, "couple_split": "2.5", "couple_direction": "Diagonal", "couple_pair": "Robots"}
+        app.graphs._normalize_couple_options(options)
+        self.assertIs(options["couple_mode"], True)
+        self.assertIs(options["couple_shared"], False)
+        self.assertEqual(options["couple_split"], 0.9)
+        self.assertEqual(options["couple_direction"], "horizontal")
+        self.assertEqual(options["couple_pair"], "girls")
 
 
 if __name__ == '__main__':
@@ -689,8 +4506,4155 @@ class WorkflowEnvelopeIndexTests(unittest.TestCase):
                 "outputs": {"10": {"images": [{"filename": "c_00001_.png"}]}},
             },
         }
-        records = load_app()._envelope_records_from_history(hist, seen_prompt_ids={"pid-3"})
+        records = load_app().workflow_index._envelope_records_from_history(hist, seen_prompt_ids={"pid-3"})
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["prompt_id"], "pid-1")
         self.assertEqual(records[0]["filenames"], ["a_00001_.png"])
         self.assertIs(records[0]["workflow"], envelope)
+
+
+    def test_ltx_variant_sampling_recipe_env_is_opt_in_per_variant(self):
+        app = load_app()
+
+        # No variant ships an override today: the author's DMD ramp measured worse
+        # than the built-in table (see the note on dmd-q8-v13). The mechanism stays
+        # so a future recipe is a config line, not a patch.
+        for variant, spec in app.config.LTX2_MLX_VARIANTS.items():
+            recipe = spec.get('runtime_env') or {}
+            self.assertIsInstance(recipe, dict, variant)
+            for key, value in recipe.items():
+                self.assertTrue(str(key).startswith('LTX2_'), f'{variant}: {key}')
+                if key.endswith('SIGMAS'):
+                    schedule = [float(x) for x in str(value).split(',')]
+                    self.assertLessEqual(schedule[0], 1.0, variant)
+                    self.assertEqual(schedule[-1], 0.0, variant)
+                    self.assertTrue(all(b <= a for a, b in zip(schedule, schedule[1:])), variant)
+
+    def test_every_variant_model_dir_matches_its_declared_pipeline(self):
+        app = load_app()
+
+        # --distilled aborts at load on a package with no distilled transformer,
+        # and --two-stage needs the dev one. The failure surfaces to the studio as
+        # a bare "did not return a job id", so assert the pairing here instead of
+        # discovering it from a redacted error. Only checks variants whose model
+        # directory is present, so this stays useful on a partial install.
+        for variant, spec in app.config.LTX2_MLX_VARIANTS.items():
+            model_dir = Path(spec['model'])
+            if not model_dir.is_dir():
+                continue
+            names = {p.name for p in model_dir.iterdir()}
+            has_distilled = any(n.startswith('transformer-distilled') for n in names)
+            has_dev = any(n.startswith('transformer-dev') for n in names)
+            if spec.get('video_distilled'):
+                self.assertTrue(
+                    has_distilled,
+                    f'{variant} declares video_distilled but ships no distilled transformer: {sorted(names)}',
+                )
+            else:
+                self.assertTrue(
+                    has_dev,
+                    f'{variant} runs the dev two-stage but ships no dev transformer: {sorted(names)}',
+                )
+
+
+class LoraVideoPreviewTests(unittest.TestCase):
+    """A LoRA for a VIDEO model has no still art anywhere — its whole Civitai
+    gallery is clips. Skipping videos outright gave every one of them a blank
+    card; all 14 installed MiniMax H3 LoRAs resolved to no art at all."""
+
+    def _meta(self, images):
+        return {'modelVersion': {'id': '9', 'modelId': '42', 'images': images}}
+
+    def test_every_clip_is_a_candidate_because_the_cdn_may_refuse_the_transform(self):
+        """Measured on HMNSFW_AIO_V2: clip 1 answered video/mp4 at 5.1 MB with
+        anim=false set, while clips 2 and 3 answered image/jpeg. One
+        uncooperative asset must not cost the card its art, so the fetcher gets
+        the whole gallery in order and takes the first that is really an image."""
+        app = load_app()
+        clips = [
+            {'url': f'https://image.civitai.com/h/u-{n}/original=true/{n}.mp4', 'type': 'video'}
+            for n in (1, 2, 3)
+        ]
+        sources = app.models.lora_preview_sources('/models/loras/h3.safetensors', self._meta(clips))
+        self.assertEqual(len(sources), 3)
+        self.assertTrue(all('anim=false,width=450' in url for url in sources), sources)
+        self.assertEqual(sources[0], app.models.lora_preview_source('/models/loras/h3.safetensors', self._meta(clips)))
+
+    def test_a_cached_video_is_a_miss_like_a_fresh_one(self):
+        """A cache entry outlives the bug that wrote it. A build that applied
+        the still transform without checking the answer cached the mp4s the CDN
+        handed back, so the read path needs the same rule as the fetch path or
+        those cards stay broken until the cache is cleared by hand."""
+        route = (BASE / 'gateway/http.py').read_text(encoding='utf-8')
+        block = route[route.index('def get_api_loras_preview'):][:4200]
+        self.assertIn("str(cached[1] or '').lower().startswith('video/')", block)
+        # …and the fresh fetch rejects one too, with the next candidate taking over.
+        self.assertIn("if got.lower().startswith('video/'):", block)
+        self.assertIn('for candidate in sources[:PREVIEW_SOURCE_ATTEMPTS]:', block)
+
+    def test_a_local_clip_is_skipped_and_the_remote_gallery_takes_over(self):
+        """The downloader saves a preview clip beside the weights and records it
+        as preview_url. The resolver used to return it and STOP, so the route
+        guessed video/mp4 from the extension and sent 7 MB of mp4 into an <img>
+        — which paints nothing. Measured on Krea2-realism-V2. Predates the H3
+        work; it is why some Krea2 cards were blank."""
+        app = load_app()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            weights = root / 'k2.safetensors'
+            weights.write_bytes(b'w')
+            clip = root / 'k2.mp4'
+            clip.write_bytes(b'mp4')
+            meta = {
+                'preview_url': str(clip),
+                'modelVersion': {'id': '9', 'images': [
+                    {'url': 'https://image.civitai.com/h/u/original=true/still.jpeg', 'type': 'image'},
+                ]},
+            }
+            sources = app.models.lora_preview_sources(str(weights), meta)
+            self.assertNotIn(str(clip), sources, 'a local clip cannot be shown in an <img>')
+            self.assertEqual(sources[0], 'https://image.civitai.com/h/u/original=true/still.jpeg')
+
+            # A local STILL beside the weights still wins outright — no network.
+            png = root / 'k2.png'
+            png.write_bytes(b'png')
+            self.assertEqual(
+                app.models.lora_preview_sources(str(weights), meta)[0], str(png.resolve()),
+            )
+
+    def test_a_video_only_gallery_resolves_to_a_still_frame(self):
+        app = load_app()
+        raw = 'https://image.civitai.com/hash/uuid-1/original=true/140459617.mp4'
+        source = app.models.lora_preview_source(
+            '/models/loras/h3.safetensors', self._meta([{'url': raw, 'type': 'video'}]),
+        )
+        # Civitai renders the frame: measured against the live CDN, the raw url
+        # is video/mp4 at 1621 KB and this one is image/jpeg at 69 KB.
+        self.assertEqual(
+            source,
+            'https://image.civitai.com/hash/uuid-1/anim=false,width=450/140459617.mp4',
+        )
+
+    def test_a_real_still_is_preferred_over_a_transformed_video(self):
+        app = load_app()
+        still = 'https://image.civitai.com/hash/uuid-2/original=true/card.jpeg'
+        video = 'https://image.civitai.com/hash/uuid-1/original=true/clip.mp4'
+        source = app.models.lora_preview_source('/models/loras/h3.safetensors', self._meta([
+            {'url': video, 'type': 'video'},
+            {'url': still, 'type': 'image'},
+        ]))
+        self.assertEqual(source, still, 'a still needs no transform and no third party to honour one')
+
+    def test_a_video_off_civitai_is_still_no_card_art(self):
+        """An <img> cannot show an mp4, and only Civitai's CDN renders a frame
+        for us. Returning the url anyway would serve video/mp4 into an <img>."""
+        app = load_app()
+        source = app.models.lora_preview_source('/models/loras/h3.safetensors', self._meta([
+            {'url': 'https://example.com/a/original=true/clip.mp4', 'type': 'video'},
+        ]))
+        self.assertEqual(source, '')
+
+    def test_a_sidecar_that_forgot_to_say_video_is_caught_by_the_extension(self):
+        app = load_app()
+        source = app.models.lora_preview_source('/models/loras/h3.safetensors', self._meta([
+            {'url': 'https://image.civitai.com/h/u/original=true/clip.webm'},
+        ]))
+        self.assertTrue(source.endswith('/anim=false,width=450/clip.webm'), source)
+
+    def test_the_transform_replaces_an_existing_one_rather_than_stacking(self):
+        app = load_app()
+        self.assertEqual(
+            app.models.civitai_still_url('https://image.civitai.com/h/u/width=450/c.mp4'),
+            'https://image.civitai.com/h/u/anim=false,width=450/c.mp4',
+        )
+        # …and is inserted when the url carries no transform segment at all.
+        self.assertEqual(
+            app.models.civitai_still_url('https://image.civitai.com/h/u/c.mp4'),
+            'https://image.civitai.com/h/u/anim=false,width=450/c.mp4',
+        )
+
+
+class LoraCacheTests(unittest.TestCase):
+    """The LoRA cache holds data fetched from the internet (Civitai card art and
+    version lists). It must be unreadable at rest, and it must never outlive the
+    installed file it describes — a replaced LoRA showing its predecessor's art, or
+    an uninstalled one lingering on disk, are both failures."""
+
+    def _app(self, root, key='cache-test-key'):
+        app = load_app()
+        app.loras.LORA_CACHE_DIR = root / 'lora-cache'
+        app.loras.LORA_PREVIEW_CACHE_DIR = app.loras.LORA_CACHE_DIR / 'previews'
+        app.loras.LORA_VERSION_CACHE_DIR = app.loras.LORA_CACHE_DIR / 'versions'
+        app.media.output_encryption_password = lambda create=True: key
+        return app
+
+    def _lora(self, root, name='style.safetensors', body=b'weights', url='https://image.civitai.com/card.jpg'):
+        path = root / name
+        path.write_bytes(body)
+        return {
+            'id': name,
+            'name': name,
+            'path': str(path),
+            'baseModel': 'Krea 2',
+            'metadata': {'previewUrl': url, 'modelVersion': {'id': '9', 'modelId': '42', 'name': 'v1'}},
+        }
+
+    def test_cached_preview_round_trips_and_is_unreadable_on_disk(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root)
+            item = self._lora(root)
+            url = item['metadata']['previewUrl']
+
+            app.loras.cache_lora_preview(item, url, b'\x89PNG-secret-card-art', 'image/png')
+            # Serve from disk, not from the in-process copy.
+            app.loras._lora_cache_memory.clear()
+            app.loras._lora_cache_memory_bytes = 0
+
+            data, ctype = app.loras.cached_lora_preview(item, url)
+            self.assertEqual(data, b'\x89PNG-secret-card-art')
+            self.assertEqual(ctype, 'image/png')
+
+            stored = list(app.loras.LORA_PREVIEW_CACHE_DIR.glob('*.enc'))
+            self.assertEqual(len(stored), 1)
+            blob = stored[0].read_bytes()
+            self.assertNotIn(b'PNG-secret-card-art', blob)
+            self.assertNotIn(b'image/png', blob)
+            # The filename must not name the collection either.
+            self.assertNotIn('style', stored[0].name)
+
+    def test_a_replaced_lora_never_serves_the_old_preview(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root)
+            item = self._lora(root)
+            url = item['metadata']['previewUrl']
+            app.loras.cache_lora_preview(item, url, b'old-art', 'image/png')
+
+            # An update-and-replace keeps the id and rewrites the file.
+            time.sleep(0.01)
+            Path(item['path']).write_bytes(b'different-weights')
+            app.loras._lora_cache_memory.clear()
+            app.loras._lora_cache_memory_bytes = 0
+
+            self.assertIsNone(app.loras.cached_lora_preview(item, url))
+
+    def test_pruning_drops_uninstalled_loras_and_keeps_installed_ones(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root)
+            kept = self._lora(root, 'kept.safetensors')
+            removed = self._lora(root, 'removed.safetensors')
+            app.loras.cache_lora_preview(kept, kept['metadata']['previewUrl'], b'kept-art', 'image/png')
+            app.loras.cache_lora_preview(removed, removed['metadata']['previewUrl'], b'gone-art', 'image/png')
+            app.models.cache_model_versions('42', {'at': time.time(), 'versions': [{'id': '9'}]})
+            self.assertEqual(len(list(app.loras.LORA_PREVIEW_CACHE_DIR.glob('*.enc'))), 2)
+
+            Path(removed['path']).unlink()
+            app.loras.prune_lora_caches([kept])
+
+            surviving = list(app.loras.LORA_PREVIEW_CACHE_DIR.glob('*.enc'))
+            self.assertEqual([p.name for p in surviving], [f"{app.loras.lora_cache_key(kept, kept['metadata']['previewUrl'])}.enc"])
+            # The version list belongs to the Civitai model, which is still installed.
+            self.assertIsNotNone(app.models.cached_model_versions('42'))
+
+            app.loras.prune_lora_caches([])
+            self.assertEqual(list(app.loras.LORA_PREVIEW_CACHE_DIR.glob('*.enc')), [])
+            self.assertIsNone(app.models.cached_model_versions('42'))
+
+    def test_no_machine_key_means_no_cache_rather_than_a_plaintext_one(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root, key=None)
+            item = self._lora(root)
+            url = item['metadata']['previewUrl']
+
+            app.loras.cache_lora_preview(item, url, b'card-art', 'image/png')
+            self.assertFalse(app.loras.LORA_PREVIEW_CACHE_DIR.exists() and list(app.loras.LORA_PREVIEW_CACHE_DIR.glob('*')))
+            app.loras._lora_cache_memory.clear()
+            app.loras._lora_cache_memory_bytes = 0
+            self.assertIsNone(app.loras.cached_lora_preview(item, url))
+
+    def test_version_lists_survive_a_restart_without_asking_civitai_again(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root)
+            record = {'at': time.time(), 'versions': [{'id': '11', 'name': 'v2', 'baseModel': 'Krea 2'}]}
+            app.models.cache_model_versions('42', record)
+
+            # A restart: fresh module, empty in-memory cache, same encrypted dir.
+            restarted = self._app(root)
+            calls = []
+            restarted.models.civitai_json = lambda *a, **k: calls.append(a) or {'modelVersions': []}
+
+            self.assertEqual(restarted.models.civitai_model_versions('42'), record['versions'])
+            self.assertEqual(calls, [])
+
+
+class BfsHeadSwapGuideTests(unittest.TestCase):
+    """The guide layout IS the conditioning contract for the BFS head-swap LoRA.
+
+    Its author's node reserves a chroma strip that the model was trained to read.
+    Get the side, the size, or the frame dimensions wrong and the model receives
+    something it has never seen, so these are asserted rather than trusted.
+    """
+
+    def _clip(self, directory, name, width, height):
+        path = Path(directory) / name
+        subprocess.run(
+            ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+             '-i', f'testsrc=size={width}x{height}:rate=8:duration=1',
+             '-pix_fmt', 'yuv420p', str(path)],
+            check=True, timeout=120,
+        )
+        return path
+
+    def _face(self, directory, name, width, height):
+        path = Path(directory) / name
+        subprocess.run(
+            ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+             '-i', f'color=c=red:size={width}x{height}', '-frames:v', '1', str(path)],
+            check=True, timeout=120,
+        )
+        return path
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_guide_keeps_the_frame_size_and_fits_the_footage_beside_the_strip(self):
+        # ReservedRegionFrameComposer keeps the canvas at the source frame size
+        # and fits the footage into what the strip leaves:
+        #   canvas = Image.new("RGBA", (orig_w, orig_h), ...)
+        #   video_x, video_y = region_size_px, (orig_h - fitted_video_h) // 2
+        # Widening the canvas instead gives the LoRA a layout it never saw in
+        # training and it copies the guide through instead of swapping a face.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._clip(tmp, 'src.mp4', 640, 384)
+            face = self._face(tmp, 'face.png', 200, 200)
+            out = Path(tmp) / 'guide.mp4'
+            info = load_app().native_mlx.build_bfs_headswap_guide_video(source, face, out, region_px=128)
+            # Frame size is the source's, NOT source + strip.
+            self.assertEqual((info['width'], info['height']), (640, 384))
+            self.assertEqual(load_app().native_mlx._probe_video_dimensions(out), (640, 384))
+            # 512x384 of usable width; 640x384 footage fits to 512x307 (aspect kept).
+            self.assertEqual(info['video_width'], 512)
+            self.assertEqual(info['video_height'], 306)
+            self.assertEqual(info['video_x'], 128)
+            self.assertEqual(info['video_y'], (384 - 306) // 2)
+            # The render is the whole canvas, so it is the delivered frame.
+            self.assertEqual((info['content_width'], info['content_height']), (640, 384))
+
+    def test_the_footage_keeps_its_aspect_ratio_inside_the_guide(self):
+        # Stretching it to fill the leftover box would hand the model distorted
+        # motion to track. The node fits; so do we.
+        plan = load_app().native_mlx.plan_bfs_headswap_geometry(1080, 1920, region_px=256)
+        self.assertAlmostEqual(
+            plan['video_width'] / plan['video_height'], 1080 / 1920, places=2,
+        )
+        self.assertLessEqual(plan['video_width'], plan['width'] - plan['region_px'])
+        self.assertLessEqual(plan['video_height'], plan['height'])
+
+    def test_the_v3_trigger_is_required_before_a_render_is_spent(self):
+        # No trigger -> the IC-LoRA never engages and the model reproduces the
+        # guide (green column, face box, untouched footage). That failure looks
+        # like a bug in the compositor and costs a full render to discover, so
+        # it is caught up front instead.
+        app_mod = load_app()
+        self.assertTrue(app_mod.native_mlx.bfs_headswap_prompt_has_trigger(
+            'head_swap: FACE: adult woman, fair skin ACTION: seated, facing camera'))
+        self.assertTrue(app_mod.native_mlx.bfs_headswap_prompt_has_trigger('HEAD_SWAP: FACE: x ACTION: y'))
+        self.assertFalse(app_mod.native_mlx.bfs_headswap_prompt_has_trigger(
+            'a woman sitting on a sofa, cinematic lighting'))
+        self.assertFalse(app_mod.native_mlx.bfs_headswap_prompt_has_trigger(''))
+        # The message has to carry the template, since that is the whole fix.
+        self.assertIn('FACE:', app_mod.native_mlx.BFS_HEADSWAP_PROMPT_HELP)
+        self.assertIn('ACTION:', app_mod.native_mlx.BFS_HEADSWAP_PROMPT_HELP)
+
+    def test_the_bfs_adapter_specifically_must_be_among_the_active_loras(self):
+        # "At least one LoRA" passed with any unrelated LoRA selected, and the
+        # render then came back as a copy of the guide after a full generation.
+        # A muted LoRA is filtered out upstream, so the panel can show the
+        # head-swap LoRA at strength 1 while nothing is actually fused.
+        app_mod = load_app()
+        bfs = {'filePath': '/l/head_swap_v3_rank_adaptive_fro_098.safetensors'}
+        self.assertTrue(app_mod.native_mlx.bfs_headswap_lora_selected(bfs))
+        self.assertTrue(app_mod.native_mlx.bfs_headswap_lora_selected({'name': 'BFS Head-Swap v3'}))
+        self.assertFalse(app_mod.native_mlx.bfs_headswap_lora_selected({'filePath': '/l/LTX2.3_Crisp_Enhance.safetensors'}))
+        self.assertFalse(app_mod.native_mlx.bfs_headswap_lora_selected({}))
+        self.assertFalse(app_mod.native_mlx.bfs_headswap_lora_selected(None))
+
+    def test_the_swap_engine_is_chosen_explicitly_and_defaults_to_bfs(self):
+        # FaceFusion and BFS are different tools, not quality tiers, so the
+        # engine is read from the request rather than guessed. An unknown value
+        # must fall back to BFS instead of silently running nothing.
+        app_mod = load_app()
+        self.assertEqual(app_mod.native_mlx._headswap_backend_name({}), 'bfs')
+        self.assertEqual(app_mod.native_mlx._headswap_backend_name({'head_swap_backend': 'facefusion'}), 'facefusion')
+        self.assertEqual(app_mod.native_mlx._headswap_backend_name({'head_swap_backend': 'FaceFusion'}), 'facefusion')
+        self.assertEqual(app_mod.native_mlx._headswap_backend_name({'head_swap_backend': 'nonsense'}), 'bfs')
+        self.assertEqual(app_mod.native_mlx._headswap_backend_name(None), 'bfs')
+
+    def test_a_strip_that_would_not_fit_is_rejected(self):
+        with self.assertRaises(RuntimeError):
+            load_app().native_mlx.plan_bfs_headswap_geometry(320, 320, region_px=512)
+
+    def test_the_render_is_the_deliverable_so_nothing_crops_it(self):
+        # The author's model card: the generated result does NOT contain the
+        # strip. Sizing the render to the guide canvas and cropping the strip
+        # back off is what stretched the scene and read as a zoom, so the crop
+        # helper is gone — assert it stays gone.
+        self.assertFalse(
+            hasattr(load_app(), 'crop_bfs_headswap_region'),
+            'the head-swap render is already the deliverable; nothing may crop it',
+        )
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_guide_is_resampled_to_the_render_frame_rate(self):
+        # The runtime reads the guide's first N frames at ITS rate, so a guide
+        # left at the source's rate drifts against the render frame for frame.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'src25.mp4'
+            subprocess.run(
+                ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+                 '-i', 'testsrc=size=640x384:rate=25:duration=2',
+                 '-pix_fmt', 'yuv420p', str(path)],
+                check=True, timeout=120,
+            )
+            face = self._face(tmp, 'face.png', 64, 64)
+            guide = Path(tmp) / 'guide.mp4'
+            load_app().native_mlx.build_bfs_headswap_guide_video(path, face, guide, region_px=128, frame_rate=24)
+            rate = subprocess.run(
+                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                 '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', str(guide)],
+                capture_output=True, text=True, check=True, timeout=60,
+            ).stdout.strip()
+            self.assertEqual(rate, '24/1')
+
+    def test_render_dimensions_are_snapped_to_the_latent_grid(self):
+        # The render size comes from the source, which is arbitrary (a phone clip
+        # is 1080 wide), while both axes must sit on the pipeline's grid.
+        plan = load_app().native_mlx.plan_bfs_headswap_geometry(500, 300, region_px=128)
+        self.assertEqual((plan['width'], plan['height']), (512, 320))
+        self.assertEqual(plan['width'] % 64, 0)
+        self.assertEqual(plan['height'] % 64, 0)
+
+    def test_max_dimension_caps_the_render_and_keeps_the_aspect(self):
+        # The speed lever: cost scales with the rendered frame.
+        plan = load_app().native_mlx.plan_bfs_headswap_geometry(768, 1088, region_px=256, max_dimension=768)
+        self.assertEqual((plan['width'], plan['height']), (512, 768))
+        uncapped = load_app().native_mlx.plan_bfs_headswap_geometry(768, 1088, region_px=256)
+        self.assertEqual((uncapped['width'], uncapped['height']), (768, 1088))
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_the_strip_is_snapped_to_a_multiple_of_32(self):
+        # LTX requires both axes divisible by 32, and the strip is the only
+        # dimension we choose — an odd width would make the canvas unrenderable.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._clip(tmp, 'small.mp4', 256, 256)
+            face = self._face(tmp, 'face.png', 200, 200)
+            info = load_app().native_mlx.build_bfs_headswap_guide_video(
+                source, face, Path(tmp) / 'g.mp4', region_px=200)
+            self.assertEqual(info['region_px'], 192)
+            self.assertEqual(info['width'] % 32, 0)
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_reserved_strip_is_chroma_green_on_the_expected_side(self):
+        # Dimensions alone would still pass if the strip flipped sides or the key
+        # colour changed, and either would hand the LoRA conditioning it was never
+        # trained on. Sample actual pixels instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._clip(tmp, 'src.mp4', 640, 384)
+            face = self._face(tmp, 'face.png', 64, 64)
+            out = Path(tmp) / 'guide.mp4'
+            app_mod = load_app()
+            app_mod.native_mlx.build_bfs_headswap_guide_video(source, face, out, region_px=128)
+
+            def sample(x, y):
+                raw = subprocess.run(
+                    ['ffmpeg', '-v', 'error', '-i', str(out), '-frames:v', '1',
+                     '-vf', f'crop=4:4:{x}:{y}', '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'],
+                    capture_output=True, check=True, timeout=60,
+                ).stdout
+                return raw[0], raw[1], raw[2]
+
+            # Top-left corner sits inside the reserved strip, above the face.
+            r, g, b = sample(0, 0)
+            self.assertGreater(g, 200, f'reserved strip should be chroma green, got rgb({r},{g},{b})')
+            self.assertLess(r, 80)
+            self.assertLess(b, 80)
+            # 640x384 source, 128 strip -> footage fitted to 512x306 at (128, 39).
+            # Its middle must carry picture...
+            r2, g2, b2 = sample(384, 192)
+            self.assertFalse(
+                g2 > 200 and r2 < 80 and b2 < 80,
+                f'fitted footage should carry frame, got rgb({r2},{g2},{b2})',
+            )
+            # ...and the band above it must be chroma, because the node fits the
+            # footage rather than stretching it. Asserting this keeps the layout
+            # honest: stretching to fill would track distorted motion, and
+            # widening the canvas hands the LoRA an unseen layout entirely.
+            r3, g3, b3 = sample(384, 4)
+            self.assertGreater(g3, 200, f'letterbox above the footage should be chroma, got rgb({r3},{g3},{b3})')
+            self.assertLess(r3, 80)
+            self.assertLess(b3, 80)
+
+
+class CancelGenerationJobTests(unittest.TestCase):
+    """The studio Cancel button must actually stop the backend render — an
+    un-interrupted job keeps burning the GPU and makes the next generation run
+    at half speed (the reported 'regen took twice as long' symptom)."""
+
+    def test_cancel_route_terminates_a_native_jobs_live_subprocess(self):
+        app = load_app()
+        proc = subprocess.Popen(['sleep', '30'])
+        jobs = {'native1': {'id': 'native1', 'status': 'running', 'backend': 'ltx23-eros-dmd'}}
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patch.object(app.jobs, 'jobs', jobs), \
+                 patch.object(app.jobs, 'native_job_procs', {'native1': proc}):
+                server_thread.start()
+                request = app.net.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/job/native1/cancel',
+                    data=b'{}',
+                    headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with app.net.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                self.assertEqual(response.status, 200)
+            self.assertTrue(payload['ok'])
+            self.assertTrue(payload['interrupted'])
+            self.assertTrue(jobs['native1']['cancel_requested'])
+            self.assertIsNotNone(proc.wait(timeout=5))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+    def test_cancel_between_native_stages_flags_the_record_as_interrupted(self):
+        # No live subprocess right now (e.g. staging inputs, or between the main
+        # render and a post pass) — the flag alone stops the runner at its next
+        # checkpoint, so that still counts as an interrupt.
+        app = load_app()
+        jobs = {'native2': {'id': 'native2', 'status': 'queued'}}
+        with patch.object(app.jobs, 'jobs', jobs), patch.object(app.jobs, 'native_job_procs', {}):
+            result = app.jobs.cancel_generation_job('native2')
+        self.assertTrue(result['interrupted'])
+        self.assertTrue(jobs['native2']['cancel_requested'])
+
+    def test_cancel_of_a_pending_comfy_prompt_deletes_it_from_the_queue(self):
+        app = load_app()
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self):
+                return self._payload
+
+        dequeued = []
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            calls.append((request.get_method(), url, request.data))
+            if url.endswith('/queue') and request.get_method() == 'GET':
+                # A deleted prompt really is gone from the next read; the cancel
+                # verifies that rather than trusting the POST's 200.
+                pending = [] if dequeued else [[2, 'pending-prompt']]
+                return FakeResponse(json.dumps({
+                    'queue_running': [[1, 'running-prompt']],
+                    'queue_pending': pending,
+                }).encode('utf-8'))
+            if url.endswith('/queue'):
+                dequeued.append(True)
+            return FakeResponse(b'{}')
+
+        with patch.object(app.jobs, 'jobs', {}), patch.object(app.jobs, 'native_job_procs', {}), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+            result = app.jobs.cancel_generation_job('pending-prompt')
+        self.assertTrue(result['interrupted'])
+        # Dequeued is immediate and verifiable — this one really is stopped.
+        self.assertTrue(result['stopped'])
+        deletes = [c for c in calls if c[0] == 'POST' and c[1].endswith('/queue')]
+        self.assertEqual(len(deletes), 1)
+        self.assertEqual(json.loads(deletes[0][2].decode('utf-8')), {'delete': ['pending-prompt']})
+
+    def test_cancel_of_the_executing_comfy_prompt_interrupts_it(self):
+        app = load_app()
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self):
+                return self._payload
+
+        interrupted_at = []
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            calls.append((request.get_method(), url))
+            if url.endswith('/queue') and request.get_method() == 'GET':
+                # Comfy honours an interrupt at the next checkpoint, so the
+                # prompt is still running on the read immediately after the
+                # POST and gone on the one after that.
+                running = [] if len(interrupted_at) > 1 else [[1, 'running-prompt']]
+                if interrupted_at:
+                    interrupted_at.append(True)
+                return FakeResponse(json.dumps({
+                    'queue_running': running,
+                    'queue_pending': [],
+                }).encode('utf-8'))
+            if url.endswith('/interrupt'):
+                interrupted_at.append(True)
+            return FakeResponse(b'{}')
+
+        with patch.object(app.jobs, 'jobs', {}), patch.object(app.jobs, 'native_job_procs', {}), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app.jobs, 'CANCEL_VERIFY_POLL_SECONDS', 0.01), \
+             patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+            result = app.jobs.cancel_generation_job('running-prompt')
+        self.assertTrue(result['interrupted'])
+        self.assertIn(('POST', 'http://comfy.test/interrupt'), calls)
+        # Waited for the prompt to actually leave the queue before saying so.
+        self.assertTrue(result['stopped'])
+        self.assertEqual(result['backend_state'], 'running')
+
+    def test_cancel_of_a_finished_or_unknown_job_is_a_noop(self):
+        app = load_app()
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self):
+                return json.dumps({'queue_running': [], 'queue_pending': []}).encode('utf-8')
+
+        jobs = {'done1': {'id': 'done1', 'status': 'success'}}
+        with patch.object(app.jobs, 'jobs', jobs), patch.object(app.jobs, 'native_job_procs', {}), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app.net, 'urlopen', return_value=FakeResponse()):
+            finished = app.jobs.cancel_generation_job('done1')
+            unknown = app.jobs.cancel_generation_job('nope')
+        self.assertTrue(finished['ok'])
+        self.assertFalse(finished['interrupted'])
+        self.assertNotIn('cancel_requested', jobs['done1'])
+        self.assertTrue(unknown['ok'])
+        self.assertFalse(unknown['interrupted'])
+
+    def test_native_runner_raises_cancelled_when_flagged_before_the_spawn(self):
+        app = load_app()
+        jobs = {'native3': {'id': 'native3', 'status': 'running', 'cancel_requested': True}}
+        with patch.object(app.jobs, 'jobs', jobs), patch.object(app.jobs, 'native_job_procs', {}):
+            with self.assertRaises(app.native_mlx.NativeJobCancelled):
+                app.native_mlx._run_native_ltx_subprocess('native3', jobs['native3'], ['sleep', '30'], cwd='.', env=os.environ.copy())
+
+    def test_native_runner_raises_cancelled_when_flagged_mid_render(self):
+        app = load_app()
+        jobs = {'native4': {'id': 'native4', 'status': 'running'}}
+        procs = {}
+
+        def flag_soon():
+            time.sleep(0.5)
+            with app.jobs.jobs_lock:
+                jobs['native4']['cancel_requested'] = True
+
+        flagger = app.jobs.threading.Thread(target=flag_soon, daemon=True)
+        started = time.monotonic()
+        with patch.object(app.jobs, 'jobs', jobs), patch.object(app.jobs, 'native_job_procs', procs):
+            flagger.start()
+            with self.assertRaises(app.native_mlx.NativeJobCancelled):
+                app.native_mlx._run_native_ltx_subprocess('native4', jobs['native4'], ['sleep', '30'], cwd='.', env=os.environ.copy())
+        flagger.join(timeout=2)
+        # The render must die promptly, not run the sleep to completion.
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(procs, {})
+
+
+class RemoteComfyLaneTests(unittest.TestCase):
+    """Remote (rented-box) Comfy lanes: authenticated transport, prompt->lane
+    routing with requester-scoped reads, requester-sealed fetch-back, and the
+    post-harvest scrub of the rented instance."""
+
+    SPKI = 'A' * 200  # base64url-shaped requester public key
+    OTHER_SPKI = 'B' * 200
+
+    @contextlib.contextmanager
+    def _route_state(self, app, tmp):
+        """Per-test prompt-route and lane isolation.
+
+        The rental registry patch matters as much as the route file: routing
+        calls refresh_comfy_lanes(), which reads that registry from its real
+        home and folds the lanes it finds into COMFY_LANES. Unpatched, these
+        tests route through whichever machines the developer has attached at
+        the moment they run.
+        """
+        with contextlib.ExitStack() as stack:
+            for context in (
+                patch.object(app.promptroutes, 'COMFY_PROMPT_ROUTES_FILE', Path(tmp) / 'routes.json'),
+                patch.object(app.promptroutes, '_comfy_prompt_routes', {}),
+                patch.object(app.promptroutes, '_comfy_prompt_routes_loaded', True),
+                patch.object(app.lanes, 'RENTAL_LANES_FILE', Path(tmp) / 'rental-lanes.json'),
+                patch.dict(app.lanes._rental_lanes_state,
+                           {"mtime": None, "lanes": {}, "applied": set()}, clear=False),
+            ):
+                stack.enter_context(context)
+            yield
+
+    def test_lane_remoteness_and_transport_contract(self):
+        app = load_app()
+        lanes = {
+            'default': 'http://127.0.0.1:8188',
+            'rental': 'http://198.51.100.7:8188',
+            'tunnel': 'http://127.0.0.1:8189',
+        }
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'tunnel'}), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}):
+            self.assertFalse(app.lanes.comfy_lane_is_remote('default'))
+            self.assertTrue(app.lanes.comfy_lane_is_remote('rental'))
+            # SSH-tunneled lanes look local; remoteness is declarable.
+            self.assertTrue(app.lanes.comfy_lane_is_remote('tunnel'))
+            self.assertIsNone(app.lanes.comfy_lane_transport_error('default'))
+            # Off-host without a token: refused (no authenticated channel).
+            self.assertIn('authenticated', app.lanes.comfy_lane_transport_error('rental'))
+            # Declared-remote loopback = tunnel; the tunnel is the auth.
+            self.assertIsNone(app.lanes.comfy_lane_transport_error('tunnel'))
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}):
+            self.assertIsNone(app.lanes.comfy_lane_transport_error('rental'))
+            request = app.lanes.comfy_lane_request('rental', '/history/x')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer lane-secret')
+
+    def test_a_dead_lane_is_caught_before_any_work_is_staged_on_it(self):
+        """Being ALLOWED to reach a lane is not the same as it being there.
+
+        A tunnelled lane always passes the transport contract - the tunnel is
+        the auth - so a rental that was destroyed mid-session still read as
+        healthy. Submits staged references into a dead socket, hung, and came
+        back as a bare timeout for a machine that no longer existed. The probe
+        has to name that. The local lane is asked too, through the health cache,
+        because ComfyUI is optional and its absence is a setup step with a
+        button rather than a failure at Generate."""
+        app = load_app()
+        lanes = {'default': 'http://127.0.0.1:8188', 'rental9': 'http://127.0.0.1:18337'}
+
+        class Answering:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app.lanes, '_lane_health_cache', {}), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}):
+            # A local lane that answers is silent, exactly as before.
+            with patch.object(app.net, 'urlopen', return_value=Answering()):
+                self.assertIsNone(app.lanes.comfy_lane_liveness_error('default'))
+
+            with patch.object(app.net, 'urlopen', return_value=Answering()):
+                self.assertIsNone(app.lanes.comfy_lane_liveness_error('rental9'))
+
+            # A dead tunnel says so, names the lane, and says what to do about
+            # it — this is the sentence that has to reach the user instead of
+            # "timed out" three minutes later.
+            with patch.object(app.net, 'urlopen', side_effect=ConnectionRefusedError('Connection refused')):
+                message = app.lanes.comfy_lane_liveness_error('rental9')
+            self.assertIn('rental9', message)
+            self.assertIn('not answering', message)
+            self.assertIn('re-attach', message.lower())
+
+            # A lane that answers but is unhealthy is dead for our purposes too.
+            class Broken(Answering):
+                status = 502
+            with patch.object(app.net, 'urlopen', return_value=Broken()):
+                self.assertIn('502', app.lanes.comfy_lane_liveness_error('rental9'))
+
+    def test_a_lanes_vram_headroom_is_read_from_its_own_launch_flags(self):
+        """The H3 motion-reference budget was measured with --vram-headroom 12
+        and is only valid on a lane that runs it. Comfy's planner cannot see
+        reference rows, so a lane launched without the flag holds roughly half
+        the rows and a job the budget allows dies in block 0 (2026-08-21, job
+        34a722c2). The lane publishes its own argv on /system_stats; that, not
+        the provisioning's intent, is what the gateway reports."""
+        app = load_app()
+        # The parser: absent is 0.0 (ComfyUI's default), unknown is None, and
+        # the two spellings argparse accepts both count. Last one wins.
+        self.assertEqual(app.lanes.vram_headroom_gb_from_argv(['main.py', '--vram-headroom', '12']), 12.0)
+        self.assertEqual(app.lanes.vram_headroom_gb_from_argv(['main.py', '--vram-headroom=4.5']), 4.5)
+        self.assertEqual(app.lanes.vram_headroom_gb_from_argv(['main.py', '--disable-metadata']), 0.0)
+        self.assertEqual(app.lanes.vram_headroom_gb_from_argv(['main.py', '--vram-headroom', '4', '--vram-headroom', '12']), 12.0)
+        self.assertIsNone(app.lanes.vram_headroom_gb_from_argv(None))
+        self.assertIsNone(app.lanes.vram_headroom_gb_from_argv('--vram-headroom 12'))
+
+        lanes = {'default': 'http://127.0.0.1:8188', 'rental9': 'http://127.0.0.1:18337'}
+        probes = []
+
+        def answering(argv):
+            class Answer:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return json.dumps({"system": {"argv": argv}, "devices": []}).encode()
+            def fake_urlopen(request, timeout=None):
+                probes.append(request.full_url)
+                return Answer()
+            return fake_urlopen
+
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental9': 'lane-secret'}), \
+             patch.object(app.lanes, '_lane_launch_args_cache', {}):
+            with patch.object(app.net, 'urlopen', answering(['main.py', '--disable-metadata', '--vram-headroom', '12'])):
+                report = app.lanes.comfy_lane_vram_headroom('rental9')
+            self.assertEqual(report, {
+                'lane': 'rental9', 'remote': True, 'vram_headroom_gb': 12.0, 'vram_total_gb': None,
+                # What this card size has proven, so the guard can bound a
+                # predicted budget by observed reality (None until it runs).
+                'row_observations': None,
+                'probed': True, 'error': None,
+            })
+            self.assertEqual(probes, ['http://127.0.0.1:18337/system_stats'])
+            # Cached: the flags only change when ComfyUI is relaunched, and a
+            # reference job asks twice (pre-flight, then the staged files).
+            with patch.object(app.net, 'urlopen', side_effect=AssertionError('must not re-probe inside the TTL')):
+                self.assertEqual(app.lanes.comfy_lane_vram_headroom('rental9')['vram_headroom_gb'], 12.0)
+
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app.lanes, '_lane_launch_args_cache', {}):
+            # Launched WITHOUT the flag: a fact, reported as 0.0 — this is the
+            # lane the MCP guard holds to the smaller ceiling.
+            with patch.object(app.net, 'urlopen', answering(['main.py', '--disable-auto-launch', '--disable-metadata'])):
+                report = app.lanes.comfy_lane_vram_headroom('rental9')
+            self.assertTrue(report['probed'])
+            self.assertEqual(report['vram_headroom_gb'], 0.0)
+
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app.lanes, '_lane_launch_args_cache', {}):
+            # A lane that will not answer is UNKNOWN, never "without": the
+            # record says so and names the reason, and nothing is cached.
+            with patch.object(app.net, 'urlopen', side_effect=ConnectionRefusedError('Connection refused')):
+                report = app.lanes.comfy_lane_vram_headroom('rental9')
+            self.assertEqual((report['probed'], report['vram_headroom_gb']), (False, None))
+            self.assertIn('Connection refused', report['error'])
+            with patch.object(app.net, 'urlopen', answering(['main.py', '--vram-headroom', '12'])):
+                self.assertEqual(app.lanes.comfy_lane_vram_headroom('rental9')['vram_headroom_gb'], 12.0)
+
+    def test_a_lanes_card_size_rides_with_its_launch_flags(self):
+        """The motion-reference budget is a property of the CARD: 85,000 packed
+        rows were measured on a 32 GB 5090, a 96 GB RTX PRO 6000 holds far more.
+        The same /system_stats read that carries the launch flags publishes the
+        device, so the lane report names the card in GiB — and a lane that
+        publishes no device says None, never a guess."""
+        app = load_app()
+        lanes = {'default': 'http://127.0.0.1:8188', 'rental9': 'http://127.0.0.1:18337'}
+
+        def answering(payload):
+            class Answer:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return json.dumps(payload).encode()
+            return lambda request, timeout=None: Answer()
+
+        pro6000 = {
+            "system": {"argv": ["main.py", "--vram-headroom", "12"]},
+            "devices": [{"name": "cuda:0 NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                         "vram_total": 101_971_394_560, "vram_free": 100_000_000_000}],
+        }
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app.lanes, '_lane_launch_args_cache', {}):
+            with patch.object(app.net, 'urlopen', answering(pro6000)):
+                report = app.lanes.comfy_lane_vram_headroom('rental9')
+            self.assertEqual(report['probed'], True)
+            self.assertEqual(report['vram_headroom_gb'], 12.0)
+            self.assertEqual(report['vram_total_gb'], 94.97)
+            # Cached with the flags: no second probe inside the TTL.
+            with patch.object(app.net, 'urlopen', side_effect=AssertionError('must not re-probe inside the TTL')):
+                self.assertEqual(app.lanes.comfy_lane_vram_headroom('rental9')['vram_total_gb'], 94.97)
+
+        with patch.object(app.lanes, 'COMFY_LANES', lanes), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app.lanes, '_lane_launch_args_cache', {}):
+            with patch.object(app.net, 'urlopen', answering({"system": {"argv": ["main.py"]}, "devices": []})):
+                report = app.lanes.comfy_lane_vram_headroom('rental9')
+            self.assertEqual((report['probed'], report['vram_headroom_gb'], report['vram_total_gb']), (True, 0.0, None))
+
+    def test_api_lanes_resolve_names_the_lane_a_graph_routes_to_and_its_headroom(self):
+        """The MCP's motion-reference guard asks this before pricing a job: only
+        the gateway knows the lanes, so the same first-match rules that will
+        route the submission answer here, and the lane's own /system_stats argv
+        says whether the measured budget applies."""
+        app = load_app()
+        graph = {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}
+
+        class Answer:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({"system": {"argv": ["main.py", "--disable-metadata"]}}).encode()
+
+        import urllib.request
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp, self._route_state(app, tmp), \
+             patch.object(app.config, 'TOKEN', 'test-token'), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app.lanes, '_lane_launch_args_cache', {}), \
+             patch.object(app.net, 'urlopen', return_value=Answer()):
+            Path(tmp, 'rental-lanes.json').write_text(json.dumps({"47": {
+                "lane": "rental47", "local_port": 18347, "needles": ["minimax_h3"], "tier": "minimax",
+            }}))
+            server_thread.start()
+            try:
+                def resolve(body):
+                    request = urllib.request.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/lanes/resolve',
+                        data=json.dumps(body).encode('utf-8'),
+                        headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    try:
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            return response.status, json.loads(response.read().decode('utf-8'))
+                    except urllib.error.HTTPError as error:
+                        return error.code, json.loads(error.read().decode('utf-8'))
+
+                status, answer = resolve({"graph": graph})
+                self.assertEqual(status, 200)
+                # The attached H3 box, launched without the flag.
+                self.assertEqual(answer, {
+                    'ok': True, 'lane': 'rental47', 'remote': True,
+                    'vram_headroom_gb': 0.0, 'vram_total_gb': None, 'row_observations': None,
+                    'probed': True, 'error': None,
+                })
+                # A graph no rental claims routes to the local default, which
+                # is probed the same way (a CUDA host running the studio
+                # locally carries the same contract).
+                status, answer = resolve({"graph": {"1": {"class_type": "CheckpointLoaderSimple",
+                                                           "inputs": {"ckpt_name": "sdxl.safetensors"}}}})
+                self.assertEqual((status, answer['lane'], answer['remote']), (200, 'default', False))
+                # The body is a graph, not a /prompt submission: nothing else
+                # is accepted, so a wrong shape can never be mistaken for a job.
+                status, answer = resolve({"prompt": graph})
+                self.assertEqual(status, 400)
+                self.assertIn('graph', answer['error'])
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+    def test_requester_scoping_of_prompt_routes(self):
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                app.promptroutes.record_comfy_prompt_route('p1', 'default', requester_spki=self.SPKI)
+                route = app.promptroutes.comfy_prompt_route('p1')
+                self.assertEqual(route['requester_fp'], app.promptroutes.requester_fingerprint(self.SPKI))
+                self.assertTrue(app.promptroutes.requester_may_read_prompt(route, self.SPKI))
+                self.assertFalse(app.promptroutes.requester_may_read_prompt(route, self.OTHER_SPKI))
+                self.assertFalse(app.promptroutes.requester_may_read_prompt(route, None))
+                # Legacy submissions (no key presented) stay token-only open.
+                app.promptroutes.record_comfy_prompt_route('p2', 'default')
+                self.assertTrue(app.promptroutes.requester_may_read_prompt(app.promptroutes.comfy_prompt_route('p2'), None))
+                # Routes survive a reload from disk (gateway restart).
+                with patch.object(app.promptroutes, '_comfy_prompt_routes', {}), \
+                     patch.object(app.promptroutes, '_comfy_prompt_routes_loaded', False):
+                    reloaded = app.promptroutes.comfy_prompt_route('p1')
+                    self.assertEqual(reloaded['requester_fp'], route['requester_fp'])
+
+    def test_a_submitter_can_recover_the_prompt_id_it_never_received(self):
+        """Queueing a video is slow enough that callers time out mid-submit -
+        staging references on the lane happens inside that request, and Comfy
+        only answers once its executor frees up. The job still queues, runs and
+        is harvested, so the caller must be able to find it by the client_id it
+        minted rather than abandon a render nobody is holding the id for."""
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                app.promptroutes.record_comfy_prompt_route('p1', 'default', client_id='cid-1')
+                prompt_id, route = app.promptroutes.comfy_prompt_id_for_client('cid-1')
+                self.assertEqual(prompt_id, 'p1')
+                self.assertEqual(route['lane'], 'default')
+
+                # An unknown id resolves to nothing rather than to someone
+                # else's job, and a blank one never matches a blank record.
+                self.assertEqual(app.promptroutes.comfy_prompt_id_for_client('cid-nope'), (None, None))
+                app.promptroutes.record_comfy_prompt_route('p2', 'default')
+                self.assertEqual(app.promptroutes.comfy_prompt_id_for_client(''), (None, None))
+
+                # The newest submission wins: a retried client_id must not hand
+                # back the earlier, already-finished render.
+                app.promptroutes.record_comfy_prompt_route('p3', 'default', client_id='cid-2')
+                app.promptroutes.record_comfy_prompt_route('p4', 'default', client_id='cid-2')
+                self.assertEqual(app.promptroutes.comfy_prompt_id_for_client('cid-2')[0], 'p4')
+
+                # Recovery is scoped exactly like a history read: the key that
+                # submitted it may read it back, nobody else.
+                app.promptroutes.record_comfy_prompt_route('p5', 'default', requester_spki=self.SPKI, client_id='cid-3')
+                _, sealed = app.promptroutes.comfy_prompt_id_for_client('cid-3')
+                self.assertTrue(app.promptroutes.requester_may_read_prompt(sealed, self.SPKI))
+                self.assertFalse(app.promptroutes.requester_may_read_prompt(sealed, self.OTHER_SPKI))
+
+                # And it survives a gateway restart, which is the case that
+                # matters: the record outlives the connection that lost it.
+                with patch.object(app.promptroutes, '_comfy_prompt_routes', {}), \
+                     patch.object(app.promptroutes, '_comfy_prompt_routes_loaded', False):
+                    self.assertEqual(app.promptroutes.comfy_prompt_id_for_client('cid-1')[0], 'p1')
+
+    def test_client_id_is_read_from_the_submitted_prompt_body(self):
+        app = load_app()
+        body = json.dumps({'client_id': 'media-studio-mcp-abc', 'prompt': {'1': {'class_type': 'X'}}}).encode()
+        self.assertEqual(app.graphs._prompt_body_client_id(body), 'media-studio-mcp-abc')
+        # A body without one, and a body that is not JSON at all, are ordinary
+        # submissions - they must not raise inside the submit path.
+        self.assertEqual(app.graphs._prompt_body_client_id(b'{"prompt": {}}'), '')
+        self.assertEqual(app.graphs._prompt_body_client_id(b'not json'), '')
+
+    def test_prompt_input_files_are_pushed_to_the_remote_lane(self):
+        app = load_app()
+        uploads = []
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{}'
+
+        def fake_urlopen(request, timeout=None):
+            uploads.append(request)
+            return FakeResponse()
+
+        with TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / 'input'
+            input_dir.mkdir()
+            (input_dir / 'start.png').write_bytes(b'PNGBYTES')
+            graph = {'70': {'class_type': 'LoadImage', 'inputs': {'image': 'start.png'}},
+                     '71': {'class_type': 'LoadImage', 'inputs': {'image': 'missing.png'}}}
+            body = json.dumps({'prompt': graph}).encode('utf-8')
+            with patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+                pushed = app.promptroutes.push_prompt_inputs_to_lane(body, 'rental')
+        self.assertEqual(pushed, ['start.png'])
+        self.assertEqual(len(uploads), 1)
+        upload = uploads[0]
+        self.assertEqual(upload.full_url, 'http://rental.test:8188/upload/image')
+        self.assertEqual(upload.get_header('Authorization'), 'Bearer lane-secret')
+        self.assertIn(b'PNGBYTES', upload.data)
+        self.assertIn(b'name="overwrite"', upload.data)
+        self.assertIn(b'filename="start.png"', upload.data)
+
+    def test_remote_harvest_seals_to_requester_key_with_no_plaintext_in_output_dir(self):
+        app = load_app()
+        pid = 'remote-prompt-1'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        fetched = []
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'MP4BYTES'
+
+        def fake_urlopen(request, timeout=None):
+            fetched.append(request.full_url)
+            return FakeResponse()
+
+        sealed = {}
+
+        def fake_seal(spki, source, envelope, media_name):
+            sealed.update(spki=spki, plaintext=Path(source).read_bytes(), media_name=media_name)
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app.media, 'AGENT_DUAL_SEAL_ENABLED', False), \
+                 patch.object(app.media, '_seal_file_with_helper', side_effect=fake_seal), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                harvested = app.promptroutes.harvest_remote_comfy_outputs(pid, history)
+
+                logical_name = harvested[0]
+                self.assertTrue(logical_name.startswith('cmf-'))
+                self.assertIn('video_00001_.mp4', logical_name)
+                # Sealed to the REQUESTER's key, from the exact fetched bytes.
+                self.assertEqual(sealed['spki'], self.SPKI)
+                self.assertEqual(sealed['plaintext'], b'MP4BYTES')
+                # Only the envelope exists; no plaintext landed in the shared
+                # output dir, and the private staging file is gone.
+                self.assertEqual([p.name for p in out_dir.iterdir()], [logical_name + '.e2e'])
+                self.assertEqual(list(state_dir.glob('.remote-harvest-*')), [])
+                self.assertEqual(app.promptroutes.comfy_prompt_route(pid)['status'], 'harvested')
+                self.assertIn('/view?', fetched[0])
+                self.assertIn('filename=video_00001_.mp4', fetched[0])
+
+    def _harvest_keypairs(self, root):
+        """Real RSA keys for the harvest path, as media_unseal would mint them.
+
+        Fakes would prove nothing here: the claim under test is that two
+        independent private keys each open their own envelope and neither opens
+        the other's, which only real crypto can show.
+        """
+        import media_unseal
+
+        owner_key = Path(root) / 'owner.pem'
+        agent_key = Path(root) / 'agent.pem'
+        return {
+            'owner_key': owner_key, 'owner_spki': media_unseal.generate_keypair(owner_key),
+            'agent_key': agent_key, 'agent_spki': media_unseal.generate_keypair(agent_key),
+        }
+
+    def _harvest_urlopen(self, payload, fetched):
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return payload
+
+        def fake_urlopen(request, timeout=None):
+            fetched.append(request.full_url)
+            return FakeResponse()
+
+        return fake_urlopen
+
+    def test_remote_harvest_gives_the_owner_and_the_agent_each_an_openable_envelope(self):
+        """A rental job an agent submitted must not lock the owner out.
+
+        The harvest sealed to a single recipient — the requester — so an
+        agent-submitted job came back as media the owner's own studio could
+        never open: the History tile failed to decrypt and Download saved the
+        enc:v1 JSON with an .mp4 name. The owner's envelope now keeps the plain
+        <name>.e2e path every reader already looks for, and the agent keeps its
+        access through its own <name>.agent-<fp>.e2e alongside it.
+        """
+        app = load_app()
+        pid = 'remote-prompt-dual'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        payload = b'MP4BYTES-that-only-a-key-holder-sees'
+        fetched = []
+
+        with TemporaryDirectory() as tmp:
+            keys = self._harvest_keypairs(tmp)
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app.media, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app.media, 'vault_public_key_spki', return_value=keys['owner_spki']), \
+                 patch.object(app.net, 'urlopen', side_effect=self._harvest_urlopen(payload, fetched)):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=keys['agent_spki'])
+                harvested = app.promptroutes.harvest_remote_comfy_outputs(pid, history)
+                self.assertEqual(app.promptroutes.comfy_prompt_route(pid)['status'], 'harvested')
+
+            logical = out_dir / harvested[0]
+            owner_envelope = app.media.e2e_envelope_path_for(logical)
+            agent_envelope = app.media.agent_envelope_path_for(
+                logical, app.promptroutes.requester_fingerprint(keys['agent_spki']))
+
+            # Exactly two envelopes and no plaintext: the owner's at the path
+            # History reads, the agent's beside it.
+            self.assertEqual(
+                sorted(p.name for p in out_dir.iterdir()),
+                sorted([owner_envelope.name, agent_envelope.name]))
+            self.assertEqual(list(state_dir.glob('.remote-harvest-*')), [])
+            # Distinct envelopes (fresh DEK + IV each), same fetched bytes.
+            self.assertNotEqual(owner_envelope.read_bytes(), agent_envelope.read_bytes())
+            self.assertEqual(open_sealed_envelope(owner_envelope, keys['owner_key']), payload)
+            self.assertEqual(open_sealed_envelope(agent_envelope, keys['agent_key']), payload)
+            # Neither key opens the other's envelope.
+            with self.assertRaises(Exception):
+                open_sealed_envelope(owner_envelope, keys['agent_key'])
+            with self.assertRaises(Exception):
+                open_sealed_envelope(agent_envelope, keys['owner_key'])
+
+    def test_history_shows_one_tile_for_a_dual_sealed_output(self):
+        """Two recipients, one generation.
+
+        The harvest now drops a second envelope beside the owner's, in the same
+        shared output dir the file-fallback history walks. The agent's copy is
+        sealed to a key this host does not hold, so listing it would offer the
+        owner a tile their browser could never decrypt — the very symptom the
+        dual seal exists to remove."""
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            out_dir.mkdir()
+            logical = out_dir / 'cmf-41eecc4f-minimax_h3_00001_.mp4'
+            fingerprint = 'b8c09d11fbfe53e0c2de8857adc7e6f2'
+            app.media.e2e_envelope_path_for(logical).write_text('{"ciphertext":"owner"}')
+            app.media.agent_envelope_path_for(logical, fingerprint).write_text('{"ciphertext":"agent"}')
+            with patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'OUT_DIR', out_dir), \
+                 patch.object(app.workflow_index, '_workflow_index_records', {}):
+                records = app.media.output_file_records()
+        self.assertEqual([r['outputs'] for r in records], [[str(logical.resolve())]])
+
+    def test_remote_harvest_writes_one_envelope_when_there_is_no_second_recipient(self):
+        """No owner vault, and an owner-initiated job, each keep one envelope.
+
+        Without a vault there is nobody to seal a second copy to, so the
+        requester's single envelope stays exactly as it was; and a job the
+        owner started themselves never presents a requester key, so it must not
+        grow a stray agent envelope in the shared output dir.
+        """
+        app = load_app()
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        sealed = []
+
+        def fake_seal(spki, source, envelope, media_name):
+            sealed.append((spki, Path(envelope).name))
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        for label, owner_spki, requester_spki, expected_spki in (
+            ('no-vault', None, self.SPKI, self.SPKI),
+            ('owner-job', self.OTHER_SPKI, None, self.OTHER_SPKI),
+        ):
+            with self.subTest(case=label), TemporaryDirectory() as tmp:
+                sealed.clear()
+                out_dir = Path(tmp) / 'output'
+                state_dir = Path(tmp) / 'state'
+                pid = f'remote-prompt-single-{label}'
+                patches = self._route_state(app, tmp)
+                with patches, \
+                     patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                     patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                     patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                     patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                     patch.object(app.config, 'GATEWAY_STATE_DIR', state_dir), \
+                     patch.object(app.media, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                     patch.object(app.media, 'vault_public_key_spki', return_value=owner_spki), \
+                     patch.object(app.media, '_seal_file_with_helper', side_effect=fake_seal), \
+                     patch.object(app.net, 'urlopen', side_effect=self._harvest_urlopen(b'MP4BYTES', [])):
+                    app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=requester_spki)
+                    harvested = app.promptroutes.harvest_remote_comfy_outputs(pid, history)
+
+                self.assertEqual(sealed, [(expected_spki, harvested[0] + '.e2e')])
+                self.assertEqual([p.name for p in out_dir.iterdir()], [harvested[0] + '.e2e'])
+
+    def test_remote_harvest_keeps_the_agent_copy_when_the_owner_copy_is_the_one_at_risk(self):
+        """A failed second seal may never cost the owner their only copy.
+
+        The agent's envelope is a convenience; the owner's is the generation.
+        So the owner seals first, and a failure sealing the agent copy is
+        logged and swallowed — the harvest still completes and still records
+        the output, exactly as the local path behaves.
+        """
+        app = load_app()
+        pid = 'remote-prompt-agent-fails'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        agent_fp = app.promptroutes.requester_fingerprint(self.SPKI)
+
+        def fake_seal(spki, source, envelope, media_name):
+            if spki == self.SPKI:
+                raise RuntimeError('seal helper exited 1')
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app.media, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app.media, 'vault_public_key_spki', return_value=self.OTHER_SPKI), \
+                 patch.object(app.media, '_seal_file_with_helper', side_effect=fake_seal), \
+                 patch.object(app.net, 'urlopen', side_effect=self._harvest_urlopen(b'MP4BYTES', [])):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                harvested = app.promptroutes.harvest_remote_comfy_outputs(pid, history)
+                # The output is still recorded, so the scrub that follows can run.
+                self.assertEqual(app.promptroutes.comfy_prompt_route(pid)['status'], 'harvested')
+
+            self.assertEqual([p.name for p in out_dir.iterdir()], [harvested[0] + '.e2e'])
+            self.assertNotIn(agent_fp, ''.join(p.name for p in out_dir.iterdir()))
+            self.assertEqual(list(state_dir.glob('.remote-harvest-*')), [])
+
+    def test_scrub_deletes_remote_files_and_drops_history(self):
+        app = load_app()
+        pid = 'remote-prompt-2'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{}'
+
+        def fake_urlopen(request, timeout=None):
+            calls.append((request.get_method(), request.full_url, request.data))
+            return FakeResponse()
+
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI,
+                                              pushed_inputs=['start.png'])
+                result = app.promptroutes.scrub_remote_comfy_prompt(pid, history)
+
+        self.assertTrue(result['files_scrubbed'])
+        self.assertTrue(result['history_dropped'])
+        scrub_calls = [c for c in calls if c[1].endswith('/hivemind/scrub-files')]
+        self.assertEqual(len(scrub_calls), 1)
+        files = json.loads(scrub_calls[0][2].decode('utf-8'))['files']
+        self.assertIn({'type': 'output', 'subfolder': '', 'filename': 'video_00001_.mp4'}, files)
+        self.assertIn({'type': 'input', 'subfolder': '', 'filename': 'start.png'}, files)
+        history_calls = [c for c in calls if c[1].endswith('/history') and c[0] == 'POST']
+        self.assertEqual(len(history_calls), 1)
+        self.assertEqual(json.loads(history_calls[0][2].decode('utf-8')), {'delete': [pid]})
+
+    def test_inputs_only_scrub_spares_the_outputs_and_the_history_entry(self):
+        # Harvest-failure path: the output is the only copy of a paid
+        # generation and the history entry is the only record of its filename,
+        # so neither may go — but the staged reference image must.
+        app = load_app()
+        pid = 'remote-prompt-inputs-only'
+        history = {'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}}}
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{}'
+
+        def fake_urlopen(request, timeout=None):
+            calls.append((request.get_method(), request.full_url, request.data))
+            return FakeResponse()
+
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI,
+                                              pushed_inputs=['start.png'])
+                result = app.promptroutes.scrub_remote_comfy_prompt(pid, history, inputs_only=True)
+
+        self.assertTrue(result['files_scrubbed'])
+        self.assertFalse(result['history_dropped'])
+        scrub_calls = [c for c in calls if c[1].endswith('/hivemind/scrub-files')]
+        self.assertEqual(len(scrub_calls), 1)
+        files = json.loads(scrub_calls[0][2].decode('utf-8'))['files']
+        self.assertEqual(files, [{'type': 'input', 'subfolder': '', 'filename': 'start.png'}])
+        self.assertEqual([c for c in calls if c[1].endswith('/history') and c[0] == 'POST'], [])
+
+    def test_attaching_a_machine_routes_without_restarting_the_gateway(self):
+        # Attaching used to require a full stack restart to load the lane from
+        # the launcher env, which killed in-flight generations to add a routing
+        # rule. The registry is read live instead.
+        app = load_app()
+        # The router takes a raw request body, not a parsed dict.
+        graph = json.dumps({"prompt": {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app.lanes, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app.lanes, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                # Nothing attached: the H3 graph goes to the local default.
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'default')
+
+                registry.write_text(json.dumps({"47": {
+                    "lane": "rental47", "local_port": 18347,
+                    "needles": ["minimax_h3"], "tier": "minimax",
+                }}))
+
+                # Same process, no restart: the next routing decision uses it.
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'rental47')
+                self.assertEqual(app.lanes.COMFY_LANES['rental47'], 'http://127.0.0.1:18347')
+                self.assertTrue(app.lanes.comfy_lane_is_remote('rental47'))
+
+                # Detaching is equally live — no dead lane left routing to a
+                # destroyed box.
+                registry.write_text(json.dumps({}))
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'default')
+                self.assertNotIn('rental47', app.lanes.COMFY_LANES)
+                self.assertFalse(app.lanes.comfy_lane_is_remote('rental47'))
+
+    def test_connecting_a_comfyui_lights_the_lane_without_a_restart(self):
+        """ComfyUI is optional and attached, not required at boot.
+
+        The Connect card writes comfy-attachments.json; the next request here
+        picks it up, exactly the way a rented machine does. Detaching restores
+        the configured URL rather than removing the lane — ~30 read sites assume
+        `default` exists, so "no ComfyUI" has to be a lane that does not answer.
+        """
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "comfy-attachments.json"
+            with patch.object(app.lanes, 'LOCAL_LANES_FILE', registry), \
+                 patch.object(app.lanes, 'RENTAL_LANES_FILE', Path(tmp) / "rental-lanes.json"), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.dict(app.lanes._local_lanes_state, {"mtime": None, "lanes": {}, "applied": set()}, clear=False), \
+                 patch.object(app.lanes, '_ENV_COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app.lanes, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                app.lanes.refresh_comfy_lanes()
+                self.assertEqual(app.lanes.COMFY_LANES['default'], 'http://127.0.0.1:8188')
+
+                # The owner attaches the ComfyUI Desktop app, which serves :8000.
+                registry.write_text(json.dumps({"default": {"url": "http://127.0.0.1:8000"}}))
+                app.lanes.refresh_comfy_lanes()
+                self.assertEqual(app.lanes.COMFY_LANES['default'], 'http://127.0.0.1:8000')
+                # An attached LOCAL engine is not a remote lane: its outputs are
+                # on this disk and must not go down the sealed fetch-back path.
+                self.assertFalse(app.lanes.comfy_lane_is_remote('default'))
+
+                # Detaching restores the configured lane; it never empties the map.
+                registry.write_text(json.dumps({}))
+                app.lanes.refresh_comfy_lanes()
+                self.assertEqual(app.lanes.COMFY_LANES['default'], 'http://127.0.0.1:8188')
+
+    def test_a_missing_attachment_registry_is_the_ordinary_state(self):
+        """A machine that has never connected a ComfyUI has no registry file at
+        all. That is not an error and must not empty the lane map."""
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            with patch.object(app.lanes, 'LOCAL_LANES_FILE', Path(tmp) / "nothing-here.json"), \
+                 patch.object(app.lanes, 'RENTAL_LANES_FILE', Path(tmp) / "rental-lanes.json"), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.dict(app.lanes._local_lanes_state, {"mtime": None, "lanes": {}, "applied": set()}, clear=False), \
+                 patch.object(app.lanes, '_ENV_COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app.lanes, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                self.assertEqual(app.lanes._read_local_attachments(), {})
+                app.lanes.refresh_comfy_lanes()
+                self.assertEqual(app.lanes.COMFY_LANES, {"default": "http://127.0.0.1:8188"})
+
+    def test_the_selected_machine_wins_when_two_lanes_serve_the_same_models(self):
+        # Renting two H3 boxes is legitimate; both lanes match the same graph,
+        # and lane rules are FIRST-MATCH. Priority is how the studio's machine
+        # picker settles it — without it, routing follows file order and "run
+        # it on that one" is a coin flip.
+        app = load_app()
+        graph = json.dumps({"prompt": {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app.lanes, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app.lanes, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                registry.write_text(json.dumps({
+                    "47": {"lane": "rental47", "local_port": 18347, "needles": ["minimax_h3"], "priority": 0},
+                    "48": {"lane": "rental48", "local_port": 18348, "needles": ["minimax_h3"], "priority": 3},
+                }))
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'rental48')
+
+                # Selecting the other one flips routing on the next request.
+                registry.write_text(json.dumps({
+                    "47": {"lane": "rental47", "local_port": 18347, "needles": ["minimax_h3"], "priority": 9},
+                    "48": {"lane": "rental48", "local_port": 18348, "needles": ["minimax_h3"], "priority": 3},
+                }))
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'rental47')
+
+    def _two_boxes_registry(self, registry):
+        # Two H3 boxes, same models. The GLOBAL priority says 48 leads.
+        registry.write_text(json.dumps({
+            "vast:47": {"lane": "rental47", "local_port": 18347, "needles": ["minimax_h3"], "priority": 0},
+            "vast:48": {"lane": "rental48", "local_port": 18348, "needles": ["minimax_h3"], "priority": 3},
+        }))
+
+    def test_a_run_on_pin_routes_the_request_ahead_of_the_priority_order(self):
+        # The studio's per-tab "Run on": two tabs, two boxes serving the same
+        # models. The global priority says 48 leads; the tab pinned to 47 still
+        # lands on 47 and the un-pinned tab follows the priority. Nothing global
+        # moves, so the two tabs drive the two boxes at once — and switching in
+        # one tab can never move the other (the bug this replaces: the picker
+        # rewrote the one global priority, so every tab followed the last click).
+        app = load_app()
+        graph = json.dumps({"prompt": {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app.lanes, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app.lanes, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                self._two_boxes_registry(registry)
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'rental48')
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph, run_on='vast:47'), 'rental47')
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph, run_on='vast:48'), 'rental48')
+                # The lane name is accepted too (what the registry calls the box).
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph, run_on='rental47'), 'rental47')
+                # Per request: the next un-pinned request still follows the priority.
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'rental48')
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph, run_on=''), 'rental48')
+                self.assertEqual(
+                    app.lanes.comfy_http_for_prompt_body(graph, run_on='vast:47'), 'http://127.0.0.1:18347')
+
+    def test_a_run_on_pin_never_sends_a_model_to_a_box_that_lacks_it(self):
+        # The pin settles which of several CAPABLE boxes runs a job; it is not a
+        # way to queue a model on a box without it. Pinned to an H3 box, an LTX
+        # graph falls through to the normal order — the local ltx lane here.
+        app = load_app()
+        ltx_graph = json.dumps({"prompt": {"1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "ltx2310eros_v14.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app.lanes, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app.lanes, 'COMFY_LANES', {
+                     "default": "http://127.0.0.1:8188", "ltx": "http://127.0.0.1:8189"}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', [("ltx", ["ltx"])]), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                self._two_boxes_registry(registry)
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(ltx_graph, run_on='vast:47'), 'ltx')
+
+    def test_a_run_on_pin_naming_a_detached_machine_is_refused_not_rerouted(self):
+        # The tab asked for THAT box. Quietly spending another box's hours is the
+        # surprise the pin exists to prevent, so a stale pin raises — the studio
+        # drops a stale pin on its next refresh, and an agent gets the reason.
+        app = load_app()
+        graph = json.dumps({"prompt": {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app.lanes, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app.lanes, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                self._two_boxes_registry(registry)
+                with self.assertRaises(app.lanes.ComfyLanePinError) as caught:
+                    app.lanes.comfy_lane_for_prompt_body(graph, run_on='vast:99')
+                self.assertIn('vast:99', str(caught.exception))
+                self.assertIn('no longer attached', str(caught.exception))
+                # Detaching the pinned box turns a good pin stale on the next request.
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph, run_on='vast:47'), 'rental47')
+                registry.write_text(json.dumps({
+                    "vast:48": {"lane": "rental48", "local_port": 18348, "needles": ["minimax_h3"], "priority": 3},
+                }))
+                with self.assertRaises(app.lanes.ComfyLanePinError):
+                    app.lanes.comfy_lane_for_prompt_body(graph, run_on='vast:47')
+                # No pin is no pin.
+                self.assertIsNone(app.lanes.comfy_lane_for_pin(''))
+                self.assertIsNone(app.lanes.comfy_lane_for_pin(None))
+
+    def test_a_prompt_body_carries_the_run_on_pin_top_level_or_in_the_png_info(self):
+        app = load_app()
+        self.assertEqual(
+            app.lanes._run_on_from_comfy_prompt_body(json.dumps({"prompt": {}, "run_on": "vast:47"})), 'vast:47')
+        self.assertEqual(
+            app.lanes._run_on_from_comfy_prompt_body(json.dumps({
+                "prompt": {}, "extra_data": {"extra_pnginfo": {"runOn": " vast:48 "}},
+            }).encode('utf-8')),
+            'vast:48')
+        self.assertEqual(app.lanes._run_on_from_comfy_prompt_body(b'{"prompt": {}}'), '')
+        self.assertEqual(app.lanes._run_on_from_comfy_prompt_body(b'not json'), '')
+        self.assertEqual(app.lanes._run_on_from_comfy_prompt_body(b'[]'), '')
+
+    def test_proxy_submit_and_lanes_resolve_route_by_the_run_on_pin_and_refuse_a_stale_one(self):
+        """Over HTTP: the MCP's submit (/comfy/api/prompt) and its budget guard
+        (/api/lanes/resolve) both honour the tab's pin, and a stale pin comes
+        back 409 + operational (so it survives machine-private redaction and
+        reaches the tab as the reason, not a bare failure)."""
+        from urllib.request import urlopen as real_urlopen, Request as RealRequest
+        from urllib.error import HTTPError as RealHTTPError
+        app = load_app()
+        graph = {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}
+
+        class Answer:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({"system": {"argv": ["main.py", "--vram-headroom", "12"]}}).encode()
+
+        def post(port, path, body):
+            request = RealRequest(
+                f'http://127.0.0.1:{port}{path}', data=json.dumps(body).encode('utf-8'),
+                headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                method='POST',
+            )
+            try:
+                with real_urlopen(request, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode('utf-8'))
+            except RealHTTPError as error:
+                return error.code, json.loads(error.read().decode('utf-8') or '{}')
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp, self._route_state(app, tmp), \
+             patch.object(app.config, 'TOKEN', 'test-token'), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app.lanes, '_lane_launch_args_cache', {}), \
+             patch.object(app.net, 'urlopen', return_value=Answer()), \
+             patch.object(app.media, 'vault_public_key_spki', return_value=None):
+            self._two_boxes_registry(Path(tmp, 'rental-lanes.json'))
+            server_thread.start()
+            try:
+                port = server.server_port
+                # The guard prices the PINNED lane, not the priority leader.
+                status, answer = post(port, '/api/lanes/resolve', {"graph": graph})
+                self.assertEqual((status, answer['lane']), (200, 'rental48'))
+                status, answer = post(port, '/api/lanes/resolve', {"graph": graph, "run_on": "vast:47"})
+                self.assertEqual((status, answer['lane']), (200, 'rental47'))
+                status, answer = post(port, '/api/lanes/resolve', {"graph": graph, "run_on": "vast:99"})
+                self.assertEqual(status, 409)
+                self.assertTrue(answer.get('operational'))
+                self.assertIn('vast:99', answer['error'])
+                # The submit: a stale pin is refused before anything is staged on
+                # any lane (no sealing key here, and we never reach that check).
+                status, answer = post(port, '/comfy/api/prompt', {"prompt": graph, "run_on": "vast:99"})
+                self.assertEqual(status, 409)
+                self.assertTrue(answer.get('operational'))
+                self.assertIn('vast:99', answer['error'])
+                # A good pin routes to its lane — the remote lane then asks for a
+                # sealing key, which is how we know it was rental47 being readied
+                # rather than the local default (which needs no key).
+                status, answer = post(port, '/comfy/api/prompt', {"prompt": graph, "run_on": "vast:47"})
+                self.assertEqual(status, 409)
+                self.assertIn('sealing key', answer['error'])
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_generate_api_refuses_a_stale_run_on_pin_before_queueing(self):
+        # An image tab pinned to a box that was destroyed meanwhile: refused up
+        # front with the reason, not a job that dies seconds later.
+        app = load_app()
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        captured = {}
+
+        def fake_start(media_type, options, runner, args):
+            captured.update(options=dict(options))
+            return None
+
+        with TemporaryDirectory() as tmp, self._route_state(app, tmp), \
+             patch.object(app.config, 'TOKEN', 'test-token'), \
+             patch.object(app.jobs, 'jobs', {}), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app.lanes, 'COMFY_LANE_RULES', []), \
+             patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app.jobs, 'start_studio_generation_thread', side_effect=fake_start):
+            self._two_boxes_registry(Path(tmp, 'rental-lanes.json'))
+            server_thread.start()
+            try:
+                def generate(body):
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps(body).encode('utf-8'),
+                        headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    try:
+                        with app.net.urlopen(request, timeout=5) as response:
+                            return response.status, json.loads(response.read().decode('utf-8'))
+                    except app.http.HTTPError as error:
+                        return error.code, json.loads(error.read().decode('utf-8') or '{}')
+
+                status, payload = generate({
+                    'backend': 'comfy-api-image', 'prompt': 'a pinned request', 'run_on': 'vast:99'})
+                self.assertEqual(status, 409)
+                self.assertTrue(payload.get('operational'))
+                self.assertIn('vast:99', payload['error'])
+                self.assertEqual(captured, {}, 'nothing was queued')
+                # A live pin rides into the runner's options, where the lane pick reads it.
+                status, payload = generate({
+                    'backend': 'comfy-api-image', 'prompt': 'a pinned request', 'run_on': 'vast:47'})
+                self.assertEqual(status, 202)
+                self.assertEqual(captured['options'].get('run_on'), 'vast:47')
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_an_attached_rental_outranks_a_local_lane_that_serves_the_same_models(self):
+        # The stack launcher prepends rental rules to COMFY_LANE_RULES at boot;
+        # the attach-without-restart path has to agree, or renting a machine is
+        # a no-op for every model a local lane also claims. Live 2026-08-10:
+        # LTX generations kept running on the local `ltx` lane while a paid
+        # video box sat idle, because its rule had been appended.
+        app = load_app()
+        graph = json.dumps({"prompt": {"1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "ltx2310eros_v14.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app.lanes, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app.lanes, 'COMFY_LANES', {
+                     "default": "http://127.0.0.1:8188", "ltx": "http://127.0.0.1:8189"}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', [("ltx", ["ltx"])]), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()):
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'ltx')
+                registry.write_text(json.dumps({
+                    "77": {"lane": "rental77", "local_port": 18377,
+                           "needles": ["ltx2310eros"], "priority": 1},
+                }))
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'rental77')
+
+                # Detaching hands the workload back to the local lane.
+                registry.write_text(json.dumps({}))
+                self.assertEqual(app.lanes.comfy_lane_for_prompt_body(graph), 'ltx')
+
+    def test_lane_registry_reread_is_skipped_when_the_file_has_not_changed(self):
+        app = load_app()
+        reads = []
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            registry.write_text(json.dumps({"9": {"lane": "rental9", "local_port": 18309, "needles": ["krea"]}}))
+            real_read_text = Path.read_text
+
+            def counting_read_text(self, *args, **kwargs):
+                if self == registry:
+                    reads.append(1)
+                return real_read_text(self, *args, **kwargs)
+
+            with patch.object(app.lanes, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(Path, 'read_text', counting_read_text):
+                for _ in range(5):
+                    app.lanes._read_rental_attachments()
+        # Per-request refresh must cost a stat, not a parse.
+        self.assertEqual(len(reads), 1)
+
+    def test_an_unreadable_lane_registry_keeps_the_last_good_routing(self):
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            registry.write_text(json.dumps({"9": {"lane": "rental9", "local_port": 18309, "needles": ["krea"]}}))
+            with patch.object(app.lanes, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app.lanes._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False):
+                self.assertIn('rental9', app.lanes._read_rental_attachments())
+                registry.write_text("{ this is not json")
+                # A half-written file must not strand a running generation.
+                self.assertIn('rental9', app.lanes._read_rental_attachments())
+
+    def test_routed_prompt_reports_real_progress_from_the_lane(self):
+        # A remote lane's /history entry appears only at the very end, so
+        # without the lane's own counters the studio bar is pure guesswork.
+        app = load_app()
+        pid = 'remote-prompt-progress'
+        payload = json.dumps({
+            'prompt_id': pid, 'node_id': '14', 'value': 5.0, 'max': 10.0, 'updated_at': 1.0,
+        }).encode('utf-8')
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return payload
+
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.net, 'urlopen', side_effect=lambda request, timeout=None: FakeResponse()):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                progress = app.promptroutes._record_lane_progress(pid, 'rental')
+                route = app.promptroutes.comfy_prompt_route(pid)
+
+        # Half the steps, scaled into the share sampling owns — never the full
+        # bar, because decode + mux + fetch-back still follow the last step.
+        # Reported as a PERCENT: one `progress` key on /api/job has to mean one
+        # thing, and every other producer of it writes 0-100. While this lane
+        # alone wrote a fraction, media_studio._job_progress could not read both
+        # and turned a local 5% into a finished bar.
+        expected = 0.5 * app.promptroutes.REMOTE_SAMPLER_PROGRESS_SHARE * 100
+        self.assertAlmostEqual(progress, expected)
+        self.assertAlmostEqual(route['progress'], expected)
+        self.assertLess(route['progress'], 100)
+        self.assertEqual((route['progress_step'], route['progress_total']), (5, 10))
+        # Status must stay 'submitted': respawn_remote_comfy_watchers re-arms on
+        # it, so promoting to 'running' here would orphan the job on restart.
+        self.assertEqual(route['status'], 'submitted')
+
+    def test_progress_from_a_neighbouring_prompt_is_ignored(self):
+        app = load_app()
+        pid = 'remote-prompt-progress-2'
+        payload = json.dumps({'prompt_id': 'someone-elses', 'value': 9.0, 'max': 10.0}).encode('utf-8')
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return payload
+
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.net, 'urlopen', side_effect=lambda request, timeout=None: FakeResponse()):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                self.assertIsNone(app.promptroutes._record_lane_progress(pid, 'rental'))
+                self.assertNotIn('progress', app.promptroutes.comfy_prompt_route(pid))
+
+    def test_a_lane_without_the_progress_route_just_keeps_the_estimate(self):
+        app = load_app()
+        pid = 'remote-prompt-progress-3'
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.net, 'urlopen', side_effect=RuntimeError('404 Not Found')):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                self.assertIsNone(app.promptroutes._record_lane_progress(pid, 'rental'))
+
+    def test_routed_prompt_has_a_job_record_the_studio_can_finish_on(self):
+        # The studio polls /api/job over its trusted channel. Remote prompts had
+        # no record there for their whole life, so a finished generation left
+        # the studio spinning while the video sat in History.
+        app = load_app()
+        pid = 'remote-prompt-job-record'
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                running = app.promptroutes.remote_comfy_job_record(pid)
+                app.promptroutes.update_comfy_prompt_route(pid, progress=0.45)
+                mid = app.promptroutes.remote_comfy_job_record(pid)
+                app.promptroutes.update_comfy_prompt_route(pid, status='harvested', outputs=['cmf-abc-clip.mp4'])
+                done = app.promptroutes.remote_comfy_job_record(pid)
+                app.promptroutes.update_comfy_prompt_route(pid, status='error', error='UNETLoader (node 6) failed — boom')
+                failed = app.promptroutes.remote_comfy_job_record(pid)
+                self.assertIsNone(app.promptroutes.remote_comfy_job_record('never-routed'))
+
+        self.assertEqual(running['status'], 'running')
+        self.assertNotIn('progress', running)
+        self.assertEqual(mid['progress'], 0.45)
+        self.assertEqual(done['status'], 'success')
+        # /image/ serves the requester-sealed envelope; /comfy/view only ever
+        # served plaintext local files and 404s for a harvested remote output.
+        self.assertEqual(done['image_urls'], ['/image/cmf-abc-clip.mp4'])
+        self.assertEqual(failed['status'], 'error')
+        self.assertIn('UNETLoader', failed['error'])
+        # The prompt itself never appears in a job record.
+        self.assertEqual(done['prompt'], app.history.PRIVATE_PROMPT_LABEL)
+
+    def test_remote_failure_message_names_the_node_without_leaking_the_box(self):
+        app = load_app()
+        history = {'status': {'status_str': 'error', 'completed': False, 'messages': [
+            ['execution_start', {'prompt_id': 'x'}],
+            ['execution_error', {
+                'node_id': '30',
+                'node_type': 'SpectrumApplyMiniMaxH3',
+                'exception_type': 'ValueError',
+                'exception_message': 'bootstrap_first_forecast requires degree == 1',
+                # Both of these carry material that must never come back.
+                'current_inputs': {'prompt': ['a private prompt the customer typed']},
+                'traceback': ['  File "/workspace/ComfyUI/execution.py", line 545'],
+            }],
+        ]}}
+        message = app.promptroutes.remote_comfy_failure_message(history)
+        self.assertIn('SpectrumApplyMiniMaxH3', message)
+        self.assertIn('node 30', message)
+        self.assertIn('bootstrap_first_forecast requires degree == 1', message)
+        self.assertNotIn('private prompt', message)
+        self.assertNotIn('/workspace', message)
+
+    def test_remote_failure_message_reduces_remote_paths_to_basenames(self):
+        app = load_app()
+        history = {'status': {'status_str': 'error', 'messages': [
+            ['execution_error', {
+                'node_id': '6', 'node_type': 'UNETLoader', 'exception_type': 'FileNotFoundError',
+                'exception_message': "cannot open /workspace/ComfyUI/models/diffusion_models/h3.safetensors",
+            }],
+        ]}}
+        message = app.promptroutes.remote_comfy_failure_message(history)
+        self.assertIn('h3.safetensors', message)
+        self.assertNotIn('/workspace/ComfyUI', message)
+
+    def test_remote_failure_message_falls_back_to_the_status_string(self):
+        app = load_app()
+        self.assertEqual(
+            app.promptroutes.remote_comfy_failure_message({'status': {'status_str': 'error', 'messages': []}}),
+            'error',
+        )
+        self.assertEqual(app.promptroutes.remote_comfy_failure_message({}), 'remote generation failed')
+
+    def test_watcher_harvests_then_scrubs_when_the_remote_prompt_finishes(self):
+        app = load_app()
+        pid = 'remote-prompt-3'
+        entry = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'clip_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload): self._payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return self._payload
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            calls.append((request.get_method(), url))
+            if url.endswith(f'/history/{pid}'):
+                return FakeResponse(json.dumps({pid: entry}).encode('utf-8'))
+            if '/view?' in url:
+                return FakeResponse(b'CLIPBYTES')
+            return FakeResponse(b'{}')
+
+        def fake_seal(spki, source, envelope, media_name):
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.config, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app.config, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app.media, '_seal_file_with_helper', side_effect=fake_seal), \
+                 patch.object(app.workflow_index, '_harvest_comfy_workflow_envelopes', return_value=0), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                route = app.promptroutes.watch_remote_comfy_prompt(pid, poll_seconds=0.01, timeout_seconds=5)
+
+        self.assertEqual(route['status'], 'harvested')
+        self.assertTrue(route['scrubbed'])
+        self.assertEqual(route['outputs'], [f'cmf-{pid[:8]}-clip_00001_.mp4'])
+        self.assertTrue(any(url.endswith('/hivemind/scrub-files') for _, url in calls))
+
+    def test_synthetic_history_reports_each_remote_phase(self):
+        app = load_app()
+        # In flight: no entry yet, exactly like live Comfy history.
+        self.assertEqual(app.promptroutes.synthetic_comfy_history_for_route('p', {'status': 'submitted'}), {})
+        harvested = app.promptroutes.synthetic_comfy_history_for_route(
+            'p', {'status': 'harvested', 'outputs': ['cmf-p-clip.mp4']})
+        status = harvested['p']['status']
+        self.assertTrue(status['completed'])
+        self.assertEqual(status['status_str'], 'success')
+        images = harvested['p']['outputs']['hivemind_remote']['images']
+        self.assertEqual(images, [{'filename': 'cmf-p-clip.mp4', 'subfolder': '', 'type': 'output'}])
+        errored = app.promptroutes.synthetic_comfy_history_for_route('p', {'status': 'error', 'error': 'boom'})
+        self.assertEqual(errored['p']['status']['status_str'], 'error')
+        self.assertEqual(errored['p']['outputs'], {})
+
+    def test_proxy_scopes_remote_history_to_the_requester_over_http(self):
+        from urllib.request import urlopen as real_urlopen, Request as RealRequest
+        from urllib.error import HTTPError as RealHTTPError
+        app = load_app()
+        pid = 'rp-http-1'
+
+        def get_history(port, headers=None):
+            request = RealRequest(
+                f'http://127.0.0.1:{port}/comfy/api/history/{pid}',
+                headers={'Authorization': 'Bearer test-token', **(headers or {})},
+            )
+            try:
+                with real_urlopen(request, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode('utf-8'))
+            except RealHTTPError as error:
+                return error.code, json.loads(error.read().decode('utf-8') or '{}')
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:1', 'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                app.promptroutes.update_comfy_prompt_route(pid, status='harvested', outputs=['cmf-rp-clip.mp4'])
+                server_thread.start()
+                try:
+                    port = server.server_port
+                    # No requester key presented: the prompt does not exist.
+                    status, payload = get_history(port)
+                    self.assertEqual((status, payload), (404, {}))
+                    # Wrong key: same.
+                    status, payload = get_history(port, {'X-E2E-Requester-Pub': self.OTHER_SPKI})
+                    self.assertEqual((status, payload), (404, {}))
+                    # The owning requester reads the harvested result, served
+                    # from the gateway's record (the lane was scrubbed).
+                    status, payload = get_history(port, {'X-E2E-Requester-Pub': self.SPKI})
+                    self.assertEqual(status, 200)
+                    self.assertTrue(payload[pid]['status']['completed'])
+                    images = payload[pid]['outputs']['hivemind_remote']['images']
+                    self.assertEqual(images[0]['filename'], 'cmf-rp-clip.mp4')
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+    def test_proxy_submit_to_unauthenticated_remote_lane_is_refused(self):
+        from urllib.request import urlopen as real_urlopen, Request as RealRequest
+        from urllib.error import HTTPError as RealHTTPError
+        app = load_app()
+        graph = {'1': {'class_type': 'CheckpointLoaderSimple',
+                       'inputs': {'ckpt_name': 'minimax_h3_fl2va.safetensors'}}}
+        body = json.dumps({'prompt': graph}).encode('utf-8')
+
+        def submit(port, headers=None):
+            request = RealRequest(
+                f'http://127.0.0.1:{port}/comfy/api/prompt',
+                data=body,
+                headers={'Authorization': 'Bearer test-token',
+                         'Content-Type': 'application/json', **(headers or {})},
+                method='POST',
+            )
+            try:
+                with real_urlopen(request, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode('utf-8'))
+            except RealHTTPError as error:
+                return error.code, json.loads(error.read().decode('utf-8') or '{}')
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:1', 'rental': 'http://198.51.100.7:8188'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', [('rental', ['minimax'])]), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {}), \
+                 patch.object(app.media, 'vault_public_key_spki', return_value=None):
+                server_thread.start()
+                try:
+                    port = server.server_port
+                    # No authenticated transport for the off-host lane.
+                    status, payload = submit(port)
+                    self.assertEqual(status, 502)
+                    self.assertIn('authenticated', payload['error'])
+                    # With transport but no sealing key anywhere: refused
+                    # before any plaintext could become undeliverable.
+                    with patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}):
+                        status, payload = submit(port)
+                        self.assertEqual(status, 409)
+                        self.assertIn('sealing key', payload['error'])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+    def test_proxy_submit_records_route_and_spawns_watcher_for_remote_lane(self):
+        from urllib.request import urlopen as real_urlopen, Request as RealRequest
+        app = load_app()
+        graph = {'1': {'class_type': 'CheckpointLoaderSimple',
+                       'inputs': {'ckpt_name': 'minimax_h3_fl2va.safetensors'}}}
+        body = json.dumps({'prompt': graph}).encode('utf-8')
+        upstream = []
+        watched = []
+
+        class FakeResponse:
+            status = 200
+            headers = {'Content-Type': 'application/json'}
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({'prompt_id': 'rp-new-1'}).encode('utf-8')
+
+        def fake_upstream_urlopen(request, timeout=None):
+            upstream.append(request)
+            return FakeResponse()
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patch.object(app.config, 'TOKEN', 'test-token'), \
+                 patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://127.0.0.1:1', 'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_RULES', [('rental', ['minimax'])]), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', set()), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.config, 'COMFY_INPUT_DIR', Path(tmp) / 'input'), \
+                 patch.object(app.promptroutes, 'watch_remote_comfy_prompt', side_effect=lambda pid, **kw: watched.append(pid)), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_upstream_urlopen):
+                server_thread.start()
+                try:
+                    request = RealRequest(
+                        f'http://127.0.0.1:{server.server_port}/comfy/api/prompt',
+                        data=body,
+                        headers={'Authorization': 'Bearer test-token',
+                                 'Content-Type': 'application/json',
+                                 'X-E2E-Requester-Pub': self.SPKI},
+                        method='POST',
+                    )
+                    with real_urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                    self.assertEqual(payload['prompt_id'], 'rp-new-1')
+                    # The lane is asked whether it is alive BEFORE anything is
+                    # staged on it: a dead tunnel used to swallow the uploads
+                    # and surface minutes later as an unexplained timeout.
+                    self.assertEqual(upstream[0].full_url, 'http://rental.test:8188/system_stats')
+                    submitted = next(r for r in upstream if r.full_url.endswith('/api/prompt'))
+                    # Routed to the rental lane, with its transport token, and
+                    # without leaking the requester header upstream.
+                    self.assertEqual(submitted.full_url, 'http://rental.test:8188/api/prompt')
+                    self.assertEqual(submitted.get_header('Authorization'), 'Bearer lane-secret')
+                    self.assertIsNone(submitted.get_header('X-e2e-requester-pub'))
+                    route = app.promptroutes.comfy_prompt_route('rp-new-1')
+                    self.assertEqual(route['lane'], 'rental')
+                    self.assertTrue(route['remote'])
+                    self.assertEqual(route['requester_fp'], app.promptroutes.requester_fingerprint(self.SPKI))
+                    for _ in range(100):
+                        if watched:
+                            break
+                        time.sleep(0.02)
+                    self.assertEqual(watched, ['rp-new-1'])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+    def test_watcher_keeps_outputs_but_scrubs_inputs_when_harvest_fails(self):
+        # A flaky fetch-back must never delete the only copy of the outputs —
+        # but the customer's staged reference image has no recovery value and
+        # must not sit on the rented box until teardown.
+        app = load_app()
+        pid = 'remote-prompt-4'
+        entry = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'clip_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+
+        class FakeResponse:
+            def __init__(self, payload): self._payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return self._payload
+
+        def fake_urlopen(request, timeout=None):
+            if request.full_url.endswith(f'/history/{pid}'):
+                return FakeResponse(json.dumps({pid: entry}).encode('utf-8'))
+            return FakeResponse(b'{}')
+
+        scrubs = []
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app.lanes, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app.lanes, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app.workflow_index, '_harvest_comfy_workflow_envelopes', return_value=0), \
+                 patch.object(app.promptroutes, 'harvest_remote_comfy_outputs', side_effect=RuntimeError('view flaked')), \
+                 patch.object(app.promptroutes, 'scrub_remote_comfy_prompt', side_effect=lambda *a, **k: scrubs.append((a, k))), \
+                 patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+                app.promptroutes.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                route = app.promptroutes.watch_remote_comfy_prompt(pid, poll_seconds=0.01, timeout_seconds=5)
+
+        self.assertEqual(route['status'], 'error')
+        self.assertIn('view flaked', route['error'])
+        self.assertEqual(len(scrubs), 1)
+        self.assertTrue(scrubs[0][1]['inputs_only'])
+
+
+class NativeKleinLoraTests(unittest.TestCase):
+    """A LoRA the caller asked for has to reach the engine or be refused.
+
+    The warm Swift server takes an array of them; the CLI fallback takes one
+    (--lora, or a --lora-config-path JSON that is a single object). The CLI
+    command used to be built with neither, so with ZIMG_USE_FLUX2_SERVER unset
+    — its default, and this machine's state — a Klein edit that requested LoRAs
+    ran on the bare model and reported success.
+    """
+
+    def _argv(self, native_loras):
+        app = load_app()
+        captured = {}
+
+        class FakeProc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = [str(arg) for arg in cmd]
+            Path(cmd[cmd.index("--output") + 1]).write_bytes(b"x" * 2000)
+            return FakeProc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.png"
+            with patch.object(app.native_mlx.subprocess, "run", side_effect=fake_run):
+                app.native_mlx._klein3_native_edit_once(
+                    "a test", [Path(tmp) / "ref.png"], out,
+                    width=1024, height=1024, steps=4, guidance=1.0, seed=1,
+                    native_loras=native_loras,
+                )
+        return captured["cmd"]
+
+    def test_no_lora_asks_for_none(self):
+        self.assertNotIn("--lora", self._argv(None))
+
+    def test_one_lora_reaches_the_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lora = Path(tmp) / "style.safetensors"
+            lora.write_bytes(b"x")
+            argv = self._argv([{"filePath": str(lora), "scale": 1.25}])
+        index = argv.index("--lora")
+        self.assertEqual(argv[index + 1], str(lora))
+        self.assertEqual(argv[index + 3], "1.25")
+
+    def test_stacking_more_than_one_is_refused_not_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lora = Path(tmp) / "style.safetensors"
+            lora.write_bytes(b"x")
+            with self.assertRaises(RuntimeError) as caught:
+                self._argv([{"filePath": str(lora), "scale": 1.0}] * 2)
+        self.assertIn("persistent server", str(caught.exception))
+
+    def test_a_missing_lora_is_named(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self._argv([{"filePath": "/nowhere/ghost.safetensors", "scale": 1.0}])
+        self.assertIn("ghost.safetensors", str(caught.exception))
+
+
+class BigLoveKlein3ResolutionTests(unittest.TestCase):
+    """The native Klein lane used to pin every edit to its 1.5MP bucket, so the
+    studio's Resolution control and the registry's advertised width/height did
+    nothing on Apple Silicon. A requested canvas is now a pixel budget."""
+
+    def test_unspecified_size_still_lands_on_the_trained_bucket(self):
+        app = load_app()
+        self.assertEqual(app.graphs.snap_biglove_klein3_resolution(0, 0), app.graphs.BIGLOVE_KLEIN3_BASE_BUCKET)
+        self.assertEqual(app.graphs.snap_biglove_klein3_resolution(None, None), app.graphs.BIGLOVE_KLEIN3_BASE_BUCKET)
+        self.assertEqual(app.graphs.snap_biglove_klein3_resolution('', ''), app.graphs.BIGLOVE_KLEIN3_BASE_BUCKET)
+
+    def test_requested_budget_scales_the_bucket_and_stays_on_the_grid(self):
+        app = load_app()
+        for width, height in ((512, 768), (768, 1152), (1152, 1728)):
+            with self.subTest(width=width, height=height):
+                out_w, out_h = app.graphs.snap_biglove_klein3_resolution(width, height)
+                self.assertEqual((out_w, out_h), (width, height))
+                self.assertEqual((out_w % 32, out_h % 32), (0, 0))
+        # The budget is what carries over, not the requested shape: a square
+        # request keeps its pixel count on the bucket's 2:3 canvas, which the
+        # edit then reshapes onto the reference's own aspect.
+        out_w, out_h = app.graphs.snap_biglove_klein3_resolution(1024, 1024)
+        self.assertAlmostEqual(out_w * out_h, 1024 * 1024, delta=60_000)
+        self.assertLess(out_w, out_h)
+
+    def test_budget_is_clamped_to_the_supported_range(self):
+        app = load_app()
+        tiny_w, tiny_h = app.graphs.snap_biglove_klein3_resolution(64, 96)
+        self.assertGreaterEqual(tiny_w * tiny_h, app.graphs.BIGLOVE_KLEIN3_MIN_PIXELS * 0.95)
+        huge_w, huge_h = app.graphs.snap_biglove_klein3_resolution(4096, 4096)
+        self.assertLessEqual(huge_w * huge_h, app.graphs.BIGLOVE_KLEIN3_MAX_PIXELS * 1.05)
+
+    def test_landscape_requests_keep_their_orientation(self):
+        app = load_app()
+        out_w, out_h = app.graphs.snap_biglove_klein3_resolution(1536, 1024)
+        self.assertGreater(out_w, out_h)
+
+    def test_a_comfy_graph_latent_is_a_shape_not_a_budget(self):
+        app = load_app()
+        # The stock 512x512 EmptyLatentImage next to an ImageScaleToTotalPixels
+        # node must not be read as a request for a 0.26MP draft.
+        self.assertEqual(app.graphs.orient_biglove_klein3_bucket(512, 512), app.graphs.BIGLOVE_KLEIN3_BASE_BUCKET)
+        bucket_w, bucket_h = app.graphs.BIGLOVE_KLEIN3_BASE_BUCKET
+        self.assertEqual(app.graphs.orient_biglove_klein3_bucket(1024, 512), (bucket_h, bucket_w))
+
+
+class CancelHonestyTests(unittest.TestCase):
+    """Cancelling reports what actually happened, not what was requested.
+
+    The old code answered True as soon as a lane accepted the /interrupt POST.
+    On a rented box loading a video model that acceptance means nothing for
+    minutes: the GPU stays busy, the next generation queues behind it, and the
+    studio has already said "cancelled". These pin the distinction.
+    """
+
+    @staticmethod
+    def _queue_responder(calls, still_running):
+        class FakeResponse:
+            def __init__(self, payload=b'{}'):
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return self._payload
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            calls.append((request.get_method(), url))
+            if url.endswith('/queue') and request.get_method() == 'GET':
+                running = [[1, 'stuck-prompt']] if still_running() else []
+                return FakeResponse(json.dumps({
+                    'queue_running': running, 'queue_pending': [],
+                }).encode('utf-8'))
+            return FakeResponse()
+
+        return fake_urlopen
+
+    def test_a_prompt_that_will_not_die_yet_is_reported_as_not_stopped(self):
+        # The exact shape of the reported bug: accepted, but still holding the
+        # backend when the verification window runs out.
+        app = load_app()
+        calls = []
+        with patch.object(app.jobs, 'jobs', {}), patch.object(app.jobs, 'native_job_procs', {}), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app.jobs, 'CANCEL_VERIFY_SECONDS', 0.05), \
+             patch.object(app.jobs, 'CANCEL_VERIFY_POLL_SECONDS', 0.01), \
+             patch.object(app.net, 'urlopen', side_effect=self._queue_responder(calls, lambda: True)):
+            result = app.jobs.cancel_generation_job('stuck-prompt')
+        self.assertTrue(result['interrupted'], 'the backend did accept the request')
+        self.assertFalse(result['stopped'], 'but it never let go — the caller must not claim it did')
+        self.assertEqual(result['backend_state'], 'running')
+
+    def test_the_verification_window_is_bounded(self):
+        # A backend that never lets go must not hang the cancel request; the
+        # studio's own call has a timeout and would report a failed cancel.
+        app = load_app()
+        calls = []
+        started = time.monotonic()
+        with patch.object(app.jobs, 'jobs', {}), patch.object(app.jobs, 'native_job_procs', {}), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app.jobs, 'CANCEL_VERIFY_SECONDS', 0.2), \
+             patch.object(app.jobs, 'CANCEL_VERIFY_POLL_SECONDS', 0.01), \
+             patch.object(app.net, 'urlopen', side_effect=self._queue_responder(calls, lambda: True)):
+            app.jobs.cancel_generation_job('stuck-prompt')
+        self.assertLess(time.monotonic() - started, 3.0)
+
+    def test_a_prompt_on_no_lane_at_all_counts_as_stopped(self):
+        # Nothing of ours is holding a GPU, which is the end state the caller
+        # wanted — but it was never asked for, so `interrupted` stays False.
+        app = load_app()
+        calls = []
+        with patch.object(app.jobs, 'jobs', {}), patch.object(app.jobs, 'native_job_procs', {}), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app.net, 'urlopen', side_effect=self._queue_responder(calls, lambda: False)):
+            result = app.jobs.cancel_generation_job('never-here')
+        self.assertFalse(result['interrupted'])
+        self.assertTrue(result['stopped'])
+
+    def test_cancelling_a_remote_prompt_marks_its_route_cancelled_not_errored(self):
+        # A deliberate cancel recorded as an error shows up in History as a
+        # broken generation, and the watcher then reports a failure that never
+        # happened.
+        app = load_app()
+        calls = []
+        routes = {'remote-prompt': {'lane': 'default', 'remote': True, 'status': 'submitted'}}
+        with patch.object(app.jobs, 'jobs', {}), patch.object(app.jobs, 'native_job_procs', {}), \
+             patch.object(app.lanes, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app.promptroutes, '_comfy_prompt_routes', routes), \
+             patch.object(app.promptroutes, '_comfy_prompt_routes_loaded', True), \
+             patch.object(app.promptroutes, '_persist_comfy_prompt_routes_locked', lambda: None), \
+             patch.object(app.jobs, 'CANCEL_VERIFY_POLL_SECONDS', 0.01), \
+             patch.object(app.net, 'urlopen', side_effect=self._queue_responder(calls, lambda: False)):
+            app.jobs.cancel_generation_job('remote-prompt')
+        self.assertEqual(routes['remote-prompt']['status'], 'cancelled')
+        self.assertTrue(routes['remote-prompt'].get('cancelled_at'))
+
+    def test_the_watcher_stops_waiting_on_a_cancelled_prompt(self):
+        # A prompt cancelled while PENDING is deleted from the queue and never
+        # reaches history, so the watcher would otherwise sit through its whole
+        # timeout and then record a spurious "did not finish" error.
+        app = load_app()
+        routes = {'gone': {'lane': 'default', 'remote': True, 'status': 'cancelled'}}
+        with patch.object(app.promptroutes, '_comfy_prompt_routes', routes), \
+             patch.object(app.promptroutes, '_comfy_prompt_routes_loaded', True), \
+             patch.object(app.promptroutes, '_persist_comfy_prompt_routes_locked', lambda: None), \
+             patch.object(app.promptroutes, '_fetch_lane_history', lambda *a, **k: None), \
+             patch.object(app.promptroutes, '_record_lane_progress', lambda *a, **k: None):
+            started = time.monotonic()
+            result = app.promptroutes.watch_remote_comfy_prompt('gone', poll_seconds=0.01, timeout_seconds=30)
+        self.assertLess(time.monotonic() - started, 3.0, 'must not wait out the timeout')
+        self.assertEqual(result['status'], 'cancelled')
+        self.assertNotIn('error', result)
+
+    def test_an_interrupted_prompt_is_not_relabelled_a_failure(self):
+        # Comfy records an interrupted run in history as status_str "error",
+        # identical to a real failure. Only our own record of having asked for
+        # it tells them apart.
+        app = load_app()
+        routes = {'stopped-prompt': {'lane': 'default', 'remote': True, 'status': 'cancelled'}}
+        history = {'status': {'status_str': 'error', 'completed': False}}
+        scrubbed = []
+        with patch.object(app.promptroutes, '_comfy_prompt_routes', routes), \
+             patch.object(app.promptroutes, '_comfy_prompt_routes_loaded', True), \
+             patch.object(app.promptroutes, '_persist_comfy_prompt_routes_locked', lambda: None), \
+             patch.object(app.promptroutes, '_fetch_lane_history', lambda *a, **k: history), \
+             patch.object(app.workflow_index, '_harvest_comfy_workflow_envelopes', lambda: None), \
+             patch.object(app.promptroutes, 'scrub_remote_comfy_prompt', lambda *a, **k: scrubbed.append(a[0])):
+            result = app.promptroutes.watch_remote_comfy_prompt('stopped-prompt', poll_seconds=0.01, timeout_seconds=5)
+        self.assertEqual(result['status'], 'cancelled')
+        self.assertNotIn('error', result)
+        # Still cleaned up: a cancelled job's staged inputs are nobody's asset.
+        self.assertEqual(scrubbed, ['stopped-prompt'])
+
+
+class H3StudioImageLaneTests(unittest.TestCase):
+    """The MiniMax H3 still-image lane: registry graph -> Director -> references.
+
+    H3 Studio graphs are not KSampler graphs. One H3StudioDirector node owns the
+    prompt, the canvas, the seed, the route and the nine ordered references, and
+    the sampler downstream is a SamplerCustomAdvanced with no positive/negative
+    inputs to follow — so every generic patch the auto runner applies misses it.
+    """
+
+    ONE_PIXEL_PNG = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    )
+    ONE_PIXEL_JPEG = base64.b64decode(
+        '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB'
+        'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB/9sAQwEBAQEBAQEBAQEBAQEBAQEB'
+        'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB/8AAEQgA'
+        'AQABAwEiAAIRAQMRAf/EABUAAQEAAAAAAAAAAAAAAAAAAAAI/8QAFBABAAAAAAAAAAAAAAAA'
+        'AAAAAP/EABUBAQEAAAAAAAAAAAAAAAAAAAAG/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwD'
+        'AQACEQMRAD8AlgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+        'AAf/9k='
+    )
+
+    def _graph_path(self):
+        return BASE / 'workflows' / 'minimax-h3-image.api.json'
+
+    def _compile(self, app, options, prompt='a still of @Image1'):
+        """Run the real runner up to submit and return the graph it built."""
+        captured = {}
+
+        def fake_submit(lane_url, graph, client_id):
+            captured['graph'] = json.loads(json.dumps(graph))
+            captured['lane'] = lane_url
+            raise RuntimeError('stop after compile')
+
+        with patch.object(app.graphs, '_auto_submit_prompt', fake_submit), \
+             patch.object(app.lanes, 'comfy_lane_for_prompt_body', lambda *a, **k: 'default'), \
+             patch.object(app.lanes, 'comfy_lane_is_remote', lambda lane: False), \
+             patch.object(app.history, 'append_history', lambda rec: None), \
+             patch.object(app.jobs, 'jobs', {}):
+            app.runners.run_comfy_api_image('h3-test', prompt, dict(options, workflow_file=str(self._graph_path())))
+            record = dict(app.jobs.jobs['h3-test'])
+        return captured.get('graph'), record
+
+    def test_the_registry_ships_a_graph_the_gateway_is_allowed_to_load(self):
+        # The allowlist only covered the user's drop-in folders, so a lane whose
+        # graph rides in the repo could never load its own file.
+        app = load_app()
+        path, graph = app.graphs._load_auto_api_workflow(str(self._graph_path()))
+        self.assertEqual(path.name, 'minimax-h3-image.api.json')
+        self.assertTrue(app.graphs._h3_studio_director_id(graph))
+
+        with self.assertRaises(RuntimeError):
+            app.graphs._load_auto_api_workflow('/etc/passwd.json')
+
+    def test_references_reach_the_director_in_the_order_they_were_sent(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            refs = []
+            for name in ('first.png', 'second.png', 'third.png'):
+                (input_dir / name).write_bytes(self.ONE_PIXEL_PNG)
+                refs.append(str(input_dir / name))
+            with patch.object(app.config, 'COMFY_INPUT_DIR', input_dir):
+                graph, record = self._compile(app, {'reference_image_paths': refs, 'seed': 11})
+
+        director = graph[app.graphs._h3_studio_director_id(graph)]['inputs']
+        # Order IS the label: the compiler names them <Picture 1>..<Picture N>.
+        self.assertEqual(director['media_filename_1'], 'first.png')
+        self.assertEqual(director['media_filename_2'], 'second.png')
+        self.assertEqual(director['media_filename_3'], 'third.png')
+        self.assertEqual(director['media_type_1'], 'image')
+        # Every unused slot is written empty, so a graph can never carry a
+        # previous run's filename and the ordinals stay dense from 1.
+        for ordinal in range(4, 10):
+            self.assertEqual(director[f'media_filename_{ordinal}'], '')
+        self.assertEqual(record['reference_images'], 3)
+        self.assertEqual(director['prompt'], 'a still of @Image1')
+        self.assertEqual(director['seed'], 11)
+
+    def test_a_reference_outside_comfy_input_storage_is_staged_into_it(self):
+        # The Director loads a reference by name out of ComfyUI's input dir
+        # (h3studio collect_images), and push_prompt_inputs_to_lane finds a
+        # rental's copy the same way. A multipart upload lands elsewhere.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            elsewhere = Path(td) / 'uploads'
+            elsewhere.mkdir()
+            (elsewhere / 'phone-shot.png').write_bytes(self.ONE_PIXEL_PNG)
+            with patch.object(app.config, 'COMFY_INPUT_DIR', input_dir):
+                graph, _ = self._compile(app, {'reference_image_paths': [str(elsewhere / 'phone-shot.png')]})
+                self.assertTrue((input_dir / 'phone-shot.png').is_file())
+
+        director = graph[app.graphs._h3_studio_director_id(graph)]['inputs']
+        self.assertEqual(director['media_filename_1'], 'phone-shot.png')
+
+    def test_more_references_than_slots_is_refused_not_truncated(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            refs = []
+            for index in range(10):
+                name = f'ref{index}.png'
+                (input_dir / name).write_bytes(self.ONE_PIXEL_PNG)
+                refs.append(str(input_dir / name))
+            with patch.object(app.config, 'COMFY_INPUT_DIR', input_dir):
+                _, record = self._compile(app, {'reference_image_paths': refs})
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('at most 9', record['error'])
+
+    def test_an_explicit_canvas_sets_both_the_ratio_and_the_area(self):
+        # plan_resolution() takes the ratio from aspect_ratio and the AREA from
+        # megapixels — always. Dimensions alone render the graph's 1:1 default;
+        # a "custom" ratio alone keeps the default area (1024x576 came back as
+        # 1632x928). Both must be set together.
+        app = load_app()
+        graph, record = self._compile(app, {'width': 1024, 'height': 576})
+        director = graph[app.graphs._h3_studio_director_id(graph)]['inputs']
+        self.assertEqual(director['aspect_ratio'], 'custom')
+        self.assertEqual(director['width'], 1024)
+        self.assertEqual(director['height'], 576)
+        self.assertAlmostEqual(director['megapixels'], 0.59, places=2)
+        self.assertEqual(record['options']['width'], 1024)
+
+    def test_an_aspect_preset_carries_the_studios_resolution_tier(self):
+        # base_size is the studio's Resolution control (the short side). The
+        # Director sizes by area, so dropping it would pin every H3 still to
+        # the graph's own default megapixels.
+        app = load_app()
+        graph, _ = self._compile(app, {'aspect_ratio': '16:9', 'base_size': 1024})
+        director = graph[app.graphs._h3_studio_director_id(graph)]['inputs']
+        self.assertEqual(director['aspect_ratio'], '16:9')
+        # 1024 short side at 16:9 is ~1.86 MP.
+        self.assertAlmostEqual(director['megapixels'], 1.86, places=2)
+
+    def test_the_ksampler_path_is_untouched_by_the_director_branch(self):
+        # The same runner still drives ordinary drop-in graphs.
+        app = load_app()
+        graph = {
+            '1': {'class_type': 'KSampler', 'inputs': {'seed': 0, 'steps': 4, 'positive': ['2', 0]}},
+            '2': {'class_type': 'CLIPTextEncode', 'inputs': {'text': ''}},
+        }
+        self.assertIsNone(app.graphs._h3_studio_director_id(graph))
+
+    def test_the_generate_route_carries_every_reference_in_order(self):
+        app = load_app()
+        data_url = 'data:image/png;base64,' + base64.b64encode(self.ONE_PIXEL_PNG).decode()
+        second_url = 'data:image/jpeg;base64,' + base64.b64encode(self.ONE_PIXEL_JPEG).decode()
+        captured = {}
+
+        def fake_start(media_type, options, runner, args):
+            captured.update(options=dict(options), runner=runner)
+            return None
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            try:
+                with patch.object(app.config, 'TOKEN', 'test-token'), \
+                     patch.object(app.jobs, 'jobs', {}), \
+                     patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                     patch.object(app.jobs, 'start_studio_generation_thread', side_effect=fake_start):
+                    server_thread.start()
+                    request = app.net.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'comfy-api-image',
+                            'workflow_file': str(self._graph_path()),
+                            'prompt': '@Image1 beside @Image2',
+                            'aspect_ratio': '4:5',
+                            'base_size': 1024,
+                            'sampling_profile': 'lightx_er_sde_4',
+                            # The studio sends the first reference inline and
+                            # the rest in images_base64.
+                            'image_base64': data_url,
+                            'images_base64': [second_url],
+                        }).encode('utf-8'),
+                        headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    with app.net.urlopen(request, timeout=5) as response:
+                        self.assertEqual(response.status, 202)
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+            options = captured['options']
+            self.assertIs(captured['runner'], app.runners.run_comfy_api_image)
+            # Both references made it into options, staged into input storage.
+            self.assertEqual(len(options['reference_image_paths']), 2)
+            for path in options['reference_image_paths']:
+                self.assertTrue(Path(path).is_file())
+                self.assertEqual(Path(path).parent.resolve(), input_dir.resolve())
+            # And the H3-only controls, which the shared key list drops.
+            self.assertEqual(options['aspect_ratio'], '4:5')
+            self.assertEqual(options['base_size'], 1024)
+            self.assertEqual(options['sampling_profile'], 'lightx_er_sde_4')
+
+    def test_a_rented_lane_pushes_its_references_and_keeps_the_sealed_harvest(self):
+        # The H3 image graph routes to the rental lane (lane_needles minimax_h3),
+        # whose outputs never touch this disk. Collecting them from the local
+        # output dir returned nothing, so the lane could not have worked even
+        # with a perfect graph.
+        app = load_app()
+        pushed = {}
+        routed = {}
+        encrypted = []
+
+        def fake_push(body, lane):
+            pushed['lane'] = lane
+            pushed['names'] = [ref['name'] for ref in app.promptroutes._prompt_input_file_refs(body)]
+            return pushed['names']
+
+        def fake_watch(prompt_id, **kwargs):
+            return {'status': 'harvested', 'outputs': ['cmf-abcd1234-h3_00001_.png']}
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            (input_dir / 'face.png').write_bytes(self.ONE_PIXEL_PNG)
+            sealed = Path(td) / 'cmf-abcd1234-h3_00001_.png.e2e'
+            sealed.write_text('{"format":"enc:v1"}')
+
+            with patch.object(app.config, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app.jobs, 'jobs', {}), \
+                 patch.object(app.history, 'append_history', lambda rec: None), \
+                 patch.object(app.lanes, 'comfy_lane_for_prompt_body', lambda *a, **k: 'rental48348132'), \
+                 patch.object(app.lanes, 'COMFY_LANES', {'rental48348132': 'http://127.0.0.1:18432'}), \
+                 patch.object(app.lanes, 'comfy_lane_is_remote', lambda lane: True), \
+                 patch.object(app.lanes, 'comfy_lane_transport_error', lambda lane: None), \
+                 patch.object(app.lanes, 'comfy_lane_liveness_error', lambda lane: None), \
+                 patch.object(app.media, 'vault_public_key_spki', lambda: 'owner-spki'), \
+                 patch.object(app.promptroutes, 'push_prompt_inputs_to_lane', fake_push), \
+                 patch.object(app.graphs, '_auto_submit_prompt', lambda *a, **k: {'prompt_id': 'remote-1'}), \
+                 patch.object(app.promptroutes, 'record_comfy_prompt_route', lambda pid, lane, **kw: routed.update(pid=pid, lane=lane, **kw)), \
+                 patch.object(app.promptroutes, 'watch_remote_comfy_prompt', fake_watch), \
+                 patch.object(app.media, 'find_output_logical_path', lambda name: sealed), \
+                 patch.object(app.workflow_index, 'record_studio_workflow_setup', lambda *a, **k: None), \
+                 patch.object(app.media, 'encrypt_outputs', lambda paths, **k: encrypted.extend(paths) or paths):
+                app.runners.run_comfy_api_image('h3-remote', 'a still of @Image1', {
+                    'workflow_file': str(self._graph_path()),
+                    'reference_image_paths': [str(input_dir / 'face.png')],
+                })
+                record = dict(app.jobs.jobs['h3-remote'])
+
+        self.assertEqual(record['status'], 'success', record.get('error'))
+        # The reference was staged on the rented box — the Director reads it by
+        # name out of that box's input storage.
+        self.assertEqual(pushed['lane'], 'rental48348132')
+        self.assertEqual(pushed['names'], ['face.png'])
+        # And the route was recorded, which is what arms harvest + scrub.
+        self.assertEqual(routed['pid'], 'remote-1')
+        self.assertEqual(routed['pushed_inputs'], ['face.png'])
+        # The harvest already sealed these; sealing again would wrap the envelope.
+        self.assertEqual(encrypted, [])
+        self.assertEqual(record['outputs'], [str(sealed)])
+
+    def test_a_rented_lane_refuses_before_staging_when_it_cannot_seal(self):
+        app = load_app()
+        staged = []
+        with patch.object(app.jobs, 'jobs', {}), \
+             patch.object(app.history, 'append_history', lambda rec: None), \
+             patch.object(app.lanes, 'comfy_lane_for_prompt_body', lambda *a, **k: 'rental48348132'), \
+             patch.object(app.lanes, 'comfy_lane_is_remote', lambda lane: True), \
+             patch.object(app.lanes, 'comfy_lane_transport_error', lambda lane: None), \
+             patch.object(app.lanes, 'comfy_lane_liveness_error', lambda lane: None), \
+             patch.object(app.media, 'vault_public_key_spki', lambda: ''), \
+             patch.object(app.promptroutes, 'push_prompt_inputs_to_lane', lambda body, lane: staged.append(lane)):
+            app.runners.run_comfy_api_image('h3-unsealable', 'a still', {'workflow_file': str(self._graph_path())})
+            record = dict(app.jobs.jobs['h3-unsealable'])
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('sealed', record['error'])
+        # Nothing was uploaded to a box whose results we could not have read.
+        self.assertEqual(staged, [])
+
+
+class RowObservationTests(unittest.TestCase):
+    """The card is the authority on its own limit.
+
+    A packed-row budget is a PREDICTION, and 2026-08-23 proved predictions go
+    wrong in the dangerous direction: 85,000 was interpolated between a clean
+    76,600-row run and a fatal 95,092-row one, and a job at ~80,400 rows died
+    inside the gap. So each outcome is recorded against the card SIZE (not the
+    machine — rentals are destroyed and re-rented constantly) and the guard is
+    bounded by it.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.app = load_app()
+        self.app.lanes.H3_ROW_OBSERVATIONS_FILE = Path(self._dir.name) / "h3-row-observations.json"
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def test_a_clean_run_only_ever_raises_what_the_card_is_known_to_hold(self):
+        self.app.lanes.record_row_observation(31.36, 60_000, "clean")
+        self.app.lanes.record_row_observation(31.36, 76_600, "clean")
+        # A SMALLER clean run proves nothing new — the ceiling does not drop
+        # because someone rendered something short.
+        self.app.lanes.record_row_observation(31.36, 40_000, "clean")
+        self.assertEqual(self.app.lanes.row_observations_for(31.36)["clean_rows"], 76_600)
+
+    def test_an_oom_only_ever_lowers_it_and_keeps_the_smallest_seen(self):
+        self.app.lanes.record_row_observation(31.36, 95_092, "oom")
+        self.app.lanes.record_row_observation(31.36, 80_890, "oom")
+        self.app.lanes.record_row_observation(31.36, 142_366, "oom")
+        self.assertEqual(self.app.lanes.row_observations_for(31.36)["oom_rows"], 80_890)
+
+    def test_observations_are_keyed_by_card_size_so_they_outlive_the_machine(self):
+        """A rental is destroyed and re-rented daily; the card it was is what
+        repeats. 31.36 GiB and 31.4 GiB are the same 32 GB card."""
+        self.app.lanes.record_row_observation(31.36, 80_890, "oom")
+        self.assertEqual(self.app.lanes.row_observations_for(31.4)["oom_rows"], 80_890)
+        # A 96 GB card is a different question entirely and shares nothing.
+        self.assertIsNone(self.app.lanes.row_observations_for(95.0))
+
+    def test_junk_is_ignored_rather_than_recorded_as_a_limit(self):
+        for bad in ((None, 80_000, "oom"), (31.36, 0, "oom"), (31.36, None, "clean"),
+                    (31.36, 80_000, "sideways"), (0, 80_000, "oom")):
+            self.assertIsNone(self.app.lanes.record_row_observation(*bad))
+        self.assertIsNone(self.app.lanes.row_observations_for(31.36))
+
+    def test_an_out_of_memory_is_told_apart_from_every_other_failure(self):
+        self.assertTrue(self.app.lanes._looks_like_an_out_of_memory(
+            "SamplerCustomAdvanced (node 14) failed — OutOfMemoryError: Allocation on device 0"))
+        self.assertTrue(self.app.lanes._looks_like_an_out_of_memory("CUDA out of memory"))
+        # A node that simply could not find a file must never shrink a budget.
+        self.assertFalse(self.app.lanes._looks_like_an_out_of_memory(
+            "LoadImage (node 120) failed — cannot open reference.png"))
+        self.assertFalse(self.app.lanes._looks_like_an_out_of_memory(""))
+
+    def test_the_priced_row_count_rides_the_prompt_body_like_run_on(self):
+        body = json.dumps({"prompt": {"1": {"class_type": "X"}}, "packed_rows": 76_600,
+                           "run_on": "vast:1"}).encode()
+        self.assertEqual(self.app.lanes._packed_rows_from_comfy_prompt_body(body), 76_600)
+        # Absent, junk, or non-positive: no claim about the run at all.
+        for missing in (b'{"prompt":{}}', b'{"prompt":{},"packed_rows":"lots"}',
+                        b'{"prompt":{},"packed_rows":0}', b'not json'):
+            self.assertIsNone(self.app.lanes._packed_rows_from_comfy_prompt_body(missing))
+
+
+
+class TheHostedLaneIsNotAComfyLane(unittest.TestCase):
+    """`run_on: "cloud"` must reach the resolver, not the ComfyUI pin check.
+
+    Measured on the first end-to-end run of the hosted lane: the start route
+    asked `comfy_lane_for_pin` about every pin before the resolver saw it, the
+    hosted lane is not in COMFY_LANES because it has no machine, and the only
+    paid-per-render lane in the studio answered 409 to every start. The quote
+    a moment earlier had worked, which is what made it look like a billing
+    problem rather than a routing one.
+    """
+
+    def test_the_cloud_pin_is_never_refused_as_stale(self):
+        app = load_app()
+        self.assertIsNone(app.restore.restore_pin_error({"run_on": "cloud"}))
+
+    def test_an_empty_pin_is_fine_and_a_stale_one_is_still_refused(self):
+        app = load_app()
+        self.assertIsNone(app.restore.restore_pin_error({}))
+        self.assertIsNone(app.restore.restore_pin_error({"run_on": ""}))
+        # A rental id no lane is attached under is exactly the stale pin the
+        # check exists for.
+        error = app.restore.restore_pin_error({"run_on": "rental00000000"})
+        self.assertIsInstance(error, str)
+        self.assertTrue(error)
+
+
+class RestoreChunkLoopTests(unittest.TestCase):
+    """The twenty-minute part of the Restore studio, driven end to end.
+
+    Eight routes dispatch into `run_video_restore`, and until now none of the
+    loop underneath them had a test: not the chunk order, not the cancel that
+    keeps a render resumable, not the failure that must mark one chunk rather
+    than the project, not the assembly that carries the source audio. Those are
+    exactly the paths that lose work, and they lose it invisibly — the owner
+    only finds out after the full wait.
+
+    The lane is a fake, but nothing else is: a real three-chunk clip is cut by
+    the real ffmpeg, the real manifest is written between chunks, and the real
+    assembler joins it. The fake stands only where a GPU would.
+    """
+
+    def setUp(self):
+        self.app = load_app()
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.app.restore.RESTORE_ROOT = root / 'restore'
+        self.app.restore.RESTORE_UPLOAD_ROOT = self.app.restore.RESTORE_ROOT / 'uploads'
+        self.app.config.COMFY_INPUT_DIR = root / 'input'
+        self.app.config.COMFY_OUTPUT_DIR = root / 'output'
+        self.app.config.OUT_DIR = root / 'out'
+        self.app.history.HISTORY_FILE = root / 'history.jsonl'
+        for directory in (self.app.restore.RESTORE_ROOT, self.app.config.COMFY_INPUT_DIR,
+                          self.app.config.COMFY_OUTPUT_DIR, self.app.config.OUT_DIR):
+            directory.mkdir(parents=True, exist_ok=True)
+        self.root = root
+        self.rendered = []
+        self.fail_chunk = None
+        self.during_chunk = None
+        # Nothing here may touch a machine or the vault.
+        self.app.restore._resolve_restore_lane = lambda plan, options: (
+            'default', 'http://lane.invalid', {
+                'available': True, 'devices': ['cuda:0'], 'models': [], 'attention_modes': ['sdpa'],
+            })
+        self.app.lanes.comfy_lane_is_remote = lambda name: False
+        self.app.restore._free_restore_lane = lambda *args, **kwargs: None
+        self.app.media.encrypt_outputs = lambda paths, job_id=None: [Path(p).name for p in paths]
+        self.app.restore._restore_chunk_on_lane = self._fake_lane
+
+    # --- the fake machine -----------------------------------------------------
+
+    def _fake_lane(self, project, chunk, *, source_name, lane_name, lane_url, capability, job_id):
+        """What a local lane hands back: plaintext PNG frames, in batch order.
+
+        Produced from the chunk the runner really cut, so a plan that asked for
+        the wrong frames shows up as the wrong frame count rather than passing.
+        """
+        index = int(chunk['index'])
+        self.rendered.append(index)
+        if self.fail_chunk is not None and index == self.fail_chunk:
+            raise RuntimeError('CUDA error: out of memory')
+        if self.during_chunk is not None:
+            self.during_chunk(index)
+        staged = self.app.config.COMFY_INPUT_DIR / source_name
+        frames_dir = self.root / f'frames-{index:04d}'
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ['ffmpeg', '-v', 'error', '-y', '-i', str(staged), str(frames_dir / 'f-%04d.png')],
+            check=True, timeout=180,
+        )
+        return {'frames': sorted(frames_dir.glob('f-*.png')), 'sealed': False}
+
+    # --- the source -----------------------------------------------------------
+
+    def _source(self, *, seconds=3, rate=10, audio=True):
+        path = self.root / 'source.mp4'
+        args = ['ffmpeg', '-v', 'error', '-y',
+                '-f', 'lavfi', '-i', f'testsrc=size=64x64:rate={rate}:duration={seconds}']
+        if audio:
+            args += ['-f', 'lavfi', '-i', f'sine=frequency=440:duration={seconds}',
+                     '-c:a', 'aac', '-shortest']
+        args += ['-pix_fmt', 'yuv420p', str(path)]
+        subprocess.run(args, check=True, timeout=180)
+        return path
+
+    def _options(self, **extra):
+        # Three chunks of ten frames: one batch per chunk, no lead-in and no
+        # dissolve, so the assembly is a plain join and a wrong ORDER shows up
+        # as wrong pixels rather than a wrong seam.
+        options = {
+            'project_id': 'rtest0001',
+            'batch_size': 5,
+            'chunk_seconds': 1,
+            'context_frames': 0,
+            'seam_frames': 0,
+            'resolution': 128,
+            'cache_models': False,
+        }
+        options.update(extra)
+        return options
+
+    def _project(self, project_id='rtest0001'):
+        return self.app.config.video_restore.read_project(
+            self.app.restore.restore_manifest_path(project_id))
+
+    def _run(self, source, job_id='job00000001', **extra):
+        staged = self.root / 'staged.mp4'
+        shutil.copyfile(source, staged)
+        self.app.restore.run_video_restore(job_id, staged, self._options(**extra))
+        with self.app.jobs.jobs_lock:
+            return dict(self.app.jobs.jobs[job_id])
+
+    # --- the tests ------------------------------------------------------------
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_the_chunks_run_in_order_and_every_one_is_checkpointed(self):
+        source = self._source()
+        record = self._run(source)
+        self.assertEqual(record['status'], 'success', record.get('error'))
+        # In order, once each. A chunk loop that reorders under a resume writes
+        # a master whose shots are shuffled, and nothing downstream would say so.
+        self.assertEqual(self.rendered, [0, 1, 2])
+        project = self._project()
+        self.assertEqual(project['status'], 'complete')
+        self.assertEqual(sorted(project['chunks']), ['0', '1', '2'])
+        self.assertEqual(self.app.config.video_restore.first_unfinished_chunk(project), -1)
+        for entry in project['chunks'].values():
+            self.assertEqual(entry['frames'], 10)
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_a_cancel_mid_loop_stops_before_the_next_chunk_and_stays_resumable(self):
+        source = self._source()
+        # Asked for while chunk 0 is rendering — the flag is read at the top of
+        # each chunk, so the stop must land BEFORE chunk 1 is cut.
+        self.during_chunk = lambda index: (
+            self.app.restore.request_restore_cancel('rtest0001') if index == 0 else None)
+        record = self._run(source)
+        self.assertEqual(record['status'], 'cancelled')
+        self.assertEqual(self.rendered, [0])
+        project = self._project()
+        self.assertEqual(project['status'], 'stopped')
+        # The whole reason a stop is offered rather than a delete: the finished
+        # chunk is on disk and the resume knows which one is next.
+        self.assertEqual(sorted(project['chunks']), ['0'])
+        self.assertEqual(self.app.config.video_restore.first_unfinished_chunk(project), 1)
+        self.assertTrue((self.app.restore.restore_project_dir('rtest0001') / 'source.mp4').is_file())
+
+        # And a resume picks up exactly there, without re-rendering chunk 0.
+        self.during_chunk = None
+        self.rendered = []
+        self.app.restore.run_video_restore('job00000002', None, self._options())
+        self.assertEqual(self.rendered, [1, 2])
+        self.assertEqual(self._project()['status'], 'complete')
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_one_failing_chunk_leaves_the_chunks_before_it_alone(self):
+        source = self._source()
+        self.fail_chunk = 1
+        record = self._run(source)
+        self.assertEqual(record['status'], 'error')
+        project = self._project()
+        self.assertEqual(project['status'], 'error')
+        # Chunk 0 finished and is kept; chunk 1 is not recorded, so a resume
+        # renders it again rather than assembling around a hole.
+        self.assertEqual(sorted(project['chunks']), ['0'])
+        self.assertEqual(self.app.config.video_restore.first_unfinished_chunk(project), 1)
+        # The machine's own words survive on the project — the studio reads them
+        # through describeRestoreFailure rather than showing them raw.
+        self.assertIn('out of memory', project['error'])
+        # Nothing half-written was left behind for a resume to mistake for work.
+        chunks_dir = self.app.restore.restore_project_dir('rtest0001') / 'chunks'
+        self.assertEqual(sorted(p.name for p in chunks_dir.glob('out-*')), ['out-0000.mkv'])
+        # And the staged cut for the chunk that failed is not left in the input
+        # directory for the private-input sweeper to find hours later.
+        self.assertEqual(list(self.app.config.COMFY_INPUT_DIR.glob('restore-*')), [])
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_the_assembled_master_is_the_whole_clip_with_its_own_soundtrack(self):
+        source = self._source()
+        record = self._run(source)
+        self.assertEqual(record['status'], 'success', record.get('error'))
+        master = self.app.config.COMFY_OUTPUT_DIR / 'restore_rtest0001_master.mp4'
+        self.assertTrue(master.is_file())
+        probed = self.app.restore.probe_restore_source(master)
+        # Every source frame, once: the dissolve replaces frames rather than
+        # inserting them, so a master longer than its source is a bug.
+        self.assertEqual(probed['frames'], 30)
+        # Restoration is a picture job — the soundtrack is remuxed from the
+        # ORIGINAL, and losing it is the kind of thing nobody notices until the
+        # render is finished and the wait is spent.
+        self.assertTrue(probed['has_audio'])
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_a_silent_source_produces_a_silent_master_rather_than_failing(self):
+        source = self._source(audio=False)
+        record = self._run(source)
+        self.assertEqual(record['status'], 'success', record.get('error'))
+        probed = self.app.restore.probe_restore_source(
+            self.app.config.COMFY_OUTPUT_DIR / 'restore_rtest0001_master.mp4')
+        self.assertFalse(probed['has_audio'])
+        self.assertEqual(probed['frames'], 30)
+
+
+class RestoreSourceStreamingTests(unittest.TestCase):
+    """The upload that replaced three copies of the film with none.
+
+    A restore source is routinely hundreds of megabytes. It used to arrive as
+    base64 inside a JSON body — a copy in the browser a third larger than the
+    file, a second in the control API, a third on the way here — with a ceiling
+    the browser hit before the gateway did. These are the promises of the route
+    that replaced it.
+    """
+
+    STAGED_ID = 'uaaaaaaaa'
+
+    def setUp(self):
+        self.app = load_app()
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app.restore.RESTORE_ROOT = Path(self.tmp.name) / 'restore'
+        self.app.restore.RESTORE_UPLOAD_ROOT = self.app.restore.RESTORE_ROOT / 'uploads'
+
+    def _stream(self, payload, *, declared=None, max_bytes=None):
+        """Drive the handler's streaming reader over a fake socket."""
+        handler = self.app.http.Handler.__new__(self.app.http.Handler)
+        handler.headers = {'Content-Length': str(len(payload) if declared is None else declared)}
+        handler.rfile = io.BytesIO(payload)
+        target = self.app.restore.restore_upload_path(self.STAGED_ID)
+        written = handler.stream_body_to_file(
+            target, self.app.restore.RESTORE_MAX_SOURCE_BYTES if max_bytes is None else max_bytes)
+        return target, written
+
+    def _staged_files(self):
+        root = self.app.restore.RESTORE_UPLOAD_ROOT
+        return sorted(p.name for p in root.glob('*')) if root.exists() else []
+
+    def test_the_bytes_that_arrive_are_the_bytes_on_disk(self):
+        payload = bytes(range(256)) * 40_000
+        target, written = self._stream(payload)
+        self.assertEqual(written, len(payload))
+        self.assertEqual(target.read_bytes(), payload)
+        # And the staged id resolves back to exactly that file.
+        self.assertEqual(self.app.restore._claim_restore_source({'source_id': self.STAGED_ID}), target)
+
+    def test_a_clip_past_the_ceiling_is_refused_with_both_numbers(self):
+        with self.assertRaises(self.app.restore.RestoreTooLarge) as caught:
+            self._stream(b'x' * 4096, max_bytes=1024)
+        said = str(caught.exception)
+        self.assertIn('takes up to', said)
+        # The advice is in the same sentence as the problem.
+        self.assertIn('trim it', said.lower())
+        # Nothing was written, not even a part file.
+        self.assertEqual(self._staged_files(), [])
+
+    def test_a_truncated_upload_leaves_nothing_a_start_could_claim(self):
+        with self.assertRaises(ValueError):
+            self._stream(b'x' * 100, declared=500)
+        # A half-file renamed into place would be a source the runner probes,
+        # plans on, and cuts the wrong chunks out of.
+        self.assertEqual(self._staged_files(), [])
+        with self.assertRaises(ValueError):
+            self.app.restore._claim_restore_source({'source_id': self.STAGED_ID})
+
+    def test_an_expired_upload_says_to_pick_the_clip_again(self):
+        with self.assertRaises(ValueError) as caught:
+            self.app.restore._claim_restore_source({'source_id': 'unothinghere'})
+        self.assertIn('pick the clip again', str(caught.exception))
+
+    def test_an_upload_id_cannot_reach_outside_the_staging_directory(self):
+        root = self.app.restore.RESTORE_UPLOAD_ROOT.resolve()
+        for bad in ('../../etc/passwd', '/etc/passwd', 'a/b/c'):
+            resolved = self.app.restore.restore_upload_path(bad)
+            self.assertEqual(resolved.parent, root, bad)
+        # An id nobody issued is not a path at all.
+        with self.assertRaises(ValueError):
+            self.app.restore.restore_upload_path('')
+
+    def test_unclaimed_uploads_are_reaped_on_their_own_clock(self):
+        target, _ = self._stream(b'x' * 32)
+        self.assertEqual(self.app.restore.reap_restore_uploads(ttl_hours=24), 0)
+        stale = time.time() - 200_000
+        os.utime(target, (stale, stale))
+        self.assertEqual(self.app.restore.reap_restore_uploads(ttl_hours=24), 1)
+        self.assertFalse(target.exists())
+
+    def test_a_project_cannot_be_named_after_the_upload_directory(self):
+        # Its delete route rmtrees the project directory; a project called
+        # "uploads" would take everybody's staged sources with it.
+        with self.assertRaises(ValueError):
+            self.app.restore.restore_project_dir('uploads')
+
+    def test_the_ceiling_and_the_retention_are_advertised_not_only_logged(self):
+        retention = self.app.restore.restore_retention()
+        self.assertEqual(retention['max_source_bytes'], self.app.restore.RESTORE_MAX_SOURCE_BYTES)
+        self.assertGreater(retention['project_ttl_days'], 0)
+        self.assertGreater(retention['upload_ttl_hours'], 0)
+
+
+class RestoreReaperTests(unittest.TestCase):
+    """A project that ages out used to vanish with nothing to read."""
+
+    def setUp(self):
+        self.app = load_app()
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.app.restore.RESTORE_ROOT = root / 'restore'
+        self.app.restore.RESTORE_UPLOAD_ROOT = self.app.restore.RESTORE_ROOT / 'uploads'
+        self.app.history.HISTORY_FILE = root / 'history.jsonl'
+
+    def _project(self, project_id, status='complete', age_days=0):
+        directory = self.app.restore.restore_project_dir(project_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        manifest = self.app.restore.restore_manifest_path(project_id)
+        self.app.config.video_restore.write_project(manifest, {
+            'version': 1, 'id': project_id, 'status': status,
+            'plan': {'chunks': []}, 'chunks': {}, 'options': {},
+        })
+        if age_days:
+            when = time.time() - age_days * 86400
+            os.utime(manifest, (when, when))
+        return directory
+
+    def test_an_aged_project_leaves_a_history_line_saying_what_happened(self):
+        directory = self._project('rold00001', age_days=45)
+        self.assertEqual(self.app.restore.reap_restore_projects(ttl_days=30), 1)
+        self.assertFalse(directory.exists())
+        recs = self.app.history.load_history(10)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]['kind'], 'restore_project_reaped')
+        self.assertEqual(recs[0]['project_id'], 'rold00001')
+        # It says the rule and where the film went — not "gone".
+        self.assertIn('30 days', recs[0]['error'])
+        self.assertIn('History', recs[0]['error'])
+
+    def test_a_running_project_is_never_reaped_however_old(self):
+        directory = self._project('rrun00001', status='running', age_days=400)
+        self.assertEqual(self.app.restore.reap_restore_projects(ttl_days=30), 0)
+        self.assertTrue(directory.exists())
+
+
+class RestoreLanesSayWhyAndWhatToDo(unittest.TestCase):
+    """A lane the studio cannot use has to arrive with a reason it can print
+    and a remedy it can put a button on.
+
+    Reported 2026-09-04: a fresh machine's Restore picker read "This Mac has no
+    SeedVR2 nodes (missing LoadVideo, GetVideoComponents, SeedVR2LoadDiTModel,
+    SeedVR2LoadVAEModel, SeedVR2VideoUpscaler)" with no button under it. Two
+    faults in one sentence — five internal graph class names shown to a person,
+    and the SAME sentence for a ComfyUI that is simply not running, because a
+    lane that never answered has "all of them" missing by construction.
+    """
+
+    def setUp(self):
+        self.app = load_app()
+
+    def test_an_unreachable_lane_is_not_a_lane_missing_nodes(self):
+        def refuse(*args, **kwargs):
+            raise OSError('connection refused')
+
+        with patch.object(self.app.restore.net, 'urlopen', refuse):
+            capability = self.app.restore.lane_restore_capability('http://127.0.0.1:19099')
+        self.assertFalse(capability['available'])
+        self.assertEqual(capability['state'], 'unreachable')
+
+    def test_a_lane_that_answers_without_the_nodes_says_so(self):
+        class _Answer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({'LoadVideo': {}}).encode('utf-8')
+
+        with patch.object(self.app.restore.net, 'urlopen', lambda *a, **k: _Answer()):
+            capability = self.app.restore.lane_restore_capability('http://127.0.0.1:19099')
+        self.assertFalse(capability['available'])
+        self.assertEqual(capability['state'], 'missing-nodes')
+
+    def test_every_refused_lane_carries_a_remedy_the_studio_can_render(self):
+        captured = {}
+
+        class _Handler:
+            def send_json(self, payload):
+                captured.update(payload)
+
+            get_api_restore_capabilities = self.app.http.Handler.get_api_restore_capabilities
+
+        with patch.object(self.app.restore, 'lane_restore_capability',
+                          lambda url, timeout=8.0: {'available': False, 'state': 'unreachable',
+                                                    'missing': ['LoadVideo'], 'models': [],
+                                                    'devices': [], 'attention_modes': []}), \
+                patch.object(self.app.config.cloud_restore, 'status',
+                             lambda: {'available': False, 'reason': 'switched off'}):
+            _Handler().get_api_restore_capabilities(None, {})
+
+        self.assertTrue(captured['lanes'])
+        for lane in captured['lanes']:
+            self.assertFalse(lane['available'], lane)
+            # The whole point: never a greyed row with nothing on it.
+            self.assertTrue(lane['remedy'], lane)
+
+
+class WorkflowDependencyTests(unittest.TestCase):
+    """The preflight that runs before Generate (gateway/dependencies.py).
+
+    Liam pressed Generate on MiniMax H3 Turbo on a Mac whose ComfyUI had none
+    of it — no Spectrum node, no H3 weights, an accelerator the model cannot
+    use — and learned so from a refusal. These pin the preflight reading the
+    graph, asking the lane, naming each missing thing with its source, and
+    refusing to install 43 GB onto a card that cannot run them.
+    """
+
+    REGISTRY = {
+        "workflows": [
+            {
+                "id": "base",
+                "hardware": {"accelerator": "cuda", "reason": "needs an NVIDIA card"},
+                "core_node_classes": ["CoreOnlyNode"],
+                "custom_node_dependencies": [
+                    {"name": "Pack-A", "repo": "https://github.com/x/Pack-A", "commit": "abc123", "class_types": ["PackANode"]},
+                ],
+                "model_dependencies": [
+                    {"folder": "vae", "relativePath": "vae/base_vae.safetensors", "url": "https://example.com/base_vae.safetensors", "bytes": 12, "sha256": ""},
+                ],
+            },
+            {"id": "child", "inherits": "base", "api_workflow": "workflows/child.api.json", "hardware": {"accelerator": "mps"}},
+        ]
+    }
+    GRAPH = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "present.safetensors"}},
+        "2": {"class_type": "VAELoader", "inputs": {"vae_name": "base_vae.safetensors"}},
+        "3": {"class_type": "PackANode", "inputs": {}},
+        "4": {"class_type": "CoreOnlyNode", "inputs": {}},
+        "5": {"class_type": "MysteryNode", "inputs": {}},
+        "6": {"class_type": "LoraLoaderModelOnly", "inputs": {"lora_name": "unknown_lora.safetensors"}},
+    }
+    OBJECT_INFO = {
+        "UNETLoader": {"input": {"required": {"unet_name": [["present.safetensors"]]}}},
+        "VAELoader": {"input": {"required": {"vae_name": [["other_vae.safetensors"]]}}},
+        "LoraLoaderModelOnly": {"input": {"required": {"lora_name": [["some_lora.safetensors"]]}}},
+    }
+
+    def _fake_lane(self, accelerator="mps"):
+        info = self.OBJECT_INFO
+
+        class Response:
+            def __init__(self, payload, status=200):
+                self.payload = json.dumps(payload).encode("utf-8")
+                self.status = status
+                self.headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, *_args):
+                return self.payload
+
+        def fake_urlopen(request, timeout=None):
+            path = request.full_url.split("://", 1)[-1].split("/", 1)[-1]
+            if path == "system_stats":
+                return Response({"devices": [{"type": accelerator, "name": accelerator}], "system": {"comfyui_version": "0.26.0"}})
+            if path.startswith("object_info/"):
+                class_type = path.split("/", 1)[-1]
+                return Response({class_type: info[class_type]} if class_type in info else {})
+            raise AssertionError(f"unexpected lane request {path}")
+
+        return fake_urlopen
+
+    def _with_registry(self, tmp_path):
+        registry = tmp_path / "registry.json"
+        registry.write_text(json.dumps(self.REGISTRY), encoding="utf-8")
+        workflows = tmp_path / "workflows"
+        workflows.mkdir()
+        (workflows / "child.api.json").write_text(json.dumps(self.GRAPH), encoding="utf-8")
+        return registry
+
+    def test_inherited_definitions_fold_the_parent_in_with_the_child_winning(self):
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            registry = self._with_registry(Path(td))
+            resolved = app.dependencies.load_registry(registry)
+        child = resolved["child"]
+        self.assertEqual(child["hardware"]["accelerator"], "mps")
+        self.assertEqual(child["hardware"]["reason"], "needs an NVIDIA card")
+        self.assertEqual([item["name"] for item in child["custom_node_dependencies"]], ["Pack-A"])
+        self.assertNotIn("inherits", child)
+
+    def test_the_preflight_names_each_missing_thing_with_its_source(self):
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            registry = self._with_registry(tmp)
+            resolved = app.dependencies.load_registry(registry)
+            app.dependencies.forget_lane_object_info()
+            with patch.object(app.config, 'BASE', tmp), patch.object(app.config, 'REGISTRY_WORKFLOW_DIR', tmp / 'workflows'), \
+                 patch.object(app.net, 'urlopen', side_effect=self._fake_lane()), \
+                 patch.object(app.dependencies, 'MANAGER_NODE_MAP', tmp / 'no-map.json'):
+                report = app.dependencies.check_workflow("child", "default", registry=resolved)
+        self.assertFalse(report["ok"])
+        self.assertTrue(report["known"])
+        self.assertTrue(report["hardware"]["supported"])  # child asks for mps, the lane is mps
+        by_id = {item["id"]: item for item in report["missing"]}
+        self.assertEqual(sorted(by_id), [
+            "model:base_vae.safetensors", "model:unknown_lora.safetensors",
+            "node:CoreOnlyNode", "node:MysteryNode", "node:PackANode",
+        ])
+        # A registry-named pack is installable from its GitHub repo, at its pin.
+        pack = by_id["node:PackANode"]
+        self.assertTrue(pack["installable"])
+        self.assertEqual(pack["source"]["repo"], "https://github.com/x/Pack-A")
+        self.assertEqual(pack["source"]["commit"], "abc123")
+        # A core node is an update, said in words, never attempted.
+        core = by_id["node:CoreOnlyNode"]
+        self.assertEqual(core["kind"], "comfyui")
+        self.assertFalse(core["installable"])
+        self.assertIn("Update ComfyUI", core["reason"])
+        # A node nobody can attribute is named as such.
+        self.assertFalse(by_id["node:MysteryNode"]["installable"])
+        self.assertIn("No known source", by_id["node:MysteryNode"]["reason"])
+        # A model the registry knows is downloadable; one it does not says where to put it.
+        vae = by_id["model:base_vae.safetensors"]
+        self.assertTrue(vae["installable"])
+        self.assertEqual(vae["bytes"], 12)
+        self.assertEqual(vae["source"]["folder"], "vae")
+        lora = by_id["model:unknown_lora.safetensors"]
+        self.assertFalse(lora["installable"])
+        self.assertIn("ComfyUI/models/loras", lora["reason"])
+        # The present file and the loaders themselves count as satisfied.
+        self.assertGreaterEqual(report["satisfied"], 3)
+        self.assertEqual(report["missing_bytes"], 12)
+
+    def test_an_unsupported_accelerator_blocks_every_install(self):
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            registry = self._with_registry(tmp)
+            resolved = app.dependencies.load_registry(registry)
+            resolved["child"]["hardware"] = {"accelerator": "cuda", "reason": "needs an NVIDIA card"}
+            app.dependencies.forget_lane_object_info()
+            with patch.object(app.config, 'BASE', tmp), patch.object(app.config, 'REGISTRY_WORKFLOW_DIR', tmp / 'workflows'), \
+                 patch.object(app.net, 'urlopen', side_effect=self._fake_lane("mps")), \
+                 patch.object(app.dependencies, 'MANAGER_NODE_MAP', tmp / 'no-map.json'):
+                report = app.dependencies.check_workflow("child", "default", registry=resolved)
+        self.assertFalse(report["hardware"]["supported"])
+        self.assertEqual(report["hardware"]["required"], "cuda")
+        self.assertEqual(report["hardware"]["reason"], "needs an NVIDIA card")
+        self.assertTrue(report["missing"])
+        for item in report["missing"]:
+            self.assertFalse(item["installable"], item["id"])
+            self.assertEqual(item["blocked_by"], "hardware")
+
+    def test_a_comfy_relative_graph_is_read_from_the_comfyui_install(self):
+        """ltx23-regular-fp8 names `comfy:workflows/civitai/...`: on the live
+        Mac that answered "outside the auto-workflow folders" and the whole
+        workflow was reported as unknown, which reads as all clear."""
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            comfy = tmp / "comfy"
+            (comfy / "workflows" / "civitai").mkdir(parents=True)
+            (comfy / "workflows" / "civitai" / "g.json").write_text(json.dumps({"prompt": self.GRAPH}), encoding="utf-8")
+            definition = {"id": "x", "api_workflow": "comfy:workflows/civitai/g.json"}
+            with patch.object(app.config, 'COMFY', comfy), patch.object(app.config, 'REGISTRY_WORKFLOW_DIR', tmp / 'gateway-workflows'):
+                graph = app.dependencies.load_workflow_graph(definition)
+                self.assertIn("PackANode", {node["class_type"] for node in graph.values()})
+                # Outside both roots: refused, never read.
+                (tmp / "elsewhere.json").write_text("{}", encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "outside the workflow folders"):
+                    app.dependencies.load_workflow_graph({"id": "y", "api_workflow": str(tmp / "elsewhere.json")})
+
+    def test_a_node_class_with_spaces_is_asked_for_by_its_quoted_name(self):
+        """"Sol-Attn (tau 0 = off)" is a real node title a pack ships as its
+        class name; unquoted it made urllib refuse the request and the whole
+        preflight died with the connection (HTTP 000 on the live Mac)."""
+        app = load_app()
+        asked = []
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *a): return None
+            def read(self, *a): return b"{}"
+
+        def fake_urlopen(request, timeout=None):
+            asked.append(request.full_url)
+            return Response()
+
+        app.dependencies.forget_lane_object_info()
+        with patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+            self.assertIsNone(app.dependencies.lane_object_info("default", "Sol-Attn (tau 0 = off)"))
+        self.assertTrue(asked[0].endswith("/object_info/Sol-Attn%20%28tau%200%20%3D%20off%29"), asked)
+
+    def test_an_unknown_workflow_is_no_preflight_not_a_clean_bill(self):
+        app = load_app()
+        report = app.dependencies.check_workflow("not-a-workflow", "default", registry={})
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["known"])
+        self.assertEqual(report["missing"], [])
+
+    def test_a_model_download_resumes_its_part_and_verifies_size_and_hash(self):
+        app = load_app()
+        payload = b"0123456789abcdef"
+        digest = hashlib.sha256(payload).hexdigest()
+
+        class Response:
+            def __init__(self, body, status, total):
+                self.body, self.status = body, status
+                self.headers = {"Content-Length": str(len(body))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, n):
+                chunk, self.body = self.body[:n], self.body[n:]
+                return chunk
+
+        seen = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append(request.headers.get("Range"))
+            start = int(str(request.headers.get("Range") or "bytes=0-")[len("bytes="):-1] or 0)
+            return Response(payload[start:], 206 if start else 200, len(payload))
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "models" / "vae" / "file.safetensors"
+            dest.parent.mkdir(parents=True)
+            (dest.parent / "file.safetensors.part").write_bytes(payload[:6])
+            progress = []
+            with patch.object(app.net, 'urlopen', side_effect=fake_urlopen):
+                app.dependencies.download_url(
+                    "https://example.com/file.safetensors", dest, expected_bytes=len(payload), sha256=digest,
+                    progress_cb=lambda done, total: progress.append((done, total)),
+                )
+            self.assertEqual(dest.read_bytes(), payload)
+            self.assertFalse((dest.parent / "file.safetensors.part").exists())
+        self.assertEqual(seen, ["bytes=6-"])
+        self.assertEqual(progress[0], (6, len(payload)))
+        self.assertEqual(progress[-1], (len(payload), len(payload)))
+
+    def test_a_bad_hash_discards_the_file_and_says_so(self):
+        app = load_app()
+        payload = b"not the bytes you wanted"
+
+        class Response:
+            status = 200
+            headers = {"Content-Length": str(len(payload))}
+            body = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, n):
+                chunk, self.body = self.body[:n], self.body[n:]
+                return chunk
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "file.safetensors"
+            with patch.object(app.net, 'urlopen', return_value=Response()):
+                with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                    app.dependencies.download_url("https://example.com/f", dest, sha256="00" * 32)
+            self.assertFalse(dest.exists())
+            self.assertFalse(dest.with_suffix(".safetensors.part").exists())
+
+    def test_installs_refuse_unsafe_targets_and_remote_lanes(self):
+        app = load_app()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(app.config, 'COMFY', Path(td)):
+                with self.assertRaisesRegex(RuntimeError, "github.com only"):
+                    app.dependencies.install_custom_node({"repo": "https://evil.example/x/y"})
+                with self.assertRaisesRegex(RuntimeError, "refusing"):
+                    app.dependencies._model_destination("../etc", "x.safetensors")
+                with self.assertRaisesRegex(RuntimeError, "model extension"):
+                    app.dependencies._model_destination("vae", "script.sh")
+            with patch.object(app.lanes, 'comfy_lane_is_remote', return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "re-provision"):
+                    app.dependencies.start_install_job(
+                        {"id": "model:x.safetensors", "kind": "model", "name": "x.safetensors", "source": {"folder": "vae", "url": "https://e/x"}},
+                        lane="h3",
+                    )
+
+    def test_the_install_route_starts_only_installable_items_and_names_the_rest(self):
+        app = load_app()
+        report = {
+            "missing": [
+                {"id": "node:PackANode", "kind": "custom_node", "installable": True, "source": {"repo": "https://github.com/x/Pack-A", "name": "Pack-A"}},
+                {"id": "node:CoreOnlyNode", "kind": "comfyui", "installable": False, "reason": "Update ComfyUI"},
+            ],
+            "hardware": {"supported": True},
+        }
+        started = []
+
+        def fake_start(item, workflow_id="", lane="default"):
+            started.append((item["id"], workflow_id, lane))
+            return {"id": "job1", "status": "queued", "dependency": item["id"]}
+
+        server = app.runtime.ThreadingHTTPServer(('127.0.0.1', 0), app.http.Handler)
+        server_thread = app.jobs.threading.Thread(target=server.serve_forever, daemon=True)
+        with patch.object(app.config, 'TOKEN', 'test-token'), \
+             patch.object(app.dependencies, 'check_workflow', return_value=report), \
+             patch.object(app.dependencies, 'start_install_job', side_effect=fake_start):
+            server_thread.start()
+            try:
+                request = app.net.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/workflows/dependencies/install',
+                    data=json.dumps({'workflow_id': 'child'}).encode('utf-8'),
+                    headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with app.net.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                    self.assertEqual(response.status, 202)
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+        self.assertEqual(started, [("node:PackANode", "child", "default")])
+        self.assertEqual([job["id"] for job in payload["started"]], ["job1"])
+        self.assertEqual(payload["refused"], [{"id": "node:CoreOnlyNode", "reason": "Update ComfyUI"}])
+
+
+class CivitaiFeedResilienceTests(unittest.TestCase):
+    """Civitai's /images feed 503s transiently, and the studio has to survive it.
+
+    The reported symptom was the whole inspiration tab replaced by "HTTP Error
+    503: Service Unavailable" on a route switch, working again on reload.
+    Nothing here is about making Civitai reliable — it is not ours — these
+    pin the three things the studio controls: what a page failure costs, what
+    the browser is told, and how hard we lean on the endpoint while asking.
+    """
+
+    def test_a_failed_page_keeps_the_results_already_collected(self):
+        app = load_app()
+        # Page one is a normal thin page (the filter yield is ~40%, so filling
+        # 24 takes more than one); page two is the 503 that used to throw the
+        # whole search away.
+        page_one = {
+            'items': [{'id': i, 'meta': {'prompt': f'a very reusable prompt {i}'}} for i in range(20)],
+            'metadata': {'nextCursor': 'cursor-2'},
+        }
+        calls = []
+
+        def flaky(path, params=None, **kwargs):
+            calls.append(dict(params or {}))
+            if len(calls) == 1:
+                return page_one
+            raise app.models.HTTPError('https://civitai.com', 503, 'Service Unavailable', {}, None)
+
+        with patch.object(app.models, 'civitai_json', side_effect=flaky):
+            result = app.models.civitai_search_images({'limit': '24'})
+
+        self.assertEqual(len(result['items']), 20, 'page one survived page two failing')
+        # The sentence, not the status line, and it names who was busy.
+        self.assertIn('Civitai', result['metadata']['partial'])
+        self.assertNotIn('HTTP Error', result['metadata']['partial'])
+        # Resuming has to retry the page that failed, not skip past it.
+        self.assertEqual(result['metadata']['nextCursor'], 'cursor-2')
+
+    def test_an_empty_hand_still_raises(self):
+        """Partial results are worth keeping; zero results are just a failure.
+
+        Swallowing this one would turn "Civitai is down" into "Civitai has
+        nothing", which is the one thing a loading surface must never say.
+        """
+        app = load_app()
+
+        def dead(path, params=None, **kwargs):
+            raise app.models.HTTPError('https://civitai.com', 503, 'Service Unavailable', {}, None)
+
+        with patch.object(app.models, 'civitai_json', side_effect=dead):
+            with self.assertRaises(app.models.HTTPError):
+                app.models.civitai_search_images({'limit': '24'})
+
+    def test_upstream_failures_are_sentences_not_status_lines(self):
+        app = load_app()
+        busy = app.models.civitai_error_message(
+            app.models.HTTPError('https://civitai.com', 503, 'Service Unavailable', {}, None))
+        self.assertIn('Civitai', busy)
+        self.assertIn('again', busy)
+        self.assertNotIn('HTTP Error', busy)
+
+        limited = app.models.civitai_error_message(
+            app.models.HTTPError('https://civitai.com', 429, 'Too Many Requests', {}, None))
+        self.assertIn('rate-limiting', limited)
+
+        refused = app.models.civitai_error_message(
+            app.models.HTTPError('https://civitai.com', 401, 'Unauthorized', {}, None))
+        self.assertIn('key', refused)
+
+        offline = app.models.civitai_error_message(app.models.URLError('no route to host'))
+        self.assertIn('Civitai', offline)
+
+    def test_retry_after_is_honoured_and_the_ladder_is_jittered(self):
+        """Two calls rejected in the same wobble must not wake up together."""
+        app = load_app()
+
+        class Headers(dict):
+            def get(self, key, default=None):
+                return dict.get(self, key, default)
+
+        rate_limited = app.models.HTTPError(
+            'https://civitai.com', 429, 'Too Many Requests', Headers({'Retry-After': '4'}), None)
+        self.assertEqual(app.models.civitai_retry_after(rate_limited, 1), 4.0)
+
+        # An HTTP-date is legal and rare: it falls through to the ladder rather
+        # than raising on the path whose whole job is recovery.
+        dated = app.models.HTTPError(
+            'https://civitai.com', 429, 'Too Many Requests', Headers({'Retry-After': 'Wed, 10 Sep 2026 12:00:00 GMT'}), None)
+        self.assertGreater(app.models.civitai_retry_after(dated, 1), 0)
+
+        plain = app.models.HTTPError('https://civitai.com', 503, 'Service Unavailable', Headers(), None)
+        delays = {app.models.civitai_retry_after(plain, 2) for _ in range(20)}
+        self.assertGreater(len(delays), 1, 'a deterministic ladder re-collides on the next attempt')
+        self.assertTrue(all(0 < d < 3.0 * 1.31 for d in delays))
+
+    def test_the_base_model_scrape_runs_once_when_two_callers_arrive_together(self):
+        """Opening the finder asks for the filter vocabulary twice at once.
+
+        The images handler wants it for its own response while the browser
+        fetches it directly, and cold that is six /models pages at limit=100
+        EACH — twelve heavy calls landing on Civitai in the same second as the
+        images search they decorate. Whoever loses the race waits and reuses.
+        """
+        app = load_app()
+        app.models.CIVITAI_BASE_MODELS_CACHE.update({'at': 0, 'items': None})
+        scrapes = []
+
+        def slow_models(path, params=None, **kwargs):
+            scrapes.append(params.get('types'))
+            time.sleep(0.02)
+            return {'items': [{'modelVersions': [{'baseModel': 'SDXL 1.0'}]}]}
+
+        results = []
+        with patch.object(app.models, 'civitai_json', side_effect=slow_models):
+            threads = [app.jobs.threading.Thread(target=lambda: results.append(app.models.civitai_base_model_options()))
+                       for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+        self.assertEqual(len(scrapes), 6, 'one scrape of six model types, not one per caller')
+        self.assertEqual(len(results), 4)
+        self.assertTrue(all(r == results[0] for r in results), 'every caller got the same answer')
+
+
+class H3NativeLaneTests(unittest.TestCase):
+    """MiniMax H3 through h3.c: the arithmetic the engine will hold us to.
+
+    Every number here is transcribed from vendor/h3.c (h3_host.h for the canvas
+    and frame constants, h3_valid_params in h3.c for the dial ranges), so these
+    are not the studio's opinions — they are what the engine refuses. A render
+    that violates one fails forty seconds in, after a 62 GB text encoder has
+    loaded, which is exactly why they are checked before the queue.
+    """
+
+    def h3(self):
+        load_app()
+        from gateway import h3_native
+        return h3_native
+
+    def test_frames_land_on_the_engines_own_lattice(self):
+        h3 = self.h3()
+        # h3_align_frame_count: the smallest 5+17n at or above the request.
+        self.assertEqual(h3.align_frames(1), 5)
+        self.assertEqual(h3.align_frames(22), 22)
+        self.assertEqual(h3.align_frames(23), 39)
+        self.assertEqual(h3.align_frames(96), 107)
+        self.assertEqual(h3.align_frames(362), 362)
+        for requested in range(1, 400):
+            aligned = h3.align_frames(requested)
+            self.assertGreaterEqual(aligned, requested if requested >= 5 else 5)
+            self.assertEqual((aligned - h3.FRAME_OFFSET) % h3.FRAME_MODULUS, 0)
+
+    def test_the_canvas_keeps_its_shape_rather_than_its_pixels(self):
+        h3 = self.h3()
+        # 16:9 has no exact representation on the 32-grid inside the budget, so
+        # what matters is that the drift is small — an earlier scale-and-floor
+        # turned 1920x1080 into 1.83:1, which letterboxes.
+        for width, height in ((1920, 1080), (1280, 720), (1080, 1920), (3840, 2160)):
+            snapped_w, snapped_h = h3.snap_canvas(width, height)
+            self.assertEqual(snapped_w % h3.CANVAS_MULTIPLE, 0)
+            self.assertEqual(snapped_h % h3.CANVAS_MULTIPLE, 0)
+            self.assertLessEqual(snapped_w * snapped_h, h3.MAX_PIXELS)
+            drift = abs((snapped_w / snapped_h) - (width / height)) / (width / height)
+            self.assertLess(drift, 0.01, f'{width}x{height} -> {snapped_w}x{snapped_h}')
+
+    def test_a_canvas_that_already_fits_is_left_exactly_alone(self):
+        h3 = self.h3()
+        self.assertEqual(h3.snap_canvas(864, 480), (864, 480))
+        self.assertEqual(h3.snap_canvas(768, 1344), (768, 1344))
+        # And a small request is never enlarged to spend the pixel budget.
+        self.assertEqual(h3.snap_canvas(320, 320), (320, 320))
+
+    def test_the_internal_canvas_is_exactly_the_same_aspect_or_absent(self):
+        h3 = self.h3()
+        # The engine's test is integer-exact: render_w * h == render_h * w.
+        for width, height in ((1024, 576), (512, 512), (768, 1344), (1216, 704)):
+            render = h3.snap_render_canvas(width, height, 0.5)
+            if render == (0, 0):
+                continue
+            self.assertEqual(render[0] * height, render[1] * width)
+            self.assertEqual(render[0] % h3.CANVAS_MULTIPLE, 0)
+            self.assertEqual(render[1] % h3.CANVAS_MULTIPLE, 0)
+            self.assertGreaterEqual(min(render), h3.MIN_RENDER_EDGE)
+        # Below the coherence floor there is no smaller canvas worth using, so
+        # the engine samples at full size rather than at a size that renders mush.
+        self.assertEqual(h3.snap_render_canvas(384, 384, 0.5), (0, 0))
+
+    def test_the_two_reuse_dials_are_never_raised_together(self):
+        h3 = self.h3()
+        # h3.c refuses core_reuse > 1 alongside reuse > 1. A request that sets
+        # both is resolved rather than failing at the engine.
+        settings = h3.resolve_settings({'preset': 'balanced', 'core_reuse': 4})
+        self.assertEqual(settings['core_reuse'], 4)
+        self.assertEqual(settings['reuse'], 1)
+        settings = h3.resolve_settings({'preset': 'balanced', 'core_reuse': 4, 'reuse': 3})
+        self.assertEqual(settings['reuse'], 3)
+        self.assertEqual(settings['core_reuse'], 1)
+
+    def test_token_reduction_is_off_by_default_and_refused_on_a_thinned_transformer(self):
+        h3 = self.h3()
+        self.assertFalse(h3.resolve_settings({})['token_reduction'])
+        self.assertFalse(h3.resolve_settings({'preset': 'draft'})['token_reduction'])
+        # Upstream's own warning, and the shape of the artefact reports: paired
+        # tokens over 40 layers at reuse 3 is where doubled frames come from.
+        self.assertFalse(h3.resolve_settings({'preset': 'draft', 'token_reduction': True})['token_reduction'])
+        # Anywhere else it is a choice, and an explicit one is honoured.
+        self.assertTrue(h3.resolve_settings({'preset': 'balanced', 'token_reduction': True})['token_reduction'])
+
+    def test_every_dial_is_clamped_into_the_engines_range(self):
+        h3 = self.h3()
+        settings = h3.resolve_settings({'steps': 0, 'layers': 9999, 'reuse': 77, 'core_reuse': 0})
+        self.assertGreaterEqual(settings['steps'], h3.STEP_RANGE[0])
+        self.assertLessEqual(settings['layers'], h3.LAYER_RANGE[1])
+        self.assertLessEqual(settings['reuse'], h3.REUSE_RANGE[1])
+        self.assertGreaterEqual(settings['core_reuse'], h3.CORE_REUSE_RANGE[0])
+
+    def test_the_command_line_is_what_the_engine_documents(self):
+        h3 = self.h3()
+        settings = h3.resolve_settings({'preset': 'draft', 'ssd_streaming': True, 'int8_row_fc2': False})
+        command = h3.build_command(
+            prompt='a balloon', output='/out/clip.mp4', width=864, height=480,
+            frames=56, seed=7, settings=settings, binary='/bin/h3', directory='/model',
+        )
+        self.assertEqual(command[:5], ['/bin/h3', '-d', '/model', '-p', 'a balloon'])
+        self.assertEqual(command[-2:], ['-o', '/out/clip.mp4'])
+        for flag, value in (('--width', '864'), ('--height', '480'), ('--frames', '56'),
+                            ('--steps', '4'), ('--layers', '40'), ('--reuse', '3'), ('--seed', '7')):
+            self.assertEqual(command[command.index(flag) + 1], value)
+        self.assertIn('--ssd-streaming', command)
+        self.assertNotIn('--use-int8-row-fc2', command)
+        self.assertNotIn('--token-reduction', command)
+        # core_reuse 1 is the engine's own default and is left unsaid, which is
+        # also what keeps it from colliding with --reuse.
+        self.assertNotIn('--core-reuse', command)
+
+    def test_a_motion_clips_own_sound_picks_the_flag_rather_than_a_re_encode(self):
+        h3 = self.h3()
+        command = h3.build_command(
+            prompt='p', output='/o.mp4', width=512, height=512, frames=22, seed=1,
+            settings=h3.resolve_settings({'preset': 'fast'}),
+            reference_images=['a.png'],
+            reference_videos=[('loud.mp4', True), ('quiet.mp4', False)],
+            reference_audios=['voice.wav'],
+            binary='/bin/h3', directory='/model',
+        )
+        self.assertEqual(command[command.index('--ref-image') + 1], 'a.png')
+        self.assertEqual(command[command.index('--ref-video') + 1], 'loud.mp4')
+        self.assertEqual(command[command.index('--ref-silent-video') + 1], 'quiet.mp4')
+        self.assertEqual(command[command.index('--ref-audio') + 1], 'voice.wav')
+
+    def test_references_and_frame_anchors_are_refused_together(self):
+        h3 = self.h3()
+        with self.assertRaises(ValueError) as caught:
+            h3.build_command(
+                prompt='p', output='/o.mp4', width=512, height=512, frames=22, seed=1,
+                settings=h3.resolve_settings({}),
+                reference_images=['a.png'], first_frame='start.png',
+                binary='/bin/h3', directory='/model',
+            )
+        # Two different checkpoints, and the message has to say which choice to make.
+        self.assertIn('reference pictures', str(caught.exception))
+
+    def test_progress_reads_the_engines_own_lines(self):
+        h3 = self.h3()
+        # h3_cli.c writes "\r%-25s %4d/%-4d" to stderr.
+        self.assertEqual(h3.parse_progress_line('denoise                      3/20   '), ('denoise', 3, 20))
+        self.assertEqual(h3.parse_progress_line('text encoder                50/50'), ('text encoder', 50, 50))
+        self.assertIsNone(h3.parse_progress_line('h3: wrote /tmp/out.mp4'))
+        self.assertIsNone(h3.parse_progress_line(''))
+        # And the bands are monotonic across the render, so the bar never runs backwards.
+        percents = [
+            h3.progress_percent('tokenizer', 1, 1),
+            h3.progress_percent('text encoder', 50, 50),
+            h3.progress_percent('denoise', 10, 20),
+            h3.progress_percent('video VAE load', 1, 2),
+            h3.progress_percent('FFmpeg', 22, 22),
+        ]
+        self.assertEqual(percents, sorted(percents))
+        self.assertEqual(percents[-1], 100.0)
+
+    def test_the_bands_are_in_the_order_the_engine_emits_them(self):
+        """The bar only moves forward, so a phase listed above where h3.c emits
+        it never moves it at all — it reads as a hang.
+
+        The first real render on an M5 Max sat at 37% for twenty-five seconds
+        because `load transformer core` was above `refine text` here while
+        h3_dit.c's load_dit calls refine_text, then the AdaLN precompute, then
+        load_core. This pins that sequence against the SOURCE rather than
+        against a remembered run."""
+        h3 = self.h3()
+        source = (Path(__file__).resolve().parents[2] / 'vendor/h3.c/h3_dit.c')
+        if source.exists():
+            text = source.read_text(encoding='utf-8', errors='replace')
+            body = text[text.index('static h3_dit *load_dit('):]
+            # Each phase, at the call that emits it. The AdaLN precompute
+            # reports through schedule_report, so its position in load_dit is
+            # the schedule call rather than a literal string.
+            positions = [
+                body.index('"refine text"'),
+                body.index('h3_dit_schedule_precompute'),
+                body.index('load_core('),
+            ]
+            self.assertEqual(positions, sorted(positions), 'load_dit no longer calls them in this order')
+            # And this table lists them in that same sequence.
+            table = [name for name in h3.PHASE_ORDER
+                     if name in ('refine text', 'precompute AdaLN', 'load transformer core')]
+            self.assertEqual(table, ['refine text', 'precompute AdaLN', 'load transformer core'])
+        # Whether or not the vendored engine is checked out, the table itself
+        # must be monotonic and must end at exactly 100.
+        starts = [h3.progress_percent(name, 0, 1) for name in h3.PHASE_ORDER]
+        self.assertEqual(starts, sorted(starts), 'the bands are out of order')
+        self.assertEqual(h3.progress_percent(h3.PHASE_ORDER[-1], 1, 1), 100.0)
+        # And the two phases that dominate the clock own the two widest bands.
+        widths = {name: end - start for name, start, end in h3._PROGRESS_BANDS}
+        self.assertEqual(
+            sorted(widths, key=widths.get, reverse=True)[:2],
+            ['denoise', 'load transformer core'],
+        )
+
+    def test_the_bar_takes_the_last_measurement_in_a_mixed_tail(self):
+        h3 = self.h3()
+        load_app()
+        from gateway import jobs
+        record = {'id': 'j1', 'progress': 0}
+        with jobs.jobs_lock:
+            jobs.jobs['j1'] = record
+        h3.update_process_progress('j1', record, 'denoise  1/20\rdenoise  9/20   ')
+        self.assertEqual(record['current_step'], 9)
+        self.assertEqual(record['progress_phase'], 'denoise')
+        # A later line that would move the bar BACKWARDS is ignored: the phases
+        # interleave in the tail and a percentage that retreats reads as a stall.
+        before = record['progress']
+        h3.update_process_progress('j1', record, 'tokenizer  1/1')
+        self.assertEqual(record['progress'], before)
+
+    def test_the_lane_says_what_is_missing_and_what_to_run(self):
+        h3 = self.h3()
+        blocked = h3._first_blocker({
+            'apple_silicon': True, 'route_enabled': True, 'engine_installed': False,
+            'ffmpeg': True, 'model': {'fl2va': True},
+        })
+        self.assertIn('scripts/install_h3c.sh', blocked['fix'])
+        blocked = h3._first_blocker({
+            'apple_silicon': True, 'route_enabled': True, 'engine_installed': True,
+            'ffmpeg': True, 'model': {'fl2va': False},
+        })
+        self.assertIn('assemble_h3c_model.py', blocked['fix'])
+        # Nothing in the way is None, not an empty string dressed as a problem.
+        self.assertIsNone(h3._first_blocker({
+            'apple_silicon': True, 'route_enabled': True, 'engine_installed': True,
+            'ffmpeg': True, 'model': {'fl2va': True},
+        }))
+
+    def test_the_machine_decides_streaming_and_the_m5_kernel(self):
+        h3 = self.h3()
+        big = h3.recommended_settings({'memory_gb': 128.0, 'chip_generation': 5, 'chip': 'Apple M5 Max'})
+        self.assertEqual(big['preset'], 'balanced')
+        self.assertFalse(big['ssd_streaming'])
+        self.assertTrue(big['int8_row_fc2'])
+        small = h3.recommended_settings({'memory_gb': 16.0, 'chip_generation': 2, 'chip': 'Apple M2'})
+        self.assertEqual(small['preset'], 'draft')
+        self.assertTrue(small['ssd_streaming'], '16 GB cannot hold a 36 GB transformer')
+        self.assertFalse(small['int8_row_fc2'])
+        # And it is never recommended, on any machine.
+        for memory in (8, 16, 32, 64, 128, 512):
+            self.assertFalse(h3.recommended_settings({'memory_gb': float(memory), 'chip_generation': 5})['token_reduction'])
+
+    def test_the_marker_is_what_routes_a_submit_and_nothing_else(self):
+        app = load_app()
+        from gateway import graphs
+        body = json.dumps({
+            'prompt': {'1': {'class_type': 'HivemindNativeH3', 'inputs': {}}},
+            'extra_data': {'extra_pnginfo': {'nativeH3': {
+                'enabled': True, 'prompt': 'hello',
+                'reference_videos': [{'path': 'clip.mp4', 'use_audio': True}, 'quiet.mp4'],
+                'options': {'width': 864, 'height': 480},
+            }}},
+        }).encode()
+        detected = graphs.detect_native_h3_prompt(body)
+        self.assertEqual(detected['prompt'], 'hello')
+        self.assertEqual(detected['reference_videos'], [
+            {'path': 'clip.mp4', 'use_audio': True},
+            {'path': 'quiet.mp4', 'use_audio': False},
+        ])
+        # An ordinary ComfyUI submit is not this lane's, and must pass through.
+        self.assertIsNone(graphs.detect_native_h3_prompt(
+            json.dumps({'prompt': {'1': {'class_type': 'KSampler'}}}).encode()))
+        self.assertIsNone(graphs.detect_native_h3_prompt(b'not json'))
+
+    def test_a_cuda_machine_refuses_the_submit_rather_than_forwarding_it(self):
+        # There is no ComfyUI H3 on the other side of this marker, so a body
+        # built for h3.c must never reach a ComfyUI as a graph it will reject in
+        # its own words. The route says why, in the lane's words.
+        with patch.dict(os.environ, CUDA_ENV):
+            load_app()
+            from gateway import graphs
+            body = json.dumps({
+                'prompt': {'1': {'class_type': 'HivemindNativeH3', 'inputs': {}}},
+                'extra_data': {'extra_pnginfo': {'nativeH3': {'enabled': True, 'prompt': 'x'}}},
+            }).encode()
+            with self.assertRaises(RuntimeError) as caught:
+                graphs.detect_native_h3_prompt(body)
+            self.assertIn('Apple Silicon', str(caught.exception))
+
+    def test_a_misaligned_snapshot_gets_copied_weights_and_an_aligned_one_keeps_the_engines_default(self):
+        """The setting that decided whether this lane rendered anything.
+
+        The safetensors format pads its header so the payload starts on an
+        8-byte boundary. MLX's writer skipped the padding, h3.c on an M5 maps
+        shard bytes straight into GPU buffers, and a 4-byte GPU load at a
+        2-mod-4 address silently reads the wrong bytes: black video, saturated
+        audio, byte-identical across seeds — while the CPU read the same file
+        perfectly. So the choice of weight path follows the snapshot: copied
+        buffers (H3_ZERO_COPY_WEIGHTS=0) for a misaligned one, the engine's own
+        file-backed default for an aligned one. An operator's value wins."""
+        h3 = self.h3()
+        base = {'PATH': os.environ.get('PATH', '')}
+        misaligned = h3.runner_environment(base, shards_aligned=False)
+        self.assertEqual(misaligned['H3_ZERO_COPY_WEIGHTS'], '0')
+        aligned = h3.runner_environment(base, shards_aligned=True)
+        self.assertNotIn('H3_ZERO_COPY_WEIGHTS', aligned, 'an aligned snapshot must keep the engine default')
+        pinned = h3.runner_environment({**base, 'H3_ZERO_COPY_WEIGHTS': 'transformer'}, shards_aligned=False)
+        self.assertEqual(pinned['H3_ZERO_COPY_WEIGHTS'], 'transformer', 'the operator wins')
+        if shutil.which('ffmpeg'):
+            self.assertTrue(aligned['H3_FFMPEG'].endswith('ffmpeg'))
+        # The job record says which way the weights were loaded.
+        self.assertIn('zero_copy_weights', gateway_source())
+
+    def test_shard_alignment_is_read_the_way_the_format_defines_it(self):
+        """Eight bytes of length, then the header, then the payload: the
+        payload's offset mod 8 is the whole test. Written against two synthetic
+        shards rather than the real 5 GB ones."""
+        h3 = self.h3()
+        with TemporaryDirectory() as td:
+            transformer = Path(td) / 'FL2VA' / 'transformer'
+            transformer.mkdir(parents=True)
+            header = b'{"t":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]}}'
+            padded = header + b' ' * ((-(8 + len(header))) % 8)
+            (transformer / 'good.safetensors').write_bytes(len(padded).to_bytes(8, 'little') + padded + b'\0' * 4)
+            (transformer / 'bad.safetensors').write_bytes(len(header).to_bytes(8, 'little') + header + b'\0' * 4)
+            self.assertEqual(h3.shard_alignment(transformer / 'good.safetensors'), 0)
+            self.assertNotEqual(h3.shard_alignment(transformer / 'bad.safetensors'), 0)
+            aligned, names = h3.transformer_shards_aligned(Path(td))
+            self.assertFalse(aligned)
+            self.assertEqual(names, ['bad.safetensors'])
+            (transformer / 'bad.safetensors').unlink()
+            self.assertEqual(h3.transformer_shards_aligned(Path(td)), (True, []))
+
+    def test_a_misaligned_snapshot_is_an_advisory_with_its_fix_not_a_blocker(self):
+        """The runner copies the weights, so the render is right either way —
+        but file-backed weights are what let H3 fit on a smaller Mac, so the
+        profile says why it is heavier here and names the one command."""
+        h3 = self.h3()
+        with TemporaryDirectory() as td, patch.object(h3.config, 'H3C_MODEL_DIR', Path(td)):
+            transformer = Path(td) / 'FL2VA' / 'transformer'
+            transformer.mkdir(parents=True)
+            header = b'{"t":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]}}'
+            (transformer / 'model-00001-of-00001.safetensors').write_bytes(len(header).to_bytes(8, 'little') + header + b'\0' * 4)
+            profile = h3.machine_profile(refresh=True)
+            self.assertFalse(profile['model']['shards_aligned'])
+            self.assertEqual(profile['model']['misaligned_shards'], ['model-00001-of-00001.safetensors'])
+            self.assertIn('--realign', profile['advisory']['fix'])
+            # Not what stands between this machine and a render.
+            self.assertNotEqual((profile['blocked_by'] or {}).get('fix'), profile['advisory']['fix'])
+        h3.machine_profile(refresh=True)
+
+    def test_the_registry_lane_declares_what_this_module_implements(self):
+        h3 = self.h3()
+        registry = json.loads((BASE / 'workflow-registry.json').read_text(encoding='utf-8'))
+        lane = next(w for w in registry['workflows'] if w['id'] == 'minimax-h3-native')
+        self.assertEqual(lane['builder'], 'h3-native')
+        self.assertEqual(lane['hardware']['accelerator'], 'mps')
+        self.assertIn('h3_native', lane['accepts'])
+        # h3.c fuses LoRAs itself, so the studio offers its LoRA panel here,
+        # listing the same library the CUDA H3 lanes do.
+        self.assertIs(lane['supports_loras'], True)
+        self.assertIn('loras', lane['accepts'])
+        self.assertEqual(lane['compatible_base_models'], ['MiniMax H3'])
+        block = lane['h3_native']
+        # The panel renders the registry's presets and the runner resolves this
+        # module's; they are the same table or the studio shows a lie.
+        self.assertEqual(list(block['preset_order']), list(h3.PRESET_ORDER))
+        for name in h3.PRESET_ORDER:
+            for dial in ('steps', 'layers', 'reuse', 'core_reuse', 'render_scale'):
+                self.assertEqual(block['presets'][name][dial], h3.PRESETS[name][dial], f'{name}.{dial}')
+        self.assertEqual(block['limits']['max_pixels'], h3.MAX_PIXELS)
+        self.assertEqual(block['limits']['max_frames'], h3.MAX_FRAMES)
+        self.assertEqual(block['limits']['min_render_edge'], h3.MIN_RENDER_EDGE)
+        self.assertIs(block['token_reduction']['default'], False)
+
+    def test_loras_ride_the_command_line_in_the_order_they_stack(self):
+        """h3.c fuses each --lora at the --lora-strength after it, stacked in
+        the order given, and is handed the library's resolved file, never the
+        name the studio sent."""
+        h3 = self.h3()
+        settings = {'preset': 'fast', 'steps': 20, 'layers': 45, 'reuse': 2, 'core_reuse': 1,
+                    'render_scale': 1.0, 'token_reduction': False, 'ssd_streaming': False,
+                    'int8_row_fc2': False, 'custom': False}
+        command = h3.build_command(
+            prompt='p', output='/o.mp4', width=512, height=512, frames=22, seed=1, settings=settings,
+            loras=[{'name': 'a.safetensors', 'filePath': '/loras/a.safetensors', 'scale': 0.8},
+                   {'name': 'b.safetensors', 'filePath': '/loras/b.safetensors', 'scale': -0.25}],
+            binary='/bin/h3', directory='/model',
+        )
+        pairs = [command[index:index + 2] for index, part in enumerate(command)
+                 if part in ('--lora', '--lora-strength')]
+        self.assertEqual(pairs, [['--lora', '/loras/a.safetensors'], ['--lora-strength', '0.8'],
+                                 ['--lora', '/loras/b.safetensors'], ['--lora-strength', '-0.25']])
+        self.assertEqual(command[-2:], ['-o', '/o.mp4'])
+        plain = h3.build_command(prompt='p', output='/o.mp4', width=512, height=512, frames=22, seed=1,
+                                 settings=settings, binary='/bin/h3', directory='/model')
+        self.assertNotIn('--lora', plain)
+
+    def test_a_lora_render_that_cannot_start_says_why_before_the_queue(self):
+        """The engine checks every adapter against the checkpoint within a
+        second of starting. What it cannot know — a name the library does not
+        hold, a build from before the patch, a Mac that streams the transformer
+        instead of loading it — is refused here, each with what to do."""
+        h3 = self.h3()
+        big_mac = {'engine_loras': True, 'memory_gb': 128.0, 'recommended': {
+            'preset': 'balanced', 'ssd_streaming': False, 'int8_row_fc2': True, 'token_reduction': False}}
+        small_mac = {**big_mac, 'memory_gb': 24.0, 'recommended': {
+            **big_mac['recommended'], 'preset': 'draft', 'ssd_streaming': True, 'int8_row_fc2': False}}
+        found = {'name': 'H3_Deeper.safetensors', 'filePath': '/loras/H3_Deeper.safetensors', 'scale': 0.6}
+
+        def refusal(profile, native):
+            readiness = {'ok': True, 'reference_mode': False, 'blocked_by': None, 'profile': profile}
+            with patch.object(h3, 'route_readiness', return_value=readiness), \
+                    patch.object(h3, 'machine_profile', return_value=profile), \
+                    patch.object(h3.jobs, 'start_studio_generation_thread') as started:
+                with self.assertRaises(RuntimeError) as caught:
+                    h3.queue_native_h3_job(native)
+                started.assert_not_called()
+            return str(caught.exception)
+
+        missing = {'name': 'gone.safetensors', 'source': 'gone.safetensors', 'scale': 1.0}
+        self.assertIn('gone.safetensors', refusal(big_mac, {'prompt': 'p', 'loras': [missing]}))
+        self.assertIn('scripts/install_h3c.sh',
+                      refusal({**big_mac, 'engine_loras': False}, {'prompt': 'p', 'loras': [found]}))
+        self.assertIn('switch SSD streaming off', refusal(
+            big_mac, {'prompt': 'p', 'loras': [found], 'options': {'ssd_streaming': True}}))
+        streamed = refusal(small_mac, {'prompt': 'p', 'loras': [found]})
+        self.assertIn('rented NVIDIA machine', streamed)
+        self.assertIn('24', streamed)
+
+        readiness = {'ok': True, 'reference_mode': False, 'blocked_by': None, 'profile': big_mac}
+        with patch.object(h3, 'route_readiness', return_value=readiness), \
+                patch.object(h3, 'machine_profile', return_value=big_mac), \
+                patch.object(h3.jobs, 'start_studio_generation_thread') as started:
+            job_id = h3.queue_native_h3_job({'prompt': 'p', 'loras': [found]})
+            started.assert_called_once()
+        options = h3.jobs.jobs[job_id]['options']
+        # Names and strengths, as the LTX lane records them, and never a path.
+        self.assertEqual(options['loras'], [{'name': 'H3_Deeper.safetensors', 'strength': 0.6}])
+        self.assertEqual(options['lora_count'], 1)
+        self.assertNotIn('/loras/', json.dumps(options))
+
+    def test_what_the_engine_says_it_fused_lands_on_the_job(self):
+        """An adapter that does not fit the checkpoint is skipped, which is
+        ComfyUI's rule too, so the job has to say how many were; otherwise a
+        half-applied LoRA reads exactly like a whole one."""
+        h3 = self.h3()
+        stderr = (
+            "h3: lora: fusing 466 adapters into 216 DiT tensors from 2 files\n"
+            "h3: lora warning: skipped 50 adapters that do not fit this checkpoint "
+            "(H3-GalaxyAce.safetensors: blocks.0.adaln_proj.linear.weight is 96768x2688, its adapter 96768x8)\n"
+            "\rdenoise                    20/20  \n"
+        )
+        self.assertEqual(h3.lora_fusion_report(stderr),
+                         {'lora_adapters': 466, 'lora_tensors': 216, 'lora_adapters_skipped': 50})
+        self.assertEqual(h3.lora_fusion_report('h3: lora: fusing 208 adapters into 208 DiT tensors from 1 files'),
+                         {'lora_adapters': 208, 'lora_tensors': 208, 'lora_adapters_skipped': 0})
+        self.assertEqual(h3.lora_fusion_report('h3: wrote /tmp/out.mp4'), {})
+
+    def test_the_marker_carries_loras_resolved_against_the_library(self):
+        load_app()
+        from gateway import graphs
+        with TemporaryDirectory() as td, patch.object(graphs.config, 'COMFY', Path(td)):
+            library = Path(td) / 'models' / 'loras'
+            library.mkdir(parents=True)
+            (library / 'H3_Deeper.safetensors').write_bytes(b'lora')
+            detected = graphs.detect_native_h3_prompt(json.dumps({
+                'prompt': {'1': {'class_type': 'HivemindNativeH3', 'inputs': {}}},
+                'extra_data': {'extra_pnginfo': {'nativeH3': {
+                    'enabled': True, 'prompt': 'hello',
+                    'loras': [{'name': 'H3_Deeper.safetensors', 'strength': 0.6},
+                              {'name': 'gone.safetensors', 'strength': 1}],
+                }}},
+            }).encode())
+            expected = str((library / 'H3_Deeper.safetensors').resolve())
+        self.assertEqual(detected['loras'][0]['filePath'], expected)
+        self.assertEqual(detected['loras'][0]['scale'], 0.6)
+        self.assertEqual(detected['loras'][1]['name'], 'gone.safetensors')
+        self.assertNotIn('filePath', detected['loras'][1])

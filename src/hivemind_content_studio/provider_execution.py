@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import json
+import tempfile
 import os
 from pathlib import Path
 from typing import Any, Callable
 
 from .generation import (
+    AUTH_MODE_API_KEY,
+    AUTH_MODE_OAUTH,
     PAID_GENERATION_CONFIRMATION,
     generate_higgsfield_cloud_asset,
     generate_higgsfield_consumer_asset,
@@ -18,7 +20,14 @@ from .generation import (
     record_generated_asset,
 )
 from .manifest import load_manifest
+from .media_studio import generate_image as generate_media_studio_image
 from .media_studio import generate_video as generate_media_studio_video
+from .private_access import (
+    private_media_exists,
+    read_private_json,
+    read_private_media,
+    write_private_json,
+)
 from .hivemindos_hosted_media import generate_hosted_media_asset
 
 
@@ -36,6 +45,7 @@ class ProviderExecutors:
         muapi: Generator = generate_muapi_asset,
         hivemindos_hosted: Generator = generate_hosted_media_asset,
         media_studio: Generator = generate_media_studio_video,
+        media_studio_image: Generator = generate_media_studio_image,
         openai_image: Generator = generate_openai_image_asset,
         openai_oauth_image: Generator = generate_openai_oauth_image_asset,
         xai_imagine: Generator = generate_xai_imagine_asset,
@@ -45,6 +55,7 @@ class ProviderExecutors:
         self.muapi = muapi
         self.hivemindos_hosted = hivemindos_hosted
         self.media_studio = media_studio
+        self.media_studio_image = media_studio_image
         self.openai_image = openai_image
         self.openai_oauth_image = openai_oauth_image
         self.xai_imagine = xai_imagine
@@ -60,11 +71,15 @@ class ProviderExecutors:
             "xai-imagine-api",
             "xai-imagine-oauth",
         )
+        # The Media Studio MCP fronts local ComfyUI, fleet machines, and attached
+        # rentals behind one registry, so it serves both roles: "comfyui" is the
+        # catalog's name for that route, "media-studio-mcp" the transport's.
+        local_media = ("comfyui", "media-studio-mcp")
         executors = {
             ("generate_keyframes", provider): lambda manifest, authorization=None, selected=provider: self.generate_keyframes(manifest, selected, authorization=authorization)
-            for provider in providers
+            for provider in (*providers, *local_media)
         }
-        for provider in (*providers, "media-studio-mcp"):
+        for provider in (*providers, *local_media):
             executors[("animate_scenes", provider)] = lambda manifest, authorization=None, selected=provider: self.animate_scenes(manifest, selected, authorization=authorization)
         return executors
 
@@ -80,7 +95,7 @@ class ProviderExecutors:
         request_artifact = next((item for item in manifest["artifacts"] if item["role"] == request_role), None)
         if not request_artifact:
             raise ValueError(f"Run has no {request_role} contract")
-        requests = json.loads(Path(request_artifact["path"]).read_text(encoding="utf-8"))
+        requests = read_private_json(Path(request_artifact["path"]))
         if not isinstance(requests, list):
             raise ValueError(f"{request_role} must contain a JSON list")
         existing = {
@@ -95,12 +110,17 @@ class ProviderExecutors:
             scene = int(raw.get("scene") or 0)
             if scene <= 0 or scene in existing:
                 continue
-            result = self._execute_scene(manifest_file, manifest, raw, provider, kind=kind, authorization=authorization or {})
+            staged: list[Path] = []
+            try:
+                result = self._execute_scene(manifest_file, manifest, raw, provider, kind=kind, authorization=authorization or {}, staged=staged)
+            finally:
+                for item in staged:
+                    item.unlink(missing_ok=True)
             record_generated_asset(manifest_file, result, role=output_role, scene=scene)
             outputs.append(str(result["output"]))
         return {"provider": provider, "artifacts": outputs}
 
-    def _execute_scene(self, manifest_file: Path, manifest: dict[str, Any], request: dict[str, Any], provider: str, *, kind: str, authorization: dict[str, Any]) -> dict[str, Any]:
+    def _execute_scene(self, manifest_file: Path, manifest: dict[str, Any], request: dict[str, Any], provider: str, *, kind: str, authorization: dict[str, Any], staged: list[Path]) -> dict[str, Any]:
         scene = int(request["scene"])
         extension = ".png" if kind == "keyframe" else ".mp4"
         output_dir = manifest_file.parent / ("keyframes" if kind == "keyframe" else "scene-videos")
@@ -109,9 +129,10 @@ class ProviderExecutors:
         prompt = str(request.get("prompt") or "").strip()
         aspect_ratio = str(request.get("aspect_ratio") or manifest["brief"].get("aspect_ratio") or "9:16")
         options = _provider_options(manifest, provider)
+        generation_options = _studio_generation_options(manifest)
         if provider == "higgsfield-consumer":
-            model = str(options.get(f"{kind}_model") or ("gpt_image_2" if kind == "keyframe" else "seedance_2_0"))
-            source = self._source_path(manifest, scene) if kind == "motion" else None
+            model = _selected_model(options, kind, "gpt_image_2" if kind == "keyframe" else "seedance_2_0")
+            source = self._source_path(manifest, scene, staged) if kind == "motion" else None
             return self.higgsfield_consumer(
                 kind=kind,
                 model=model,
@@ -125,7 +146,7 @@ class ProviderExecutors:
         if provider in {"openai-gpt-image", "openai-gpt-image-oauth"}:
             if kind != "keyframe":
                 raise ValueError("OpenAI GPT Image does not provide scene motion")
-            model = str(options.get("model") or options.get("keyframe_model") or "gpt-image-2")
+            model = _selected_model(options, kind, "gpt-image-2")
             generator = self.openai_oauth_image if provider.endswith("oauth") else self.openai_image
             return generator(
                 prompt=prompt,
@@ -136,24 +157,21 @@ class ProviderExecutors:
                 confirm=PAID_GENERATION_CONFIRMATION,
             )
         if provider in {"xai-imagine-api", "xai-imagine-oauth"}:
-            model = str(
-                options.get(f"{kind}_model")
-                or ("grok-imagine-image-quality" if kind == "keyframe" else "grok-imagine-video")
-            )
+            model = _selected_model(options, kind, "grok-imagine-image-quality" if kind == "keyframe" else "grok-imagine-video")
             return self.xai_imagine(
                 kind=kind,
-                auth_mode="oauth" if provider.endswith("oauth") else "api-key",
+                auth_mode=AUTH_MODE_OAUTH if provider.endswith("oauth") else AUTH_MODE_API_KEY,
                 prompt=prompt,
                 model=model,
                 aspect_ratio=aspect_ratio,
                 output=output,
-                source=self._source_path(manifest, scene) if kind == "motion" else None,
+                source=self._source_path(manifest, scene, staged) if kind == "motion" else None,
                 duration_seconds=float(request.get("duration_seconds") or 5) if kind == "motion" else None,
                 resolution=str(options.get(f"{kind}_resolution") or ("1k" if kind == "keyframe" else "720p")),
                 confirm=PAID_GENERATION_CONFIRMATION,
             )
         if provider == "higgsfield-cloud":
-            model = str(options.get(f"{kind}_model") or ("higgsfield-ai/soul/standard" if kind == "keyframe" else "higgsfield-ai/dop/standard"))
+            model = _selected_model(options, kind, "higgsfield-ai/soul/standard" if kind == "keyframe" else "higgsfield-ai/dop/standard")
             payload: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
             if kind == "motion":
                 source_url = self._source_url(manifest, scene)
@@ -162,7 +180,7 @@ class ProviderExecutors:
                 payload.update({"image_url": source_url, "duration": float(request.get("duration_seconds") or 4)})
             payload.update(options.get(f"{kind}_payload") if isinstance(options.get(f"{kind}_payload"), dict) else {})
             payload_path = output.with_suffix(".payload.json")
-            payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            write_private_json(payload_path, payload)
             return self.higgsfield_cloud(model_id=model, payload=payload_path, output=output, confirm=PAID_GENERATION_CONFIRMATION)
         if provider == "muapi":
             contract = options.get(kind) if isinstance(options.get(kind), dict) else {}
@@ -175,11 +193,13 @@ class ProviderExecutors:
                 "aspect_ratio": aspect_ratio,
                 "duration_seconds": request.get("duration_seconds") or 4,
                 "source_url": self._source_url(manifest, scene) or "",
+                "seed": generation_options.get("seed"),
+                "seed_mode": generation_options.get("seed_mode", "randomize"),
             }
             payload = _format_template(template, values)
             payload_path = output.with_suffix(".payload.json")
             state_path = manifest_file.parent / "muapi-state.json"
-            payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            write_private_json(payload_path, payload)
             return self.muapi(endpoint=endpoint, payload=payload_path, output=output, state=state_path, confirm=PAID_GENERATION_CONFIRMATION)
         if provider == "hivemindos-hosted-media":
             contract = options.get(kind) if isinstance(options.get(kind), dict) else {}
@@ -195,6 +215,8 @@ class ProviderExecutors:
                 "aspect_ratio": aspect_ratio,
                 "duration_seconds": request.get("duration_seconds") or 4,
                 "source_url": self._source_url(manifest, scene) or "",
+                "seed": generation_options.get("seed"),
+                "seed_mode": generation_options.get("seed_mode", "randomize"),
             }
             payload = _format_template(template, values)
             agent_id = str(
@@ -212,25 +234,76 @@ class ProviderExecutors:
                 maximum_debit_usd=maximum_debit_usd,
                 idempotency_key=f"{run_id}:{kind}:{scene}:{model}",
             )
-        if provider == "media-studio-mcp" and kind == "motion":
+        if provider in {"media-studio-mcp", "comfyui"} and kind == "motion":
+            workflow_id = str(
+                _role_options(options, kind).get("workflow_id")
+                or options.get("workflow_id")
+                or _role_options(options, kind).get("model")
+                or options.get("model")
+                or ""
+            ).strip()
+            # A scene keyframe anchors the clip when one exists. Without it this
+            # is a text-to-video request, which the registry's t2v workflows
+            # accept — refusing outright would strand every lane that generates
+            # motion straight from a prompt.
+            try:
+                source_path = self._source_path(manifest, scene, staged)
+            except ValueError:
+                source_path = None
             return self.media_studio(
-                image_path=self._source_path(manifest, scene),
+                image_path=source_path,
                 prompt=prompt,
+                aspect_ratio=aspect_ratio,
                 duration_seconds=float(request.get("duration_seconds") or 4),
-                workflow_id=str(options.get("workflow_id") or "") or None,
+                workflow_id=workflow_id or None,
+                studio_lane=str(_role_options(options, kind).get("studio_lane") or options.get("studio_lane") or ""),
+                run_on=str(_role_options(options, kind).get("run_on") or options.get("run_on") or ""),
+                output_dir=output_dir,
+            )
+        if provider in {"media-studio-mcp", "comfyui"} and kind == "keyframe":
+            # Local ComfyUI, a fleet machine, or an attached rental — the lane is
+            # whatever the Media Studio registry currently fronts, so one branch
+            # covers all three avenues.
+            role_options = _role_options(options, kind)
+            workflow_id = str(
+                role_options.get("workflow_id")
+                or options.get("workflow_id")
+                or role_options.get("model")
+                or options.get("model")
+                or ""
+            ).strip()
+            return self.media_studio_image(
+                prompt=prompt,
+                workflow_id=workflow_id or None,
+                backend=str(role_options.get("backend") or options.get("backend") or ""),
+                aspect_ratio=aspect_ratio,
+                resolution=str(role_options.get("resolution") or options.get("image_resolution") or ""),
+                negative_prompt=str(request.get("negative_prompt") or options.get("negative_prompt") or ""),
+                seed=generation_options.get("seed") if isinstance(generation_options.get("seed"), int) else None,
+                loras=options.get("loras") if isinstance(options.get("loras"), list) else None,
                 output_dir=output_dir,
             )
         raise ValueError(f"No manifest executor exists for {provider!r} and {kind!r}")
 
     @staticmethod
-    def _source_path(manifest: dict[str, Any], scene: int) -> str:
+    def _source_path(manifest: dict[str, Any], scene: int, staged: list[Path]) -> str:
         artifact = next(
             (item for item in reversed(manifest["artifacts"]) if item.get("role") == "keyframe" and int(item.get("scene") or 0) == scene),
             None,
         )
-        if not artifact or not Path(str(artifact.get("path") or "")).is_file():
+        source = Path(str(artifact.get("path") or "")) if artifact else None
+        if source is None or not private_media_exists(source):
             raise ValueError(f"Scene {scene} requires a recorded local keyframe")
-        return str(artifact["path"])
+        if source.is_file():
+            return str(source)
+        # Encrypted at rest: stage a plaintext copy for the generator; the
+        # caller unlinks everything in `staged` once the scene completes.
+        body = read_private_media(source)
+        descriptor, name = tempfile.mkstemp(prefix=f".staged-{source.stem}-", suffix=source.suffix, dir=source.parent)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+        staged.append(Path(name))
+        return name
 
     @staticmethod
     def _source_url(manifest: dict[str, Any], scene: int) -> str | None:
@@ -249,9 +322,34 @@ def _provider_options(manifest: dict[str, Any], provider: str) -> dict[str, Any]
     return value if isinstance(value, dict) else {}
 
 
+def _studio_generation_options(manifest: dict[str, Any]) -> dict[str, Any]:
+    all_options = manifest.get("brief", {}).get("provider_options")
+    if not isinstance(all_options, dict):
+        return {}
+    value = all_options.get("_studio_generation")
+    return value if isinstance(value, dict) else {}
+
+
+def _role_options(options: dict[str, Any], kind: str) -> dict[str, Any]:
+    value = options.get(kind)
+    return value if isinstance(value, dict) else {}
+
+
+def _selected_model(options: dict[str, Any], kind: str, fallback: str) -> str:
+    role_options = _role_options(options, kind)
+    for value in (
+        role_options.get("model"),
+        options.get(f"{kind}_model"),
+        options.get("model"),
+    ):
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return str(value).strip()
+    return fallback
+
+
 def _format_template(value: Any, variables: dict[str, Any]) -> Any:
     if isinstance(value, str):
-        if value in {"{prompt}", "{aspect_ratio}", "{duration_seconds}", "{source_url}"}:
+        if value in {"{prompt}", "{aspect_ratio}", "{duration_seconds}", "{source_url}", "{seed}", "{seed_mode}"}:
             return variables[value[1:-1]]
         return value.format_map({key: str(item) for key, item in variables.items()})
     if isinstance(value, list):

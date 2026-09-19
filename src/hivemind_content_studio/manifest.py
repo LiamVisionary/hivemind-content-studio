@@ -14,8 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .private_access import ENCRYPTED_PREFIX, _resolve_private_cipher, runtime_private_cipher
+
 
 MANIFEST_VERSION = 2
+
+# Sections that carry prompts, scripts, captions, and composer metadata.
+PRIVATE_MANIFEST_KEYS = ("brief", "studio", "publish")
 
 
 class ManifestConflictError(RuntimeError):
@@ -31,8 +36,9 @@ def slugify(value: str) -> str:
 
 
 def create_manifest(*, lane: str, brief: dict[str, Any], runs_dir: Path, providers: dict[str, str]) -> tuple[Path, dict[str, Any]]:
-    identity = str(brief.get("id") or brief.get("title") or brief.get("subject") or lane)
-    run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{slugify(identity)}"
+    # Run ids stay opaque: brief titles/subjects are prompt text and must never
+    # reach directory names, telemetry, or machine-visible receipts.
+    run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{slugify(lane)}-{uuid.uuid4().hex[:6]}"
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     manifest = {
@@ -54,6 +60,31 @@ def create_manifest(*, lane: str, brief: dict[str, Any], runs_dir: Path, provide
     return manifest_path, manifest
 
 
+def _seal_private_sections(manifest: dict[str, Any]) -> dict[str, Any]:
+    cipher = runtime_private_cipher()
+    if cipher is None:
+        return manifest
+    sealed = dict(manifest)
+    for key in PRIVATE_MANIFEST_KEYS:
+        value = sealed.get(key)
+        if value is None or (isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX)):
+            continue
+        sealed[key] = cipher.encrypt(json.dumps(value, separators=(",", ":"), sort_keys=True))
+    return sealed
+
+
+def _unseal_private_sections(manifest: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
+    for key in PRIVATE_MANIFEST_KEYS:
+        value = manifest.get(key)
+        if not isinstance(value, str) or not value.startswith(ENCRYPTED_PREFIX):
+            continue
+        try:
+            manifest[key] = json.loads(_resolve_private_cipher().decrypt(value))
+        except Exception as exc:
+            raise RuntimeError(f"Private manifest section {key!r} in {manifest_path} could not be decrypted") from exc
+    return manifest
+
+
 def load_manifest(path: str | Path) -> dict[str, Any]:
     manifest_path = Path(path).expanduser().resolve()
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -62,7 +93,7 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
         data = _migrate_v1(data)
     elif version != MANIFEST_VERSION:
         raise ValueError(f"Unsupported manifest schema in {manifest_path}")
-    return data
+    return _unseal_private_sections(data, manifest_path)
 
 
 def write_manifest(path: str | Path, manifest: dict[str, Any]) -> Path:
@@ -80,10 +111,11 @@ def write_manifest(path: str | Path, manifest: dict[str, Any]) -> Path:
         manifest["schema_version"] = MANIFEST_VERSION
         manifest["revision"] = base_revision + 1
         manifest["updated_at"] = utc_now()
+        sealed = _seal_private_sections(manifest)
         fd, temp_name = tempfile.mkstemp(prefix=".manifest-", suffix=".json", dir=manifest_path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(manifest, handle, indent=2, sort_keys=True)
+                json.dump(sealed, handle, indent=2, sort_keys=True)
                 handle.write("\n")
             os.replace(temp_name, manifest_path)
         finally:

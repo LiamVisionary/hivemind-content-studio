@@ -1,0 +1,473 @@
+// Saved prompts — name a prompt and keep it, with the entire generation setup
+// that produced it (model, seed, LoRAs, aspect/resolution, steps, references, …).
+// Loading offers both: the prompt text alone, or the prompt AND its settings.
+//
+// The whole library is sealed to the owner vault (savedLibraryStore), so prompt
+// text never reaches the server in a readable form — the same client-only E2E
+// rule the composer, history, and generated media already follow.
+//
+// Below the saved entries sits the DEFAULT library (lib/defaultPrompts.js): the
+// starters that ship with the app, filtered to the model that is selected right
+// now — each is a finished prompt in that model's own format, so the ones for
+// other models are hidden rather than listed. They are not vault data, so they
+// show even while the vault is locked. Both studios draw from it: the image
+// shelf is filtered by the selected local workflow's family exactly as the video
+// shelf is filtered by the selected video model's.
+//
+// A starter row takes one of three shapes, and which one it takes is a property
+// of the starter, not a display choice:
+//   - one prompt          → the row IS the button.
+//   - split into parts    → the row labels a clip generated in several runs, and
+//                           each part gets its own button, in order.
+//   - a collection        → the row opens into variants of one idea, of which
+//                           you load exactly one. Collapsed by default and one
+//                           at a time: the animation shelf alone is 74 prompts,
+//                           and expanded they would bury every other starter.
+import { useRef, useState } from 'react';
+import { toast } from 'react-hot-toast';
+import { useSavedLibrary } from '../hooks/hooks.js';
+import { LIBRARIES, deleteLibraryEntry, saveLibraryEntry } from '../lib/savedLibraryStore.js';
+import { defaultPromptsFor, describeDefaultPrompt, describeDefaultPromptPart } from '../lib/defaultPrompts.js';
+import { ConfirmModal } from '../ui/Modal.jsx';
+import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
+import { Icon } from '../ui/icons.jsx';
+import { LibraryDeleteButton, LibraryStateNote, SaveNameModal } from '../ui/SavedLibrary.jsx';
+import { Button, TextInput } from '../ui/kit.jsx';
+import { toastFailure } from '../ui/failureToast.jsx';
+
+const SECTION_LABEL = { image: 'Image', video: 'Video' };
+// Past this many saved prompts a name list stops being scannable, so a filter
+// box appears above it. Below it the box would only be one more thing to read.
+const SEARCH_FROM = 7;
+
+// Name first, then the one-line summary, then the prompt text itself — so
+// "night" finds a prompt about a night street even when its name is "Shot 3".
+export function filterSavedPrompts(entries, query) {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return entries;
+  return entries.filter((entry) => [entry.name, entry.data?.summary, entry.data?.prompt]
+    .some((field) => String(field || '').toLowerCase().includes(needle)));
+}
+
+// One line describing what "+ settings" would restore, built at save time from
+// whichever context shape the studio produced.
+export function describeSavedContext(section, context) {
+  if (!context) return '';
+  const parts = [];
+  if (section === 'video') {
+    parts.push(context.modelName || context.model);
+    parts.push(context.resolution);
+    parts.push(context.aspectRatio);
+    if (Number(context.duration)) parts.push(`${context.duration}s`);
+  } else {
+    parts.push(context.useLocalModel
+      ? (context.selectedLocalModel || 'local model')
+      : (context.selectedModelName || context.selectedModel));
+    parts.push(context.customWidth && context.customHeight
+      ? `${context.customWidth}×${context.customHeight}`
+      : (context.resolution || context.aspectRatio));
+    if (Number(context.steps)) parts.push(`${context.steps} steps`);
+    if (Number(context.seed) >= 0) parts.push(`seed ${context.seed}`);
+  }
+  const loras = (context.loras || []).filter((lora) => lora?.enabled !== false).length;
+  if (loras) parts.push(`${loras} LoRA${loras === 1 ? '' : 's'}`);
+  const refs = (context.referenceImages || []).length + (context.ingredientImages || []).length;
+  if (refs) parts.push(`${refs} reference${refs === 1 ? '' : 's'}`);
+  return parts.filter(Boolean).map(String).join(' · ');
+}
+
+// `modelSource` is the current studio setup — used only to float the starters
+// written for the selected model to the top, so it stays optional.
+export function SavedPromptsMenu({
+  section, prompt, negativePrompt = '', capture, modelSource = null, onLoadPrompt, onLoadContext,
+  // Who the starters should be rendered for (the gender of whoever holds
+  // <Subject 1>), and the stand-ins of the prompt in the composer — saved with
+  // it so a library prompt binds its person when it is loaded onto a cast.
+  renderGender = undefined, standIns = [],
+  // The image composer folds its quick starters and its UGC block into THIS
+  // menu rather than standing up two more chips beside it: `chip` renames the
+  // trigger and `extraSections` renders above "Save current prompt…".
+  chip = null,
+  extraSections = null,
+  // A picture for a starter row: `(entry) => url | ''`. The image composer hands
+  // in the shipped example renders (studios/image/starterArt.js) — each one made
+  // from that row's own prompt at its own recipe — so a row shows what it draws
+  // instead of only saying so. Absent on the video shelf, which has none.
+  starterArtFor = null,
+  // Controlled mode, forwarded verbatim to Menu. A caller that loads this
+  // component lazily owns the open state: the chip it shows while the chunk is
+  // in flight is the thing that was clicked, so the menu has to come up already
+  // open rather than waiting for a second click. Omit both and it keeps its own
+  // state, exactly as before.
+  open: openProp = undefined,
+  onOpenChange = undefined,
+}) {
+  const { entries, loading, locked, error, unreadable, retry } = useSavedLibrary(LIBRARIES.prompts);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  // A save that met a library this key cannot open: held here until the user
+  // says replacing that library is what they want.
+  const [confirmReplace, setConfirmReplace] = useState(null);
+  const [query, setQuery] = useState('');
+  // Which starter collection is open. One at a time — a second open list turns
+  // the popover into a wall, which is the thing collections exist to prevent.
+  const [openStarter, setOpenStarter] = useState('');
+  // The menu's close(), captured from the render prop so a delete can shut the
+  // menu AFTER the confirm — not before it, which left a cancel with the menu gone.
+  const closeMenuRef = useRef(null);
+
+  const hasPrompt = Boolean(String(prompt || '').trim());
+  const starters = defaultPromptsFor(section, modelSource, { gender: renderGender });
+  const searchable = entries.length >= SEARCH_FROM;
+  const shown = searchable ? filterSavedPrompts(entries, query) : entries;
+
+  const save = async (name, { overwriteUnreadable = false } = {}) => {
+    setSaving(true);
+    try {
+      const context = capture?.() || null;
+      await saveLibraryEntry(LIBRARIES.prompts, {
+        name,
+        data: {
+          section,
+          prompt: String(prompt || ''),
+          negativePrompt: String(negativePrompt || ''),
+          // Which words of the prompt are its stand-in person, when it still
+          // has one — so loading it onto a cast binds them (subjectTemplate.js).
+          ...(Array.isArray(standIns) && standIns.length ? { standIns } : {}),
+          context,
+          summary: describeSavedContext(section, context),
+        },
+      }, { overwriteUnreadable });
+      setSaveOpen(false);
+      toast.success(`Saved “${name}”.`);
+    } catch (error) {
+      // The stored library could not be decrypted with this key. Never replace
+      // it on the strength of a Save click alone — ask, then retry with consent.
+      if (error?.unreadable) { setConfirmReplace(name); return; }
+      toastFailure(error, { operation: 'That saved prompt' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const loadPromptOnly = (entry) => {
+    onLoadPrompt({
+      prompt: entry.data?.prompt || '',
+      negativePrompt: entry.data?.negativePrompt || '',
+      standIns: Array.isArray(entry.data?.standIns) ? entry.data.standIns : [],
+    });
+    toast.success(`Loaded the prompt from “${entry.name}”.`);
+  };
+
+  // A starter carries no negative prompt of its own, so the current one is
+  // passed straight back rather than cleared — replacing the prompt text is what
+  // was asked for, wiping a negative prompt is not.
+  //
+  // The toast carries the part's own instruction (arm the chain, press Extend)
+  // because that step happens BEFORE the pasted prompt makes sense, and the
+  // hover title it came from is gone the moment the menu closes.
+  // `slot` is whichever prompt was clicked: the whole starter, one part of a
+  // split one, or one variant of a collection. They load identically — what
+  // differs is only what the toast can call it.
+  const loadStarter = (entry, slot, index = 0) => {
+    onLoadPrompt({
+      prompt: slot.prompt,
+      negativePrompt,
+      standIns: slot.standIns || [],
+      // A starter can opt into setting the studio up for itself (the timeline
+      // sequences do): the flag and the slot's own length ride along, and the
+      // studio decides what actually applies to the selected model. Loaders
+      // that don't know these fields ignore them.
+      timeline: entry.timeline === true,
+      durationSeconds: Number(slot.durationSeconds) || 0,
+      // An image starter's recipe — steps, CFG, sampler pair, output size, the
+      // LoRA it was written around. Null on the video shelf, where the settings
+      // that matter are the two fields above.
+      setup: entry.setup || null,
+      // A starter that is the framing half of a WORKFLOW names it here, and the
+      // studio opens the dialog that writes the other half.
+      workflow: entry.workflow || '',
+    });
+    let name = entry.name;
+    if (entry.variants?.length) name = `${entry.name} — ${slot.name}`;
+    else if (entry.parts.length > 1) name = `${entry.name} — part ${index + 1}`;
+    // The slot's own step where there is one (arm the chain, press Extend),
+    // otherwise the entry's (attach the reference clip, fill in the brackets).
+    const step = slot.note || entry.note;
+    if (step) toast.success(`Loaded “${name}”. ${step}`, { duration: 10000 });
+    else toast.success(`Loaded “${name}”.`);
+  };
+
+  const loadEverything = (entry) => {
+    if (!onLoadContext?.(entry.data?.context)) {
+      toast.error('Those settings could not be restored — the model may no longer be installed.');
+      return;
+    }
+    toast.success(`Loaded “${entry.name}” with its settings.`);
+  };
+
+  const remove = async () => {
+    const entry = confirmDelete;
+    setConfirmDelete(null);
+    try {
+      await deleteLibraryEntry(LIBRARIES.prompts, entry.id);
+      toast(`Deleted “${entry.name}”.`);
+      closeMenuRef.current?.();
+    } catch (error) {
+      toastFailure(error, { operation: 'That saved prompt' });
+    }
+  };
+
+  return (
+    <>
+      <Menu
+        up
+        width="w-[22rem]"
+        open={openProp}
+        onOpenChange={onOpenChange}
+        trigger={(open, toggle) => (
+          <ChipButton
+            icon={chip?.icon || 'database'}
+            label={chip?.label || 'Prompts'}
+            active={open}
+            // Re-check on open: the studio can mount before the owner unlocks,
+            // and the locked note tells them to go and unlock.
+            onClick={() => { if (locked) retry(); toggle(); }}
+            title={chip?.title || 'Save this prompt and its settings, or load a saved one'}
+          />
+        )}
+      >
+        {(close) => {
+          closeMenuRef.current = close;
+          return (
+          <>
+            {extraSections ? extraSections(close) : null}
+            <MenuItem
+              icon="plus"
+              disabled={!hasPrompt}
+              onClick={() => { setSaveOpen(true); close(); }}
+              title={hasPrompt ? 'Save this prompt with every current setting' : 'Write a prompt first'}
+              className="font-medium text-ink1"
+            >
+              Save current prompt…
+            </MenuItem>
+
+            <div className="my-1 h-px bg-line1" />
+
+            <LibraryStateNote
+              loading={loading}
+              locked={locked}
+              error={error}
+              onRetry={retry}
+              unreadable={unreadable}
+              empty={!entries.length}
+              emptyHint="Nothing saved yet. Write a prompt, dial in the settings, then use Save current prompt."
+            />
+
+            {searchable ? (
+              <div className="px-1 pb-1.5">
+                <TextInput
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={`Search ${entries.length} saved prompts`}
+                  aria-label="Search saved prompts"
+                  className="text-xs"
+                />
+              </div>
+            ) : null}
+
+            {entries.length && !shown.length ? (
+              <p className="px-2.5 py-3 text-xs text-ink3">No saved prompt matches “{query.trim()}”.</p>
+            ) : null}
+
+            {shown.length ? (
+              <div className="max-h-80 overflow-y-auto">
+                {shown.map((entry) => {
+                  const foreign = entry.data?.section && entry.data.section !== section;
+                  const restorable = Boolean(entry.data?.context) && !foreign;
+                  return (
+                    <div key={entry.id} className="rounded-md px-1.5 py-1.5 transition-colors hover:bg-bg2">
+                      <div className="flex items-start gap-1.5">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[13px] font-medium text-ink1">{entry.name}</div>
+                          <div className="truncate text-[10px] text-ink3">
+                            {foreign ? `${SECTION_LABEL[entry.data.section] || entry.data.section} · ` : ''}
+                            {entry.data?.summary || 'Prompt only'}
+                          </div>
+                        </div>
+                        {/* The menu stays open under the confirm: cancelling
+                            used to drop you back with the menu shut. */}
+                        <LibraryDeleteButton label={`Delete ${entry.name}`} onClick={() => setConfirmDelete(entry)} />
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="neutral"
+                          onClick={() => { loadPromptOnly(entry); close(); }}
+                          title="Replace the prompt text only — your current settings stay as they are"
+                        >
+                          Load prompt
+                        </Button>
+                        {/* Honey-outlined rather than a filled primary: a list of
+                            entries would otherwise hold a primary per row. The
+                            `!` is needed — the neutral variant's own border/text
+                            colour utilities sort after these in the sheet. */}
+                        <Button
+                          size="sm"
+                          variant="neutral"
+                          className={restorable ? '!border-honey/50 !bg-honey-tint !text-honey hover:!border-honey' : ''}
+                          disabled={!restorable}
+                          onClick={() => { loadEverything(entry); close(); }}
+                          title={
+                            foreign
+                              ? `Saved in the ${SECTION_LABEL[entry.data.section] || 'other'} studio — its settings do not apply here`
+                              : restorable
+                                ? 'Replace the prompt AND restore every setting saved with it'
+                                : 'No settings were captured with this prompt'
+                          }
+                        >
+                          Load prompt + settings
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            {starters.length ? (
+              <>
+                <div className="my-1 h-px bg-line1" />
+                <MenuHeading>Starter prompts</MenuHeading>
+                <div className="max-h-72 overflow-y-auto">
+                  {starters.map((entry) => {
+                    const split = entry.parts.length > 1;
+                    const variants = entry.variants || [];
+                    const open = openStarter === entry.id;
+                    // A single-prompt starter is the row itself. A split one
+                    // keeps the row as a label and gives each part its own
+                    // button — the parts are generated in separate runs, so
+                    // there is no "load the whole thing" to offer. A collection
+                    // makes the row a disclosure: it has no prompt of its own,
+                    // only the variants underneath it.
+                    const Row = split ? 'div' : 'button';
+                    const art = starterArtFor?.(entry) || '';
+                    return (
+                      <div key={entry.id} className="rounded-md px-1 py-0.5">
+                        <Row
+                          {...(split ? {} : {
+                            type: 'button',
+                            onClick: variants.length
+                              ? () => setOpenStarter(open ? '' : entry.id)
+                              : () => { loadStarter(entry, entry.parts[0]); close(); },
+                            title: variants.length
+                              ? `${variants.length} variants — ${open ? 'hide them' : 'pick one'}`
+                              : (entry.note || 'Replace the prompt text with this starter'),
+                            'aria-expanded': variants.length ? open : undefined,
+                          })}
+                          className={`flex w-full items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors ${split ? '' : 'hover:bg-bg2'}`}
+                        >
+                          {art ? (
+                            <img
+                              src={art}
+                              alt=""
+                              loading="lazy"
+                              className="mt-0.5 h-11 w-11 shrink-0 rounded-md border border-line1 bg-bg3 object-cover"
+                            />
+                          ) : null}
+                          <span className="flex min-w-0 flex-1 flex-col items-start">
+                            <span className="flex w-full items-center gap-1">
+                              <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink1">{entry.name}</span>
+                              {variants.length ? (
+                                <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink3" />
+                              ) : null}
+                            </span>
+                            <span className="w-full truncate text-[10px] text-ink3">{describeDefaultPrompt(entry)}</span>
+                            {/* Media the prompt cannot run without — pasting one of
+                                these into an empty composer and pressing Generate
+                                produces a clip with no clip in it. */}
+                            {entry.requires ? (
+                              <span className="w-full truncate text-[10px] text-honey">Needs {entry.requires}</span>
+                            ) : null}
+                          </span>
+                        </Row>
+                        {split ? (
+                          <div className="mt-1 flex flex-wrap items-center gap-1 px-1.5 pb-1">
+                            {entry.parts.map((part, index) => (
+                              <Button
+                                key={part.label}
+                                size="sm"
+                                variant="neutral"
+                                onClick={() => { loadStarter(entry, part, index); close(); }}
+                                title={[entry.note, part.note].filter(Boolean).join('\n\n')}
+                              >
+                                {describeDefaultPromptPart(part, index)}
+                              </Button>
+                            ))}
+                          </div>
+                        ) : null}
+                        {/* The variants scroll inside their own box rather than
+                            inside the starter list: twenty of them would
+                            otherwise push every other starter out of reach, and
+                            the row you opened would scroll away with them. */}
+                        {open && variants.length ? (
+                          <div className="mb-1 ml-1.5 mt-1 max-h-52 overflow-y-auto border-l border-line1 pl-2">
+                            {variants.map((variant) => (
+                              <button
+                                key={variant.id}
+                                type="button"
+                                onClick={() => { loadStarter(entry, variant); close(); }}
+                                title={[entry.note, variant.note].filter(Boolean).join('\n\n')}
+                                className="flex w-full flex-col items-start rounded-md px-1.5 py-1 text-left transition-colors hover:bg-bg2"
+                              >
+                                <span className="w-full truncate text-[12px] text-ink1">{variant.name}</span>
+                                <span className="w-full truncate text-[10px] text-ink3">{variant.summary}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+          </>
+          );
+        }}
+      </Menu>
+
+      <SaveNameModal
+        open={saveOpen}
+        busy={saving}
+        title="Save prompt"
+        label="Name"
+        placeholder="e.g. Cinematic night portrait"
+        hint="Saved with every current setting — model, seed, LoRAs, aspect ratio, resolution, references."
+        takenNames={entries.map((entry) => entry.name)}
+        onClose={() => setSaveOpen(false)}
+        onSave={save}
+      />
+
+      <ConfirmModal
+        open={Boolean(confirmDelete)}
+        onClose={() => setConfirmDelete(null)}
+        onConfirm={remove}
+        title={`Delete “${confirmDelete?.name}”?`}
+        body="This permanently removes the saved prompt and the settings stored with it."
+        confirmLabel="Delete prompt"
+      />
+
+      <ConfirmModal
+        open={Boolean(confirmReplace)}
+        onClose={() => setConfirmReplace(null)}
+        onConfirm={() => { const name = confirmReplace; setConfirmReplace(null); void save(name, { overwriteUnreadable: true }); }}
+        title="Replace your unreadable prompt library?"
+        body="The saved prompts on the server could not be decrypted with this key — they may have been sealed under an earlier vault. Saving now replaces that library with this one prompt. The old entries cannot be recovered afterwards."
+        confirmLabel="Replace and save"
+        cancelLabel="Keep the old library"
+      />
+    </>
+  );
+}

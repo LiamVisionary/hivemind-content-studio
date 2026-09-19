@@ -18,7 +18,8 @@ public enum Flux2GenerationMode: Sendable {
     case textToImage
 
     /// Image-to-Image generation with reference images
-    /// - Parameter images: Reference images (1-3). Multiple images are concatenated along sequence dimension
+    /// - Parameter images: Reference images (1 to the model's `maxReferenceImages` — 4 for Klein, 6 for dev).
+    ///             Multiple images are concatenated along sequence dimension
     ///             with unique time-based position IDs for each, allowing the transformer to
     ///             attend to all reference images during generation.
     ///
@@ -641,7 +642,8 @@ public class Flux2Pipeline: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - prompt: Text description
-    ///   - images: 1-3 reference images. Multiple images are concatenated along sequence dimension
+    ///   - images: 1 to the model's `maxReferenceImages` reference images (4 for Klein, 6 for dev).
+    ///             Multiple images are concatenated along sequence dimension
     ///             with unique time-based position IDs, allowing the transformer to attend to all references.
     ///   - interpretImagePaths: File paths to images to analyze with VLM and inject description into prompt (not used as visual reference)
     ///   - height: Optional height (inferred from first image if nil)
@@ -668,8 +670,12 @@ public class Flux2Pipeline: @unchecked Sendable {
         onProgress: Flux2ProgressCallback? = nil,
         onCheckpoint: Flux2CheckpointCallback? = nil
     ) async throws -> CGImage {
-        guard !images.isEmpty && images.count <= 3 else {
-            throw Flux2Error.invalidConfiguration("Provide 1-3 reference images")
+        // The reference budget is the model's, not a fixed 3: Klein conditions on
+        // 4 references, dev on 6. References are concatenated along the sequence
+        // dimension, so nothing below this guard cares how many there are.
+        guard !images.isEmpty && images.count <= model.maxReferenceImages else {
+            throw Flux2Error.invalidConfiguration(
+                "Provide 1-\(model.maxReferenceImages) reference images for \(model.displayName)")
         }
 
         // Infer dimensions from first image if not provided
@@ -798,8 +804,12 @@ public class Flux2Pipeline: @unchecked Sendable {
         onProgress: Flux2ProgressCallback? = nil,
         onCheckpoint: Flux2CheckpointCallback? = nil
     ) async throws -> Flux2GenerationResult {
-        guard !images.isEmpty && images.count <= 3 else {
-            throw Flux2Error.invalidConfiguration("Provide 1-3 reference images")
+        // The reference budget is the model's, not a fixed 3: Klein conditions on
+        // 4 references, dev on 6. References are concatenated along the sequence
+        // dimension, so nothing below this guard cares how many there are.
+        guard !images.isEmpty && images.count <= model.maxReferenceImages else {
+            throw Flux2Error.invalidConfiguration(
+                "Provide 1-\(model.maxReferenceImages) reference images for \(model.displayName)")
         }
 
         // Infer dimensions from first image if not provided

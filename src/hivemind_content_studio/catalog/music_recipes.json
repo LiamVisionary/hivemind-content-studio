@@ -1,0 +1,1525 @@
+{
+  "version": 1,
+  "provenance": {
+    "compiled": "2026-09-18",
+    "method": "Compiled once, offline. `basis` on each recipe says where its form and its tempo came from: `skills` means the arrangement craft in jtydhr88/music-composition-skills (MIT; facts summarised, no text copied), `general` means general musical knowledge where that source gives nothing for the style.",
+    "source": "https://github.com/jtydhr88/music-composition-skills",
+    "section_mapping": "EDM: groove=verse, build=pre-chorus, drop=chorus, breakdown=bridge. Jazz: head=chorus, solos=verse, trading=bridge. Hip-hop: hook=chorus. J-pop: A-melo=verse, B-melo=pre-chorus, sabi=chorus, C-melo=bridge. Salsa: montuno=bridge. Blues: each 12-bar chorus=verse, the solo chorus=bridge."
+  },
+  "families": [
+    {
+      "id": "electronic",
+      "label": "Electronic and dance"
+    },
+    {
+      "id": "hiphop",
+      "label": "Hip-hop"
+    },
+    {
+      "id": "pop",
+      "label": "Pop and song"
+    },
+    {
+      "id": "rock",
+      "label": "Rock and funk"
+    },
+    {
+      "id": "jazz",
+      "label": "Jazz and blues"
+    },
+    {
+      "id": "latin",
+      "label": "Latin and Caribbean"
+    },
+    {
+      "id": "score",
+      "label": "Score and ambient"
+    }
+  ],
+  "recipes": [
+    {
+      "id": "deep-house",
+      "label": "Deep house",
+      "family": "electronic",
+      "describes": "Deep house and other mellow house music: four-on-the-floor kick, warm chords, soulful pads, a groove around 120 to 125 BPM.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "pre-chorus",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 122,
+      "bpm_range": [
+        118,
+        125
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "four-on-the-floor kick",
+        "warm chord stabs",
+        "sub bass",
+        "offbeat hi-hat"
+      ],
+      "form_note": "Club form: a groove section, a build, a drop, a breakdown, then a second build and drop, with drums-only ends so a DJ can mix it.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "festival-house",
+      "label": "Progressive / big-room house",
+      "family": "electronic",
+      "describes": "Festival, progressive, big-room or electro house: big synth leads, sidechained pads, long builds into large drops, around 128 BPM.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "pre-chorus",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 128,
+      "bpm_range": [
+        124,
+        130
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "big synth lead",
+        "sidechain pumping",
+        "risers",
+        "snare roll build"
+      ],
+      "form_note": "Club form: a groove section, a build, a drop, a breakdown, then a second build and drop, with drums-only ends so a DJ can mix it.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "techno",
+      "label": "Techno",
+      "family": "electronic",
+      "describes": "Techno, acid techno and warehouse music: a driving relentless kick, hypnotic repetition, acid or industrial timbres.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "pre-chorus",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 132,
+      "bpm_range": [
+        125,
+        140
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "driving kick",
+        "acid bassline",
+        "hypnotic loop",
+        "industrial percussion"
+      ],
+      "form_note": "Club form: a groove section, a build, a drop, a breakdown, then a second build and drop, with drums-only ends so a DJ can mix it.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "trance",
+      "label": "Trance",
+      "family": "electronic",
+      "describes": "Trance and uplifting or psy trance: arpeggiated synths, euphoric supersaw leads, long emotional breakdowns.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "pre-chorus",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 138,
+      "bpm_range": [
+        132,
+        142
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "supersaw lead",
+        "arpeggio",
+        "long breakdown",
+        "rolling bass"
+      ],
+      "form_note": "Club form: a groove section, a build, a drop, a breakdown, then a second build and drop, with drums-only ends so a DJ can mix it.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "drum-and-bass",
+      "label": "Drum and bass",
+      "family": "electronic",
+      "describes": "Drum and bass, liquid, neurofunk and jungle: fast chopped breakbeats around 170 to 175 BPM over deep sub bass.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "pre-chorus",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 174,
+      "bpm_range": [
+        144,
+        192
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "chopped breakbeat",
+        "reese or sub bass",
+        "airy pads",
+        "fast hi-hats"
+      ],
+      "form_note": "Club form: a groove section, a build, a drop, a breakdown, then a second build and drop, with drums-only ends so a DJ can mix it.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "dubstep",
+      "label": "Dubstep / bass music",
+      "family": "electronic",
+      "describes": "Dubstep, riddim and heavy bass music: half-time drums around 140 BPM, wobble or growl bass, big drops.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "pre-chorus",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 140,
+      "bpm_range": [
+        138,
+        150
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "half-time drums",
+        "wobble bass",
+        "growl bass",
+        "impact drops"
+      ],
+      "form_note": "Club form: a groove section, a build, a drop, a breakdown, then a second build and drop, with drums-only ends so a DJ can mix it.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "disco",
+      "label": "Disco / nu-disco",
+      "family": "electronic",
+      "describes": "Disco, nu-disco and funky dance-pop: four-on-the-floor with offbeat open hi-hats, octave bass, strings and rhythm guitar.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 116,
+      "bpm_range": [
+        108,
+        120
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "four-on-the-floor kick",
+        "offbeat open hi-hat",
+        "octave bass",
+        "string stabs",
+        "rhythm guitar"
+      ],
+      "form_note": "Song form over a dance-floor pulse: verses and a repeated chorus rather than builds and drops.",
+      "basis": {
+        "form": "general",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "synthwave",
+      "label": "Synthwave",
+      "family": "electronic",
+      "describes": "Synthwave, retrowave and outrun: gated 80s drums, analog arpeggios and pads, neon nostalgia.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 100,
+      "bpm_range": [
+        80,
+        118
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "gated reverb drums",
+        "analog arpeggio",
+        "lush pads",
+        "synth bass"
+      ],
+      "form_note": "Eighties pop-song form carried by synths: verse and chorus sections even when nobody sings.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "dub-techno",
+      "label": "Dub techno",
+      "family": "electronic",
+      "describes": "Dub techno and minimal loop-based electronic music: one deep loop that slowly evolves through echo and filtering, with no contrasting sections.",
+      "sections": [],
+      "bpm": 122,
+      "bpm_range": [
+        115,
+        128
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "dub chords",
+        "tape echo",
+        "deep loop",
+        "filtered noise"
+      ],
+      "form_note": "One loop that evolves: material is only ever added on top, so there are no sections to order.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "afrobeats",
+      "label": "Afrobeats / amapiano",
+      "family": "electronic",
+      "describes": "Afrobeats, afropop and amapiano: syncopated log drums or shakers, mid-tempo dance groove, bright melodic hooks.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 104,
+      "bpm_range": [
+        95,
+        115
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "syncopated percussion",
+        "log drum",
+        "shakers",
+        "melodic hook"
+      ],
+      "form_note": "Song form with a hook-led chorus over a steady mid-tempo dance groove.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "boom-bap",
+      "label": "Boom bap",
+      "family": "hiphop",
+      "describes": "Boom bap and classic sample-based hip-hop instrumentals: chopped soul or jazz samples, punchy swung drums, vinyl texture.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 90,
+      "bpm_range": [
+        60,
+        108
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "chopped sample",
+        "punchy swung drums",
+        "vinyl crackle",
+        "upright or sub bass"
+      ],
+      "form_note": "Three 16-bar verses around a short hook, with an instrumental intro and outro for DJs.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "trap",
+      "label": "Trap",
+      "family": "hiphop",
+      "describes": "Trap beats: sliding 808 bass, fast hi-hat rolls, snare on the third beat, dark bells or pads.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 140,
+      "bpm_range": [
+        132,
+        172
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "808 bass slides",
+        "hi-hat rolls",
+        "snare on beat three",
+        "dark bells"
+      ],
+      "form_note": "Written at 140 rather than 70: half-time drums under a hook-led beat that returns after each verse.",
+      "basis": {
+        "form": "general",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "drill",
+      "label": "Drill",
+      "family": "hiphop",
+      "describes": "Drill beats, UK or Brooklyn: sliding 808s, skippy syncopated hi-hats, ominous minor melodies around 140 to 145 BPM.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 142,
+      "bpm_range": [
+        138,
+        146
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "sliding 808",
+        "skippy hi-hats",
+        "ominous piano or strings",
+        "counter snares"
+      ],
+      "form_note": "A hook-led beat like trap, with a more syncopated drum pattern.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "lofi-hiphop",
+      "label": "Lo-fi hip-hop",
+      "family": "hiphop",
+      "describes": "Lo-fi hip-hop and chillhop study beats: dusty electric piano or guitar loops, soft swung drums, tape hiss, mellow and slow.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 78,
+      "bpm_range": [
+        70,
+        90
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "dusty rhodes",
+        "soft swung drums",
+        "tape hiss",
+        "mellow guitar"
+      ],
+      "form_note": "A short loop with small variations: a second idea arrives as a chorus and the loop returns.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "pop",
+      "label": "Pop",
+      "family": "pop",
+      "describes": "Mainstream pop and dance-pop songs: a catchy sung hook, polished production, verses that lift through a pre-chorus into the chorus.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 116,
+      "bpm_range": [
+        96,
+        128
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "catchy vocal hook",
+        "polished drums",
+        "synth and guitar layers",
+        "stacked harmonies"
+      ],
+      "form_note": "Verse, a pre-chorus that lifts, and a repeated chorus; a bridge gives the last chorus something to return from.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "pop-ballad",
+      "label": "Pop ballad",
+      "family": "pop",
+      "describes": "Slow emotional pop ballads and power ballads: piano or acoustic guitar, a heartfelt lead vocal, strings swelling into the final chorus.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 70,
+      "bpm_range": [
+        60,
+        84
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "piano",
+        "heartfelt lead vocal",
+        "string swell",
+        "big final chorus"
+      ],
+      "form_note": "The same pop form at a slow tempo, with the arrangement held back until the last chorus.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "j-pop",
+      "label": "J-pop",
+      "family": "pop",
+      "describes": "J-pop and anime-style songs: bright fast band-and-synth arrangements, busy chord changes, a big chorus the whole song is built around.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 150,
+      "bpm_range": [
+        120,
+        180
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "bright band arrangement",
+        "busy chord changes",
+        "stop before the chorus",
+        "final key change"
+      ],
+      "form_note": "Designed backwards from the chorus: verse, a pre-chorus that sets it up, the chorus, and a late bridge before the final chorus.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "k-pop",
+      "label": "K-pop",
+      "family": "pop",
+      "describes": "K-pop dance tracks: punchy synth bass, rap verses beside a big sung chorus, sharp section changes and a dance break.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 120,
+      "bpm_range": [
+        95,
+        135
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "punchy synth bass",
+        "rap verse",
+        "big sung chorus",
+        "dance break"
+      ],
+      "form_note": "Pop form with sharply contrasted sections; the bridge is often a dance break.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "city-pop",
+      "label": "City pop",
+      "family": "pop",
+      "describes": "City pop and Japanese 80s-style pop: jazzy seventh chords, slap or pushed bass, Rhodes, muted sixteenth-note guitar, a late saxophone.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 112,
+      "bpm_range": [
+        100,
+        120
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "jazzy seventh chords",
+        "rhodes",
+        "muted 16th-note guitar",
+        "synth hook",
+        "saxophone"
+      ],
+      "form_note": "Pop song grammar with jazz chord vocabulary; the bridge drops the drums and the outro is instrumental.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "rnb",
+      "label": "R&B / neo-soul",
+      "family": "pop",
+      "describes": "R&B, neo-soul and slow jams: laid-back programmed drums, sustained electric piano, stacked vocal harmonies, smooth bass.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 85,
+      "bpm_range": [
+        65,
+        100
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "laid-back drums",
+        "electric piano",
+        "stacked vocal harmonies",
+        "smooth bass"
+      ],
+      "form_note": "Song form whose shape comes from taking instruments away rather than adding them.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "mandopop-ballad",
+      "label": "Mandopop ballad",
+      "family": "pop",
+      "describes": "Mandarin or Cantonese pop ballads: piano and strings, a lyrical sung melody, slow and sentimental.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 72,
+      "bpm_range": [
+        60,
+        84
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "piano",
+        "strings",
+        "lyrical vocal melody",
+        "sentimental mood"
+      ],
+      "form_note": "Borrowed pop form - verse, pre-chorus, chorus, a late bridge - under a melody shaped by the words.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "folk",
+      "label": "Folk / singer-songwriter",
+      "family": "pop",
+      "describes": "Acoustic folk, indie folk and singer-songwriter music: fingerpicked or strummed acoustic guitar, an intimate vocal, light percussion.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 96,
+      "bpm_range": [
+        70,
+        120
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "acoustic guitar",
+        "intimate vocal",
+        "light percussion",
+        "warm room"
+      ],
+      "form_note": "Plain verse and chorus, with the story carried by the verses.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "country",
+      "label": "Country",
+      "family": "pop",
+      "describes": "Country and Americana: acoustic and electric guitar, pedal steel or fiddle, a storytelling vocal, a two-beat or train feel.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 104,
+      "bpm_range": [
+        80,
+        132
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "acoustic guitar",
+        "pedal steel",
+        "fiddle",
+        "storytelling vocal"
+      ],
+      "form_note": "Verse and chorus with a short instrumental bridge or solo before the last chorus.",
+      "basis": {
+        "form": "general",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "rock",
+      "label": "Rock",
+      "family": "rock",
+      "describes": "Classic rock, indie rock, alternative and arena rock: a guitar riff as the hook, power chords, a backbeat on two and four, a guitar solo.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 116,
+      "bpm_range": [
+        60,
+        200
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "guitar riff",
+        "power chords",
+        "backbeat drums",
+        "guitar solo"
+      ],
+      "form_note": "Riff-led verse and chorus: the riff opens the song, links the sections, sits under the solo and returns at the end.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "metal",
+      "label": "Hard rock / metal",
+      "family": "rock",
+      "describes": "Hard rock and heavy metal: distorted down-tuned riffs, double kick drums, gallop rhythms, aggressive and heavy.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 160,
+      "bpm_range": [
+        100,
+        200
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "distorted riffs",
+        "double kick",
+        "gallop rhythm",
+        "aggressive vocals"
+      ],
+      "form_note": "The rock form, with the riff kept running from the intro straight through the verse.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "punk",
+      "label": "Punk",
+      "family": "rock",
+      "describes": "Punk rock, pop punk and hardcore: very fast, loud, simple major power chords, short songs with shouted hooks.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 180,
+      "bpm_range": [
+        120,
+        270
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "fast power chords",
+        "loud crash cymbals",
+        "shouted hook",
+        "driving bass"
+      ],
+      "form_note": "Short and fast: verse and chorus twice and out, usually with no bridge at all.",
+      "basis": {
+        "form": "general",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "funk",
+      "label": "Funk",
+      "family": "rock",
+      "describes": "Funk and funk rock: syncopated sixteenth-note grooves, ghost-note drums, slap or percussive bass, horn stabs, rhythm guitar.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 108,
+      "bpm_range": [
+        92,
+        138
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "ghost-note drums",
+        "slap bass",
+        "horn stabs",
+        "scratch rhythm guitar"
+      ],
+      "form_note": "Groove first: sections change by what the rhythm section adds or drops more than by new chords.",
+      "basis": {
+        "form": "general",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "swing",
+      "label": "Swing / big band",
+      "family": "jazz",
+      "describes": "Swing and big band jazz: ride cymbal and walking bass keeping time, brass and sax section figures, a swung feel.",
+      "sections": [
+        "intro",
+        "chorus",
+        "verse",
+        "verse",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 134,
+      "bpm_range": [
+        60,
+        255
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "walking bass",
+        "ride cymbal swing",
+        "brass figures",
+        "sax section"
+      ],
+      "form_note": "Jazz form: the theme is stated, players solo over its chord cycle, trade phrases, and the theme returns.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "bebop",
+      "label": "Bebop / small-group jazz",
+      "family": "jazz",
+      "describes": "Bebop, hard bop and fast small-group jazz: quartet or quintet, rapid improvised lines, altered chords, busy drums.",
+      "sections": [
+        "intro",
+        "chorus",
+        "verse",
+        "verse",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 220,
+      "bpm_range": [
+        160,
+        304
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "fast improvised lines",
+        "walking upright bass",
+        "ride cymbal",
+        "altered chords"
+      ],
+      "form_note": "Jazz form: the theme is stated, players solo over its chord cycle, trade phrases, and the theme returns.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "cool-jazz",
+      "label": "Cool / modal jazz",
+      "family": "jazz",
+      "describes": "Cool jazz, modal jazz and relaxed late-night trio playing: sparse, spacious, medium tempo, brushed or light drums.",
+      "sections": [
+        "intro",
+        "chorus",
+        "verse",
+        "verse",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 120,
+      "bpm_range": [
+        90,
+        150
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "sparse piano",
+        "brushed drums",
+        "upright bass",
+        "muted trumpet"
+      ],
+      "form_note": "Jazz form: the theme is stated, players solo over its chord cycle, trade phrases, and the theme returns.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "jazz-ballad",
+      "label": "Jazz ballad",
+      "family": "jazz",
+      "describes": "Slow jazz ballads: brushes, a tender solo horn or piano melody, very slow and intimate.",
+      "sections": [
+        "intro",
+        "chorus",
+        "verse",
+        "verse",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 60,
+      "bpm_range": [
+        50,
+        72
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "brushes",
+        "tender solo melody",
+        "soft piano comping",
+        "upright bass"
+      ],
+      "form_note": "Jazz form: the theme is stated, players solo over its chord cycle, trade phrases, and the theme returns.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "jazz-fusion",
+      "label": "Jazz fusion",
+      "family": "jazz",
+      "describes": "Jazz fusion and jazz-funk: electric instruments, ghost-note grooves, virtuosic solos, rock energy with jazz harmony.",
+      "sections": [
+        "intro",
+        "chorus",
+        "verse",
+        "verse",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 150,
+      "bpm_range": [
+        136,
+        172
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "electric piano",
+        "ghost-note groove",
+        "virtuosic solos",
+        "electric bass"
+      ],
+      "form_note": "Jazz form: the theme is stated, players solo over its chord cycle, trade phrases, and the theme returns.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "jazz-waltz",
+      "label": "Jazz waltz",
+      "family": "jazz",
+      "describes": "Jazz waltz: swung three-four time, lilting and light, small group.",
+      "sections": [
+        "intro",
+        "chorus",
+        "verse",
+        "verse",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 140,
+      "bpm_range": [
+        100,
+        255
+      ],
+      "time_signature": "3/4",
+      "tonality": "either",
+      "tags": [
+        "swung 3/4",
+        "brushes or ride",
+        "walking bass in three",
+        "piano trio"
+      ],
+      "form_note": "Jazz form: the theme is stated, players solo over its chord cycle, trade phrases, and the theme returns.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "blues",
+      "label": "Blues shuffle",
+      "family": "jazz",
+      "describes": "Blues and blues rock shuffles: a twelve-bar progression, triplet shuffle feel, dominant seventh chords, guitar or harmonica solos.",
+      "sections": [
+        "intro",
+        "verse",
+        "verse",
+        "bridge",
+        "verse",
+        "outro"
+      ],
+      "bpm": 110,
+      "bpm_range": [
+        80,
+        160
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "12-bar progression",
+        "triplet shuffle",
+        "dominant seventh chords",
+        "guitar or harmonica solo"
+      ],
+      "form_note": "One twelve-bar cycle played again and again: sung choruses, a solo chorus, and a last one to finish.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "slow-blues",
+      "label": "Slow blues",
+      "family": "jazz",
+      "describes": "Slow blues: a slow twelve-eight feel, aching guitar bends, organ, a lot of space.",
+      "sections": [
+        "intro",
+        "verse",
+        "verse",
+        "bridge",
+        "verse",
+        "outro"
+      ],
+      "bpm": 60,
+      "bpm_range": [
+        50,
+        80
+      ],
+      "time_signature": "12/8",
+      "tonality": "either",
+      "tags": [
+        "slow 12/8 feel",
+        "guitar bends",
+        "organ",
+        "space between phrases"
+      ],
+      "form_note": "The same twelve-bar cycle, slow enough that each chorus is a statement on its own.",
+      "basis": {
+        "form": "skills",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "bossa-nova",
+      "label": "Bossa nova",
+      "family": "latin",
+      "describes": "Bossa nova: nylon-string guitar, soft rim-click rhythm, upright bass, gentle and understated, major seventh harmony.",
+      "sections": [
+        "intro",
+        "verse",
+        "verse",
+        "bridge",
+        "verse",
+        "outro"
+      ],
+      "bpm": 120,
+      "bpm_range": [
+        100,
+        168
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "nylon-string guitar",
+        "rim-click clave",
+        "upright bass",
+        "rhodes",
+        "shaker"
+      ],
+      "form_note": "Usually a thirty-two bar AABA song: the theme twice, a contrasting bridge, and the theme again.",
+      "basis": {
+        "form": "general",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "samba",
+      "label": "Samba",
+      "family": "latin",
+      "describes": "Samba and batucada: fast Brazilian percussion, surdo pulse, pandeiro sixteenths, carnival energy.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 176,
+      "bpm_range": [
+        160,
+        200
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "surdo pulse",
+        "pandeiro 16ths",
+        "cavaquinho",
+        "batucada percussion"
+      ],
+      "form_note": "Verse and a sung refrain, with the full percussion battery saved for the climaxes.",
+      "basis": {
+        "form": "general",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "salsa",
+      "label": "Salsa / mambo",
+      "family": "latin",
+      "describes": "Salsa, son and mambo: clave, piano montuno, congas and timbales, cowbell, punchy brass.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 190,
+      "bpm_range": [
+        160,
+        220
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "clave",
+        "piano montuno",
+        "congas and timbales",
+        "cowbell",
+        "brass section"
+      ],
+      "form_note": "A sung first half, then the montuno: a short repeating loop where the band improvises and the brass answers.",
+      "basis": {
+        "form": "skills",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "reggaeton",
+      "label": "Reggaeton",
+      "family": "latin",
+      "describes": "Reggaeton and Latin urban pop: the dembow drum pattern, deep bass, a sung or rapped hook, around 90 to 100 BPM.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 95,
+      "bpm_range": [
+        85,
+        105
+      ],
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "dembow rhythm",
+        "deep bass",
+        "plucked synth",
+        "vocal hook"
+      ],
+      "form_note": "Hook-led song form over a dembow pattern that never stops.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "reggae",
+      "label": "Reggae",
+      "family": "latin",
+      "describes": "Reggae and dub: the one-drop drum pattern, offbeat guitar or keyboard skank, heavy melodic bass, laid-back.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 76,
+      "bpm_range": [
+        60,
+        90
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "one-drop drums",
+        "offbeat skank",
+        "heavy melodic bass",
+        "organ bubble"
+      ],
+      "form_note": "Verse and chorus over a bassline that carries the song; counted in double time the same music reads 120 to 180.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "ska",
+      "label": "Ska",
+      "family": "latin",
+      "describes": "Ska and two-tone: fast offbeat guitar upstrokes, walking bass, a horn section, a four-on-the-floor kick.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 150,
+      "bpm_range": [
+        116,
+        192
+      ],
+      "time_signature": "4/4",
+      "tonality": "major",
+      "tags": [
+        "offbeat guitar upstrokes",
+        "walking bass",
+        "horn section",
+        "four-on-the-floor kick"
+      ],
+      "form_note": "Reggae played straight and fast, in plain verse and chorus with horn-led breaks.",
+      "basis": {
+        "form": "general",
+        "tempo": "skills"
+      }
+    },
+    {
+      "id": "cumbia",
+      "label": "Cumbia",
+      "family": "latin",
+      "describes": "Cumbia: a loping two-step shuffle with guiro scrape, accordion or synth melody, strong backbeat.",
+      "sections": [
+        "intro",
+        "verse",
+        "chorus",
+        "verse",
+        "chorus",
+        "bridge",
+        "chorus",
+        "outro"
+      ],
+      "bpm": 95,
+      "bpm_range": [
+        80,
+        110
+      ],
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "guiro scrape",
+        "accordion melody",
+        "loping bass",
+        "strong backbeat"
+      ],
+      "form_note": "Verse and chorus with an instrumental melody between them; counted in double time it reads twice as fast.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "ambient",
+      "label": "Ambient / drone",
+      "family": "score",
+      "describes": "Ambient, dark ambient, drone, meditation and sleep music: slowly evolving textures and pads, little or no rhythm, no hooks.",
+      "sections": [],
+      "bpm": null,
+      "bpm_range": null,
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "evolving pads",
+        "drones",
+        "field recordings",
+        "sparse piano or bells"
+      ],
+      "form_note": "Through-composed: it evolves rather than returning to anything, so there are no sections to order.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "epic-trailer",
+      "label": "Epic / trailer music",
+      "family": "score",
+      "describes": "Epic trailer music and hybrid orchestral: taiko or orchestral percussion, brass swells, risers, choir, rising tension to one huge climax.",
+      "sections": [
+        "intro",
+        "verse",
+        "pre-chorus",
+        "chorus",
+        "outro"
+      ],
+      "bpm": null,
+      "bpm_range": null,
+      "time_signature": "4/4",
+      "tonality": "minor",
+      "tags": [
+        "orchestral percussion",
+        "brass crescendo",
+        "risers",
+        "choir",
+        "synth sub bass"
+      ],
+      "form_note": "One arc: a quiet opening, a long build, a single climax, and a short resolution.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    },
+    {
+      "id": "film-score",
+      "label": "Orchestral film score",
+      "family": "score",
+      "describes": "Orchestral film score and underscore: sweeping strings, solo instruments, emotional themes that develop without pop-style repetition.",
+      "sections": [],
+      "bpm": null,
+      "bpm_range": null,
+      "time_signature": "4/4",
+      "tonality": "either",
+      "tags": [
+        "sweeping strings",
+        "solo cello or piano",
+        "french horns",
+        "harp"
+      ],
+      "form_note": "Through-composed: themes develop and tension is sustained rather than resolved, with no repeating sections.",
+      "basis": {
+        "form": "general",
+        "tempo": "general"
+      }
+    }
+  ]
+}

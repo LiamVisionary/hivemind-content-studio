@@ -1,0 +1,217 @@
+{
+ "prompt": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "ltx2310eros_v14.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoraLoaderModelOnly",
+   "inputs": {
+    "model": [
+     "1",
+     0
+    ],
+    "lora_name": "ltx2310eros_v14_dmd_lora.safetensors",
+    "strength_model": 1.0
+   }
+  },
+  "3": {
+   "class_type": "LTXAVTextEncoderLoader",
+   "inputs": {
+    "text_encoder": "gemma_3_12B_it_fp8_scaled.safetensors",
+    "ckpt_name": "ltx2310eros_v14.safetensors",
+    "device": "default"
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "clip": [
+     "3",
+     0
+    ],
+    "text": ""
+   }
+  },
+  "5": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "clip": [
+     "3",
+     0
+    ],
+    "text": "blurry, distorted, deformed, low quality, watermark"
+   }
+  },
+  "6": {
+   "class_type": "LTXVConditioning",
+   "inputs": {
+    "positive": [
+     "4",
+     0
+    ],
+    "negative": [
+     "5",
+     0
+    ],
+    "frame_rate": 25.0
+   }
+  },
+  "7": {
+   "class_type": "EmptyLTXVLatentVideo",
+   "inputs": {
+    "width": 768,
+    "height": 512,
+    "length": 97,
+    "batch_size": 1
+   }
+  },
+  "8": {
+   "class_type": "LTXVAudioVAELoader",
+   "inputs": {
+    "ckpt_name": "ltx2310eros_v14.safetensors"
+   }
+  },
+  "9": {
+   "class_type": "LTXVEmptyLatentAudio",
+   "inputs": {
+    "frames_number": 97,
+    "frame_rate": 25,
+    "batch_size": 1,
+    "audio_vae": [
+     "8",
+     0
+    ]
+   }
+  },
+  "10": {
+   "class_type": "LTXVConcatAVLatent",
+   "inputs": {
+    "video_latent": [
+     "7",
+     0
+    ],
+    "audio_latent": [
+     "9",
+     0
+    ]
+   }
+  },
+  "11": {
+   "class_type": "LTXVScheduler",
+   "inputs": {
+    "steps": 8,
+    "max_shift": 2.05,
+    "base_shift": 0.95,
+    "stretch": true,
+    "terminal": 0.1,
+    "latent": [
+     "10",
+     0
+    ]
+   }
+  },
+  "12": {
+   "class_type": "KSamplerSelect",
+   "inputs": {
+    "sampler_name": "euler"
+   }
+  },
+  "13": {
+   "class_type": "SamplerCustom",
+   "inputs": {
+    "model": [
+     "2",
+     0
+    ],
+    "add_noise": true,
+    "noise_seed": 42,
+    "cfg": 1.0,
+    "positive": [
+     "6",
+     0
+    ],
+    "negative": [
+     "6",
+     1
+    ],
+    "sampler": [
+     "12",
+     0
+    ],
+    "sigmas": [
+     "11",
+     0
+    ],
+    "latent_image": [
+     "10",
+     0
+    ]
+   }
+  },
+  "14": {
+   "class_type": "LTXVSeparateAVLatent",
+   "inputs": {
+    "av_latent": [
+     "13",
+     0
+    ]
+   }
+  },
+  "15": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "14",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "16": {
+   "class_type": "CreateVideo",
+   "inputs": {
+    "images": [
+     "15",
+     0
+    ],
+    "fps": 25.0,
+    "audio": [
+     "18",
+     0
+    ]
+   }
+  },
+  "17": {
+   "class_type": "SaveVideo",
+   "inputs": {
+    "video": [
+     "16",
+     0
+    ],
+    "filename_prefix": "ltx23_eros_v14",
+    "format": "mp4",
+    "codec": "h264"
+   }
+  },
+  "18": {
+   "class_type": "LTXVAudioVAEDecode",
+   "inputs": {
+    "samples": [
+     "14",
+     1
+    ],
+    "audio_vae": [
+     "8",
+     0
+    ]
+   }
+  }
+ },
+ "client_id": "hivemind-media-studio"
+}

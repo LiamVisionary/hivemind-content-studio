@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+# stdio MCP speaks JSON-RPC over stdout. An engine log line on that channel is a
+# protocol violation, not noise — see the same claim in cli.py.
+os.environ.setdefault("MPT_LOG_SINK", "stderr")
 
 from .agent_runtime import attach_script, run_registered_agent_script
 from .approval_ledger import ApprovalLedger
@@ -15,24 +20,23 @@ from .capability_router import CapabilityPolicy, CapabilityRouter
 from .doctor import collect_checks
 from .evaluation import record_semantic_evaluation as save_semantic_evaluation
 from .evaluation import semantic_preflight
+from .diagnostics import build_baseline, diagnose_performance, vanity_leak
 from .experiments import ingest_performance_batch, recommend_next_variant
 from .generation import (
     generate_higgsfield_cloud_asset,
     generate_higgsfield_consumer_asset,
     generate_muapi_asset,
-    record_generated_asset,
 )
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
 from .intent_service import ContentIntentService
-from .manifest import approve_manifest, load_manifest
-from .mcp_http import McpHttpClient
-from .media_studio import generate_video as run_media_studio_video
-from .media_studio import list_media_studio_tools, media_studio_status
-from .metrics import record_metrics, summarize_metrics
+from .manifest import approve_manifest
+from .media_models import media_model_catalog
+from .machine_privacy import machine_artifact_receipt, machine_next_actions, machine_operation_receipt, machine_run_receipt
+from .metrics import summarize_metrics
 from .orchestrator import ContentOrchestrator
 from .planner import plan
 from .providers import provider_report
-from .publishing import dry_run, execute_publish, prepare_publish
+from .publishing import dry_run, execute_publish, handoff_to_hivemindos, prepare_publish, sync_hivemindos_posts
 from .stickman import render_stickman_frames
 from .voice import generate_elevenlabs_lines
 
@@ -101,23 +105,34 @@ def build_mcp_server():
     def providers_resource() -> str:
         return json.dumps({"providers": provider_report()}, sort_keys=True)
 
+    @mcp.resource("studio://media-models")
+    def media_models_resource() -> str:
+        return json.dumps({"privacy": "machine-redacted", "catalog": media_model_catalog()}, sort_keys=True)
+
     @mcp.resource("studio://telemetry/generations")
     def generation_telemetry_resource() -> str:
         return json.dumps(generation_telemetry_snapshot(_orchestrator().store), sort_keys=True)
 
     @mcp.resource("studio://runs/{run_id}")
     def run_resource(run_id: str) -> str:
-        return json.dumps(_orchestrator().get_run(run_id), sort_keys=True)
+        return json.dumps(machine_run_receipt(_orchestrator().get_run(run_id)), sort_keys=True)
 
     @mcp.resource("studio://runs/{run_id}/artifacts")
     def artifacts_resource(run_id: str) -> str:
         run = _orchestrator().get_run(run_id)
-        return json.dumps({"run_id": run_id, "artifacts": run["artifact_records"]}, sort_keys=True)
+        receipt = machine_run_receipt(run)
+        return json.dumps({
+            "run_id": run_id,
+            "privacy": "machine-redacted",
+            "artifact_count": receipt["artifact_count"],
+            "artifact_roles": receipt["artifact_roles"],
+            "media_redacted": True,
+        }, sort_keys=True)
 
     @mcp.resource("studio://runs/{run_id}/next-actions")
     def next_actions_resource(run_id: str) -> str:
         run = _orchestrator().get_run(run_id)
-        return json.dumps({"run_id": run_id, "status": run["status"], "next_actions": run["next_actions"]}, sort_keys=True)
+        return json.dumps({"run_id": run_id, "status": run["status"], "next_actions": machine_next_actions(run["next_actions"])}, sort_keys=True)
 
     @mcp.tool()
     def studio_doctor() -> dict:
@@ -130,19 +145,30 @@ def build_mcp_server():
         return {"ok": True, "providers": provider_report()}
 
     @mcp.tool()
+    def list_media_models(kind: str = "") -> dict:
+        """Every image and video model this machine can reach, in the shared
+        HivemindOS media-model catalog shape: where each runs, what it costs,
+        whether it is ready from HivemindOS chat, and how to run it. `kind`
+        narrows to "image" or "video". Carries no prompts, media, paths or
+        credential values."""
+        return {"ok": True, "privacy": "machine-redacted", "catalog": media_model_catalog(kind.strip().lower() or None)}
+
+    @mcp.tool()
     def execute_content_run(brief_path: str, policy: dict | None = None, budget: dict | None = None) -> dict:
         """Create a durable run and advance deterministic steps until an explicit action is needed."""
-        return _orchestrator().execute_content_run(brief_path, policy=policy, budget=budget)
+        return machine_run_receipt(_orchestrator().execute_content_run(brief_path, policy=policy, budget=budget))
 
     @mcp.tool()
     def get_content_run(run_id: str) -> dict:
         """Get run state, artifacts, evidence, cost, and precise next actions."""
-        return _orchestrator().get_run(run_id)
+        return machine_run_receipt(_orchestrator().get_run(run_id))
 
     @mcp.tool()
     def list_content_runs(status: str = "", limit: int = 100) -> dict:
         """List durable runs, optionally filtered by status."""
-        return {"ok": True, "runs": _orchestrator().list_runs(status=status or None, limit=limit)}
+        return {"ok": True, "privacy": "machine-redacted", "runs": [
+            machine_run_receipt(run) for run in _orchestrator().list_runs(status=status or None, limit=limit)
+        ]}
 
     @mcp.tool()
     def get_generation_telemetry(limit: int = 100) -> dict:
@@ -152,17 +178,17 @@ def build_mcp_server():
     @mcp.tool()
     def resume_content_run(run_id: str) -> dict:
         """Resume a cancelled or externally-unblocked run from its persisted step."""
-        return _orchestrator().resume_run(run_id)
+        return machine_run_receipt(_orchestrator().resume_run(run_id))
 
     @mcp.tool()
     def retry_content_step(run_id: str, step_id: str) -> dict:
         """Retry one failed/blocked step within its bounded attempt policy."""
-        return _orchestrator().retry_step(run_id, step_id)
+        return machine_run_receipt(_orchestrator().retry_step(run_id, step_id))
 
     @mcp.tool()
     def cancel_content_run(run_id: str, reason: str) -> dict:
         """Cancel local orchestration and record the reason without claiming upstream cancellation."""
-        return _orchestrator().cancel_run(run_id, reason)
+        return machine_run_receipt(_orchestrator().cancel_run(run_id, reason))
 
     @mcp.tool()
     def route_content_intent(run_id: str, intent: str, provider_override: str = "", estimated_cost_usd: float | None = None) -> dict:
@@ -172,7 +198,7 @@ def build_mcp_server():
             _policy_for_run(run_id, estimated_cost_usd),
             provider_override=provider_override or None,
         )
-        return {"ok": True, "run_id": run_id, "decision": decision}
+        return {"ok": True, "run_id": run_id, "decision": machine_operation_receipt(decision)}
 
     @mcp.tool()
     def execute_content_intent(run_id: str, intent: str, estimated_cost_usd: float | None = None, provider_override: str = "", approval_token: str = "") -> dict:
@@ -183,42 +209,42 @@ def build_mcp_server():
             _optional_approval_ledger(),
             generation_metric_sink=record_hivemind_generation_metric,
         )
-        return service.execute_intent(
+        return machine_operation_receipt(service.execute_intent(
             run_id,
             intent,
             estimated_cost_usd=estimated_cost_usd,
             provider_override=provider_override or None,
             approval_token=approval_token or None,
-        )
+        ))
 
     @mcp.tool()
     def ingest_content_asset_base64(run_id: str, file_name: str, encoded: str, role: str, provider: str = "mcp-upload", scene: int = 0) -> dict:
         """Ingest a bounded base64 asset for remote agents and record immutable provenance."""
         artifact = AssetStore().ingest_base64(_manifest_for_run(run_id), file_name=file_name, encoded=encoded, role=role, provider=provider, scene=scene or None)
-        return {"ok": True, "run_id": run_id, "artifact": artifact}
+        return {"ok": True, "run_id": run_id, "artifact": machine_artifact_receipt(artifact)}
 
     @mcp.tool()
     def ingest_content_asset_url(run_id: str, url: str, role: str, provider: str = "remote-import", scene: int = 0) -> dict:
         """Ingest an allowlisted public HTTPS asset with SSRF, size, MIME, and decode checks."""
         artifact = AssetStore().ingest_url(_manifest_for_run(run_id), url, role=role, provider=provider, scene=scene or None)
-        return {"ok": True, "run_id": run_id, "artifact": artifact}
+        return {"ok": True, "run_id": run_id, "artifact": machine_artifact_receipt(artifact)}
 
     @mcp.tool()
     def ingest_content_asset_local(run_id: str, source_path: str, role: str, provider: str = "agent-upload", scene: int = 0) -> dict:
         """Ingest a file only from operator-configured roots and record provenance."""
         artifact = AssetStore().ingest_local(_manifest_for_run(run_id), source_path, role=role, provider=provider, scene=scene or None)
-        return {"ok": True, "run_id": run_id, "artifact": artifact}
+        return {"ok": True, "run_id": run_id, "artifact": machine_artifact_receipt(artifact)}
 
     @mcp.tool()
     def request_content_approval(run_id: str, kind: str, provider: str, target: str, reason: str, amount_usd: float = 0.0) -> dict:
         """Request an exact-scope approval. Approval/denial itself is operator-only and not exposed over MCP."""
         approval = _approval_ledger().request(run_id=run_id, kind=kind, provider=provider, amount_usd=amount_usd, target=target, reason=reason)
-        return {
+        return machine_operation_receipt({
             "ok": True,
             "status": "awaiting_approval",
             "approval": approval,
             "next_actions": [{"intent": "operator_decide_approval", "approval_id": approval["id"]}],
-        }
+        })
 
     @mcp.tool()
     def apply_content_run_approval(run_id: str, reviewer: str, rights_note: str, approval_token: str) -> dict:
@@ -233,12 +259,26 @@ def build_mcp_server():
             target=str(manifest_path),
         )
         manifest = approve_manifest(manifest_path, reviewer=reviewer, rights_note=rights_note)
-        return {"ok": True, "run_id": run_id, "approval": manifest["approval"], "receipt": consumed}
+        return machine_operation_receipt({"ok": True, "run_id": run_id, "approval": manifest["approval"], "receipt": consumed})
 
     @mcp.tool()
     def preflight_content_semantics(run_id: str) -> dict:
         """Run deterministic claim and mobile-legibility preflight before semantic evaluation."""
-        return {"ok": True, "run_id": run_id, "evaluation": semantic_preflight(_manifest_for_run(run_id))}
+        # The findings ARE the answer. This used to run the check and return a
+        # hard-coded success, so a brief carrying an unsubstantiated guarantee
+        # and two unreadable overlays came back {"ok": true} and the agent's
+        # only pre-evaluation safety gate saw nothing.
+        report = semantic_preflight(_manifest_for_run(run_id))
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "privacy": "machine-redacted",
+            "preflight_passed": bool(report.get("passed")),
+            "score": report.get("score"),
+            "checks": report.get("checks") or {},
+            "scene_failures": report.get("scene_failures") or [],
+            "regeneration_instructions": report.get("regeneration_instructions") or [],
+        }
 
     @mcp.tool()
     def record_semantic_evaluation(run_id: str, evaluator: str, passed: bool, score: float, checks: dict, scene_failures: list[dict], regeneration_instructions: list[dict]) -> dict:
@@ -247,37 +287,69 @@ def build_mcp_server():
             _manifest_for_run(run_id), evaluator=evaluator, passed=passed, score=score,
             checks=checks, scene_failures=scene_failures, regeneration_instructions=regeneration_instructions,
         )
-        return {"ok": True, "run_id": run_id, "evaluation": evaluation}
+        return {"ok": True, "run_id": run_id, "privacy": "machine-redacted", "evaluation_recorded": bool(evaluation)}
 
     @mcp.tool()
     def ingest_content_metrics(run_id: str, entries: list[dict]) -> dict:
         """Idempotently ingest outcome/spend/retention evidence keyed by external ids."""
-        return {"ok": True, "run_id": run_id, **ingest_performance_batch(_manifest_for_run(run_id), entries)}
+        return machine_operation_receipt({"ok": True, "run_id": run_id, **ingest_performance_batch(_manifest_for_run(run_id), entries)})
+
+    @mcp.tool()
+    def diagnose_content_bottleneck(run_ids: list[str], roas_target: float = 0.0) -> dict:
+        """Name the first funnel stage underperforming this operator's own measured band.
+
+        Verdicts and next tests cross the boundary; observed views, revenue, and manifest
+        paths do not. Fix the named stage before scaling creative above it.
+        """
+        if not run_ids:
+            raise ValueError("At least one run_id is required")
+        paths = {run_id: _manifest_for_run(run_id) for run_id in run_ids}
+        baseline = build_baseline(list(paths.values()))
+        target = roas_target if roas_target > 0 else None
+        diagnoses = {}
+        for run_id, manifest_path in paths.items():
+            diagnosis = diagnose_performance(manifest_path, baseline=baseline, roas_target=target)
+            diagnoses[run_id] = {
+                "bottleneck": diagnosis["bottleneck"],
+                "ladder_id": diagnosis["ladder_id"],
+                "suspect": diagnosis["suspect"],
+                "next_test": diagnosis["next_test"],
+                "stage_verdicts": {stage["stage"]: stage["verdict"] for stage in diagnosis["stages"]},
+            }
+        vanity_run_ids: list[str] = []
+        if baseline["measured_runs"]:
+            by_path = {str(manifest_path): run_id for run_id, manifest_path in paths.items()}
+            vanity_run_ids = [by_path[item["manifest"]] for item in vanity_leak(list(paths.values()))["vanity_runs"]]
+        return {
+            "ok": True,
+            "privacy": "machine-redacted",
+            "calibration": {"source": baseline["source"], "measured_runs": baseline["measured_runs"], "roas_target": target},
+            "diagnoses": diagnoses,
+            "vanity_run_ids": vanity_run_ids,
+        }
 
     @mcp.tool()
     def recommend_content_variant(run_ids: list[str], change_dimension: str, candidate_value: Any) -> dict:
         """Preserve the measured winner and recommend a child varying exactly one dimension."""
         paths = [_manifest_for_run(run_id) for run_id in run_ids]
-        return {"ok": True, "recommendation": recommend_next_variant(paths, change_dimension=change_dimension, candidate_value=candidate_value)}
+        recommend_next_variant(paths, change_dimension=change_dimension, candidate_value=candidate_value)
+        return {"ok": True, "privacy": "machine-redacted", "run_count": len(run_ids), "recommendation_ready": True}
 
     # Compatibility tools remain for existing agents, but the preferred contract is
     # execute_content_run -> execute_content_intent -> evidence/approval resources.
-    @mcp.tool()
     def plan_content(brief_path: str, lane: str = "") -> dict:
         manifest = plan(brief_path, lane=lane or None)
-        return {"ok": True, "manifest": str(manifest)}
+        return {"ok": True, "planned": bool(manifest), "privacy": "machine-redacted"}
 
-    @mcp.tool()
     def run_agent_script_generation(manifest_path: str, runtime_id: str, confirm: str = "") -> dict:
-        return run_registered_agent_script(manifest_path, runtime_id=runtime_id, confirm=confirm)
+        return machine_operation_receipt(run_registered_agent_script(manifest_path, runtime_id=runtime_id, confirm=confirm))
 
-    @mcp.tool()
     def attach_agent_script(manifest_path: str, script_path: str, runtime: str = "external-agent") -> dict:
-        return attach_script(manifest_path, script_path, runtime=runtime)
+        return machine_operation_receipt(attach_script(manifest_path, script_path, runtime=runtime))
 
     @mcp.tool()
     def render_stickman_ad_frames(manifest_path: str) -> dict:
-        return render_stickman_frames(manifest_path)
+        return machine_operation_receipt(render_stickman_frames(manifest_path))
 
     def generate_higgsfield_consumer_media(kind: str, model: str, prompt: str, output_path: str, **kwargs) -> dict:
         """Internal compatibility executor; agent calls should use execute_content_intent."""
@@ -295,27 +367,66 @@ def build_mcp_server():
 
     @mcp.tool()
     def assemble_content_run(manifest_path: str, output_path: str = "") -> dict:
-        return assemble_run(manifest_path, output=output_path or None)
+        return machine_operation_receipt(assemble_run(manifest_path, output=output_path or None))
 
     @mcp.tool()
     def export_capcut_timeline_handoff(manifest_path: str, output_dir: str = "") -> dict:
-        return export_capcut_handoff(manifest_path, output_dir=output_dir or None)
+        return machine_operation_receipt(export_capcut_handoff(manifest_path, output_dir=output_dir or None))
 
     @mcp.tool()
-    def prepare_social_publish(manifest_path: str, video: str, title: str, caption: str, platforms: list[str], provider: str = "postiz", scheduled_at: str = "") -> dict:
-        return prepare_publish(manifest_path, video=video, title=title, caption=caption, platforms=platforms, provider=provider, scheduled_at=scheduled_at or None)
+    def prepare_social_publish(manifest_path: str, video: str, title: str, caption: str, platforms: list[str], provider: str = "auto", scheduled_at: str = "", accounts: dict[str, str] | None = None) -> dict:
+        """provider "auto" picks HivemindOS when it runs on this machine, then hosted publishing, then the owner's own keys."""
+        return machine_operation_receipt(prepare_publish(manifest_path, video=video, title=title, caption=caption, platforms=platforms, provider=provider, scheduled_at=scheduled_at or None, accounts=accounts))
+
+    @mcp.tool()
+    def save_content_persona(persona: dict) -> dict:
+        """Create or update a recurring character: id, name, appearance or references, platforms, posts_per_day, review_in (studio|hivemindos)."""
+        from .persona_autopilot import save_persona
+
+        return machine_operation_receipt({"ok": True, "persona": save_persona(persona)})
+
+    @mcp.tool()
+    def plan_persona_day(persona_id: str, trend_notes: str = "", count: int = 0, model_id: str = "") -> dict:
+        """Write today's hooks, captions and shots for a persona. Gather trend_notes first (X discovery, reddit-voc, research). Starts nothing."""
+        from .persona_autopilot import plan_persona_day as plan_day
+
+        return machine_operation_receipt({"ok": True, **plan_day(persona_id, trend_notes=trend_notes, count=count or None, model_id=model_id)})
+
+    @mcp.tool()
+    def start_persona_day(persona_id: str, posts: list[dict]) -> dict:
+        """Open one persona-series run per planned post. Each run stops for generation, then for a person's review; nothing publishes."""
+        from .persona_autopilot import start_persona_day as start_day
+
+        return machine_operation_receipt({"ok": True, **start_day(persona_id, posts, orchestrator=_orchestrator())})
+
+    @mcp.tool()
+    def social_publish_rails() -> dict:
+        """Which publishing rails can take a post now, and what each unavailable one needs."""
+        from .posting_rails import posting_rails
+
+        return machine_operation_receipt(posting_rails())
+
+    @mcp.tool()
+    def handoff_social_publish(manifest_path: str) -> dict:
+        """Hand drafts prepared for HivemindOS to its Socials queue for human review. Publishes nothing."""
+        return machine_operation_receipt(handoff_to_hivemindos(manifest_path))
+
+    @mcp.tool()
+    def sync_social_publish(manifest_path: str, refresh: bool = True) -> dict:
+        """Pull handed-off posts' state and platform numbers back onto the run."""
+        return machine_operation_receipt(sync_hivemindos_posts(manifest_path, refresh=refresh))
 
     @mcp.tool()
     def dry_run_social_publish(manifest_path: str) -> dict:
-        return dry_run(manifest_path)
+        return machine_operation_receipt(dry_run(manifest_path))
 
     @mcp.tool()
     def execute_social_publish(manifest_path: str, confirm: str = "") -> dict:
-        return execute_publish(manifest_path, confirm=confirm)
+        return machine_operation_receipt(execute_publish(manifest_path, confirm=confirm))
 
     @mcp.tool()
     def summarize_content_metrics(manifest_path: str) -> dict:
-        return summarize_metrics(manifest_path)
+        return machine_operation_receipt(summarize_metrics(manifest_path))
 
     return mcp
 

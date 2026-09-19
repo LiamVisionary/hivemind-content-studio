@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+# stdout is this command's contract — every subcommand prints one JSON document
+# there and agents parse it. The embedded faceless engine logs to stdout by
+# default, which interleaved ANSI-coloured loguru lines with that JSON and made
+# a successful render unparseable. Claim the channel before anything imports the
+# engine; `setdefault` so an operator debugging by hand can still override.
+os.environ.setdefault("MPT_LOG_SINK", "stderr")
 
 from .agent_runtime import attach_script, run_registered_agent_script
 from .approval_config import load_approval_ledger, operator_token
@@ -16,6 +24,7 @@ from .config import load_config
 from .doctor import collect_checks
 from .intent_service import ContentIntentService
 from .manifest import approve_manifest, load_manifest
+from .diagnostics import diagnose_performance, diagnose_portfolio
 from .metrics import record_metrics, summarize_metrics
 from .media_studio import generate_video as generate_media_studio_video, list_media_studio_tools, media_studio_status
 from .generation import generate_higgsfield_cloud_asset, generate_higgsfield_consumer_asset, generate_muapi_asset, record_generated_asset
@@ -24,7 +33,7 @@ from .mcp_http import McpHttpClient
 from .planner import plan
 from .orchestrator import ContentOrchestrator
 from .providers import provider_report
-from .publishing import dry_run, execute_publish, prepare_publish
+from .publishing import dry_run, execute_publish, handoff_to_hivemindos, prepare_publish, sync_hivemindos_posts
 from .qa import qa_video
 from .stickman import render_stickman_frames
 from .template_catalog import template_by_id, template_report
@@ -54,7 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     stack = sub.add_parser("stack", help="Start, stop, inspect, or restart the complete local media stack")
     stack.add_argument("action", choices=["start", "stop", "restart", "status", "url", "supervise"], nargs="?", default="status")
+    stack.add_argument("--remote-access", action="store_true", help="Enable persistent tailnet HTTPS access at startup")
+    stack.add_argument("--tailnet-port", type=int, help="Tailnet HTTPS port; use 8789 for the legacy URL")
     stack.set_defaults(func=cmd_stack)
+
+    remote = sub.add_parser("remote-access", help="Manage tailnet access for an already-running studio")
+    remote.add_argument("action", choices=["enable", "disable", "status"])
+    remote.add_argument("--tailnet-port", type=int, help="Tailnet HTTPS port (default: 8765)")
+    remote.set_defaults(func=cmd_remote_access)
 
     telemetry = sub.add_parser("telemetry", help="Inspect privacy-safe generation performance and reliability")
     telemetry_sub = telemetry.add_subparsers(dest="telemetry_command", required=True)
@@ -64,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     planner = sub.add_parser("plan", help="Create a canonical run from a YAML brief")
     planner.add_argument("brief")
-    planner.add_argument("--lane", choices=["animation", "first-frame-animation-ad", "stickman-performance-ad", "static-text-ad", "faceless", "clip", "social-post"])
+    planner.add_argument("--lane", choices=["animation", "first-frame-animation-ad", "persona-series", "stickman-performance-ad", "static-text-ad", "faceless", "clip", "social-post"])
     planner.set_defaults(func=cmd_plan)
 
     run = sub.add_parser("run", help="Create, inspect, resume, retry, or cancel durable agent runs")
@@ -241,9 +257,21 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--title", required=True)
     prepare.add_argument("--caption", default="")
     prepare.add_argument("--platforms", required=True)
-    prepare.add_argument("--provider", choices=["postiz", "upload-post"], default="postiz")
+    prepare.add_argument("--provider", choices=["auto", "hivemindos", "managed-socials", "postiz", "upload-post"], default="auto",
+                         help="auto picks HivemindOS when it is running here, then hosted publishing, then your own keys")
+    prepare.add_argument("--account", action="append", default=[], metavar="PLATFORM=ID",
+                         help="HivemindOS Socials account (or hosted channel) to post from; repeat per platform")
     prepare.add_argument("--scheduled-at")
     prepare.set_defaults(func=cmd_publish_prepare)
+    rails = publish_sub.add_parser("rails", help="Show which publishing rails can take a post now, and what each unavailable one needs")
+    rails.set_defaults(func=cmd_publish_rails)
+    handoff = publish_sub.add_parser("handoff", help="Hand HivemindOS drafts to the local Socials queue for review (publishes nothing)")
+    handoff.add_argument("manifest")
+    handoff.set_defaults(func=cmd_publish_handoff)
+    sync = publish_sub.add_parser("sync", help="Pull handed-off posts' state and numbers back from HivemindOS")
+    sync.add_argument("manifest")
+    sync.add_argument("--no-refresh", action="store_true", help="Read the last numbers HivemindOS holds without asking the platform again")
+    sync.set_defaults(func=cmd_publish_sync)
     validate = publish_sub.add_parser("dry-run")
     validate.add_argument("manifest")
     validate.set_defaults(func=cmd_publish_dry_run)
@@ -251,6 +279,21 @@ def build_parser() -> argparse.ArgumentParser:
     execute.add_argument("manifest")
     execute.add_argument("--confirm", default="")
     execute.set_defaults(func=cmd_publish_execute)
+
+    persona = sub.add_parser("persona", help="Recurring characters and their daily autopilot (drafts only; nothing publishes)")
+    persona_sub = persona.add_subparsers(dest="persona_command", required=True)
+    persona_save = persona_sub.add_parser("save", help="Create or update a persona from a JSON file")
+    persona_save.add_argument("file")
+    persona_save.set_defaults(func=cmd_persona_save)
+    persona_list = persona_sub.add_parser("list")
+    persona_list.set_defaults(func=cmd_persona_list)
+    persona_day = persona_sub.add_parser("day", help="Plan today's posts and open one run per post")
+    persona_day.add_argument("persona_id")
+    persona_day.add_argument("--trend-notes", default="", help="What is working right now, as text or @path to a file")
+    persona_day.add_argument("--count", type=int)
+    persona_day.add_argument("--model-id", default="")
+    persona_day.add_argument("--plan-only", action="store_true", help="Print the day plan without opening runs")
+    persona_day.set_defaults(func=cmd_persona_day)
 
     metrics = sub.add_parser("metrics", help="Record and summarize per-run distribution outcomes")
     metrics_sub = metrics.add_subparsers(dest="metrics_command", required=True)
@@ -266,6 +309,11 @@ def build_parser() -> argparse.ArgumentParser:
     summary = metrics_sub.add_parser("summary")
     summary.add_argument("manifest")
     summary.set_defaults(func=cmd_metrics_summary)
+    diagnose = metrics_sub.add_parser("diagnose", help="Name the first underperforming funnel stage")
+    diagnose.add_argument("manifests", nargs="+")
+    diagnose.add_argument("--roas-target", type=float, help="Break-even ROAS; defaults to the portfolio median")
+    diagnose.add_argument("--underperformance", type=float, default=0.5, help="Share of the operator's own median that still counts as passing")
+    diagnose.set_defaults(func=cmd_metrics_diagnose)
     return parser
 
 
@@ -319,7 +367,28 @@ def cmd_stack(args: argparse.Namespace) -> int:
     script = Path(__file__).resolve().parents[2] / "scripts" / "hivemind-studio-stack"
     if not script.is_file():
         raise RuntimeError(f"Unified stack supervisor is missing: {script}")
-    return subprocess.run([str(script), args.action], check=False).returncode
+    argv = [str(script), args.action]
+    if args.remote_access:
+        argv.append("--remote-access")
+    if args.tailnet_port is not None:
+        argv.extend(["--tailnet-port", str(args.tailnet_port)])
+    return subprocess.run(argv, check=False).returncode
+
+
+def cmd_remote_access(args: argparse.Namespace) -> int:
+    from .remote_access import RemoteAccessError, remote_access_status, set_remote_access
+
+    if args.tailnet_port is not None and not 1 <= args.tailnet_port <= 65535:
+        print("--tailnet-port must be between 1 and 65535", file=sys.stderr)
+        return 2
+    try:
+        status = (remote_access_status(https_port=args.tailnet_port) if args.action == "status"
+                  else set_remote_access(args.action == "enable", https_port=args.tailnet_port))
+    except RemoteAccessError as exc:
+        print(f"{exc.message} {exc.remedy}", file=sys.stderr)
+        return 1
+    print(json.dumps(status, indent=2))
+    return 0 if args.action == "status" or status["enabled"] == (args.action == "enable") else 1
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -576,8 +645,53 @@ def cmd_media_studio_generate(args: argparse.Namespace) -> int:
 
 
 def cmd_publish_prepare(args: argparse.Namespace) -> int:
-    draft = prepare_publish(args.manifest, video=args.video, media=args.media, text_only=args.text_only, title=args.title, caption=args.caption, platforms=args.platforms.split(","), provider=args.provider, scheduled_at=args.scheduled_at)
+    draft = prepare_publish(args.manifest, video=args.video, media=args.media, text_only=args.text_only, title=args.title, caption=args.caption, platforms=args.platforms.split(","), provider=args.provider, scheduled_at=args.scheduled_at, accounts=dict(item.split("=", 1) for item in args.account if "=" in item))
     print(json.dumps({"ok": True, "published": False, "draft": draft}, indent=2))
+    return 0
+
+
+def cmd_persona_save(args: argparse.Namespace) -> int:
+    from .persona_autopilot import save_persona
+
+    print(json.dumps({"ok": True, "persona": save_persona(json.loads(Path(args.file).expanduser().read_text(encoding="utf-8")))}, indent=2))
+    return 0
+
+
+def cmd_persona_list(args: argparse.Namespace) -> int:
+    from .persona_autopilot import list_personas
+
+    print(json.dumps({"ok": True, "personas": list_personas()}, indent=2))
+    return 0
+
+
+def cmd_persona_day(args: argparse.Namespace) -> int:
+    from .persona_autopilot import plan_persona_day, start_persona_day
+
+    notes = args.trend_notes
+    if notes.startswith("@"):
+        notes = Path(notes[1:]).expanduser().read_text(encoding="utf-8")
+    plan_result = plan_persona_day(args.persona_id, trend_notes=notes, count=args.count, model_id=args.model_id)
+    if args.plan_only:
+        print(json.dumps({"ok": True, **plan_result}, indent=2))
+        return 0
+    print(json.dumps({"ok": True, "plan": plan_result, **start_persona_day(args.persona_id, plan_result["posts"], orchestrator=_orchestrator())}, indent=2))
+    return 0
+
+
+def cmd_publish_rails(args: argparse.Namespace) -> int:
+    from .posting_rails import posting_rails
+
+    print(json.dumps(posting_rails(), indent=2))
+    return 0
+
+
+def cmd_publish_handoff(args: argparse.Namespace) -> int:
+    print(json.dumps(handoff_to_hivemindos(args.manifest), indent=2))
+    return 0
+
+
+def cmd_publish_sync(args: argparse.Namespace) -> int:
+    print(json.dumps(sync_hivemindos_posts(args.manifest, refresh=not args.no_refresh), indent=2))
     return 0
 
 
@@ -600,6 +714,15 @@ def cmd_metrics_record(args: argparse.Namespace) -> int:
 
 def cmd_metrics_summary(args: argparse.Namespace) -> int:
     print(json.dumps(summarize_metrics(args.manifest), indent=2))
+    return 0
+
+
+def cmd_metrics_diagnose(args: argparse.Namespace) -> int:
+    if len(args.manifests) == 1:
+        result = diagnose_performance(args.manifests[0], roas_target=args.roas_target, underperformance=args.underperformance)
+    else:
+        result = diagnose_portfolio(args.manifests, roas_target=args.roas_target, underperformance=args.underperformance)
+    print(json.dumps(result, indent=2))
     return 0
 
 

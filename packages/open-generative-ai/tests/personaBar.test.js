@@ -1,0 +1,194 @@
+// Hive Persona ID — the wiring the pure logic in personaId.test.js cannot see.
+//
+// The flow itself — save, load, edit a row, overwrite — was driven in the
+// browser against the running studio and the sealed blob it wrote.
+//
+// Deliberately textual: a persona is a NAME for three reference lists, so what
+// is pinned here is where it is stored and which setters write it back. That
+// is module wiring, not something a page can be made to show.
+//
+// After the Video studio's UI was rebuilt, that wiring spans two files:
+// VideoStudio.jsx still owns every value and handler, while the controls that
+// read them (the References panel and Prompt Check) render from
+// src/studios/video/VideoComposerBar.jsx. Assertions below name whichever file
+// carries the half they check; the contract is that the two halves meet.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
+
+test('personas are their own sealed library, not a corner of an existing one', () => {
+    const store = read('src/lib/savedLibraryStore.js');
+    assert.match(store, /personas: 'personas'/);
+    assert.match(store, /\[LIBRARIES\.personas\]: 'personas_v1'/, 'personas get their own vault blob key');
+});
+
+test('the persona bar lives in the References panel and owns no media of its own', () => {
+    const menu = read('src/studios/video/ReferencesMenu.jsx');
+    assert.match(menu, /<PersonaBar/);
+    // It reads the same three lists the rows do and writes back through the same
+    // setters — a persona is a NAME for those rows, never a fourth source.
+    assert.match(menu, /onLoad=\{\(next\) => \{\s*emit\('images', next\.images\);\s*emit\('videos', next\.videos\);\s*emit\('audios', next\.audios\);/);
+    const bar = read('src/studios/video/PersonaBar.jsx');
+    assert.doesNotMatch(bar, /uploadFileToHivemindStudio|fetchHivemindReferences/, 'the bar never uploads or lists media itself');
+});
+
+test('loading checks the persona against references that still exist', () => {
+    const menu = read('src/studios/video/ReferencesMenu.jsx');
+    // Null until the listing has been read, and null again when the listing is
+    // empty (standalone mode) — "could not check" must not read as "all gone".
+    assert.match(menu, /const \[known, setKnown\] = useState\(null\)/);
+    assert.match(menu, /setKnown\(refs\.length\s*\?\s*new Set\(/);
+    assert.match(menu, /known=\{known\}/);
+});
+
+test('the studio carries which persona the references are, and drops it with them', () => {
+    const logic = read('src/studios/video/videoLogic.js');
+    // Every place the reference rows are emptied also puts the character down:
+    // a fresh setup, a "+ New", and attaching a source video (which reference
+    // mode never combines with).
+    const clears = logic.split('referenceVideos: [],');
+    assert.equal(clears.length - 1, 3, 'the three reference-clearing sites are still three');
+    assert.equal((logic.match(/persona: null,/g) || []).length, 3, 'each of them clears the persona too');
+    // A restored run says which character it ran with, even if it was deleted.
+    // Restore, load, save and cast-apply all shape the label through ONE
+    // helper, so a persona saved before gender existed comes back with
+    // gender '' everywhere rather than undefined in some places.
+    assert.match(logic, /persona: personaIdentity\(context\.persona\)/);
+
+    const studio = read('src/studios/VideoStudio.jsx');
+    assert.match(studio, /persona: s\.setup\.persona \? \{ \.\.\.s\.setup\.persona \} : null,/, 'capture carries it');
+    assert.match(studio, /persona: personaIdentity\(next\)/, 'the bar\'s change handler shapes it the same way');
+    assert.match(studio, /persona: personaIdentity\(woven\.persona\)/, 'and so does the weave, whenever it writes the rows');
+    // The References panel is mounted TWICE since the redesign — the studio
+    // renders the drawer's copy itself, and hands the composer everything its
+    // copy needs. Both are wired to the one persona on the setup and the one
+    // change handler, so whichever door the owner opens reports the same
+    // character; a copy that lost the wiring would silently forget it.
+    assert.match(studio, /persona=\{s\.setup\.persona \|\| null\}/, 'the drawer\'s copy reads it');
+    assert.match(studio, /onPersonaChange=\{onPersonaChange\}/, 'and writes back through the studio');
+    const composer = read('src/studios/video/VideoComposerBar.jsx');
+    assert.match(composer, /<ReferencesMenu[\s\S]*?persona=\{s\.setup\.persona \|\| null\}/, 'the composer\'s copy reads the same persona');
+    assert.match(composer, /<ReferencesMenu[\s\S]*?onPersonaChange=\{onPersonaChange\}/, 'and writes back through the same handler');
+    assert.match(studio, /<VideoComposerBar[\s\S]*?onPersonaChange=\{onPersonaChange\}/, 'which the studio hands it');
+});
+
+test('the persona name never reaches localStorage', () => {
+    // Settings persist in the clear; anything the owner wrote does not. A
+    // character's name is theirs — it lives only in the sealed library.
+    const prefs = read('src/lib/videoPreferences.js');
+    assert.doesNotMatch(prefs, /persona/i);
+});
+
+test('a dialog raised from a popover does not dismiss the popover under it', () => {
+    // Modals portal to document.body, so they are never inside the panel that
+    // opened them: the capture-phase pointerdown closed the panel, React
+    // unmounted the dialog with it, and the click that would have saved never
+    // landed. Reproduced in the browser — the first Save persona did nothing.
+    const menu = read('src/ui/Menu.jsx');
+    assert.match(menu, /const inModal = \(node\) => Boolean\(node\?\.closest\?\.\('\[role="dialog"\]'\)\)/);
+    assert.match(menu, /if \(inModal\(e\.target\)\) return;/);
+    // Escape belongs to the topmost layer, which is the dialog.
+    assert.match(menu, /if \(e\.key === 'Escape' && !modalOpen\(\)\) close\(\)/);
+    // Every modal in the app is that one portal, so the guard covers all of them.
+    assert.match(read('src/ui/Modal.jsx'), /role="dialog"/);
+});
+
+test('a persona has a gender, set beside its name and read by every generator', () => {
+    // Set in two places — the save dialog, and the bar for a loaded character —
+    // through one chip row, and written into the persona payload itself.
+    //
+    // The Video studio's presentation now lives in src/studios/video/*, so the
+    // reader half of this (which control asks for the gender, which door fires
+    // the weave that carries it) is pinned in the composer bar, and the writer
+    // half — the values and the handlers — stays pinned in VideoStudio.jsx.
+    const bar = read('src/studios/video/PersonaBar.jsx');
+    assert.match(bar, /function GenderChips\(/);
+    assert.match(bar, /<GenderChips value=\{saveGender\} onChange=\{setSaveGender\}/, 'the save dialog asks for it');
+    assert.match(bar, /<GenderChips compact value=\{gender\} onChange=\{setLoadedGender\}/, 'the bar lets a loaded persona change it');
+    assert.match(bar, /const data = personaFromReferences\(\{\s*\.\.\.current, gender: normalizePersonaGender\(saveGender\), look: saveLook,\s*\}\);/, 'save writes it — and the look — into the payload');
+    assert.match(bar, /personaFromReferences\(\{ images, videos, audios, gender, look \}\)/, 'the loaded gender and look are part of what is compared and saved over');
+    // The look has a field of its own in the save dialog, and is seeded from
+    // the loaded persona or the cast strip's draft.
+    assert.match(bar, /value=\{saveLook\}/);
+    assert.match(bar, /const look = normalizePersonaLook\(persona\?\.look \?\? seed\?\.look\);/);
+    // The shared save dialog grew a slot for it rather than the bar growing a
+    // second dialog.
+    assert.match(read('src/ui/SavedLibrary.jsx'), /children = null,/);
+    // Every place that writes ABOUT the persona reads the gender: the cast
+    // compiler, the reference scaffold, the UGC deal, the prompt helper, the
+    // starters.
+    assert.match(read('src/lib/castPrompt.js'), /gender: normalizePersonaGender\(persona\?\.gender\)/);
+    const studio = read('src/studios/VideoStudio.jsx');
+    // The deal reads the persona's gender. Open-ended after it, because the
+    // deal also takes the ad format now (which bank the setting comes from) and
+    // pinning the whole argument object made this fail for an unrelated reason.
+    assert.match(studio, /ugcVariantAt\(index, \{ gender: s\.setup\.persona\?\.gender[,\s}]/);
+    // With pictures attached the UGC brief is about the person in them, so the
+    // reference rows (and the persona's name/gender) go to the brief builder,
+    // and the menu says who the clip will be about.
+    assert.match(studio, /persona: ugcPersona\(\),/);
+    assert.match(studio, /subject=\{ugcSubjectLabel\(ugcPersona\(\)\)\}/);
+    assert.match(studio, /videoRequestPlan\(s\.setup\)\.sendReferenceImages\) return null;/, 'only pictures that will be SENT count');
+    assert.match(studio, /personaGender=\{s\.setup\.persona\?\.gender \|\| ''\}/);
+    // The helper's draft and Prompt Check's Weave both go through the studio's
+    // one weave (acceptPrompt), whose cast carries the gender — and the helper
+    // is told the whole cast by slot, never a persona's name.
+    assert.match(studio, /cast=\{castSubjects\(s\.cast\)\}/);
+    assert.match(studio, /onUse=\{\(prompt\) => \{[\s\S]*?acceptPrompt\(prompt\);/);
+    // The References panel no longer renders a Weave of its own — the weave has
+    // one home (Prompt Check + the cast strip), and the panel's onWeave prop is
+    // accepted but inert.
+    const menu = read('src/studios/video/ReferencesMenu.jsx');
+    assert.doesNotMatch(menu, /onWriteTags/);
+    assert.match(menu, /void onWeave;/);
+    // Prompt Check moved into the composer bar with the rest of the composer,
+    // so the weave it fires is now checked in two halves: the door is wired to
+    // a prop there, and the studio hands that prop the ONE weave — the closure
+    // that scaffolds the cast into the prompt. The bar implements no weave of
+    // its own, which is what keeps the two doors from drifting apart.
+    const composerBar = read('src/studios/video/VideoComposerBar.jsx');
+    assert.match(composerBar, /<PromptCheckMenu[\s\S]*?onWeave=\{onWeave\}/, 'Prompt Check\'s Weave is the studio\'s, passed in');
+    assert.doesNotMatch(composerBar, /acceptPrompt/, 'the bar never weaves on its own');
+    assert.match(studio, /const weavePromptNow = \(\) => \{[\s\S]*?acceptPrompt\(s\.setup\.prompt, \{ scaffold: true \}\);/, 'the one weave scaffolds the cast in');
+    assert.match(studio, /<VideoComposerBar[\s\S]*?onWeave=\{weavePromptNow\}/, 'and it is what Prompt Check\'s door runs');
+    assert.match(read('src/lib/promptWeave.js'), /gender: normalizePersonaGender\(persona\?\.gender \|\| gender\)/, 'the references member carries it');
+    assert.match(read('src/lib/defaultPrompts.js'), /const gender = override !== undefined \? override : \(source\?\.persona\?\.gender \|\| ''\);/);
+    // Only the gender reaches the helper request — never the persona's name,
+    // which is sealed to the owner's vault.
+    const dialog = read('src/dialogs/PromptHelperDialog.jsx');
+    assert.match(dialog, /personaGender: personaGender \|\| undefined,/);
+    assert.doesNotMatch(dialog, /personaName/);
+});
+
+// The compact switch on a video row. One rule (referenceVideoCanvas) decides
+// both what the row SHOWS and what is SENT, and every carrier of a reference
+// video — cast, persona, portable persona, the request itself — keeps the flag
+// beside useAudio rather than dropping it on the way through.
+test('a video row\'s compact switch reaches the request, and every carrier keeps it beside useAudio', () => {
+    // The request: "compact" or "full" per clip, from the shared rule, which
+    // also holds it to full while no picture is attached.
+    const studioLib = read('src/lib/hivemindStudio.js');
+    assert.match(studioLib, /import \{ isSoundOnlyReference, referenceVideoCanvas \} from '\.\/h3References\.js';/);
+    assert.match(studioLib, /use_audio: Boolean\(item\.useAudio\),[\s\S]{0,900}canvas: referenceVideoCanvas\(item, \{ images: referenceImages \}\),/);
+    // The carriers.
+    assert.match(read('src/lib/personaId.js'), /useAudio: Boolean\(item\.useAudio\),[\s\S]{0,400}compact: Boolean\(item\.compact\),/, 'personaFromReferences');
+    assert.match(read('src/lib/personaId.js'), /videos: persona\.videos\.map\(\(item\) => \[item\.url, item\.useAudio, item\.compact, item\.motion === false\]\)/, 'an edit worth saving');
+    assert.match(read('src/lib/personaTransfer.js'), /useAudio: item\.useAudio,\s*compact: item\.compact,/, 'import re-uploads keep it');
+    assert.match(read('src/lib/castPrompt.js'), /useAudio: Boolean\(item\.useAudio\), compact: Boolean\(item\.compact\),/, 'a cast member keeps it');
+    // Default OFF on every way a clip reaches the rows from the studio itself.
+    const studio = read('src/studios/VideoStudio.jsx');
+    assert.match(studio, /\{ url, name, useAudio: false, compact: false \}/);
+    assert.match(studio, /\(\{ \.\.\.item, useAudio: false, compact: false \}\)/);
+    // The server accepts exactly the two values the MCP does and forwards them.
+    // The control API is one router module per subject now: the request body
+    // lives in api/models.py, the staging that forwards it in api/video.py.
+    assert.match(
+        read('../../src/hivemind_content_studio/api/models.py'),
+        /canvas: Literal\["full", "compact"\] = "full"/);
+    assert.match(
+        read('../../src/hivemind_content_studio/api/video.py'),
+        /"use_audio": bool\(video_item\.use_audio\),\s*"canvas": video_item\.canvas,/);
+});

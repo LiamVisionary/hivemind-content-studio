@@ -12,36 +12,78 @@ description = "Local-first agent studio for faceless video, animation, clipping,
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "AGPL-3.0-or-later" }
+# The desktop bundle installs exactly this list into a frozen venv (see
+# docs/RELEASE.md). Everything that only the Streamlit WebUI, the MoneyPrinterTurbo
+# HTTP API or an optional cloud voice/LLM provider needs lives in the
+# `faceless-webui` extra below instead, because those five packages cost roughly a
+# third of the venv and no shipped process imports them. `test/studio/test_packaging_extras.py`
+# asserts the split holds and that the engine still imports with them absent.
 dependencies = [
-    "moviepy==2.1.2",
-    "streamlit==1.45.0",
+    # The credential standard this app speaks. Its own repo since 1.0.0, so
+    # this is a normal dependency rather than a vendored copy that drifts.
+    "passbook @ git+https://github.com/LiamVisionary/passbook.git",
+    "moviepy==2.2.1",
     "edge-tts==7.2.7",
-    "fastapi==0.115.6",
+    "fastapi==0.136.3",
     "uvicorn==0.32.1",
-    "openai==1.56.1",
+    "openai==2.24.0",
     "faster-whisper==1.1.0",
+    # Transcription on Apple silicon. faster-whisper runs on CTranslate2, which has
+    # no Metal or CoreML backend, so on a Mac it transcribes on CPU cores however
+    # `whisper.device` is set. MEASURED on a 42.3s clip with large-v3: 32.27s on
+    # faster-whisper/int8/CPU against 3.53s on MLX, same language and same text.
+    # Marked to arm64 macOS so no other platform tries to resolve an MLX wheel.
+    # COST, stated because it is not small: mlx-whisper hard-requires torch, which
+    # adds ~526MB to an Apple-silicon install. subtitle.py falls back to
+    # faster-whisper when the import fails, so dropping this line costs speed and
+    # nothing else.
+    "mlx-whisper>=0.4.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "loguru==0.7.3",
-    "google-generativeai==0.8.6",
-    "dashscope==1.20.14",
-    "azure-cognitiveservices-speech==1.41.1",
-    "redis==5.2.0",
-    "python-multipart==0.0.19",
+    "python-multipart==0.0.27",
+    "cryptography==46.0.6",
     "pyyaml==6.0.3",
     "requests==2.33.1",
+    "packaging==24.2",
     "socksio==1.0.0",
     "pydub==0.25.1",
-    "litellm==1.60.0",
+    "litellm==1.86.2",
+    "google-genai==2.11.0",
     "yt-dlp>=2025.1.1",
     "pillow-avif-plugin>=1.4.6",
     "pillow-heif>=0.18.0",
 ]
 
 [project.optional-dependencies]
-g4f = [
-    "g4f==0.5.2.2",
+# What the shipped desktop app installs: the base dependency list and nothing
+# else. It exists as a named extra so the release build has one thing to say
+# (`uv export --extra desktop`) and so a change to the bundle is a change to a
+# line here rather than to a build script nobody reads.
+desktop = []
+# The archived Streamlit WebUI (`archive/moneyprinterturbo/webui/Main.py`), the
+# MoneyPrinterTurbo HTTP API (`archive/moneyprinterturbo/main.py`,
+# `app/router.py`), the Redis task backend and the two cloud
+# voice/LLM providers that only the faceless engine offers. The stack never
+# starts any of them; a developer who wants them runs
+# `uv sync --extra faceless-webui`. Keeping them out of the base list is what
+# makes the bundled venv about a third smaller.
+faceless-webui = [
+    "streamlit==1.59.1",
+    "streamlit-tour==1.1.0",
+    "dashscope==1.20.14",
+    "azure-cognitiveservices-speech==1.41.1",
+    "redis==5.2.0",
+]
+# Optional TwelveLabs (https://twelvelabs.io) video-understanding/embedding
+# integration. Only needed when `twelvelabs_api_keys` is configured; install
+# with `uv sync --extra twelvelabs`.
+twelvelabs = [
+    "twelvelabs>=1.2.8",
 ]
 mcp = [
-    "mcp>=1.9.0",
+    # 2.0 removed mcp.server.fastmcp, which this server is written against; the
+    # lock had already resolved 2.0.0, so a fresh `uv sync --extra mcp` produced
+    # an MCP server that exits with "Install MCP support" on import.
+    "mcp>=1.9.0,<2",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -54,6 +96,98 @@ content-studio-api = "hivemind_content_studio.control_api:main"
 auto-clipper = "auto_clipper.cli:main"
 auto-clipper-mcp = "auto_clipper.mcp_server:main"
 
+[dependency-groups]
+dev = [
+    "coverage==7.15.1",
+    "pytest==9.1.1",
+    # A per-test deadline. Thirteen studio test files open real sockets and
+    # threads; without this a hung one holds the whole CI job to its 30-minute
+    # timeout and never says which test hung.
+    "pytest-timeout==2.4.0",
+    "ruff==0.15.21",
+]
+
+[tool.ruff]
+# `ruff check .` is the gate, so the gate has to have an answer for every file
+# in the tree — and the answer for code this repo did not write is "not ours to
+# reformat". These trees are vendored and re-synced from their
+# sources, so an edit here is undone by the next sync and shows up as a diff
+# against upstream forever after. Everything else, including every test file, is
+# linted.
+extend-exclude = [
+    # Third-party MLX/Swift engines, MIT, tracked as upstream checkouts
+    # (VincentGourbin/flux-2-swift-mlx, a fork of mzbac/zimage.swift).
+    "engines",
+    # A byte-preserved snapshot of the working Krea2 Red Mix ComfyUI/MLX
+    # checkout — see its README; it exists to be diffed against the runtime.
+    "packages/comfyui-mobile/preserved-workflows",
+    # Reviewed snapshots synced from the Shared Brain and the pinned clueso-ai
+    # commit by scripts/sync_shared_skills.py. See skills/README.md.
+    "skills/shared",
+    "skills/vendor",
+    # TIGER's model code (JusperLee/TIGER, MIT), vendored with a short, listed
+    # set of changes — see the pack's NOTICE.md. Named file by file rather than
+    # by directory: the __init__ and base_model beside them are ours and linted.
+    "packages/comfyui-custom-nodes/hivemind-audio-split/tiger/tiger.py",
+    "packages/comfyui-custom-nodes/hivemind-audio-split/tiger/tiger_dnr.py",
+    "packages/comfyui-custom-nodes/hivemind-audio-split/tiger/layers/activations.py",
+    "packages/comfyui-custom-nodes/hivemind-audio-split/tiger/layers/normalizations.py",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# WebUI 需要先把项目根目录加入 sys.path，随后才能导入 app 包。
+# The donor's Streamlit shell and HTTP entry point now live under
+# archive/moneyprinterturbo/ (see its README); both still bootstrap sys.path
+# before importing `app`, which is what E402 flags.
+"archive/moneyprinterturbo/webui/Main.py" = ["E402"]
+"archive/moneyprinterturbo/main.py" = ["E402"]
+# The media gateway's config module imports the vendored workflow builders
+# that sit beside app.py (krea2_identity_workflow, strength_hunt,
+# klein_character_sheet, smart_mask, ltx_director_*, video_restore,
+# cloud_restore) and re-exports them: every other module in the package reaches
+# them as `config.<name>`, so one file says where they come from and a test has
+# one seam to patch. Pyflakes sees imports that this file itself never calls.
+"packages/media-gateway/gateway/config.py" = ["F401"]
+
+[tool.coverage.run]
+# 统计分支覆盖率可以识别“代码行执行了，但条件的另一条分支从未验证”的情况，
+# 比只统计行覆盖率更适合作为 CI 质量基线。
+# The Streamlit WebUI, the donor HTTP entry point and the donor's agent skill
+# were measured here while they were product entry points. They are archived
+# under archive/moneyprinterturbo/ and no shipped process starts them, so
+# measuring them would let the gate describe code nobody runs.
+branch = true
+# The product's own code is the point of the gate: src/hivemind_content_studio
+# is the control plane every studio talks to, and src/auto_clipper the clipping
+# engine. Without them the percentage below described the embedded
+# MoneyPrinterTurbo faceless engine and could stay green while the app it gates
+# had no coverage at all.
+source = [
+    "app",
+    "cli",
+    "src/hivemind_content_studio",
+    "src/auto_clipper",
+]
+
+[tool.coverage.report]
+# A ratchet, not a fiction. Measured at 74.41% branch coverage over the full
+# `pytest test` run on 2026-09-03, with src/hivemind_content_studio and
+# src/auto_clipper now inside `source` above; the floor sits two points under
+# that to leave room for the branches that differ between Python versions and
+# between macOS and the Linux runner. Raise it when the measurement rises.
+fail_under = 72
+show_missing = true
+skip_covered = true
+
+[tool.hatch.metadata]
+# PassBook is depended on by git URL (see `project.dependencies`), which
+# hatchling calls a "direct reference" and refuses to build without this flag.
+# Newer hatchlings enforce it on EDITABLE builds too, so a machine that had a
+# working venv kept running until something invalidated it — and then every
+# cold start failed with a build-backend traceback rather than anything that
+# named the dependency. That is what took the studio down on 2026-08-26.
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["app", "src/hivemind_content_studio", "src/auto_clipper"]
 
@@ -61,5 +195,43 @@ packages = ["app", "src/hivemind_content_studio", "src/auto_clipper"]
 # 当前项目以应用运行形态为主，不作为可发布的 Python 包安装。
 package = true
 
+[tool.hivemind.upstream]
+# Sync point for the embedded MoneyPrinterTurbo faceless engine (app/, and the
+# archived shell under archive/moneyprinterturbo/).
+# app.__version__ tracks this, not project.version: version_checker compares it
+# against harry0703/MoneyPrinterTurbo's latest GitHub release so the WebUI tells
+# us when upstream has moved. Bump both together when merging upstream again.
+moneyprinterturbo_version = "1.3.4"
+moneyprinterturbo_commit = "1f9f19c"
+merged_at = "2026-08-16"
+
 [tool.pytest.ini_options]
 testpaths = ["test"]
+# packages/media-gateway/vendor carries a vendored MLX port with its own test
+# tree that imports `mlx` and `rife_mlx`; collecting it turns
+# `pytest packages/media-gateway` into five import errors before a single
+# gateway test runs. The rest of the list is pytest's own default.
+norecursedirs = [
+    "vendor",
+    "node_modules",
+    "*.egg",
+    ".*",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "venv",
+    "{arch}",
+]
+# `slow` is registered here rather than in test/studio/conftest.py because
+# test/services carries a slow test too and is collected first — the studio
+# conftest has not been loaded yet when that module is imported, and an
+# unregistered mark warns.
+markers = [
+    "slow: test spawns a real subprocess, socket server or ffmpeg run and is measured in seconds rather than milliseconds (`-m 'not slow'` skips them)",
+]
+# A per-test deadline (pytest-timeout). Thirteen studio test files open real
+# sockets and threads; the slowest test on record takes 11.5s, so 120s only ever
+# fires on a hang — and then it names the test instead of letting the CI job run
+# out its 30 minutes saying nothing.
+timeout = 120
