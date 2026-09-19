@@ -136,13 +136,20 @@ test('the landing studio starts loading before React does, and its dialogs do no
     // The heavy dialogs and the shipped prompt library are shut on arrival, so
     // they are not part of what the default page downloads.
     const studio = readSource('src/studios/ImageStudio.jsx');
+    // Pin the PROPERTY, not the identity: what matters is that the binding is a
+    // dynamic import, not which helper wraps React.lazy. These four moved to the
+    // local `lazyChunk()` (React.lazy plus a reload on a chunk a rebuild
+    // renamed) in 33aac26, and this assertion went red in that same commit
+    // against a tree where every dialog was still perfectly code-split. A
+    // static import still fails, which is the thing being guarded.
+    const lazyBinding = (name) => new RegExp(`const ${name}Lazy = lazy(?:Chunk)?\\(\\(\\) => import\\(`);
     for (const name of ['PromptHelperDialog', 'CivitaiPostDialog', 'CivitaiDownloadDialog']) {
         assert.doesNotMatch(studio, new RegExp(`^import \\{ ${name} \\}`, 'm'), `${name} is imported eagerly`);
-        assert.match(studio, new RegExp(`const ${name}Lazy = lazy\\(`), `${name} has no lazy binding`);
+        assert.match(studio, lazyBinding(name), `${name} has no lazy binding`);
     }
     const composer = readSource('src/studios/image/ImageComposer.jsx');
     assert.doesNotMatch(composer, /^import \{ SavedPromptsMenu \}/m);
-    assert.match(composer, /const SavedPromptsMenuLazy = lazy\(/);
+    assert.match(composer, lazyBinding('SavedPromptsMenu'));
 });
 
 test('no studio poll keeps running while the window is hidden', () => {

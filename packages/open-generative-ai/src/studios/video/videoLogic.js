@@ -6,7 +6,7 @@
 // src/lib (videoPreferences, videoTasks, modelTiers, genProgress) and are
 // re-exported here, so the node:test suite can exercise them and studio code
 // still has one import site.
-import { servedByAnyMachine } from '../../lib/rentedMachines.js';
+import { machineServesModel, servedByAnyMachine } from '../../lib/rentedMachines.js';
 import {
   t2vModels,
   i2vModels,
@@ -523,6 +523,14 @@ export function buildInitialSetup(c) {
     // Sampling-steps override for workflows with a steps slot (H3 refinement).
     // null = the workflow's registered default.
     steps: null,
+    // Frame interpolation multiplier for workflows with an interpolate slot
+    // (H3). null/1 = off, which is also the registered default; the fight
+    // preset is what normally turns it on.
+    interpolate: null,
+    // The fight preset's snapshot while it is armed, null otherwise. It holds
+    // what each dial the preset moved was set to, so disarming restores rather
+    // than guesses (lib/h3CombatPreset.js).
+    combat: null,
     videoUrl: null,
     videoName: null,
     prompt: '',
@@ -593,7 +601,13 @@ export function deriveExtendBanner(s, c, { ingredientsFallbackLabel = '' } = {})
     return 'Extending previous Seedance 2.0 generation; add an optional prompt to guide the continuation';
   }
   if (ingredientsFallbackLabel) {
-    return `No ingredients attached — this renders from the prompt alone, on ${ingredientsFallbackLabel}. Add reference views to render it through the IC-LoRA instead.`;
+    // "from the prompt alone" is only true with nothing else attached. A start
+    // frame does not keep the run on the IC graph — that needs a SHEET — so it
+    // rides along to the plain lane, and the banner has to say which inputs are
+    // actually in this render.
+    return s.imageUrl
+      ? `No reference views attached — this renders from your start frame and prompt, on ${ingredientsFallbackLabel}. Add reference views to render it through the IC-LoRA instead.`
+      : `No ingredients attached — this renders from the prompt alone, on ${ingredientsFallbackLabel}. Add reference views to render it through the IC-LoRA instead.`;
   }
   return '';
 }
@@ -787,8 +801,19 @@ export function selectRegularModelTransition(prev, m, c) {
 export function withServedModel(setup, machines, c) {
   if (!machines?.length) return setup;
   if (servedByAnyMachine(machines, { id: setup.modelId, name: setup.modelName })) return setup;
-  const served = [...(c.hivemindI2V || []), ...(c.allT2V || [])]
-    .find((m) => servedByAnyMachine(machines, m));
+  const pool = [...(c.hivemindI2V || []), ...(c.allT2V || [])];
+  // The lane the machine was RENTED FOR wins over the first one that happens to
+  // match. A box on the eros tier carries the official H3 weights as well — it
+  // is deliberately a superset — so "first served" is a coin toss, and it kept
+  // landing on plain MiniMax H3 for someone who had rented the Eros Max box.
+  // The tier names its own lane (gpu_rentals.TIERS[...].primary_workflow) and
+  // it rides on the machine, because the tier is the only thing that knows why
+  // the machine was bought.
+  const wanted = new Set((machines || [])
+    .map((machine) => String(machine?.primary_workflow || '').trim())
+    .filter(Boolean));
+  const served = pool.find((m) => wanted.has(String(m.workflowId || '')) && servedByAnyMachine(machines, m))
+    || pool.find((m) => servedByAnyMachine(machines, m));
   return served ? selectHivemindWorkflowTransition(setup, served, c) : setup;
 }
 
@@ -898,10 +923,19 @@ export function applyRestoredPreferences(prev, preferences, c) {
   if (['light', 'strong', ''].includes(preferences.denoise)) s.denoise = preferences.denoise;
   if (typeof preferences.seed === 'number') s.seed = preferences.seed;
   if (typeof preferences.steps === 'number') s.steps = preferences.steps;
+  // Interpolation and the fight preset's snapshot are settings like the rest,
+  // so they survive a reload. Both are re-gated at send time on the selected
+  // model, so a value saved on H3 is inert on a graph with no interpolate slot.
+  if (typeof preferences.interpolate === 'number') s.interpolate = preferences.interpolate;
+  if (preferences.combat) s.combat = preferences.combat;
   // A speed/quality preference, so it survives a reload. The send path re-gates
   // it on the selected model's capability, so a value left on from MiniMax H3
   // is inert on a workflow that cannot compile the two-pass graph.
   s.fastHighRes = preferences.fastHighRes === true;
+  // The h3.c dials. Restored only when something was actually saved: an absent
+  // bag is what makes the Effort slider open on whatever THIS Mac recommends,
+  // which a tab moved between machines depends on.
+  if (preferences.h3Native && typeof preferences.h3Native === 'object') s.h3Native = { ...preferences.h3Native };
   // The rest of what the Advanced / Task panels hold. Every one of these was
   // normalized by normalizeVideoPreferences and WRITTEN by the studio, but
   // never read back — so Spectrum off, the Detailer, negative guidance, Task =
@@ -1051,3 +1085,28 @@ export function restylePresetIdInPrompt(prompt) {
 export const supportsSpectrum = (model) => Boolean(model?.supportsSpectrum);
 export const supportsFastHighRes = (model) => Boolean(model?.supportsFastHighRes);
 export const supportsQualitySteps = (model) => Boolean(model?.supportsQualitySteps);
+export const supportsInterpolation = (model) => Boolean(model?.supportsInterpolation);
+
+
+/**
+ * Which machine the dependency preflight should ASK about this lane.
+ *
+ * The tab's pin when it has one. When it has none — which is every tab that
+ * has made no choice — falling through to the default lane asks THIS MAC about
+ * a workflow only a rented box can run, and it answers, correctly, that the
+ * card is wrong and the files are missing. The tab is then bounced off a lane
+ * the attached machine was already serving in full.
+ *
+ * Measured 2026-09-14: `minimax-h3-eros` reported hardware.supported=false with
+ * 6 missing items on lane `default`, and supported with nothing missing on the
+ * rental lane, in the same second. Generation itself always would have landed
+ * on the box — it routes on the graph's own model names — so this was the
+ * preflight refusing a run that would have worked.
+ */
+export function preflightRunOn(setup, machines, model) {
+  const pinned = String(setup?.rentedMachineId || '');
+  if (pinned) return pinned;
+  if (!model) return '';
+  const serving = (machines || []).find((machine) => machineServesModel(machine, model));
+  return serving ? String(serving.rental_id || '') : '';
+}

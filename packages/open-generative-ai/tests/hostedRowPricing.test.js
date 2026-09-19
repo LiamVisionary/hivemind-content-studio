@@ -106,12 +106,17 @@ test('a model that can only edit says so before the prompt is written, not after
     assert.match(image, /generateBlocked = rentedBlocked \|\| localBlocked \|\| offlineBlocked \|\| referenceMissing/);
     assert.match(image, /localBlockedReason \|\| referenceMissingReason \|\| t\('image\.generateTooltip'\)/);
 
-    // And the badge is a requirement rather than an extra when it is the only
-    // thing the row does. "Edit" beside a name reads as "can also edit".
+    // And the badge is a requirement rather than an extra when a picture is the
+    // only thing the row can start from. "Edit" beside a name reads as "can
+    // also edit". The badge is the row's TYPE now — one per row, derived from
+    // every endpoint it has — so a model that also answers a bare prompt can
+    // never wear this one.
     const picker = read('components', 'RunOnPicker.jsx');
-    assert.match(picker, /const CAPABILITY_ONLY_LABELS = \{/);
-    assert.match(picker, /'image-to-image': 'Needs a picture'/);
-    assert.match(picker, /target\.capabilities\.length === 1 && CAPABILITY_ONLY_LABELS\[capability\]/);
+    assert.match(picker, /\[STARTS_FROM_IMAGE\]: t\('runOn\.badgeNeedsPicture'\)/);
+    assert.match(picker, /const needs = target\.startsFrom === STARTS_FROM_IMAGE/);
+    assert.match(read('lib', 'i18n.js'), /'runOn\.badgeNeedsPicture': 'Needs a picture',/);
+    assert.match(targets, /if \(fromText && fromImage\) return STARTS_FROM_EITHER;/);
+    assert.match(targets, /if \(fromImage\) return STARTS_FROM_IMAGE;/);
 });
 
 // Liam, on the first cut of that fix — a label on the left, an Upload button

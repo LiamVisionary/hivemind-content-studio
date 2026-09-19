@@ -1,6 +1,6 @@
 // The recipe line — the settings people actually change, written as a sentence.
 //
-//   Make [1 image] at [9:16] in [photoreal] with [2 references] on [this Mac · Z-Image] .  Advanced →
+//   Make [1 image] at [9:16] in [photoreal] with [2 references] on [this Mac · Z-Image] .
 //
 // It replaces the composer's chip toolbar. A row of eight labelled chips reads
 // as a toolbar and stops reading as a prompt bar; the same eight values written
@@ -11,11 +11,17 @@
 // never highlight. A token whose value is the ACTIVE, non-default choice draws
 // in honey — that is how "photoreal" and "continuing shot 03" stand out without
 // a second colour or a badge.
-import { Icon } from '../../ui/icons.jsx';
+//
+// The sentence carries no door to Advanced. That was an "Advanced →" link after
+// the full stop; it is now a tab on the frame's left edge (StudioFrame's
+// DrawerTab), the edge the drawer slides out of.
 import { Menu } from '../../ui/Menu.jsx';
 import { cx } from '../../ui/kit.jsx';
 
-const TOKEN_BASE = 'inline-flex max-w-[220px] items-center rounded-md px-2 py-[3px] text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-45';
+// Every setting in the sentence is one of these, so their height IS the
+// studio's settings ergonomics. 12.5px of text with py-[3px] is a 25px target
+// — fine for a cursor, a coin-toss for a thumb landing between two of them.
+const TOKEN_BASE = 'inline-flex max-w-[220px] items-center rounded-md px-2 py-[3px] text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-45 touch:min-h-[44px] touch:px-2.5';
 const TOKEN_TONE = {
   neutral: 'bg-white/[0.06] text-ink1 hover:bg-white/[0.11]',
   honey: 'bg-honey/[0.15] text-honey hover:bg-honey/25',
@@ -47,13 +53,12 @@ export function RecipeToken({ value, tone = 'neutral', active = false, className
  *    { key, value, tone?, onClick, title? }           a token that fires directly
  *    { key, node }                                    an existing control, rendered in token position
  *   Falsy entries are skipped, so a caller can inline conditionals.
- * @param {bool} advancedOpen
- * @param {func} onToggleAdvanced
- * @param {string} advancedLabel
  */
-export function RecipeLine({ parts = [], advancedOpen = false, onToggleAdvanced, advancedLabel = 'Advanced' }) {
+export function RecipeLine({ parts = [] }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[12.5px] leading-[2] text-inkSoft">
+    // The rows are 1.75px apart under a cursor. Under a thumb they get real air,
+    // or the sentence becomes a minefield of adjacent controls.
+    <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[12.5px] leading-[2] text-inkSoft touch:gap-x-1.5 touch:gap-y-1.5">
       {parts.filter(Boolean).map((part, index) => {
         const key = part.key || `${part.text || 'part'}-${index}`;
         if (part.node) return <span key={key} className="inline-flex items-center">{part.node}</span>;
@@ -112,22 +117,6 @@ export function RecipeLine({ parts = [], advancedOpen = false, onToggleAdvanced,
           </span>
         );
       })}
-
-      {onToggleAdvanced ? (
-        <button
-          type="button"
-          onClick={onToggleAdvanced}
-          aria-expanded={advancedOpen}
-          title="Every remaining control for this studio"
-          className={cx(
-            'ml-2.5 inline-flex items-center gap-[5px] rounded-md px-1.5 py-0.5 text-[12.5px] transition-colors',
-            advancedOpen ? 'text-honey' : 'text-inkSoft hover:text-ink1',
-          )}
-        >
-          {advancedLabel}
-          <Icon name={advancedOpen ? 'arrowLeft' : 'arrowRight'} size={13} />
-        </button>
-      ) : null}
     </div>
   );
 }

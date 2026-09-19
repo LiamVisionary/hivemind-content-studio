@@ -72,7 +72,10 @@
   --r-xl: 20px;
   --r-full: 9999px;
 
-  /* Control metrics */
+  /* Control metrics. See the touch override at the foot of this file: these
+     three are the app's whole control ladder, so raising them there is what
+     makes every chip, field and row a thumb can hit on a phone. */
+  --ctl-xs: 24px;
   --ctl-sm: 28px;
   --ctl-md: 36px;
   --ctl-lg: 44px;
@@ -96,4 +99,23 @@
   /* Shell metrics */
   --sidebar-w: 216px;
   --sidebar-w-rail: 64px;
+}
+
+/* ---- Touch ----
+   The same controls at the size a thumb can actually land on. A 36px chip is a
+   comfortable mouse target and a miss on a phone; 44px is Apple's floor and the
+   one the composer's own press is drawn at.
+
+   Gated on `pointer: coarse` — the PRIMARY input — rather than on a width, so a
+   narrow desktop window keeps the tight metrics it was designed with and an
+   iPad in landscape gets the roomy ones. There are 24 h-ctl-* call sites and
+   they are the app's whole control ladder, so this one block is worth more than
+   any number of per-component breakpoints. */
+@media (pointer: coarse) {
+  :root {
+    --ctl-xs: 32px;
+    --ctl-sm: 34px;
+    --ctl-md: 44px;
+    --ctl-lg: 48px;
+  }
 }

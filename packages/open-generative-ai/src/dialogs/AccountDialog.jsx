@@ -49,7 +49,10 @@ function Row({ id, icon, label, open, onToggle, children }) {
         type="button"
         onClick={() => onToggle(open ? '' : id)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2.5 py-2.5 text-left text-ink2 transition-colors hover:text-ink1"
+        // Each row is one of the sheet's alternatives and the only way into it,
+        // so under a thumb the line grows to a full target rather than staying
+        // the 35px a 13px label and 2.5 of padding come to.
+        className="flex w-full touch:min-h-[44px] items-center gap-2.5 py-2.5 text-left text-ink2 transition-colors hover:text-ink1"
       >
         <Icon name={icon} size={14} className="shrink-0 text-ink3" />
         <span className="flex-1 truncate text-[13px]">{label}</span>

@@ -208,7 +208,12 @@ function AnchoredPanel({ anchor, width, label, onClose, children }) {
                 // flash in the corner.
                 visibility: pos ? 'visible' : 'hidden',
             }}
-            className="hive-scale-in z-[110] flex max-h-[min(520px,80vh)] flex-col overflow-hidden rounded-lg border border-line1 bg-bg1 shadow-overlay"
+            // `dvh`: `vh` on iOS is the large viewport, so 80vh is 80% of a
+            // screen the URL bar is covering the bottom of — and this panel is
+            // placed against `window.innerHeight` below, which is the small one.
+            // The two disagreeing is a panel measured taller than the box it was
+            // told to fit in, which lands it half off the bottom edge.
+            className="hive-scale-in z-[110] flex max-h-[min(520px,80dvh)] flex-col overflow-hidden rounded-lg border border-line1 bg-bg1 shadow-overlay"
         >
             {children}
         </div>,
@@ -778,7 +783,9 @@ export function PromptHelperDialog({
             // the pill naming one model and the answer coming from another.
             disabled={busyAnywhere}
             className={cx(
-                'inline-flex h-7 min-w-0 items-center gap-1.5 rounded-full border px-2.5 transition-colors',
+                // The only door to the model picker, so it joins the control
+                // ladder under a thumb rather than staying a 24.5px pill.
+                'inline-flex h-7 touch:h-ctl-md min-w-0 items-center gap-1.5 rounded-full border px-2.5 touch:px-3 transition-colors',
                 pickerOpen ? 'border-honey/50 bg-honey-tint' : 'border-line1 bg-bg2 hover:border-line2 hover:bg-bg3',
             )}
         >
@@ -1124,7 +1131,12 @@ export function PromptHelperDialog({
                                 onKeyDown={(event) => {
                                     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); accept(); }
                                 }}
-                                className="!min-h-[180px] !rounded-none !border-0 !bg-transparent !px-3.5 !py-3.5 !text-[13px] !leading-[1.8] hover:!border-0 focus:!border-0"
+                                // `!text-[13px]` outranks base.css's coarse-pointer
+                                // 16px floor, and this is the app's longest
+                                // typing surface — editing a prompt here on a
+                                // phone zoomed the whole dialog in and left it
+                                // there. The touch size has to be `!` to win.
+                                className="!min-h-[180px] !rounded-none !border-0 !bg-transparent !px-3.5 !py-3.5 !text-[13px] touch:!text-[16px] !leading-[1.8] hover:!border-0 focus:!border-0"
                             />
                         </div>
                     </div>

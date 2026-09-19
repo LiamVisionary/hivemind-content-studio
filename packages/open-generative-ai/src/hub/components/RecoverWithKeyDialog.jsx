@@ -96,7 +96,10 @@ export function RecoverWithKeyDialog({ open, onClose, items }) {
                     disabled={phase === 'scanning' || phase === 'resealing'}
                 />
                 <div className="flex items-center gap-2 text-xs">
-                    <input ref={fileRef} type="file" accept=".pem,.key,text/plain" className="hidden" onChange={onFile} />
+                    {/* No accept filter. iOS Files hands a key back under whatever
+                        type it guessed, and an extension list greys out the one file
+                        the person came here with. onFile validates the CONTENTS. */}
+                    <input ref={fileRef} type="file" className="hidden" onChange={onFile} />
                     <Button variant="ghost" size="sm" onClick={() => fileRef.current?.click()}>{t('recover.chooseFile')}</Button>
                     {fingerprint ? <span className="font-mono text-ink3">{t('recover.fingerprint')} {fingerprint}</span> : null}
                 </div>

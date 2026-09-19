@@ -42,7 +42,7 @@ export function TelemetryPanel() {
           <LoadingState label={t('app.loading')} />
         ) : (
           <div className="flex flex-col gap-6">
-            <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
+            <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(150px,1fr))]">
               <Tile label={t('activity.attempts')} value={summary.attempts || 0} detail={tf('activity.running', summary.running || 0)} />
               <Tile label={t('activity.successRate')} value={`${rate.toFixed(rate % 1 ? 1 : 0)}%`} detail={tf('activity.failed', summary.failed || 0)} />
               <Tile label={t('activity.averageTime')} value={formatTelemetryDuration(summary.average_duration_ms)} detail={tf('activity.p95', formatTelemetryDuration(summary.p95_duration_ms))} />

@@ -14,9 +14,9 @@ import { UGC_DEFAULT_FORMAT, UGC_FORMATS, ugcClock, ugcFormat, ugcTimeline, ugcV
 import { ChipButton, Menu } from '../ui/Menu.jsx';
 import { cx } from '../ui/kit.jsx';
 
-function CastRow({ label, children }) {
+function CastRow({ label, children, className = '' }) {
   return (
-    <div className="flex gap-2 text-[11px] leading-relaxed">
+    <div className={cx('flex gap-2 text-[11px] leading-relaxed', className)}>
       <span className="w-12 shrink-0 pt-px text-[10px] font-semibold uppercase tracking-[0.06em] text-ink3">
         {label}
       </span>
@@ -87,7 +87,7 @@ export function UgcMenu({
           {/* Switching format keeps whatever lines are already written: one
               script, many versions, is what a batch is. */}
           {video ? (
-            <div className="flex flex-wrap gap-1">
+            <div className="flex flex-wrap gap-1 touch:gap-2">
               {UGC_FORMATS.map((entry) => (
                 <button
                   key={entry.id}
@@ -96,12 +96,18 @@ export function UgcMenu({
                   onClick={() => { onArm?.(armed ? cast.index : nextIndex, entry.id); close(); }}
                   className={cx(
                     'rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors',
+                    // 24px chips, and the sentence that tells the five formats
+                    // apart was a `title` — neither of which survives a thumb.
+                    'touch:px-2.5 touch:py-2 touch:text-left',
                     entry.id === format.id && armed
                       ? 'border-honey/50 bg-honey-tint text-honey'
                       : 'border-line1 bg-bg1 text-ink2 hover:border-line2 hover:text-ink1',
                   )}
                 >
                   {entry.label}
+                  <span className="hidden text-[10px] font-normal leading-snug text-ink3 touch:block">
+                    {entry.hint}
+                  </span>
                 </button>
               ))}
             </div>
@@ -115,7 +121,7 @@ export function UgcMenu({
             </div>
             <CastRow label="Who">{subject || cast.person}</CastRow>
             {video && format.id !== UGC_DEFAULT_FORMAT ? (
-              <CastRow label="Format">{format.hint}</CastRow>
+              <CastRow label="Format" className="touch:hidden">{format.hint}</CastRow>
             ) : null}
             <CastRow label="Where">
               {cast.room.place}, {cast.room.light}. {cast.room.detail}
@@ -156,7 +162,7 @@ export function UgcMenu({
             <button
               type="button"
               onClick={() => { onArm?.(nextIndex, format.id); close(); }}
-              className="rounded-sm border border-honey/50 bg-honey-tint px-2 py-1 text-[11px] font-semibold text-honey transition-colors hover:border-honey"
+              className="rounded-sm border border-honey/50 bg-honey-tint px-2 py-1 text-[11px] font-semibold text-honey transition-colors hover:border-honey touch:min-h-[35px] touch:px-3"
             >
               {armed
                 ? 'Deal a new cast'
@@ -169,7 +175,7 @@ export function UgcMenu({
                 title="Remove the UGC block from the prompt"
                 className={cx(
                   'rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold',
-                  'text-ink1 transition-colors hover:border-line2',
+                  'text-ink1 transition-colors hover:border-line2 touch:min-h-[35px] touch:px-3',
                 )}
               >
                 Turn off

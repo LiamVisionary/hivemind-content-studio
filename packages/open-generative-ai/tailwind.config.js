@@ -1,5 +1,13 @@
+const plugin = require('tailwindcss/plugin');
+
 /** @type {import('tailwindcss').Config} */
 module.exports = {
+    // `hover:` compiles to a bare `:hover`, and a touch browser leaves :hover
+    // latched on whatever was tapped last until something else is tapped — so
+    // every one of the app's ~520 hover styles stuck to the last thing a finger
+    // touched. This wraps them all in `@media (hover: hover)`, which is what
+    // they always meant.
+    future: { hoverOnlyWhenSupported: true },
     content: [
         "./index.html",
         "./src/**/*.{js,ts,jsx,tsx}",
@@ -56,12 +64,41 @@ module.exports = {
             transitionTimingFunction: {
                 swift: 'cubic-bezier(0.2, 0.9, 0.3, 1)',
             },
+            // Heights AND widths off the same ladder. Icon buttons are square,
+            // and their widths used to be hard-coded px — so every one of them
+            // grew taller on a touch device and stayed the same width, drawn as
+            // a lozenge. One axis is not a ladder.
             height: {
+                'ctl-xs': 'var(--ctl-xs)',
+                'ctl-sm': 'var(--ctl-sm)',
+                'ctl-md': 'var(--ctl-md)',
+                'ctl-lg': 'var(--ctl-lg)',
+            },
+            width: {
+                'ctl-xs': 'var(--ctl-xs)',
                 'ctl-sm': 'var(--ctl-sm)',
                 'ctl-md': 'var(--ctl-md)',
                 'ctl-lg': 'var(--ctl-lg)',
             },
         },
     },
-    plugins: [],
+    plugins: [
+        // A variant that asks about the INPUT rather than the width. `touch:`
+        // applies wherever the primary pointer is a finger — a phone, a tablet,
+        // a touch laptop — and never on a trackpad Mac whose window merely
+        // happens to be narrow. Width tells you how much room there is; this
+        // tells you how precise the pointer is, and a hit target is a question
+        // about the pointer.
+        //
+        // A PLUGIN VARIANT, not a `theme.extend.screens` entry, and that is not
+        // a style choice: a `raw` screen in the screens map cannot be inverted
+        // into a max-width, and Tailwind responds by generating NO `max-*`
+        // variants at all. Measured — with `touch` in `screens`, `max-sm:hidden`
+        // compiled to nothing, silently, and a control "hidden on a phone"
+        // stayed on screen. As a plugin the screens map is untouched and both
+        // `touch:` and `max-sm:` work.
+        plugin(({ addVariant }) => {
+            addVariant('touch', '@media (pointer: coarse)');
+        }),
+    ],
 }

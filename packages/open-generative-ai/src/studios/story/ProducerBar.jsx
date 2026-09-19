@@ -39,7 +39,7 @@ export function ProducerBar({
     // writing and what is this" while the stage below it scrolls. Aligned to
     // the same 820px column the stages use, so it reads as part of the page
     // rather than as chrome bolted above it.
-    <div className="sticky top-0 z-30 mx-auto mb-1 mt-3 flex w-full max-w-[820px] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-[14px] bg-bg0/85 px-4 py-2 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.07)] backdrop-blur-xl">
+    <div className="sticky top-0 z-30 mx-auto mb-1 mt-3 flex w-[calc(100%-2rem)] max-w-[820px] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-[14px] bg-bg0/85 px-4 py-2 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.07)] backdrop-blur-xl sm:w-full">
       <span className="min-w-0 truncate text-[12px] text-ink3">{summary}</span>
 
       {busy ? (

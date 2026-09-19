@@ -76,13 +76,39 @@ function Preview({ item, playing, className = '' }) {
   );
 }
 
+// A finger never hovers, so on a phone every video result on this page was a
+// still that nothing could start — the card's own press is taken by the
+// lightbox. Read once, like kit.jsx's pointer test: a pointer does not change
+// under a running page.
+const COARSE_POINTER = typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches;
+
+// Hover's coarse-pointer stand-in: the card plays while it is on screen and
+// stops when it scrolls off, so a page of results is never twenty videos
+// decoding at once the way "play everything" would make it.
+function useVisiblePlayback(enabled) {
+  const ref = useRef(null);
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!enabled || !el || typeof IntersectionObserver !== 'function') return undefined;
+    const observer = new IntersectionObserver(([entry]) => setInView(entry.isIntersecting), { threshold: 0.5 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [enabled]);
+  return [ref, inView];
+}
+
 function ResultCard({ item, onOpen, nsfwAllowed }) {
   const [hover, setHover] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const blurred = Boolean(item.nsfw) && nsfwAllowed && !revealed;
   const credits = inspoCredits(item);
+  const [cardRef, inView] = useVisiblePlayback(COARSE_POINTER && item.kind === 'video');
   return (
     <div
+      ref={cardRef}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       className="flex min-w-0 flex-col overflow-hidden rounded-md border border-line1 bg-bg2 transition-colors duration-150 hover:border-line2"
@@ -96,7 +122,7 @@ function ResultCard({ item, onOpen, nsfwAllowed }) {
         {item.previewUrl ? (
           <Preview
             item={item}
-            playing={hover && !blurred}
+            playing={(hover || inView) && !blurred}
             className={cx('h-full w-full object-cover transition-[filter] duration-200', blurred && 'scale-105 blur-lg')}
           />
         ) : (
@@ -196,9 +222,9 @@ function DetailDialog({ item, onClose }) {
                stay consistent, and Chrome names a native blob download after
                the URL's UUID. Saving somebody else's Civitai clip is not a
                thing this surface offers anyway — "Open on Civitai" is. */
-            <video src={item.previewUrl} controls controlsList="nodownload" muted loop autoPlay playsInline className="max-h-[46vh] w-auto max-w-full" />
+            <video src={item.previewUrl} controls controlsList="nodownload" muted loop autoPlay playsInline className="max-h-[46dvh] w-auto max-w-full" />
           ) : (
-            <img src={item.previewUrl} alt="" className="max-h-[46vh] w-auto max-w-full object-contain" />
+            <img src={item.previewUrl} alt="" className="max-h-[46dvh] w-auto max-w-full object-contain" />
           )}
         </div>
 
@@ -363,9 +389,9 @@ export function InspoView({ active }) {
         <>
           <form
             onSubmit={(event) => { event.preventDefault(); void search(filters); }}
-            className="flex flex-wrap items-center gap-2 border-b border-line1 px-4 py-2.5 md:px-5"
+            className="flex flex-col gap-2 border-b border-line1 px-4 py-2.5 sm:flex-row sm:flex-wrap sm:items-center md:px-5"
           >
-            <div className="relative min-w-[180px] flex-1">
+            <div className="relative w-full min-w-0 sm:w-auto sm:min-w-[180px] sm:flex-1">
               <Icon name="search" size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3" />
               <TextInput
                 value={filters.username || ''}
@@ -375,24 +401,30 @@ export function InspoView({ active }) {
                 className="pl-8"
               />
             </div>
-            <NativeSelect aria-label={t('discover.baseModel')} value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-[170px]">
-              <option value="">{t('assets.anyBaseModel')}</option>
-              {baseModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
-            </NativeSelect>
-            <NativeSelect aria-label={t('discover.sort')} value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-[160px]">
-              {INSPO_SORTS.map((value) => <option key={value} value={value}>{value}</option>)}
-            </NativeSelect>
-            <NativeSelect aria-label={t('discover.period')} value={filters.period} onChange={(event) => setFilter('period', event.target.value)} className="w-[120px]">
-              {INSPO_PERIODS.map((value) => <option key={value} value={value}>{value === 'AllTime' ? t('discover.allTime') : value}</option>)}
-            </NativeSelect>
-            <NativeSelect aria-label={t('discover.rating')} value={filters.nsfw} onChange={(event) => setFilter('nsfw', event.target.value)} className="w-[150px]">
-              <option value="false">{t('discover.safeOnly')}</option>
-              <option value="true">{t('discover.includeNsfw')}</option>
-              <option value="">{t('discover.anyRating')}</option>
-            </NativeSelect>
-            <Button type="submit" variant="primary" icon="search" loading={state.status === 'loading'}>
-              {t('discover.search')}
-            </Button>
+            {/* Fixed widths that wrap leave a ragged stack of half-rows on a
+                phone. Two even columns below sm; the desktop row is untouched
+                because `display: contents` hands the children straight back to
+                the form's flex. */}
+            <div className="grid grid-cols-2 gap-2 sm:contents">
+              <NativeSelect aria-label={t('discover.baseModel')} value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-full sm:w-[170px]">
+                <option value="">{t('assets.anyBaseModel')}</option>
+                {baseModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+              </NativeSelect>
+              <NativeSelect aria-label={t('discover.sort')} value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-full sm:w-[160px]">
+                {INSPO_SORTS.map((value) => <option key={value} value={value}>{value}</option>)}
+              </NativeSelect>
+              <NativeSelect aria-label={t('discover.period')} value={filters.period} onChange={(event) => setFilter('period', event.target.value)} className="w-full sm:w-[120px]">
+                {INSPO_PERIODS.map((value) => <option key={value} value={value}>{value === 'AllTime' ? t('discover.allTime') : value}</option>)}
+              </NativeSelect>
+              <NativeSelect aria-label={t('discover.rating')} value={filters.nsfw} onChange={(event) => setFilter('nsfw', event.target.value)} className="w-full sm:w-[150px]">
+                <option value="false">{t('discover.safeOnly')}</option>
+                <option value="true">{t('discover.includeNsfw')}</option>
+                <option value="">{t('discover.anyRating')}</option>
+              </NativeSelect>
+              <Button type="submit" variant="primary" icon="search" loading={state.status === 'loading'} className="col-span-2">
+                {t('discover.search')}
+              </Button>
+            </div>
           </form>
 
           <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">

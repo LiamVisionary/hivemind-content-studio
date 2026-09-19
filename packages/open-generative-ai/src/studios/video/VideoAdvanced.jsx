@@ -62,6 +62,7 @@ import { LocalCatalogNotice } from '../LocalCatalogNotice.jsx';
 import { LaneMemoryNotice } from '../LaneMemoryNotice.jsx';
 import { LoraSection } from '../image/LoraSection.jsx';
 import { RunOnPicker } from '../../components/RunOnPicker.jsx';
+import { H3NativePanel } from './H3NativePanel.jsx';
 
 // A sentence that belongs to a DrawerRow rather than to a Field: the paragraph
 // under the Task switch, and the red line naming what a head swap is still
@@ -134,7 +135,24 @@ export function VideoAdvanced({
   spectrumAvailable,
   chainArmed,
   fastHighResAvailable,
+  // Frame interpolation (H3's FrameInterpolate node). Registry-gated like the
+  // two switches above it.
+  interpolationAvailable = false,
+  // Whether the fight preset is holding these controls. It does not disable
+  // them — moving one by hand is allowed, and turning the preset off still
+  // restores what it snapshotted — but a switch somebody else flipped must say
+  // so, or the drawer is presenting the preset's choices as the user's own.
+  combatArmed = false,
   denoiseAvailable,
+  // ---- MiniMax H3 on Apple silicon (h3.c) ------------------------------
+  // `h3Native` is the selected workflow's registry block — null on every other
+  // lane, which is the render condition for the whole bench. `h3Setup` holds
+  // only what this tab CHANGED, so an untouched studio sends nothing and the
+  // gateway resolves the preset from the machine.
+  h3Native = null,
+  h3Setup = null,
+  setH3Setup = null,
+  h3ReferencesAttached = false,
   setNegativePrompt,
   advancedInputs,
   setAdvanced,
@@ -352,9 +370,11 @@ export function VideoAdvanced({
                   className="py-2"
                   hint={arMatchedToFrame ? 'Matched to the starting frame — no cropping' : undefined}
                 >
-                  {/* Six across, and no friendly name under each tile: the
-                      drawer is 320px wide, so "Portrait" would wrap where the
-                      ratio itself does not. Same control, one density tighter. */}
+                  {/* Up to six across. Every tile here carries its name
+                      ("Landscape"), and six named tiles do not fit the 320px
+                      drawer, so AspectRatioPicker holds each column to the
+                      widest tile's content and wraps the rest. Same control,
+                      one density tighter. */}
                   <AspectRatioPicker
                     columns={6}
                     options={arOptions}
@@ -510,12 +530,45 @@ export function VideoAdvanced({
             </DrawerSection>
           ) : null}
 
+          {/* ---- EFFORT (MiniMax H3 on Apple silicon) -----------------------
+              Its own sections rather than rows inside SAMPLING, and ABOVE it,
+              because on this lane the Effort ladder is the tuning bench:
+              h3.c's speed comes from doing less work, and every dial behind
+              that slider changes the take. What SAMPLING is left holding for
+              this lane is the seed. Renders nothing on every other workflow —
+              `nativeH3` is the registry block, and only one row has one. */}
+          {h3Native ? (
+            <>
+              <H3NativePanel
+                nativeH3={h3Native}
+                setup={h3Setup}
+                onChange={setH3Setup}
+                referencesAttached={h3ReferencesAttached}
+                active={tabActive}
+              />
+              <DrawerDivider />
+            </>
+          ) : null}
+
           {/* ---- SAMPLING --------------------------------------------------
               The tuning bench that used to live behind the shut "Advanced"
               header. `advancedHint` was that header's summary of what was armed
               down here — it rides on this heading now, because hidden state is
               fine and unsaid state is not. */}
           <DrawerSection label="Sampling" hint={advancedHint}>
+            {/* The fight preset moved some of these. Said once, at the top of
+                the section it changed, because a person who opens this drawer
+                and finds Spectrum off and the size at Max is owed the reason —
+                and the way back, which is the chip, not this panel. Nothing
+                here is locked: a dial moved by hand simply wins until the
+                preset is turned off, which still restores what it snapshotted. */}
+            {combatArmed ? (
+              <p className="px-1 pb-1.5 text-[11px] leading-relaxed text-ink3">
+                The fight preset is holding some of these. Turn it off from the
+                <span className="text-ink2"> Fight </span>
+                chip under More in the composer to put them back as they were.
+              </p>
+            ) : null}
             {/* Lite/Standard for models that ship both a distilled and a
                 full-step build. Only rendered when both are installed, and
                 switching swaps the SELECTED MODEL — not a setting — so exactly
@@ -621,6 +674,19 @@ export function VideoAdvanced({
                   checked={s.setup.fastHighRes === true}
                   onChange={(next) => commit({ ...s.setup, fastHighRes: next })}
                   label="Fast high-res"
+                />
+              </Field>
+            ) : null}
+            {interpolationAvailable ? (
+              <Field
+                label="Motion smoothing"
+                className="py-2"
+                hint="Interpolates between the rendered frames and doubles the frame rate, for almost no extra render time. Fast motion is where H3 jitters, so this is worth most on action and nothing at all on a static shot."
+              >
+                <Toggle
+                  checked={Number(s.setup.interpolate) >= 2}
+                  onChange={(next) => commit({ ...s.setup, interpolate: next ? 2 : null })}
+                  label="Motion smoothing"
                 />
               </Field>
             ) : null}

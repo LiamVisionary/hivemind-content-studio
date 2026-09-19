@@ -1,6 +1,7 @@
 // Shared React hooks bridging the immutable src/lib logic layer.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCivitaiDownloads, subscribeCivitaiDownloads } from '../lib/civitaiDownloadStore.js';
+import { getRentalBuild, refreshRentalBuild, subscribeRentalBuild } from '../lib/rentalBuild.js';
 import { getRentalLoras, refreshRentalLoras, subscribeRentalLoras } from '../lib/rentalLoras.js';
 import {
   mediaSealFailure, peekResolvedMediaSrc, releaseResolvedMedia, resolveMediaSrc,
@@ -152,6 +153,50 @@ export function useMediaPoster(url, { kind = 'video' } = {}) {
   return { poster, resolved, pending };
 }
 
+// Does this clip actually carry sound?
+//
+// Asked of the FILE, not of the model that made it. The stage's "Sound" badge
+// used to be `/minimax/.test(model)` with a comment that other lanes were
+// silent — true when it was written, and wrong since LTX 2.3, which denoises a
+// joint audio+video latent and scores every clip it renders. A name test also
+// could not tell a graph that wires the audio out from one that samples it and
+// drops it, which is a real failure this codebase has already had.
+//
+// mediabunny answers it exactly, off the same probe clipPrep uses for the
+// last-frame grab. Resolved URLs are blob: handles held by the media cache, so
+// the fetch is a memory read rather than a second decrypt, and the answer is
+// cached per URL for the session.
+const clipAudioCache = new Map();
+
+export function useClipHasAudio(url) {
+  const resolved = useMediaSrc(url);
+  const [hasAudio, setHasAudio] = useState(() => clipAudioCache.get(resolved) ?? false);
+  useEffect(() => {
+    if (!resolved) { setHasAudio(false); return undefined; }
+    const cached = clipAudioCache.get(resolved);
+    if (cached !== undefined) { setHasAudio(cached); return undefined; }
+    let alive = true;
+    // Unknown until it is known: a badge that appears a beat late is honest,
+    // one that guesses is not.
+    setHasAudio(false);
+    (async () => {
+      try {
+        const blob = await (await fetch(resolved)).blob();
+        const { probeClip } = await import('../lib/clipPrep.js');
+        const probed = await probeClip(blob);
+        clipAudioCache.set(resolved, Boolean(probed?.hasAudio));
+      } catch {
+        // An unreadable clip is not a silent one; say nothing rather than
+        // stamping "Sound" or promising silence.
+        clipAudioCache.set(resolved, false);
+      }
+      if (alive) setHasAudio(clipAudioCache.get(resolved) || false);
+    })();
+    return () => { alive = false; };
+  }, [resolved]);
+  return hasAudio;
+}
+
 // Owner session probe (topbar lock button). Absent/failed = standalone mode.
 export function useOwnerSession() {
   const [unlocked, setUnlocked] = useState(false);
@@ -192,6 +237,23 @@ export function useRentalLoras(active = true) {
     return unsubscribe;
   }, [active]);
   return registry;
+}
+
+// The project rental build (packages/gpu-rentals/rental-build.json) — which
+// LoRAs and which checkpoint each rental tier's next machines are provisioned
+// with. `editable` is the whole gate: it is true only where this install is a
+// git checkout the control API can write that file into, which is what makes
+// the page a development surface without a ?dev=1 URL nobody can type into a
+// packaged window.
+export function useRentalBuild(active = true) {
+  const [build, setBuild] = useState(getRentalBuild);
+  useEffect(() => {
+    if (!active) return undefined;
+    const unsubscribe = subscribeRentalBuild(setBuild);
+    void refreshRentalBuild();
+    return unsubscribe;
+  }, [active]);
+  return build;
 }
 
 // An owner-sealed named library (LoRA groups, saved prompts). Reads the vault

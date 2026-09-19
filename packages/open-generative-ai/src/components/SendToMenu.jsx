@@ -100,7 +100,9 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
                 aria-checked={entry.tabId === target.tabId}
                 onClick={() => { setTabId(entry.tabId); setSource(''); }}
                 className={cx(
-                  'rounded px-2 py-1 text-[11px] transition-colors',
+                  // Which tab the work lands in is half of what this menu
+                  // decides, so under a thumb the chips stop being 24px.
+                  'rounded px-2 py-1 text-[11px] transition-colors touch:px-2.5 touch:py-2 touch:text-[12px]',
                   entry.tabId === target.tabId
                     ? 'bg-honey-tint text-honey'
                     : 'text-ink3 hover:bg-bg3 hover:text-ink2',

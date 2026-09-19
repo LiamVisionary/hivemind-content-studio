@@ -60,6 +60,18 @@ const dragIsDroppable = (dataTransfer) => {
     || types.includes('Files');
 };
 
+// A reorder pressed from the card goes through the SAME onDrop contract the
+// drag path uses: timelineDropPlan resolves the index pair either way, so the
+// pointer path and the drag path can never disagree about where a shot lands.
+// `getData` is the only thing the studio's handler reads off a DataTransfer for
+// a segment move, and HTML5 drag-and-drop is inert on a touch screen — without
+// this, reordering a scene on a phone is impossible rather than merely fiddly.
+const segmentTransfer = (id) => ({
+  types: [TIMELINE_SEGMENT_DRAG_TYPE],
+  getData: (type) => (type === TIMELINE_SEGMENT_DRAG_TYPE ? JSON.stringify({ id }) : ''),
+  files: [],
+});
+
 // The honey bar that opens in a gap while a drop would insert there.
 function InsertBar({ active }) {
   return (
@@ -142,6 +154,16 @@ export function TimelineStrip({
     },
   });
 
+  // One place over, in either direction. 'before' the card on the left and
+  // 'after' the card on the right both land the shot exactly one slot away once
+  // the plan has subtracted the moving card's own removal.
+  const moveSegment = (seg, index, delta) => {
+    const list = segments || [];
+    const to = index + delta;
+    if (to < 0 || to >= list.length) return;
+    onDrop({ id: list[to].id, region: delta < 0 ? 'before' : 'after' }, segmentTransfer(seg.id));
+  };
+
   const combinedSeconds = Number(combined?.seconds) || 0;
   const filled = (segments || []).filter((seg) => seg.url).length;
 
@@ -221,12 +243,15 @@ export function TimelineStrip({
         </p>
       ) : null}
 
-      <div className="flex items-stretch gap-1 overflow-x-auto pb-1 pt-0.5">
+      {/* A flick that reaches the end of the strip stops there rather than
+          handing the rest of the swipe to whatever scrolls behind it. */}
+      <div className="flex items-stretch gap-1 overflow-x-auto overscroll-x-contain pb-1 pt-0.5">
         {(segments || []).map((seg, index) => {
           const selected = selectedId === seg.id && !showCombined;
           const pending = pendingSegmentId && pendingSegmentId === seg.id;
           const replaceHover = overMatches(seg.id, 'on') && seg.url;
           const fillHover = overMatches(seg.id, 'on') && !seg.url;
+          const promptText = seg.url ? (promptFor?.(seg) || '') : '';
           return (
             // eslint-disable-next-line react/no-array-index-key
             <div key={seg.id} className="flex items-stretch">
@@ -234,7 +259,9 @@ export function TimelineStrip({
               <div
                 role="button"
                 tabIndex={0}
-                aria-label={`Segment ${index + 1}`}
+                // The prompt is in the NAME, not only in a tooltip a screen
+                // reader and a thumb both miss — the shape VideoRail's cards use.
+                aria-label={promptText ? `Shot ${index + 1} — ${promptText}` : `Shot ${index + 1} — empty`}
                 aria-current={selected ? 'true' : undefined}
                 title={seg.url
                   ? (promptFor?.(seg) || `Segment ${index + 1}`)
@@ -256,68 +283,121 @@ export function TimelineStrip({
                   fillHover && 'border-honey bg-honey-tint/30',
                 )}
               >
-                {seg.url ? (
-                  <SegmentThumb url={seg.url} />
-                ) : (
-                  <div className="grid aspect-video w-full place-items-center bg-bg1/60">
-                    <div className="px-2 py-1 text-center">
-                      {pending
-                        ? <Spinner size={14} className="mx-auto text-honey" />
-                        : <Icon name="clapper" size={14} className="mx-auto text-ink3" />}
-                      <div className="mt-1 text-[10px] font-semibold text-ink2">
-                        {`Shot ${index + 1}`}
-                      </div>
-                      <div className="text-[10px] text-ink3">
-                        {pending ? 'rendering…' : 'to generate'}
+                {/* The picture and everything drawn OVER it. Its own box, so
+                    the caption below is not something the state strips cover. */}
+                <div className="relative">
+                  {seg.url ? (
+                    <SegmentThumb url={seg.url} />
+                  ) : (
+                    <div className="grid aspect-video w-full place-items-center bg-bg1/60">
+                      <div className="px-2 py-1 text-center">
+                        {pending
+                          ? <Spinner size={14} className="mx-auto text-honey" />
+                          : <Icon name="clapper" size={14} className="mx-auto text-ink3" />}
+                        <div className="mt-1 text-[10px] font-semibold text-ink2">
+                          {`Shot ${index + 1}`}
+                        </div>
+                        <div className="text-[10px] text-ink3">
+                          {pending ? 'rendering…' : 'to generate'}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
-                {seg.url ? (
-                  <div className="pointer-events-none absolute left-1.5 top-1.5 rounded bg-bg0/80 px-1.5 py-0.5 font-mono text-[10px] text-ink1">
-                    {index + 1}
-                  </div>
-                ) : null}
-                {replaceHover ? (
-                  <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-bg0/85 px-1.5 py-0.5 text-center text-[10px] font-semibold text-honey">
-                    Replace this clip
-                  </div>
-                ) : null}
-                {seg.excluded ? (
-                  <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-bg0/80 px-1.5 py-0.5 text-center text-[10px] text-ink2">
-                    Dropped from the cut
-                  </div>
-                ) : null}
-                {/* Visible on keyboard focus too, not only under a pointer. */}
-                <div className="absolute right-1 top-1 flex gap-0.5 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100">
-                  {seg.url && onExportSegment ? (
-                    <IconButton
-                      icon="download"
-                      size="xs"
-                      label="Export this shot"
-                      className="border border-line1 bg-bg0/85 hover:border-line2"
-                      onClick={(event) => { event.stopPropagation(); onExportSegment(seg); }}
-                    />
+                  )}
+                  {seg.url ? (
+                    <div className="pointer-events-none absolute left-1.5 top-1.5 rounded bg-bg0/80 px-1.5 py-0.5 font-mono text-[10px] text-ink1">
+                      {index + 1}
+                    </div>
                   ) : null}
-                  {seg.url && onToggleExcluded ? (
-                    <IconButton
-                      icon={seg.excluded ? 'plus' : 'minus'}
-                      size="xs"
-                      label={seg.excluded
-                        ? 'Put back in the cut'
-                        : 'Drop from the cut — the clip is kept'}
-                      className="border border-line1 bg-bg0/85 hover:border-line2"
-                      onClick={(event) => { event.stopPropagation(); onToggleExcluded(seg); }}
-                    />
+                  {replaceHover ? (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-bg0/85 px-1.5 py-0.5 text-center text-[10px] font-semibold text-honey">
+                      Replace this clip
+                    </div>
                   ) : null}
-                  <IconButton
-                    icon="x"
-                    size="xs"
-                    label="Remove this segment"
-                    className="border border-line1 bg-bg0/85 hover:border-danger/40"
-                    onClick={(event) => { event.stopPropagation(); onRemove(seg); }}
-                  />
+                  {seg.excluded ? (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-bg0/80 px-1.5 py-0.5 text-center text-[10px] text-ink2">
+                      Dropped from the cut
+                    </div>
+                  ) : null}
+                  {/* Reorder, for a pointer that cannot drag. Two nudges on the
+                      card's own edges — the direction each one moves the shot is
+                      the direction it points, and the middle of the card stays
+                      the select target because the row itself takes no presses.
+
+                      Along the BOTTOM edge, not the middle: the action cluster
+                      below sits at top-1, the two are siblings with no z-index,
+                      and on a short card the later one wins — so a thumb aiming
+                      at "move this shot left" landed on Remove, which is the one
+                      press here that throws work away. */}
+                  <div className="pointer-events-none absolute inset-x-0 bottom-1 hidden items-center justify-between px-0.5 touch:flex">
+                    <IconButton
+                      icon="chevronLeft"
+                      size="xs"
+                      label={`Move shot ${index + 1} earlier`}
+                      disabled={index === 0}
+                      // disabled:pointer-events-none with the opacity: a button
+                      // that is invisible but still present eats the tap — a
+                      // browser fires no click on a disabled control and lets
+                      // none bubble — so the first card's left corner and the
+                      // last card's right corner would simply not select.
+                      className="pointer-events-auto rounded-full border border-line1 bg-bg0/85 disabled:pointer-events-none disabled:opacity-0"
+                      onClick={(event) => { event.stopPropagation(); moveSegment(seg, index, -1); }}
+                    />
+                    <IconButton
+                      icon="chevronRight"
+                      size="xs"
+                      label={`Move shot ${index + 1} later`}
+                      disabled={index === (segments || []).length - 1}
+                      className="pointer-events-auto rounded-full border border-line1 bg-bg0/85 disabled:pointer-events-none disabled:opacity-0"
+                      onClick={(event) => { event.stopPropagation(); moveSegment(seg, index, 1); }}
+                    />
+                  </div>
+                  {/* Visible on keyboard focus too, not only under a pointer —
+                      and at rest under a thumb, which has no hover to reveal it
+                      with and no tooltip to be told the buttons are there. */}
+                  <div className="absolute right-1 top-1 flex gap-0.5 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100 touch:opacity-100">
+                    {seg.url && onExportSegment ? (
+                      <IconButton
+                        icon="download"
+                        size="xs"
+                        label="Export this shot"
+                        className="border border-line1 bg-bg0/85 hover:border-line2"
+                        onClick={(event) => { event.stopPropagation(); onExportSegment(seg); }}
+                      />
+                    ) : null}
+                    {seg.url && onToggleExcluded ? (
+                      <IconButton
+                        icon={seg.excluded ? 'plus' : 'minus'}
+                        size="xs"
+                        label={seg.excluded
+                          ? 'Put back in the cut'
+                          : 'Drop from the cut — the clip is kept'}
+                        className="border border-line1 bg-bg0/85 hover:border-line2"
+                        onClick={(event) => { event.stopPropagation(); onToggleExcluded(seg); }}
+                      />
+                    ) : null}
+                    <IconButton
+                      icon="x"
+                      size="xs"
+                      label="Remove this segment"
+                      className="border border-line1 bg-bg0/85 hover:border-danger/40"
+                      onClick={(event) => { event.stopPropagation(); onRemove(seg); }}
+                    />
+                  </div>
                 </div>
+                {/* What the shot SAYS. It was in `title` alone, which a thumb
+                    never opens, so on a touch screen the only way to tell two
+                    shots apart was to play them. A cursor still has the tooltip,
+                    and the desktop strip keeps its height. */}
+                {promptText ? (
+                  // The wrapper carries the visibility and the <p> the clamp:
+                  // line-clamp sets `display` itself, so the two cannot share an
+                  // element without one of them deciding the other's fate.
+                  <div className="hidden touch:block">
+                    <p className="line-clamp-2 px-1.5 py-1 text-[11px] leading-snug text-ink2">
+                      {promptText}
+                    </p>
+                  </div>
+                ) : null}
               </div>
               <InsertBar active={overMatches(seg.id, 'after')} />
             </div>

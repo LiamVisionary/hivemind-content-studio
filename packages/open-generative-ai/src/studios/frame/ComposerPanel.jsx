@@ -10,7 +10,7 @@
 //
 // The panel chrome itself — radius, blur, shadow, the drop ring — belongs to
 // StudioFrame's ComposerFloat, which measures this to keep the stage clear.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { t } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Spinner } from '../../ui/kit.jsx';
@@ -33,9 +33,18 @@ export function ComposerPanel({ above = null, prompt, recipe = null, tools = nul
       {above}
       {prompt}
       {recipe}
-      <div className="flex items-center gap-2">
+      {/* The action row wraps, and below sm the press cluster takes a line of
+          its own at full width.
+
+          It used to be one unwrapping row of `shrink-0` children. At 375px the
+          tool chips and a 102px Generate pill cannot share 197px, and nothing
+          in the row was allowed to give — so the press did not wrap, it simply
+          drew OUTSIDE the panel it belongs to, 111px past its right edge. A
+          full-width press on its own line is also the shape a phone wants:
+          one thumb-sized bar along the bottom of the composer. */}
+      <div className="flex flex-wrap items-center gap-2">
         {tools}
-        <div className="ml-auto flex min-w-0 items-center gap-[15px]">
+        <div className="ml-auto flex w-full min-w-0 flex-wrap items-center justify-between gap-2 sm:w-auto sm:flex-nowrap sm:justify-end sm:gap-[15px]">
           {meta}
           {secondary}
           {primary}
@@ -45,7 +54,65 @@ export function ComposerPanel({ above = null, prompt, recipe = null, tools = nul
   );
 }
 
-/** A round 32px door in the composer's action row. The design gives these no
+/**
+ * The waiting list, above the prompt that made it.
+ *
+ * A press made while a render is out does not bounce off a greyed-out button —
+ * it joins this. Each row is one press, holding the settings it was made with,
+ * and each row can leave: a queue you can only add to is a trap. Cancel, on the
+ * stage, belongs to the render actually running; these are presses that have
+ * not started, so they are removed rather than cancelled.
+ *
+ * @param {array}    items     [{ id, place, label, detail }], oldest first
+ * @param {function} onRemove  (id) => void
+ * @param {function} onClear   drop them all
+ */
+export function ComposerQueue({ items = [], onRemove, onClear }) {
+  if (!items.length) return null;
+  return (
+    <div className="rounded-xl border border-line2 bg-white/[0.03] px-3 py-2">
+      <div className="mb-1.5 flex items-center gap-2">
+        <span className="font-mono text-[10.5px] uppercase tracking-wide text-inkSoft">
+          {items.length === 1 ? 'Next up' : `Next up · ${items.length}`}
+        </span>
+        {items.length > 1 && onClear ? (
+          <button
+            type="button"
+            onClick={onClear}
+            className="ml-auto text-[11px] text-inkSoft transition-colors hover:text-ink1"
+          >
+            Clear
+          </button>
+        ) : null}
+      </div>
+      <ul className="flex flex-col gap-1">
+        {items.map((item) => (
+          <li key={item.id} className="flex items-center gap-2">
+            <span className="w-4 shrink-0 font-mono text-[11px] text-ink3">{item.place}</span>
+            <span className="min-w-0 flex-1 truncate text-[12px] text-ink2" title={item.label || ''}>
+              {item.label || 'Untitled shot'}
+            </span>
+            {item.detail ? (
+              <span className="shrink-0 font-mono text-[10.5px] text-inkSoft">{item.detail}</span>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => onRemove?.(item.id)}
+              title="Remove from the queue"
+              aria-label="Remove from the queue"
+              className="relative grid h-6 w-6 shrink-0 place-items-center rounded-full text-ink3 transition-colors hover:bg-white/10 hover:text-ink1 touch:before:absolute touch:before:-inset-[10px] touch:before:content-['']"
+            >
+              <Icon name="x" size={13} />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** A round door in the composer's action row — 28px from sm up, 36px on touch.
+ *  The design gives these no
  *  label — the tooltip and aria-label carry the meaning, so every one of them
  *  MUST be given a `label`. */
 export function ComposerTool({ icon, label, active = false, disabled = false, badge = null, onClick, ...rest }) {
@@ -58,7 +125,11 @@ export function ComposerTool({ icon, label, active = false, disabled = false, ba
       aria-label={label}
       {...rest}
       className={cx(
-        'relative grid h-8 w-8 shrink-0 place-items-center rounded-full transition-colors',
+        // 44px under a thumb, 28px under a mouse. This is the door that holds
+        // More — Start fresh, the camera rig, the prompt library — and the row
+        // wraps now, so the extra 16px costs the layout nothing.
+        // Literal px: the rem scale on this 14px root would make h-11 38.5.
+        'relative grid h-8 w-8 shrink-0 place-items-center rounded-full transition-colors touch:h-[44px] touch:w-[44px]',
         active ? 'bg-honey/[0.15] text-honey' : 'bg-white/5 text-inkSoft hover:bg-white/10 hover:text-ink1',
         disabled && 'cursor-not-allowed opacity-40 hover:bg-white/5 hover:text-inkSoft',
       )}
@@ -83,7 +154,11 @@ export function ComposerPrimary({ children, loading = false, disabled = false, o
       title={title}
       {...rest}
       className={cx(
-        'inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full px-6 text-[13.5px] font-semibold transition-colors',
+        // grow, not w-full: it shares its line with Cancel when there is one.
+        // h-[44px] rather than h-11 — this page's root is 14px, so the rem
+        // scale would have made that 38.5 and missed the touch target.
+        'inline-flex h-[44px] grow shrink-0 items-center justify-center gap-2 rounded-full px-6 text-[13.5px] font-semibold transition-colors',
+        'sm:h-10 sm:grow-0',
         'bg-honey text-on-honey hover:bg-honey-bright',
         (disabled || loading) && 'cursor-not-allowed opacity-50 hover:bg-honey',
       )}
@@ -102,7 +177,7 @@ export function ComposerSecondary({ children, onClick, title, ...rest }) {
       onClick={onClick}
       title={title}
       {...rest}
-      className="inline-flex h-10 shrink-0 items-center rounded-full border border-danger/40 px-4 text-[13px] font-medium text-danger transition-colors hover:bg-danger/10"
+      className="inline-flex h-[44px] shrink-0 items-center justify-center rounded-full border border-danger/40 px-4 text-[13px] font-medium text-danger transition-colors hover:bg-danger/10 sm:h-10"
     >
       {children}
     </button>
@@ -130,7 +205,8 @@ export function ComposerAlternate({ children, loading = false, disabled = false,
       title={title}
       {...rest}
       className={cx(
-        'inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full border px-5 text-[13px] font-medium transition-colors',
+        'inline-flex h-[44px] grow shrink-0 items-center justify-center gap-2 rounded-full border px-5 text-[13px] font-medium transition-colors',
+        'sm:h-10 sm:grow-0',
         'border-line2 text-ink1 hover:bg-white/[0.06]',
         (disabled || loading) && 'cursor-not-allowed opacity-50 hover:bg-transparent',
       )}
@@ -146,7 +222,11 @@ export function ComposerMeta({ children, title, tone = 'soft' }) {
   return (
     <span
       title={title}
-      className={cx('hidden truncate font-mono text-[11px] sm:inline', tone === 'ok' ? 'text-ok' : 'text-inkSoft')}
+      // Shown at every width. This is the only place the run's cost is printed —
+      // ImageComposer and VideoComposerBar both build "~14s · $0.42" and pass it
+      // through here and nowhere else — and `hidden sm:inline` meant a phone
+      // pressed a paid Generate with no idea what it would take or cost.
+      className={cx('truncate font-mono text-[11px]', tone === 'ok' ? 'text-ok' : 'text-inkSoft')}
     >
       {children}
     </span>
@@ -171,7 +251,16 @@ export function ComposerPromptAction({ icon, label, active = false, disabled = f
       aria-label={label}
       {...rest}
       className={cx(
-        'grid h-[22px] w-[22px] shrink-0 place-items-center rounded-full transition-colors',
+        // The painted circle stays 22px — it sits ON the text and a bigger disc
+        // would cover the first line — but under a thumb it gets a 36px hit
+        // area around it, drawn by a pseudo-element so nothing reflows.
+        //
+        // 36 and not 44: the badge beside it grows the same way, and two 44px
+        // targets 26px apart overlap by the better part of a finger, so the
+        // boundary between "improve this" and "throw it away" would land
+        // wherever the two boxes happened to stack.
+        'relative grid h-[22px] w-[22px] shrink-0 place-items-center rounded-full transition-colors',
+        "touch:before:absolute touch:before:-inset-[7px] touch:before:content-['']",
         active ? 'bg-honey/[0.15] text-honey' : 'bg-white/5 text-ink3 hover:bg-white/10 hover:text-ink1',
         disabled && 'cursor-not-allowed opacity-40 hover:bg-white/5 hover:text-ink3',
       )}
@@ -204,25 +293,36 @@ export function ClearPromptBadge({ armed = false, onPress, ...rest }) {
       aria-label={armed ? t('composer.clearPromptConfirm') : t('composer.clearPrompt')}
       data-clear-armed={armed ? 'true' : 'false'}
       {...rest}
-      className={cx(
-        'relative flex h-[22px] shrink-0 items-center justify-center overflow-hidden rounded-full',
-        'transition-[width,background-color,color] duration-200 ease-out',
-        armed ? 'w-[52px] bg-honey/[0.15] text-honey hover:bg-honey/25' : 'w-[22px] bg-white/5 text-ink3 hover:bg-white/10 hover:text-ink1',
-      )}
+      // The pill itself moved into the span below, and the button became its
+      // padding. That is not tidying: the morph needs `overflow-hidden` to clip
+      // the word while the width animates, and overflow-hidden clips a
+      // PSEUDO-ELEMENT too — so the hit box this used to grow with
+      // `after:-inset-[11px]` was clipped back to the 22px circle and did
+      // nothing at all. Padding on an unclipped parent, cancelled by an equal
+      // negative margin, gives the finger 36px and the layout the same 22.
+      className={cx('relative flex shrink-0 items-center justify-center', 'touch:m-[-7px] touch:p-[7px]')}
     >
       <span
-        aria-hidden={armed ? 'true' : undefined}
-        className={cx('absolute inset-0 grid place-items-center transition-opacity duration-150', armed ? 'opacity-0' : 'opacity-100')}
-      >
-        <Icon name="x" size={12} />
-      </span>
-      <span
         className={cx(
-          'whitespace-nowrap px-2.5 text-[11px] font-semibold leading-none transition-opacity duration-150',
-          armed ? 'opacity-100 delay-100' : 'opacity-0',
+          'relative flex h-[22px] items-center justify-center overflow-hidden rounded-full',
+          'transition-[width,background-color,color] duration-200 ease-out',
+          armed ? 'w-[52px] bg-honey/[0.15] text-honey hover:bg-honey/25' : 'w-[22px] bg-white/5 text-ink3 hover:bg-white/10 hover:text-ink1',
         )}
       >
-        {t('common.clear')}
+        <span
+          aria-hidden={armed ? 'true' : undefined}
+          className={cx('absolute inset-0 grid place-items-center transition-opacity duration-150', armed ? 'opacity-0' : 'opacity-100')}
+        >
+          <Icon name="x" size={12} />
+        </span>
+        <span
+          className={cx(
+            'whitespace-nowrap px-2.5 text-[11px] font-semibold leading-none transition-opacity duration-150',
+            armed ? 'opacity-100 delay-100' : 'opacity-0',
+          )}
+        >
+          {t('common.clear')}
+        </span>
       </span>
     </button>
   );
@@ -248,8 +348,39 @@ export function ClearPromptBadge({ armed = false, onPress, ...rest }) {
  *  is armed so the pill has room to grow without the text having to reserve it,
  *  and because a corner that is asking a question should not also be a toolbar.
  */
+/** Set a textarea's height to the height of what is in it, up to its own
+ *  max-height. `height: auto` first — scrollHeight is measured against the
+ *  CURRENT box, so without the reset the box can only ever grow. */
+function autosize(node) {
+  if (!node) return;
+  node.style.height = 'auto';
+  node.style.height = `${node.scrollHeight}px`;
+}
+
 export function ComposerPrompt({ inputRef, value, onChange, onKeyDown, placeholder, disabled = false, onClear = null, corner = null }) {
   const clearable = Boolean(onClear) && !disabled && Boolean(String(value || '').trim());
+  // The box grows with what is in it. A `rows={1}` textarea does not — it stays
+  // one line and scrolls — and the panel around it is measured into
+  // --frame-composer-h on the assumption that it does, which is how a four-line
+  // prompt ended up as one line and a scrollbar. Measured at 375px on an EMPTY
+  // box: 26px tall over 50px of content, so even the placeholder was cut in
+  // half and the composer drew a scrollbar over its own first line.
+  //
+  // `field-sizing: content` is the CSS for this and is not in Safari, which is
+  // the browser that matters most here.
+  const ownRef = useRef(null);
+  const areaRef = inputRef || ownRef;
+  // Width as well as value: the same words need more lines in a narrower panel,
+  // and this panel narrows every time Advanced pushes it. The observer is the
+  // secondary trigger — the value effect below is what carries typing.
+  useLayoutEffect(() => {
+    const node = areaRef.current;
+    if (!node || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => autosize(node));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [areaRef]);
+  useLayoutEffect(() => { autosize(areaRef.current); }, [areaRef, value, placeholder, disabled]);
   const [armed, setArmed] = useState(false);
   const timer = useRef(null);
   const disarm = () => { clearTimeout(timer.current); timer.current = null; setArmed(false); };
@@ -271,7 +402,7 @@ export function ComposerPrompt({ inputRef, value, onChange, onKeyDown, placehold
   return (
     <div className="relative">
       <textarea
-        ref={inputRef}
+        ref={areaRef}
         rows={1}
         value={value}
         onChange={onChange}
@@ -287,11 +418,13 @@ export function ComposerPrompt({ inputRef, value, onChange, onKeyDown, placehold
           // and the armed pill is 52. It covers both faces — 48 for the pair,
           // 52 for the pill with the helper collapsed — so the text never
           // reflows mid-question.
-          clearable ? 'pr-[56px]' : corner && !disabled ? 'pr-[30px]' : null,
+          // …and a little more under a thumb, where the cluster carries a gap
+          // between its two doors so their hit boxes do not sit on each other.
+          clearable ? 'pr-[56px] touch:pr-[62px]' : corner && !disabled ? 'pr-[30px] touch:pr-[34px]' : null,
         )}
       />
       {(corner && !disabled) || clearable ? (
-        <div className="absolute right-0 top-[3px] flex items-center justify-end">
+        <div className="absolute right-0 top-[3px] flex items-center justify-end touch:gap-1.5">
           {corner && !disabled ? (
             <span
               className={cx(

@@ -135,6 +135,7 @@ function OutputLightbox({ entry, onClose }) {
   const src = useMediaSrc(entry.media_url);
   const sealFailure = useMediaSealFailure(entry.media_url);
   const title = outputKindLabel(entry);
+  const kind = outputMediaKind(entry);
   if (sealFailure) {
     return (
       <Lightbox title={title} onClose={onClose}>
@@ -142,7 +143,7 @@ function OutputLightbox({ entry, onClose }) {
       </Lightbox>
     );
   }
-  return <Lightbox src={src} kind="image" title={title} alt={title} onClose={onClose} />;
+  return <Lightbox src={src} kind={kind} title={title} alt={title} onClose={onClose} />;
 }
 
 function HistoryMenu({ items }) {
@@ -157,7 +158,9 @@ function HistoryMenu({ items }) {
           aria-label={t('runs.actions')}
           aria-expanded={open}
           className={cx(
-            'grid h-7 w-7 place-items-center rounded-md transition-colors',
+            // The chip stays 28px under a mouse; under a thumb it is the only
+            // door to Download, Delete and Load-in-Studio, so it grows to 44.
+            'grid h-7 w-7 touch:h-ctl-md touch:w-ctl-md place-items-center rounded-md transition-colors',
             open ? 'bg-bg3 text-ink1' : 'text-ink3 hover:bg-bg2 hover:text-ink1',
           )}
         >
@@ -179,20 +182,35 @@ function HistoryMenu({ items }) {
   );
 }
 
+// What an output IS, in one place. The index is not pictures-and-videos: the
+// gateway seals and indexes audio through the same pipeline (media.py's
+// OUTPUT_MEDIA_EXTS carries .mp3/.wav/.flac, and canvas_history stamps the type
+// from the filename), so a track made in the Music studio arrives here as
+// `audio/mpeg`. Classified as an image it was an <img> pointed at an MP3 —
+// a grey "Could not load" tile labelled Image, opening an empty lightbox.
+export function outputMediaKind(entry) {
+  const type = String(entry?.media_type || '');
+  if (type.startsWith('video/')) return 'video';
+  if (type.startsWith('audio/')) return 'audio';
+  return 'image';
+}
+
+const KIND_LABELS = { video: 'Video', audio: 'Audio', image: 'Image' };
+const KIND_FALLBACK_NAMES = { video: 'video', audio: 'track', image: 'image' };
+
 // "Video · minimax-h3" / "Image · z-image-turbo": what it is and what made it.
 // The index holds Image/Video-studio and cloud outputs as well as Canvas ones,
 // so "Canvas output" on every card was wrong for most of them.
 function outputKindLabel(entry) {
-  const isVideo = entry.media_type?.startsWith('video/');
-  const kind = isVideo ? 'Video' : 'Image';
+  const kind = KIND_LABELS[outputMediaKind(entry)];
   const model = entry.models?.[0];
   return model ? `${kind} · ${model}` : kind;
 }
 
 const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
-  const isVideo = entry.media_type?.startsWith('video/');
+  const kind = outputMediaKind(entry);
   const downloadName = mediaDownloadName(
-    entry.models?.[0], entry.history_id, entry.file_format, { fallback: isVideo ? 'video' : 'image' },
+    entry.models?.[0], entry.history_id, entry.file_format, { fallback: KIND_FALLBACK_NAMES[kind] },
   );
   // Registered during render, not in an effect: child effects run BEFORE the
   // parent's, so MediaThumb/CanvasVideo would already have decrypted and cached an
@@ -232,8 +250,24 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
         />
       </div>
       <div className="aspect-square">
-        {isVideo ? (
+        {kind === 'video' ? (
           <CanvasVideo url={entry.media_url} />
+        ) : kind === 'audio' ? (
+          // A track has no thumbnail to decrypt, and decrypting one per card to
+          // find that out would pull a few megabytes of audio through the vault
+          // for every row on screen. The tile is the door: it opens the same
+          // preview the pictures use, and that one carries the player.
+          <button
+            type="button"
+            onClick={() => onPreview(entry)}
+            aria-label={t('history.openPreview')}
+            className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-bg3 text-ink3 transition-colors hover:bg-bg2 hover:text-ink1"
+          >
+            <span className="grid h-9 w-9 place-items-center rounded-full bg-bg1/70 text-honey">
+              <Icon name="music" size={16} />
+            </span>
+            <b className="text-[11px] font-semibold">{t('history.playTrack')}</b>
+          </button>
         ) : (
           <button
             type="button"
@@ -284,7 +318,7 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
           onClick={() => setPromptFavorite(entry.prompt_id, !entry.favorite)}
           aria-label={entry.favorite ? t('history.removeFavorite') : t('history.addFavorite')}
           aria-pressed={entry.favorite}
-          className={cx('grid h-7 w-7 shrink-0 place-items-center rounded-md transition-colors', entry.favorite ? 'text-honey' : 'text-ink3 hover:text-ink1')}
+          className={cx('grid h-7 w-7 touch:h-ctl-md touch:w-ctl-md shrink-0 place-items-center rounded-md transition-colors', entry.favorite ? 'text-honey' : 'text-ink3 hover:text-ink1')}
         >
           <Icon name="star" size={16} />
         </button>
@@ -407,7 +441,9 @@ export function HistoryView({ active }) {
             {t('activity.offlinePill')}
           </Pill>
         ) : null}
-        <div className="relative min-w-[200px]">
+        {/* A 200px floor forced the toolbar cluster wider than a phone; below sm
+            the search takes the line it is on and the filters wrap under it. */}
+        <div className="relative min-w-0 flex-1 sm:min-w-[200px] sm:flex-none">
           <Icon name="search" size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink3" />
           <TextInput
             type="search"
@@ -473,7 +509,7 @@ export function HistoryView({ active }) {
                   )}
                 />
                 {recoveryTools ? <RecoverWithKeyDialog open={recoverOpen} onClose={() => setRecoverOpen(false)} items={s.canvasHistory} /> : null}
-                <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
+                <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(160px,1fr))]">
                   {outputs.map((entry) => (
                     <Windowed key={entry.history_id}>
                       <CanvasCard entry={entry} onDelete={confirmDeleteOutput} onPreview={setPreview} />

@@ -4,6 +4,7 @@ import { memo, useEffect, useRef } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { t } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
+import { Menu, MenuItem } from '../../ui/Menu.jsx';
 import { Modal } from '../../ui/Modal.jsx';
 import { ActionButton, IconButton, Pill, cx } from '../../ui/kit.jsx';
 import { UpscaleOverlay } from './UpscaleOverlay.jsx';
@@ -174,6 +175,13 @@ export function ViewerModal({
   }, [hasPrev, hasNext, onPrev, onNext]);
 
   const counter = position && position.total > 1 ? `${position.index + 1} of ${position.total}` : '';
+  // Whether the fold-away row holds anything at all. Every one of these is
+  // lane-gated, so on a cloud-only session the phone footer is the three
+  // permanent doors and no "More" at all.
+  const hasMore = Boolean(
+    onUpscale || onCompare || onExpand || onInpaint || onPointEyes || onMoveSun
+    || onAngles || onSequence || onReuse || onUseAsVideoFrame || onPostToCivitai,
+  );
   return (
     <Modal open onClose={onClose} title={counter ? `Generated image · ${counter}` : 'Generated image'} size="xl"
       footer={
@@ -182,58 +190,129 @@ export function ViewerModal({
               from the left (mr-auto) while everything you can DO stays right. */}
           <ActionButton variant="neutral" icon="chevronLeft" label={t('common.backToSetup')} className="mr-auto" onClick={onBackToSetup} />
           <ActionButton variant="neutral" icon="refresh" label={t('common.regenerate')} onClick={onRegenerate} />
-          {/* Both doors stay put and go dim while one of them is running: the
-              picture is already carrying the working state, and a button that
-              vanished mid-run would move every other action along the row. */}
-          {onUpscale ? (
-            <>
-              <ActionButton variant="neutral" icon="wand" label="Upscale" disabled={Boolean(upscaling)} onClick={() => onUpscale('fast')} />
-              <ActionButton variant="neutral" icon="sparkles" label="Upscale (max quality)" disabled={Boolean(upscaling)} onClick={() => onUpscale('max')} />
-            </>
-          ) : null}
-          {/* Compare appears for entries that pair with a source (upscales,
-              expansions, masked edits, angles, steps). */}
-          {onCompare ? (
-            <ActionButton variant="neutral" icon="eye" label="Compare" onClick={onCompare} />
-          ) : null}
-          {/* Canvas expansion — present only when the local krea2 lane exists. */}
-          {onExpand ? (
-            <ActionButton variant="neutral" icon="external" label="Expand" onClick={onExpand} />
-          ) : null}
-          {/* Masked edit — same gate as Expand (krea2 soft-inpaint lane). */}
-          {onInpaint ? (
-            <ActionButton variant="neutral" icon="layers" label="Edit area" onClick={onInpaint} />
-          ) : null}
-          {/* Direction edits — each on its own Klein LoRA lane. */}
-          {onPointEyes ? (
-            <ActionButton variant="neutral" icon="eye" label={t('direction.eyesTitle')} onClick={onPointEyes} />
-          ) : null}
-          {onMoveSun ? (
-            <ActionButton variant="neutral" icon="sun" label={t('direction.sunTitle')} onClick={onMoveSun} />
-          ) : null}
-          {/* Viewpoint variants + staged edit chains — Klein/Qwen edit lanes. */}
-          {onAngles ? (
-            <ActionButton variant="neutral" icon="camera" label="Angles" onClick={onAngles} />
-          ) : null}
-          {onSequence ? (
-            <ActionButton variant="neutral" icon="stack" label="Steps" onClick={onSequence} />
-          ) : null}
-          {onReuse ? (
-            <ActionButton variant="neutral" icon="plus" label="Reuse as reference image" onClick={onReuse} />
-          ) : null}
-          {onUseAsVideoFrame ? (
-            <ActionButton
-              variant="neutral"
-              icon="video"
-              loading={videoFrameBusy}
-              label={videoFrameBusy ? 'Sending…' : 'Use as video starting frame'}
-              onClick={onUseAsVideoFrame}
-            />
-          ) : null}
-          {/* Sits beside Download because it is the same decision one step
-              further: this one leaves the machine, and unencrypted. */}
-          {onPostToCivitai ? (
-            <ActionButton variant="neutral" icon="upload" label="Post to Civitai" onClick={onPostToCivitai} />
+          {/* Below sm this row is up to fifteen buttons wrapping over four
+              lines above a sliver of the picture. Three keep their place there
+              — go back, run it again, save it — and the lane-gated rest fold
+              into the one menu underneath. Written narrow-first because it has
+              to be: the phone is the base and `sm:contents` is what gives the
+              desktop back the same flex row it has always been, item for item.
+              (A `max-sm:` rule would read more directly and does compile — but
+              only since the `touch` variant moved out of `theme.screens` and
+              into a plugin; a raw screen in the screens map turns Tailwind's
+              whole max-* family off, silently.) */}
+          <span className="hidden sm:contents">
+            {/* Both doors stay put and go dim while one of them is running: the
+                picture is already carrying the working state, and a button that
+                vanished mid-run would move every other action along the row. */}
+            {onUpscale ? (
+              <>
+                <ActionButton variant="neutral" icon="wand" label="Upscale" disabled={Boolean(upscaling)} onClick={() => onUpscale('fast')} />
+                <ActionButton variant="neutral" icon="sparkles" label="Upscale (max quality)" disabled={Boolean(upscaling)} onClick={() => onUpscale('max')} />
+              </>
+            ) : null}
+            {/* Compare appears for entries that pair with a source (upscales,
+                expansions, masked edits, angles, steps). */}
+            {onCompare ? (
+              <ActionButton variant="neutral" icon="eye" label="Compare" onClick={onCompare} />
+            ) : null}
+            {/* Canvas expansion — present only when the local krea2 lane exists. */}
+            {onExpand ? (
+              <ActionButton variant="neutral" icon="external" label="Expand" onClick={onExpand} />
+            ) : null}
+            {/* Masked edit — same gate as Expand (krea2 soft-inpaint lane). */}
+            {onInpaint ? (
+              <ActionButton variant="neutral" icon="layers" label="Edit area" onClick={onInpaint} />
+            ) : null}
+            {/* Direction edits — each on its own Klein LoRA lane. */}
+            {onPointEyes ? (
+              <ActionButton variant="neutral" icon="eye" label={t('direction.eyesTitle')} onClick={onPointEyes} />
+            ) : null}
+            {onMoveSun ? (
+              <ActionButton variant="neutral" icon="sun" label={t('direction.sunTitle')} onClick={onMoveSun} />
+            ) : null}
+            {/* Viewpoint variants + staged edit chains — Klein/Qwen edit lanes. */}
+            {onAngles ? (
+              <ActionButton variant="neutral" icon="camera" label="Angles" onClick={onAngles} />
+            ) : null}
+            {onSequence ? (
+              <ActionButton variant="neutral" icon="stack" label="Steps" onClick={onSequence} />
+            ) : null}
+            {onReuse ? (
+              <ActionButton variant="neutral" icon="plus" label="Reuse as reference image" onClick={onReuse} />
+            ) : null}
+            {onUseAsVideoFrame ? (
+              <ActionButton
+                variant="neutral"
+                icon="video"
+                loading={videoFrameBusy}
+                label={videoFrameBusy ? 'Sending…' : 'Use as video starting frame'}
+                onClick={onUseAsVideoFrame}
+              />
+            ) : null}
+            {/* Sits beside Download because it is the same decision one step
+                further: this one leaves the machine, and unencrypted. */}
+            {onPostToCivitai ? (
+              <ActionButton variant="neutral" icon="upload" label="Post to Civitai" onClick={onPostToCivitai} />
+            ) : null}
+          </span>
+          {/* The same list, same gates, as one menu — MenuItem is already a
+              44px row, so every action that was a wrapped 28px button up there
+              is a thumb's row in here. Opens upward: the footer is at the
+              bottom edge of the sheet. */}
+          {hasMore ? (
+            <span className="contents sm:hidden">
+              <Menu
+                align="end"
+                up
+                width="w-60"
+                trigger={(open, toggle) => (
+                  <ActionButton variant="neutral" icon="more" label="More" onClick={toggle} aria-haspopup="menu" aria-expanded={open} />
+                )}
+              >
+                {(close) => (
+                  <>
+                    {onUpscale ? (
+                      <>
+                        <MenuItem icon="wand" disabled={Boolean(upscaling)} onClick={() => { close(); onUpscale('fast'); }}>Upscale</MenuItem>
+                        <MenuItem icon="sparkles" disabled={Boolean(upscaling)} onClick={() => { close(); onUpscale('max'); }}>Upscale (max quality)</MenuItem>
+                      </>
+                    ) : null}
+                    {onCompare ? (
+                      <MenuItem icon="eye" onClick={() => { close(); onCompare(); }}>Compare</MenuItem>
+                    ) : null}
+                    {onExpand ? (
+                      <MenuItem icon="external" onClick={() => { close(); onExpand(); }}>Expand</MenuItem>
+                    ) : null}
+                    {onInpaint ? (
+                      <MenuItem icon="layers" onClick={() => { close(); onInpaint(); }}>Edit area</MenuItem>
+                    ) : null}
+                    {onPointEyes ? (
+                      <MenuItem icon="eye" onClick={() => { close(); onPointEyes(); }}>{t('direction.eyesTitle')}</MenuItem>
+                    ) : null}
+                    {onMoveSun ? (
+                      <MenuItem icon="sun" onClick={() => { close(); onMoveSun(); }}>{t('direction.sunTitle')}</MenuItem>
+                    ) : null}
+                    {onAngles ? (
+                      <MenuItem icon="camera" onClick={() => { close(); onAngles(); }}>Angles</MenuItem>
+                    ) : null}
+                    {onSequence ? (
+                      <MenuItem icon="stack" onClick={() => { close(); onSequence(); }}>Steps</MenuItem>
+                    ) : null}
+                    {onReuse ? (
+                      <MenuItem icon="plus" onClick={() => { close(); onReuse(); }}>Reuse as reference image</MenuItem>
+                    ) : null}
+                    {onUseAsVideoFrame ? (
+                      <MenuItem icon="video" disabled={videoFrameBusy} onClick={() => { close(); onUseAsVideoFrame(); }}>
+                        {videoFrameBusy ? 'Sending…' : 'Use as video starting frame'}
+                      </MenuItem>
+                    ) : null}
+                    {onPostToCivitai ? (
+                      <MenuItem icon="upload" onClick={() => { close(); onPostToCivitai(); }}>Post to Civitai</MenuItem>
+                    ) : null}
+                  </>
+                )}
+              </Menu>
+            </span>
           ) : null}
           {/* A cloud result the studio could not keep exists on screen and on a
               CDN link that expires — say so beside the button that saves it,
@@ -256,7 +335,7 @@ export function ViewerModal({
             <img
               src={src}
               alt={entry?.prompt || 'Generated image'}
-              className="max-h-[52vh] w-auto max-w-full object-contain"
+              className="max-h-[52dvh] w-auto max-w-full object-contain"
               draggable
               onDragStart={(e) => {
                 try {

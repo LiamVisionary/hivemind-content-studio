@@ -663,6 +663,47 @@ overall_soundscape: The same quiet bright apartment carried over: fabric rustlin
 
 non_diegetic_music: The same bright upbeat pop track continuing without a break — a clean four-on-the-floor kick, a light plucked synth hook and a warm rounded bassline at a fast tempo, with a clear accent roughly every two and a half seconds. Every whip pan, spin and change of look lands exactly on one of those accents, and the last accent hits on the freeze frame.`;
 
+// ---------------------------------------------------------------------------
+// The doll-world pop video. Liam's brief, 2026-09-18: a "barbie style music
+// video" — Y2K-inspired pop, a fashion-doll aesthetic, bright colours, playful
+// fashion, glossy lighting, fast cuts, energetic camera, "plastic-perfect like
+// a fashion doll world", ending on a clean cinematic finish.
+//
+// Written for H3 because H3 renders the MUSIC. A music video whose track is a
+// surprise is a fashion reel with a soundtrack stapled to it, so the brief's
+// "fast cuts and energetic camera movement" lives in non_diegetic_music as an
+// accent roughly every 2.2s, and the seven shot stamps are cut against that
+// interval — the same move SHIRT_STYLING_H3_A makes, where beat-synchronised
+// pacing had nowhere else to live either.
+//
+// The brand the brief names is not in the prompt, for the reason DOLL_WORLD
+// says "an original fashion doll": what is wanted is the LOOK, and asking for a
+// licensed character gets whatever the model remembers of one instead. So the
+// look is described — poreless doll skin, moulding seams, lacquer, chrome,
+// props built at doll-house scale — and those clauses are the load-bearing
+// ones. Without them H3 renders an ordinary pop video in a pink room.
+//
+// Wordless on purpose. A sung line would need a <d> tag and a speaker id, and
+// H3 lip-syncs a SPOKEN line rather than a sung one; the performance is danced
+// and posed, and the track carries the song.
+//
+// "Ends with a clean cinematic finish" is a SHOT here, not an adjective at the
+// end of a paragraph: shot 7 spends the last two seconds slowing the camera out
+// of its arc, landing the confetti and holding one pose. Written any other way
+// the ending renders as more of the middle.
+const DOLL_POP_VIDEO_H3 = `integrated_multimodal_description: A 15.00-second 16:9 pop music video shot inside a life-size fashion-doll world, in the glossy early-2000s music-video look: bubblegum-pink lacquered walls, mirror-chrome trim and pearlescent plastic surfaces with faint moulding seams, oversized props built at doll-house scale, a hard key light with a soft pink fill, bright specular highlights on every surface, a dreamy bloom in the whites, punchy saturated colour, shallow depth of field and mild anamorphic flare. One performer is on screen throughout: a young woman in her early twenties with a doll-perfect finish — poreless glossy skin, large bright eyes with painted-looking lashes, a high platinum-blonde ponytail with a heavy fringe, and a hot-pink wardrobe. Her face, hair, build and proportions stay exactly the same in every shot while only the outfit and the set change around her. The camera never settles: it whips, arcs, ramps and snap-zooms, and every move lands on a musical accent. Changes of outfit are instantaneous single-frame switches carried by a whip pan or a spin, never a dissolve and never undressing. There is no text anywhere in the picture.
+[Shot 1] The camera pushes in fast on a giant plastic doll box standing upright on a mirrored floor; its clear front swings open, she steps out of the moulded tray in a pink mini dress and white knee boots, plants both feet, drops into a hand-on-hip pose and tips her chin up as the key light snaps on hard behind her.
+[Shot 2] At 00:02.200, a whip pan lands on her behind the wheel of an open-top convertible in flat toy-plastic pink, driving through a candy-coloured miniature town of moulded palm trees and pastel houses; her ponytail streams straight back, one hand on the wheel and the other raised into the wind, while the camera arcs around the bonnet and the horizon tilts with it.
+[Shot 3] At 00:04.400, poolside on a turquoise resin pool moulded into thick glossy ripples: she flips oversized white sunglasses down onto her nose in a single frame, throws a look back over her shoulder, and a fast dolly-in ends on a splash frozen in mid-air as clear plastic droplets.
+[Shot 4] At 00:06.600, a mirrored wardrobe room lined with rails of small hanging outfits. She spins on the spot and four complete looks replace one another on consecutive spins — a pastel velour tracksuit with butterfly hair clips, a silver sequinned party dress, a rhinestone denim set, a feather-trimmed coat over a swimsuit — each arriving in a single frame with its accessories snapping into place, while the wardrobe doors clap open and shut around her on the beat.
+[Shot 5] At 00:08.800, a wide symmetrical stage of pink stairs and chrome poles: she dances front and centre with four backing dancers in matching outfits, all locked in tight unison, and the camera drops low and pushes straight down the centre line while confetti falls in stiff plastic flakes.
+[Shot 6] At 00:11.000, the camera snap-zooms between details without cutting — glossed lips, a heart-shaped pendant swinging on its chain, a plastic flip phone closing, boots striking the floor in step — then ramps back out into a wide shot as she strides towards the lens through the falling confetti.
+[Shot 7] At 00:13.000, everything settles. She comes to rest dead centre against a plain hot-pink backdrop, back in the pink mini dress from the opening, the camera slows out of its arc into a locked-off medium shot, the last flakes of confetti land, and she holds one clean final pose — chin lifted, one hand on her hip, a small closed-mouth smile — while the light softens and the picture holds steady to the end.
+
+overall_soundscape: A close-miked plastic world, entirely wordless. The doll box unclips and its front swings wide, heels knock twice on a mirrored floor, boot soles squeak on lacquer, a car door thunks and a small engine hums past, water slaps in thick heavy ripples, sunglasses click down, wardrobe doors clap open and shut in rhythm, accessories pop as they land, confetti flakes tick against the floor, and fabric snaps with every turn. A faint studio-lamp hum and camera-motor pulse run under all of it. Nobody speaks anywhere in this clip.
+
+non_diegetic_music: A bright bubblegum electropop track at a fast tempo, in the early-2000s idiom: a four-on-the-floor kick, a glossy plucked synth hook, filtered chord stabs, a warm rounded bassline, hand claps on the backbeat, and airy wordless vocal chops used as an instrument. A clear accent lands roughly every 2.2 seconds, and every whip pan, spin, change of outfit and camera move is cut to one of them. The arrangement thins to claps and a rising filter sweep under the close-ups, comes back in full as she strides towards the lens, and resolves on one clean sustained chord that lands exactly on the final pose.`;
+
 export const DEFAULT_PROMPTS = Object.freeze([
   Object.freeze({
     id: 'korean-home-video-seedance-25',
@@ -924,6 +965,21 @@ export const DEFAULT_PROMPTS = Object.freeze([
       label: 'Whole clip',
       durationSeconds: 15,
       prompt: ANIME_SKATE_MULTISHOT_H3,
+    })],
+  }),
+  Object.freeze({
+    id: 'doll-pop-video-h3',
+    idea: 'doll-pop-video',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-fields',
+    name: 'Plastic doll-world pop video',
+    summary: 'Seven-cut Y2K music video, cut to its own track, ending on one pose',
+    note: 'Text-to-video: nothing to attach. Set duration to 15s and the aspect ratio to 16:9 — for a vertical cut change the aspect ratio AND the 16:9 in the first line. H3 renders the track as well as the picture, and here the music field is half the starter: it names an accent roughly every 2.2s and the seven cuts are stamped against it, which is what makes this read as a music video rather than a fashion reel. The plastic clauses are the load-bearing ones — moulding seams, lacquer, poreless doll skin, props at doll-house scale — and a rewrite that drops them renders an ordinary pop video in a pink room. She is described once, in the opening paragraph, and nowhere else: rewrite that description to make her yours and leave the shots saying only what she does. The cuts are timed to 15.0s exactly, so if you add or drop one, move the At MM:SS.mmm stamps with it.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 15,
+      prompt: DOLL_POP_VIDEO_H3,
     })],
   }),
   ...ANIMATION_STARTERS,

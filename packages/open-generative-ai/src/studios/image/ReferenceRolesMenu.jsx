@@ -70,7 +70,7 @@ export function ReferenceRolesMenu({ count = 0, roles = [], labelStyle = 'ordina
             </p>
           </div>
 
-          <div className="flex max-h-[38vh] flex-col gap-1.5 overflow-y-auto">
+          <div className="flex max-h-[38dvh] flex-col gap-1.5 overflow-y-auto overscroll-contain">
             {current.map((row, index) => (
               <div key={index} className="rounded-md border border-line1 bg-bg0 p-1.5">
                 <div className="mb-1 flex items-center gap-1.5">

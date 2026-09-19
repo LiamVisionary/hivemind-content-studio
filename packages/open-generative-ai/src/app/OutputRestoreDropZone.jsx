@@ -15,6 +15,7 @@ import toast from 'react-hot-toast';
 import { loadStudioSetup } from './promptTarget.js';
 import { basenameOf, resolveGenerationSetup, warmGenerationSetupLookup } from '../lib/generationSetupStore.js';
 import { HIVEMIND_OUTPUT_DRAG_TYPE } from '../lib/referenceDrop.js';
+import { requestVaultUnlock } from '../lib/vaultSession.js';
 import { Spinner, cx } from '../ui/kit.jsx';
 
 const CUSTOM_TYPE = HIVEMIND_OUTPUT_DRAG_TYPE;
@@ -161,7 +162,31 @@ async function handleDrop(dataTransfer) {
   if (!result?.needsUnlock && await tryCanvasHistory(identity)) return;
 
   if (result?.needsUnlock) {
-    toast('Unlock your vault (topbar) to restore saved settings, then drop again.');
+    // This used to send people to "(topbar)" — a bar that was taken out of the
+    // shell, so the instruction named a control that does not exist. It carries
+    // the control itself now, which is the project's own rule: never state a
+    // problem without the thing that fixes it. Same shape as ui/failureToast.
+    toast((instance) => (
+      <span className="flex flex-col gap-1.5 text-[12px]">
+        <span className="text-ink2">Your vault is locked, so this output’s saved settings can’t be read.</span>
+        <span className="flex gap-2">
+          <button
+            type="button"
+            className="shrink-0 rounded-sm border border-line1 bg-bg2 px-2 py-1 text-xs font-semibold text-ink1 hover:border-line2"
+            onClick={() => { toast.dismiss(instance.id); requestVaultUnlock(); }}
+          >
+            Unlock vault
+          </button>
+          <button
+            type="button"
+            className="shrink-0 rounded-sm px-2 py-1 text-xs font-semibold text-ink2 hover:text-ink1"
+            onClick={() => toast.dismiss(instance.id)}
+          >
+            Dismiss
+          </button>
+        </span>
+      </span>
+    ), { duration: 12000 });
     return;
   }
   toast('No saved settings found for this file.');

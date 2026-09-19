@@ -130,7 +130,7 @@ export function DrawerChoice({ options, value, onChange, disabled = false, mono 
     <span
       role="radiogroup"
       aria-label={ariaLabel}
-      className={cx('inline-flex items-center gap-px rounded-[8px] bg-white/[0.04] p-0.5', disabled && 'opacity-40')}
+      className={cx('inline-flex items-center gap-px rounded-[8px] bg-white/[0.04] p-0.5 touch:gap-1', disabled && 'opacity-40')}
     >
       {options.map((option) => {
         const item = typeof option === 'object' ? option : { value: option, label: String(option) };
@@ -145,7 +145,11 @@ export function DrawerChoice({ options, value, onChange, disabled = false, mono 
             title={item.title || undefined}
             onClick={() => onChange(item.value)}
             className={cx(
+              // 21px tall and a pixel apart is a mouse control. Under a thumb
+              // these become 44px targets with a gap between them, which is
+              // what stops "High" from being pressed on the way to "Best".
               'inline-flex h-6 min-w-[26px] items-center justify-center rounded-[6px] px-2 text-[11px] transition-colors',
+              'touch:h-[44px] touch:min-w-[44px] touch:px-3 touch:text-[12.5px]',
               mono && 'font-mono',
               on ? 'bg-bg3 text-ink1' : 'text-inkSoft hover:text-ink1',
               (disabled || item.disabled) && 'cursor-not-allowed opacity-50',

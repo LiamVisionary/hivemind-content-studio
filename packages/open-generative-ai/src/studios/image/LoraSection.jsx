@@ -2,8 +2,8 @@
 // Presentational: all catalog/race/selection logic lives in ImageStudio.jsx.
 // The one piece of state it reads directly is the Civitai download in flight, so
 // an update-and-replace can draw its progress on the card being replaced.
-import { useEffect, useRef, useState } from 'react';
-import { useCivitaiDownloads, useMediaSrc, useRentalLoras, useWindowEvent } from '../../hooks/hooks.js';
+import { useState } from 'react';
+import { useCivitaiDownloads, useRentalLoras, useWindowEvent } from '../../hooks/hooks.js';
 import {
   cancelCivitaiDownload,
   civitaiDownloadPercent,
@@ -14,41 +14,10 @@ import { loraVersionLabel } from '../../lib/loraSelection.js';
 import { filterRentalLoras } from '../../lib/rentalLoras.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Button, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
+import { LoraCard, LoraPreview, usePressOrigin } from './LoraCard.jsx';
 import { LoraGroupsMenu } from './LoraGroupsMenu.jsx';
 import { LoraRentalControl } from './LoraRentalControl.jsx';
 import { PendingLoraCard } from './PendingLoraCard.jsx';
-
-function LoraPreview({ lora, className = '' }) {
-  const src = useMediaSrc(lora.previewUrl || '');
-  // Was `onError={(e) => e.currentTarget.remove()}`, which ripped the node out from
-  // under React: one transient failure became permanent, no re-render could bring the
-  // art back, and it erased the evidence that anything had failed. Fall back to the
-  // label instead, and re-arm whenever the source changes.
-  const [failed, setFailed] = useState(false);
-  useEffect(() => { setFailed(false); }, [src]);
-
-  return (
-    <div className={cx('flex items-center justify-center overflow-hidden bg-bg3 text-[10px] font-semibold text-ink3', className)}>
-      {lora.previewUrl && !failed ? (
-        <img
-          src={src}
-          alt={`${lora.displayName || lora.name} preview`}
-          // Deliberately NOT loading="lazy". This grid lives in a settings panel that
-          // frequently does not scroll at all, and Chrome defers a lazy image until a
-          // scroll or resize re-triggers its evaluation — in a non-scrollable panel
-          // that never happens, so the art never loaded. Measured: these images sat at
-          // currentSrc="" with ZERO network requests while fully in view; flipping the
-          // one attribute to eager fired all seven immediately. The catalog is a
-          // bounded set behind an explicit Show toggle, so eager is right here.
-          className="h-full w-full object-cover"
-          onError={() => setFailed(true)}
-        />
-      ) : (
-        <span>LoRA</span>
-      )}
-    </div>
-  );
-}
 
 export function LoraSection({
   open,
@@ -105,17 +74,9 @@ export function LoraSection({
   // Which card is showing its two update choices. Only one at a time, and it is
   // drawn inside the card: a floating menu gets clipped by the settings panel.
   const [updateChoicesFor, setUpdateChoicesFor] = useState('');
-  // A click whose press STARTED on an inner control belongs to that control, not to
-  // the card behind it. Drag-selecting the weight and releasing over the row makes
-  // the browser fire `click` on their common ancestor — the row — so the input's own
-  // stopPropagation never sees it and the LoRA got muted mid-edit.
-  const pressOrigin = useRef(null);
-  const notePress = (e) => { pressOrigin.current = e.target; };
-  const pressStartedOnControl = () => {
-    const origin = pressOrigin.current;
-    pressOrigin.current = null;
-    return Boolean(origin?.closest?.('input, button, [role="group"]'));
-  };
+  // A click whose press STARTED on an inner control belongs to that control, not
+  // to the row behind it — see usePressOrigin for the drag that proved it.
+  const { notePress, pressStartedOnControl } = usePressOrigin();
   useWindowEvent('keydown', (e) => {
     if (e.key === 'Escape' && updateChoicesFor) setUpdateChoicesFor('');
     if (e.key === 'Escape' && rentalChoicesFor) setRentalChoicesFor('');
@@ -152,7 +113,7 @@ export function LoraSection({
                 tabIndex={0}
                 aria-pressed={enabled}
                 title={enabled ? `Click to mute ${label}` : `Muted — click to re-enable ${label}`}
-                onMouseDown={notePress}
+                onPointerDown={notePress}
                 onClick={() => { if (!pressStartedOnControl()) toggle(); }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
@@ -160,8 +121,8 @@ export function LoraSection({
                 className={cx(
                   'grid cursor-pointer items-center gap-2 rounded-md border p-1.5 transition-colors',
                   onToggleHunt
-                    ? 'grid-cols-[36px_minmax(0,1fr)_64px_28px_28px]'
-                    : 'grid-cols-[36px_minmax(0,1fr)_64px_28px]',
+                    ? 'grid-cols-[36px_minmax(0,1fr)_64px_28px_28px] touch:grid-cols-[36px_minmax(0,1fr)_64px_44px_44px]'
+                    : 'grid-cols-[36px_minmax(0,1fr)_64px_28px] touch:grid-cols-[36px_minmax(0,1fr)_64px_44px]',
                   enabled
                     ? 'border-honey/40 bg-honey-tint hover:border-honey/60'
                     : 'border-line1 bg-bg2 opacity-55 hover:opacity-80',
@@ -183,7 +144,7 @@ export function LoraSection({
                   defaultValue={String(lora.strength ?? 1)}
                   title={`Weight for ${label}`}
                   aria-label={`Weight for ${label}`}
-                  className="h-7 w-full rounded-sm border border-line1 bg-bg2 px-1 text-center font-mono text-xs text-ink1 focus:border-honey/60"
+                  className="h-7 w-full touch:h-ctl-md rounded-sm border border-line1 bg-bg2 px-1 text-center font-mono text-xs text-ink1 focus:border-honey/60"
                   onClick={(e) => e.stopPropagation()}
                   onChange={(e) => onSetStrength(lora.id, e.target.value)}
                   onBlur={(e) => onCommitStrength(lora.id, e.target.value)}
@@ -197,7 +158,7 @@ export function LoraSection({
                     aria-label={`Toggle Strength Hunt for ${label}`}
                     aria-pressed={Boolean(lora.hunt)}
                     className={cx(
-                      'grid h-7 w-7 place-items-center rounded-sm transition-colors',
+                      'grid h-7 w-7 touch:h-ctl-md touch:w-ctl-md place-items-center rounded-sm transition-colors',
                       lora.hunt
                         ? 'bg-honey text-bg0'
                         : 'border border-line1 bg-bg2 text-ink3 hover:border-honey/50 hover:text-honey',
@@ -211,7 +172,7 @@ export function LoraSection({
                   type="button"
                   title={`Unload ${label}`}
                   aria-label={`Unload ${label}`}
-                  className="grid h-7 w-7 place-items-center rounded-sm border border-transparent bg-danger-tint text-danger transition-colors hover:border-danger/40"
+                  className="grid h-7 w-7 touch:h-ctl-md touch:w-ctl-md place-items-center rounded-sm border border-transparent bg-danger-tint text-danger transition-colors hover:border-danger/40"
                   onClick={(e) => { e.stopPropagation(); onToggleLora(lora); }}
                 >
                   <Icon name="x" size={13} />
@@ -315,40 +276,19 @@ export function LoraSection({
                 onToggleLora(lora);
               };
               return (
-                // Not a <button>: the card holds the update menu, which cannot nest
-                // inside one. Same role/keyboard pattern as the selected rows above.
-                <div
+                // The same card the rental-build picker draws — one component, so
+                // one click never means two things. The update menu, the rental
+                // control and a download's progress are this panel's business and
+                // ride as children.
+                <LoraCard
                   key={lora.id}
-                  role="button"
-                  tabIndex={0}
-                  data-lora-id={lora.id}
-                  aria-pressed={selected}
-                  title={selected ? `Unload ${label}` : `Use ${label}`}
-                  onMouseDown={notePress}
-                  onClick={() => { if (!pressStartedOnControl()) toggle(); }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
-                  }}
-                  className={cx(
-                    // No overflow-hidden: it would clip the update menu. The preview
-                    // clips itself, so the card corners still look right.
-                    'relative min-w-0 cursor-pointer rounded-md border text-left transition-colors duration-150',
-                    selected
-                      ? 'border-honey bg-honey-tint'
-                      : 'border-line1 bg-bg2 hover:border-line2 hover:bg-bg3',
-                    updating && 'border-honey/60',
-                  )}
-                >
-                  <LoraPreview lora={lora} className="aspect-[4/3] w-full rounded-t-[5px]" />
-                  <div className="p-2 pb-5">
-                    <div className="truncate text-xs font-semibold text-ink1">{label}</div>
-                    <div className="mt-0.5 truncate text-[10px] text-ink3">{lora.triggerWords?.[0] || lora.baseModel}</div>
-                  </div>
-
-                  {/* Bottom-right: installed version, or the update affordance when
-                      Civitai has a newer one. An update in flight replaces both. */}
-                  <div className="absolute bottom-1 right-1.5 flex items-center gap-1">
-                    {updating ? (
+                  lora={lora}
+                  selected={selected}
+                  onToggle={toggle}
+                  highlighted={updating}
+                  // Bottom-right: installed version, or the update affordance when
+                  // Civitai has a newer one. An update in flight replaces both.
+                  meta={updating ? (
                       <span className="inline-flex items-center gap-1 font-mono text-[10px] text-honey">
                         <Spinner size={10} />
                         {`Updating ${updatePercent}%`}
@@ -392,17 +332,7 @@ export function LoraSection({
                         ) : null}
                       </>
                     )}
-                  </div>
-
-                  <span
-                    className={cx(
-                      'absolute right-1.5 top-1.5 grid h-6 w-6 place-items-center rounded-full border text-ink1',
-                      selected ? 'border-honey bg-honey text-on-honey' : 'border-line2 bg-bg0/70',
-                    )}
-                  >
-                    <Icon name={selected ? 'check' : 'plus'} size={12} />
-                  </span>
-
+                >
                   {/* The two update choices, drawn over the card. Inside the card
                       rather than in a floating menu, which the settings panel clips. */}
                   {choosing && update ? (
@@ -474,7 +404,7 @@ export function LoraSection({
                       </button>
                     </>
                   ) : null}
-                </div>
+                </LoraCard>
               );
             })}
           </div>

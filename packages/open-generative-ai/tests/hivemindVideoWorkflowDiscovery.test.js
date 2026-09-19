@@ -80,7 +80,15 @@ test('video workflow discovery recovers after an owner-session startup race', as
             // downstream; the studio must not re-test `accepts` for itself.
             supportsSpectrum: false,
             supportsFastHighRes: false,
+            // Frame interpolation — H3's FrameInterpolate node. An LTX
+            // ingredients graph has none, so the switch (and the fight
+            // preset's smoothing dial) never render on it.
+            supportsInterpolation: false,
             supportsQualitySteps: false,
+            // The h3.c bench (Effort presets, dials, ranges) as the registry
+            // writes it. Null on every workflow but MiniMax H3 (Apple Silicon),
+            // and that null IS the render condition for the whole panel.
+            nativeH3: null,
             // No reference slots wired on this workflow — the References panel
             // reads this to size itself, and null means "no reference lane".
             referenceSlots: null,
@@ -103,6 +111,11 @@ test('video workflow discovery recovers after an owner-session startup race', as
             type: 'video',
             family: 'hivemind-media-studio',
             workflowFamily: '',
+            // '' when the registry row names no accelerator: the lane runs
+            // wherever its weights are. Only a lane that REQUIRES one (the
+            // Apple-silicon H3 engine) fills this in, and that is what stops a
+            // rented NVIDIA box being offered it.
+            accelerator: '',
             provider: 'hivemind-media-studio',
             needsImage: true,
             ready: true,

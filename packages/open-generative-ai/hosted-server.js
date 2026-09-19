@@ -10,9 +10,9 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
-const { loadHostedImageModels, loadHostedWorkflowModels, missingWeightFiles } = require('./hosted-local-models');
+const { loadHostedAudioModels, loadHostedImageModels, loadHostedWorkflowModels, missingWeightFiles } = require('./hosted-local-models');
 const modelArtwork = require('./model-artwork');
-const { defaultAutoWorkflowDirs, discoverAutoImageWorkflows } = require('./auto-workflow-discovery');
+const { defaultAutoWorkflowDirs, discoverAutoImageWorkflowsDetailed } = require('./auto-workflow-discovery');
 // Generated from src/hivemind_content_studio/identity.py.
 const identity = require('./identity.json');
 
@@ -300,16 +300,31 @@ function listModels() {
     console.error(`[open-generative-ai-hosted] unable to load image workflows: ${error.message}`);
   }
   let autoModels = [];
+  let skipped = [];
   try {
     // Auto-detected drop-in workflows; registry entries win on id collision.
     const knownIds = new Set(registryModels.map((model) => model.id));
-    autoModels = discoverAutoImageWorkflows().filter((model) => !knownIds.has(model.id));
+    const found = discoverAutoImageWorkflowsDetailed();
+    autoModels = found.models.filter((model) => !knownIds.has(model.id));
+    // A file the user put in the folder on purpose and never saw again is the
+    // worst thing this loader can do, so what it could not use is kept beside
+    // what it could, and /local-ai/workflow-drop-ins hands it to the studio.
+    skipped = found.skipped;
   } catch (error) {
     console.error(`[open-generative-ai-hosted] auto-workflow discovery failed: ${error.message}`);
   }
   const models = [...registryModels, ...autoModels];
-  modelsCache = { key, models };
+  modelsCache = { key, models, skipped };
   return models;
+}
+
+// What the last discovery pass could not use, and where it was looking. Read
+// after listModels() so the cache it fills is the one being described.
+function autoWorkflowDropIns() {
+  return {
+    directories: defaultAutoWorkflowDirs(),
+    skipped: (modelsCache && modelsCache.skipped) || [],
+  };
 }
 
 // ── Is anything actually runnable right now? ─────────────────────────────
@@ -361,6 +376,31 @@ async function laneAnswers() {
 // models directory does not hold, or a lane that did not answer at all.
 async function listModelsWithReadiness() {
   const models = listModels();
+  if (!models.length) return models;
+  const laneOk = await laneAnswers();
+  return models.map((model) => {
+    const missing = missingWeightFiles(model.workflowFile);
+    if (missing.length) {
+      return { ...model, ready: false, readyReason: 'missing-weights', missingWeights: missing.slice(0, 4) };
+    }
+    if (!laneOk) return { ...model, ready: false, readyReason: 'engine-offline' };
+    return { ...model, ready: true, readyReason: 'ok' };
+  });
+}
+
+// Music lanes, with the same readiness verdict the image list carries: a row
+// the studio can render is not the same as a row that will run, and the
+// difference here is almost always the 10 GB checkpoint not being downloaded
+// yet. Saying so is what lets the Music studio offer to install it instead of
+// failing at Generate.
+async function listAudioModelsWithReadiness() {
+  let models = [];
+  try {
+    models = loadHostedAudioModels(WORKFLOW_REGISTRY);
+  } catch (error) {
+    console.error(`[open-generative-ai-hosted] unable to load audio workflows: ${error.message}`);
+    return [];
+  }
   if (!models.length) return models;
   const laneOk = await laneAnswers();
   return models.map((model) => {
@@ -799,6 +839,14 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
     return sendJson(res, 200, { exists: true, hosted: true, dataDir: LOCAL_AI_DIR, modelsDir: path.join(LOCAL_AI_DIR, 'models'), zimage: ZIMAGE_URL });
   }
   if (pathname === '/local-ai/models') return sendJson(res, 200, await listModelsWithReadiness());
+  // Why a dropped-in workflow is not in the list above. Its own route rather
+  // than a field on /local-ai/models, which is a bare array every caller reads
+  // as "the models" — widening that shape would break each of them.
+  if (pathname === '/local-ai/workflow-drop-ins') {
+    await listModelsWithReadiness();
+    return sendJson(res, 200, autoWorkflowDropIns());
+  }
+  if (pathname === '/local-ai/audio-models') return sendJson(res, 200, await listAudioModelsWithReadiness());
   if (pathname === '/local-ai/prompt-helper' && req.method === 'POST') {
     const token = readToken();
     if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
@@ -891,6 +939,24 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
   // Workflow preflight and its inline installers (gateway/dependencies.py):
   // what a lane lacks for a registered workflow, install one or all of it,
   // watch a job, cancel one, restart the lane so new node packs load.
+  // What this Mac is, and what of the h3.c lane is on it. The Video studio
+  // asks once when MiniMax H3 (Apple Silicon) is selected: it decides which
+  // Effort preset to start on, whether reference mode is even available, and
+  // — when the lane is not ready — the one sentence that says what to do.
+  if (pathname === '/local-ai/h3-native/profile' && req.method === 'GET') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    try {
+      const refresh = String(query.get('refresh') || '').trim() === '1' ? '?refresh=1' : '';
+      const profile = await requestJson(`${ZIMAGE_URL}/api/h3-native/profile${refresh}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 20000,
+      });
+      return sendJson(res, 200, profile);
+    } catch (error) {
+      return sendJson(res, upstreamStatus(error), { error: error.message });
+    }
+  }
   if (pathname === '/local-ai/workflow-dependencies' && req.method === 'GET') {
     const token = readToken();
     if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
@@ -1318,6 +1384,67 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
     if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });
     try {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      // Music goes through the same door as every other local generation, but
+      // it cannot go through the same resolver: listModels() holds image
+      // workflows only, so a music id used to come back as "Unknown local image
+      // workflow" — a refusal that named the wrong catalogue and left the Music
+      // studio with no way to submit at all.
+      if (String(body.backend || '') === 'comfy-api-audio') {
+        let audioRows = [];
+        try {
+          audioRows = loadHostedAudioModels(WORKFLOW_REGISTRY);
+        } catch (error) {
+          return sendJson(res, 500, { error: `unable to read the music catalogue: ${error.message}` });
+        }
+        const track = audioRows.find((model) => model.id === body.model);
+        if (!track) {
+          return sendJson(res, 400, { error: `Unknown music model: ${body.model || '(missing)'}` });
+        }
+        if (!String(body.prompt || '').trim()) {
+          return sendJson(res, 400, { error: 'Describe the music first' });
+        }
+        const accepts = new Set(track.accepts || []);
+        const payload = {
+          backend: 'comfy-api-audio',
+          workflow_file: track.workflowFile,
+          prompt: String(body.prompt || ''),
+          seed: body.seed ?? -1,
+        };
+        // Only forward what this model actually declares. An option a graph has
+        // no slot for is silently dropped by the runner, so sending it would
+        // read to the user as a control that does nothing.
+        const pass = {
+          lyrics: (v) => String(v),
+          seconds: (v) => Number(v),
+          bpm: (v) => Number(v),
+          timesignature: (v) => String(v),
+          language: (v) => String(v),
+          keyscale: (v) => String(v),
+          mode: (v) => String(v),
+          steps: (v) => Number(v),
+          cfg: (v) => Number(v),
+          generate_audio_codes: (v) => Boolean(v),
+        };
+        for (const [key, cast] of Object.entries(pass)) {
+          if (accepts.has(key) && body[key] != null) payload[key] = cast(body[key]);
+        }
+        if (body.sampler_name && track.samplers?.includes(String(body.sampler_name))) {
+          payload.sampler_name = String(body.sampler_name);
+        }
+        if (body.scheduler && track.schedulers?.includes(String(body.scheduler))) {
+          payload.scheduler = String(body.scheduler);
+        }
+        if (body.studio_lane) payload.studio_lane = String(body.studio_lane).slice(0, 512);
+        const submitted = await requestJson(`${ZIMAGE_URL}/api/generate`, {
+          method: 'POST',
+          // ownerPubHeaders is load-bearing: without it the finished track
+          // seals to whichever account is owner rather than to the workspace
+          // that asked for it, and the person who made it cannot open it.
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...ownerPubHeaders(req) },
+          body: JSON.stringify(payload),
+        });
+        return sendJson(res, 202, submitted);
+      }
       const selected = listModels().find((model) => model.id === body.model);
       if (!selected) return sendJson(res, 400, { error: `Unknown local image workflow: ${body.model || '(missing)'}` });
       if (selected.requires?.image && !body.image_base64 && !body.image_url) {
@@ -1489,6 +1616,27 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...ownerPubHeaders(req) },
         body: JSON.stringify(payload),
         timeout: 120000,
+      });
+      return sendJson(res, 202, submitted);
+    } catch (e) { return sendJson(res, upstreamStatus(e), { error: e.message }); }
+  }
+  if (pathname === '/local-ai/audio-split' && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });
+    try {
+      // A whole clip rides in this body, base64'd — the same ceiling the
+      // gateway applies to the decoded bytes, plus base64's third.
+      const body = JSON.parse((await readBody(req, 560 * 1024 * 1024)).toString('utf8') || '{}');
+      if (!body.media_base64) return sendJson(res, 400, { error: 'media_base64 is required' });
+      const payload = {
+        media_base64: body.media_base64,
+        voices: body.voices !== false,
+      };
+      const submitted = await requestJson(`${ZIMAGE_URL}/api/audio-split`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+        timeout: 180000,
       });
       return sendJson(res, 202, submitted);
     } catch (e) { return sendJson(res, upstreamStatus(e), { error: e.message }); }

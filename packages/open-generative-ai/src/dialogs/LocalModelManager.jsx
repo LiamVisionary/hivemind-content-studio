@@ -317,16 +317,23 @@ function FitLine({ fit }) {
   }[fit.tone] || 'text-ink3';
   const icon = { ok: 'check', warn: 'warning', blocked: 'warning' }[fit.tone] || 'cpu';
   return (
-    <div className="flex items-center justify-between gap-2">
-      <span className={cx('flex min-w-0 items-center gap-1.5 text-[11px]', tone)}>
-        <Icon name={icon} size={12} className="shrink-0" />
-        <span className="min-w-0 truncate" title={fit.text}>{fit.text}</span>
+    // "Too big for your 16 GB Mac — needs a rented GPU." is the sentence this
+    // component exists to deliver, and `truncate` next to a button was cutting
+    // it at "Too big for your 16 GB…" on a phone, with the rest reachable only
+    // through a `title` tooltip no touch device shows. It wraps instead, and the
+    // way out takes its own line below.
+    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-2">
+      <span className={cx('flex min-w-0 items-start gap-1.5 text-[11px] leading-snug', tone)}>
+        <Icon name={icon} size={12} className="mt-px shrink-0" />
+        <span className="min-w-0">{fit.text}</span>
       </span>
       {fit.action ? (
         <Button
           size="sm"
           variant="neutral"
-          className="shrink-0"
+          // `self-start` so the stacked layout does not stretch it across the
+          // card; it is still the row's right-hand column from sm up.
+          className="shrink-0 self-start"
           onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: fit.action.page } }))}
         >
           {fit.action.label}

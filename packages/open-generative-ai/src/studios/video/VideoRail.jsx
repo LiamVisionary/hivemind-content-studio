@@ -19,10 +19,29 @@
 //                              was never reachable on a touch device anyway
 //
 // What did NOT move. The operations a 72px card genuinely cannot express —
-// Auto-continue, Shot | Full cut, export the cut, close the scene, and the
-// build-error note — stay in TimelineStrip, which the composer's "more" menu
-// still opens. This rail's segment menu carries the per-shot ones (export,
-// drop-from-the-cut, remove) so the common path never needs the full strip.
+// export the cut, close the scene, reorder-by-drag across a wide strip — stay
+// in TimelineStrip, which the composer's "more" menu still opens. This rail's
+// segment menu carries the per-shot ones (export, drop-from-the-cut, remove) so
+// the common path never needs the full strip.
+//
+// TWO came back, both because the rail raised the question and could not answer
+// it. Each reads and writes the studio state the strip already owned, so the
+// two surfaces can never disagree about the same scene.
+//
+// Auto-continue, at the "+". It is a mode, and the press that makes the slot is
+// where it is decided: pressing "+" over a sequence that already holds a shot
+// asks whether the next one CONTINUES the last (H3 chains through Motion
+// Context, everything with a start-image input opens on the last frame) or CUTS
+// to a new shot with the same references and nothing carried over. The strip's
+// switch still shows and sets the same s.timelineExtend — but outside H3 that
+// switch was previously the only way to ask, and nothing led to it.
+//
+// The full cut, under the shots. The rail could draw three finished clips and
+// offer no way to watch them as one; the cut lived two levels down, behind the
+// composer's More -> Timeline. FullCutRow is the strip's Shot | Full cut on the
+// same s.timelineShowCombined and the same quiet build, with clipJoiner's
+// refusal as its title — so a scene that cannot be joined losslessly says why
+// here, rather than on a card that is not on screen.
 //
 // Drag is unchanged in vocabulary and only rotated in geometry: cards carry
 // TIMELINE_SEGMENT_DRAG_TYPE (plus the output payload when they are filled) and
@@ -38,8 +57,9 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useMediaPoster } from '../../hooks/hooks.js';
 import { t } from '../../lib/i18n.js';
 import { HIVEMIND_OUTPUT_DRAG_TYPE } from '../../lib/referenceDrop.js';
+import { nextShotIndex } from '../../lib/videoTimeline.js';
 import { Icon } from '../../ui/icons.jsx';
-import { MenuItem } from '../../ui/Menu.jsx';
+import { MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import { Spinner, cx } from '../../ui/kit.jsx';
 import {
   RailAdd, RailCard, RailDivider, RailEmpty, RailHeading, RailMenu, RailMenuSubject, RailOverflow,
@@ -113,6 +133,122 @@ function scrollCardIntoView(node) {
 }
 
 const shotNumber = (index) => String(index + 1).padStart(2, '0');
+
+/**
+ * The sequence as ONE clip, under the shots it is made of.
+ *
+ * The cut used to be reachable only through the composer's More -> Timeline,
+ * two levels under the rail that draws the sequence — so the rail could show
+ * three finished shots and offer no way to watch them as one. This is the same
+ * control as the strip's Shot | Full cut, reading and writing the same
+ * `showCombined`, at the place the shots are.
+ *
+ * It appears only when there is something to join (two or more shots in the
+ * cut) and the build is the one that was already running: joining happens
+ * client-side after every change, because the clips are sealed at rest. A join
+ * that cannot be made losslessly is not pressable — clipJoiner's own sentence
+ * is the title, so the reason is here rather than one screen away.
+ *
+ * @param {number} seconds  the built cut's length, 0 before it exists
+ * @param {bool}   showing  the cut is on the stage (studio's showCombined)
+ * @param {bool}   building a join is in flight
+ * @param {string} error    why the clips cannot be joined losslessly
+ * @param {func}   onToggle (next: bool) => …
+ *
+ * Exported for the same reason NextShotChoice is: its three states are what a
+ * person reads before pressing, and "building", "15s" and a refusal that names
+ * the clip are not settleable by a regex over this file.
+ */
+export function FullCutRow({ seconds, showing, building, error, onToggle }) {
+  const label = error
+    ? `Cannot combine losslessly: ${error}`
+    : (showing ? 'Back to the single shot' : 'Play the whole sequence as one clip');
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle?.(!showing)}
+      disabled={Boolean(error)}
+      title={label}
+      aria-label={label}
+      aria-pressed={showing}
+      className={cx(
+        'flex shrink-0 flex-col items-start gap-px rounded-[8px] bg-bg2 px-2 py-1.5 text-left transition-shadow',
+        error ? 'opacity-60' : 'hover:shadow-[0_0_0_1.5px_var(--line-2)]',
+        showing && 'bg-bg3 shadow-[0_0_0_1.5px_rgb(var(--honey-rgb))]',
+      )}
+      style={{ width: CARD_W }}
+    >
+      <span className={cx('flex items-center gap-1 text-[10px]', showing ? 'text-honey' : 'text-ink2')}>
+        {building
+          ? <Spinner size={9} className="text-honey" />
+          : <Icon name={error ? 'warning' : 'layers'} size={10} className={error ? 'text-warn' : ''} />}
+        Full cut
+      </span>
+      <span className="font-mono text-[9px] text-inkSoft">
+        {error ? 'won’t join' : building ? 'building…' : (seconds > 0 ? `${Math.round(seconds)}s` : '—')}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * What the "+" asks once the sequence holds a shot. Both rows make the same
+ * empty slot; they differ only in what the composer is holding when the caret
+ * lands in it, which is why each row carries a sentence as well as a label —
+ * "Continue" and "Cut" are indistinguishable without it. The sentence rides
+ * INSIDE the row (MenuItem's `note`), so the whole two-line block is the
+ * target: it was the obvious thing to aim at while only the label was live.
+ *
+ * Exported so the wording renders on its own: which shot it continues from, and
+ * H3's mechanism versus every start-frame lane's, are the two things a reader
+ * acts on and a regex over this file cannot settle.
+ *
+ * @param {string} continueMode 'chain' | 'frame' — the lane's picture mechanism
+ * @param {bool}   withSound    this lane can also continue the SOUND, as a
+ *                              separate choice. False on H3, whose chain
+ *                              already carries room tone — there is nothing to
+ *                              choose between — and false anywhere a clip
+ *                              cannot be fed back in.
+ * @param {string} fromShot     "02", the last filled shot
+ * @param {string} nextShot     "03", the slot this press lands in
+ * @param {func}   onPick       ('continue' | 'sound' | 'cut') => …
+ */
+export function NextShotChoice({ continueMode, withSound = false, fromShot, nextShot, onPick }) {
+  return (
+    <>
+      <MenuHeading>{`Shot ${nextShot}`}</MenuHeading>
+      <MenuItem
+        icon="arrowRight"
+        note={continueMode === 'chain'
+          ? `Picks up where shot ${fromShot} ends — motion and room tone carry across the cut.`
+          : `Opens on shot ${fromShot}'s last frame. New sound.`}
+        onClick={() => onPick?.('continue')}
+      >
+        Continue the scene
+      </MenuItem>
+      {withSound ? (
+        // Only where the picture row would NOT already carry sound. The cost is
+        // in the row because it is the moment the choice is made: this mode
+        // re-renders everything so far to keep one continuous take, so each
+        // shot takes longer than the last and the scene cannot change.
+        <MenuItem
+          icon="sound"
+          note={`Keeps shot ${fromShot}'s music and room tone running. Slower each shot, and the scene has to stay put.`}
+          onClick={() => onPick?.('sound')}
+        >
+          Continue with the sound
+        </MenuItem>
+      ) : null}
+      <MenuItem
+        icon="scissors"
+        note={`A different angle or moment: same references and settings, nothing carried over from shot ${fromShot}.`}
+        onClick={() => onPick?.('cut')}
+      >
+        Cut to a new shot
+      </MenuItem>
+    </>
+  );
+}
 
 // The studio hands over the SMOOTHED 0..1 bar the stage reads, so the rail's
 // caption and the stage's readout can never disagree by a frame.
@@ -399,6 +535,13 @@ const EarlierCard = memo(function EarlierCard({ entry, selected, label, onOpen, 
  * @param {string} selectedId      s.timelineSelectedId
  * @param {bool}   showCombined    s.timelineShowCombined — the joined cut is on the
  *                                 player, so NO shot is the selected one
+ * @param {bool}   canCombine      two or more shots feed the cut; below that there is
+ *                                 nothing to join and the Full cut row is not drawn
+ * @param {number} combinedSeconds the built cut's length, 0 before it exists
+ * @param {bool}   combineBuilding a join is in flight
+ * @param {string} combineError    why the clips cannot be joined losslessly
+ * @param {func}   onToggleCombined (next: bool) => …  opens the scene first, since
+ *                                 buildTimelineCut only runs for an open one
  * @param {string} pendingSegmentId the slot being rendered into, '' when none
  * @param {bool}   timelineOn      s.timelineOn — false means the scene is closed and
  *                                 the "+" opens it rather than appending to it
@@ -407,7 +550,13 @@ const EarlierCard = memo(function EarlierCard({ entry, selected, label, onOpen, 
  * @param {func}   secondsFor      (seg) => number — the caption's "· 5s"; optional
  * @param {func}   promptFor       (seg) => string — never a private prompt
  * @param {func}   onSelect        (seg) => …  timelineSelect
- * @param {func}   onAdd           () => …     timelineAdd
+ * @param {func}   onAdd           (mode) => …  timelineAdd; mode is 'continue',
+ *                                 'cut' or '' — see the "+" below
+ * @param {string} continueMode    '' | 'chain' | 'frame' — how THIS lane continues a
+ *                                 scene (timelineExtendModeFor). '' hides the choice
+ * @param {bool}   canContinueWithSound  the lane offers a sound-carrying continuation
+ *                                 as a SEPARATE choice (LTX extend). False on H3,
+ *                                 whose chain already carries room tone
  * @param {func}   onOpenTimeline  () => …     openTimelineView (the old Scene chip)
  * @param {func}   onRemove        (seg) => …  timelineRemoveRequest
  * @param {func}   onDrop          ({id, region}, dataTransfer) => …  timelineHandleDrop
@@ -428,6 +577,11 @@ export function VideoRail({
   segments = [],
   selectedId = '',
   showCombined = false,
+  canCombine = false,
+  combinedSeconds = 0,
+  combineBuilding = false,
+  combineError = '',
+  onToggleCombined,
   pendingSegmentId = '',
   timelineOn = false,
   generating = false,
@@ -436,6 +590,8 @@ export function VideoRail({
   promptFor,
   onSelect,
   onAdd,
+  continueMode = '',
+  canContinueWithSound = false,
   onOpenTimeline,
   onRemove,
   onDrop,
@@ -473,6 +629,13 @@ export function VideoRail({
     setMenu((prev) => (prev && prev.item === entry && prev.anchor === anchor
       ? null
       : { kind: 'clip', item: entry, anchor }));
+  }, []);
+  // The "+" is the third menu subject. It has no item — the question is about
+  // the shot that does not exist yet.
+  const openAddMenu = useCallback((anchor) => {
+    setMenu((prev) => (prev && prev.kind === 'add' && prev.anchor === anchor
+      ? null
+      : { kind: 'add', item: null, anchor }));
   }, []);
 
   const onDragStartCard = useCallback((seg, event) => {
@@ -552,6 +715,18 @@ export function VideoRail({
 
   const menuSegment = menu?.kind === 'segment' ? menu.item : null;
   const menuClip = menu?.kind === 'clip' ? menu.item : null;
+
+  // The "+" appends, so a continuation would come from the LAST filled shot —
+  // the same clip timelineContinuationPlan picks for the appended slot. With
+  // nothing filled there is nothing to continue from, and with no continueMode
+  // this lane has no mechanism at all: either way the "+" just adds.
+  const lastFilled = segments.reduce((found, seg, index) => (seg.url ? index : found), -1);
+  const canOfferContinue = Boolean(continueMode) && lastFilled >= 0;
+  const fromShot = lastFilled >= 0 ? shotNumber(lastFilled) : '';
+  // Named off the lib's own rule, not off segments.length: the press reuses an
+  // empty tail rather than appending, so counting the list would title the menu
+  // one shot ahead of the card it is about to select.
+  const nextShot = shotNumber(nextShotIndex(segments));
 
   return (
     <>
@@ -634,18 +809,39 @@ export function VideoRail({
             // has been opened: with a shot already sitting there, "arrange clips
             // into one scene" describes something the person has evidently
             // started, and the button that follows it has to add the next one.
-            label={timelineOn || segments.length
-              ? 'Add the next shot — or drop a clip here'
-              : 'Arrange clips into one scene: generate shot by shot, drag clips in, preview the full cut'}
-            onClick={() => {
+            label={(() => {
+              if (!timelineOn && !segments.length) return 'Arrange clips into one scene: generate shot by shot, drag clips in, preview the full cut';
+              if (canOfferContinue) return 'Add the next shot — continue the scene, or cut to a new one';
+              return 'Add the next shot — or drop a clip here';
+            })()}
+            onClick={(event) => {
               if (dragHappenedRef.current) return;
-              // One action either way. onAdd opens the scene when it is closed,
-              // so pressing this always puts a slot on screen.
-              if (timelineOn || segments.length) onAdd?.();
-              else onOpenTimeline?.();
+              // Nothing in the sequence yet: the press opens the scene, which
+              // seeds it from whatever is on the player. Nothing to continue.
+              if (!timelineOn && !segments.length) { onOpenTimeline?.(); return; }
+              // There are two kinds of next shot and only the person knows
+              // which this is, so it is asked rather than assumed. The press
+              // used to always mean "cut": an empty slot with nothing carried
+              // over, which on every lane but H3 was the ONLY thing the "+"
+              // could produce. A lane with no continuation mechanism, or a
+              // sequence with nothing in it yet, still just adds.
+              if (canOfferContinue) { openAddMenu(event.currentTarget); return; }
+              onAdd?.();
             }}
           />
         </div>
+
+        {/* Under the shots, because it is what they add up to. Drawn only when
+            there is a join to make — one shot is already the whole sequence. */}
+        {canCombine ? (
+          <FullCutRow
+            seconds={combinedSeconds}
+            showing={showCombined}
+            building={combineBuilding}
+            error={combineError}
+            onToggle={onToggleCombined}
+          />
+        ) : null}
       </div>
 
       {shownLoose.length ? (
@@ -675,6 +871,18 @@ export function VideoRail({
             label="Show every clip in the Library"
           />
         </>
+      ) : null}
+
+      {menu?.kind === 'add' ? (
+        <RailMenu anchor={menu.anchor} label="How the next shot opens" onClose={closeMenu}>
+          <NextShotChoice
+            continueMode={continueMode}
+            withSound={canContinueWithSound}
+            fromShot={fromShot}
+            nextShot={nextShot}
+            onPick={(mode) => { closeMenu(); onAdd?.(mode); }}
+          />
+        </RailMenu>
       ) : null}
 
       {menuSegment ? (

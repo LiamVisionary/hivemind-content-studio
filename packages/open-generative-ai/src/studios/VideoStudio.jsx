@@ -39,21 +39,29 @@ import {
 } from '../lib/workflowDependencies.js';
 import { toastFailure } from '../ui/failureToast.jsx';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
+import { blankRecast, isRecastPrompt, recastShotsWritten } from '../lib/h3Recast.js';
 import { fitShotTimeline } from '../lib/shotTimeline.js';
 import { isWan2gpModelId } from '../lib/localModels.js';
 import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
+import { consumeStudioModelRequest } from '../lib/studioHandoff.js';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
 import { applyCameraMotionPrompt, cameraMotionIdsInPrompt, cameraMotionPhrase, normalizeCameraMotions } from '../lib/cameraMotion.js';
 import { CameraMotionMenu } from './video/CameraMotionMenu.jsx';
 import { applyRestylePrompt } from '../lib/h3RestylePresets.js';
+import {
+  applyCombatPrompt, armCombat, combatLoraFrom, combatPlan, combatRestoredLoraIds,
+  combatSnapshotModelId, disarmCombat, isCombatArmed,
+} from '../lib/h3CombatPreset.js';
+import { CombatMenu } from './video/CombatMenu.jsx';
+import { h3NativeRequest } from '../lib/h3Native.js';
 import { RestyleMenu } from './video/RestyleMenu.jsx';
 import { applyEmotionPrompt, emotionDirectionIdInPrompt } from '../lib/emotionDirection.js';
 import { EmotionMenu } from './video/EmotionMenu.jsx';
 import { CastStrip } from './video/CastStrip.jsx';
 import {
-  castPersonaIdentity, castRenderGender, castRows, castSubjects, isWovenForReference,
+  castLineup, castPersonaIdentity, castRenderGender, castRows, castSubjects, isWovenForReference,
   reconcileCast, sceneMember, toCastMember, weavePrompt, weaveTarget,
 } from '../lib/promptWeave.js';
 import { allocateCast } from '../lib/castPrompt.js';
@@ -64,6 +72,7 @@ import { VIDEO_TAB_FIELDS, cloneTabValue, draftScope, snapshotTabFields } from '
 import { readDraft, writeDraft } from '../lib/draftVault.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
+import { renderSpotFile } from '../lib/sceneSpot.js';
 import { peekMediaDuration } from '../lib/mediaDuration.js';
 import { CivitaiPostDialog } from '../components/CivitaiPostDialog.jsx';
 import { civitaiResourcesFromLoras, postMetaFromEntry } from '../lib/civitaiPost.js';
@@ -75,12 +84,18 @@ import { chainKey, chainTimelineModel } from '../lib/chainTimeline.js';
 import { TIMELINE_SEGMENT_DRAG_TYPE, TimelineStrip } from './video/TimelineStrip.jsx';
 import {
   addTimelineSegment, captureIntoTimeline, fillTimelineSegment,
+  timelineCanContinueWithSound, timelineContinuationMode,
   insertTimelineSegment, loadTimelineState, moveTimelineSegment, newTimelineSegment,
   openTimeline, removeTimelineSegment, saveTimelineState, timelineCanCombine,
   timelineCombineKey, timelineContinuationPlan, timelineCutSegments, timelineDropPlan,
   timelineFromChainShots, toggleTimelineSegmentExcluded,
 } from '../lib/videoTimeline.js';
+import { RecastDialog } from './video/RecastDialog.jsx';
 import { ShotBuilderDialog, blankTimeline } from './video/ShotBuilder.jsx';
+import { TurntableDialog } from './video/TurntableDialog.jsx';
+import {
+  blankTurntable, hasTurntable, isMinimaxVendorModel, stripTurntable,
+} from '../lib/turntable.js';
 import { armChainPrompt } from '../lib/chainPrompt.js';
 import { personaIdentity } from '../lib/personaId.js';
 import { UGC_DEFAULT_FORMAT, applyUgcVideoBrief, hasUgcVideoBrief, ugcFormatInPrompt, ugcSubjectLabel, ugcVariantAt } from '../lib/ugcMode.js';
@@ -115,6 +130,7 @@ import { t, tf } from '../lib/i18n.js';
 
 import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
 import { useApiStatus } from '../app/statusStore.js';
+import { useClipHasAudio } from '../hooks/hooks.js';
 import { useRunTargets } from '../lib/useRunTargets.js';
 import { useProviderReadiness } from '../lib/useProviderReadiness.js';
 import { PLACE_THIS_MAC, pickRunTarget } from '../lib/runTargets.js';
@@ -139,6 +155,7 @@ import { UploadPicker } from './UploadPicker.jsx';
 import { FrameSlotsPicker } from './video/FrameSlotsPicker.jsx';
 import { ReferencesMenu } from './video/ReferencesMenu.jsx';
 import { VideoInpaintDialog } from '../dialogs/VideoInpaintDialog.jsx';
+import { SpotCircleDialog } from './video/SpotCircleDialog.jsx';
 import {
   composerFrameHint, composerReferenceHint, describeReferenceAttachment, describeReferenceRejection,
 } from './video/referenceKinds.js';
@@ -173,13 +190,13 @@ import {
   deriveControlVisibility, deriveExtendBanner, derivePromptUi,
   applyRestoredPreferences, applyGenerationContext, restylePresetIdInPrompt,
   startFrameSelectedTransition, startFrameClearedTransition, clearVideoUploadTransition,
-  videoUploadedTransition, selectV2VModelTransition, selectRegularModelTransition,
+  videoUploadedTransition, selectV2VModelTransition, selectRegularModelTransition, preflightRunOn,
   selectHivemindWorkflowTransition, newPromptTransition, startFreshSummary, extendTransition, withServedModel,
   getAdvancedVideoInputs, getAdvancedVideoPayload,
   normalizeVideoPreferences, normalizeVideoIngredientSelections, normalizeSelectedVideoIngredientSheet,
   videoIngredientDescriptions, withVideoIngredientDescriptions,
   normalizeVideoGenerationProgress, normalizeSamplerSteps, classifyVideoGenerationStage, formatVideoGenerationElapsed,
-  computeSmoothProgress, supportsSpectrum, supportsFastHighRes, supportsQualitySteps,
+  computeSmoothProgress, supportsSpectrum, supportsFastHighRes, supportsQualitySteps, supportsInterpolation,
   closestVideoAspectRatio, imageDimensions, redactPrivateHistoryEntry,
   groupModelTiers, activeTierFor, tierPairFor, servingMachineFor,
 } from './video/videoLogic.js';
@@ -345,6 +362,14 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     promptHelperOpen: false,
     // Head replacement: which attached motion clip has its dialog open.
     inpaintOpenIndex: null,
+    // Circling a spot on a scene picture: { url, source, spot, label } while
+    // the editor is up, and true while the circled copy is being drawn and
+    // uploaded. `spotMemory` (a Map, made on first use) remembers the last
+    // circle per ORIGINAL picture, so taking one off and putting it back
+    // reopens where it was.
+    spotEdit: null,
+    spotBusy: false,
+    spotMemory: null,
     resumeRemaining: 0,
     deleteTarget: null,
     // A pending "attach this clip?" question: { lines, resolve } while the
@@ -377,6 +402,11 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     timelineSegments: [],
     timelineSelectedId: '',
     timelineExtend: false,
+    // Which mechanism a continuation uses where the lane offers two: false is
+    // the previous clip's last frame (fast, the scene can change, the next shot
+    // scores itself), true is LTX's own extension (the soundtrack carries).
+    timelineWithSound: false,
+    timelineArmedExtendUrl: '',
     timelineShowCombined: false,
     timelineCombined: null,
     timelineBuilding: false,
@@ -411,6 +441,17 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // scratchpad, not a timeline.
     shotTimeline: blankTimeline(),
     shotBuilderOpen: false,
+    // The recast plan — the shots of an attached clip, as described by the
+    // author, plus the three clauses that keep the clip from taking the run
+    // over. Held here for the same reason the shot timeline is: a shot list
+    // built against a clip is real work and must survive the panel closing.
+    recastPlan: blankRecast(),
+    recastOpen: false,
+    // The orbit capture's dial. Held on the studio rather than in the dialog
+    // for the same reason the shot timeline is: a capture that forgot its
+    // sweep every time the panel closed would be a scratchpad, not a rig.
+    turntableRig: blankTurntable(),
+    turntableOpen: false,
   };
 
   // A duplicate overlays the source tab's configuration on top of the defaults.
@@ -449,9 +490,17 @@ export function VideoStudio({
   const [, setTick] = useState(0);
   const mountedRef = useRef(true);
   const bump = () => { if (mountedRef.current) setTick((n) => n + 1); };
+  // The waiting list lives in the queue, not in the engine, so the composer that
+  // draws it has to be told when it moves.
+  useEffect(() => generationQueueRef.current.subscribe(() => {
+    if (mountedRef.current) setTick((n) => n + 1);
+  }), []);
   // One shared verdict on whether the studio is up (topbar pill, canvas banner,
   // this button) instead of each lane discovering it when a press fails.
   const apiStatus = useApiStatus();
+  // Whether the clip on the stage carries sound — asked of the file, so a
+  // joined cut, a restored clip and a cloud render all answer for themselves.
+  const clipHasAudio = useClipHasAudio(s.resultUrl);
 
   // The primary tab adopts the composer draft and any pending generation no open
   // tab owns; new and duplicated tabs start clean. StudioTabs decides which tab
@@ -503,6 +552,36 @@ export function VideoStudio({
     finishRentedHandoff();
   };
 
+  // "Use in <studio>" from the Models route, held until the catalogue it names
+  // a model from has actually arrived. Separate from the Rented handoff above:
+  // that one carries a MODE, this carries a MODEL, and either can arrive alone.
+  const pendingModelRef = useRef('');
+
+  const claimModelHandoff = () => {
+    if (!tabActiveRef.current) return;
+    const wanted = consumeStudioModelRequest('video');
+    if (wanted) pendingModelRef.current = wanted;
+    finishModelHandoff();
+  };
+
+  // Applied through chooseRunTarget — the Run-on picker's own handler — rather
+  // than a raw commit, so a handed-over model gets everything a picked one
+  // gets: the right transition for its family, its defaults, and the
+  // dependency preflight for a lane that needs weights or a rented box. A raw
+  // commit is how the Rented handoff once arrived pointed at a model its
+  // machine could not run.
+  const finishModelHandoff = () => {
+    const wanted = pendingModelRef.current;
+    if (!wanted) return;
+    const entry = allVideoModels(s.catalogs).find((m) => m.id === wanted);
+    // The catalogues land after mount and in no fixed order, so an id that is
+    // not there YET is not an id that is wrong. Keep holding it; the arrivals
+    // below call this again.
+    if (!entry) return;
+    pendingModelRef.current = '';
+    chooseRunTarget(entry, { chosen: true });
+  };
+
   // The other half of the handoff: land on a model the machine can actually run.
   // Called on every arrival that could make the answer knowable, and gives up
   // its claim only once it has really decided — an early attempt against an
@@ -512,10 +591,21 @@ export function VideoStudio({
     if (!reconcileRentedModelRef.current) return;
     if (!s.rentedMachines?.length || !s.catalogs.hivemindI2V?.length) return;
     reconcileRentedModelRef.current = false;
-    const next = withServedModel(s.setup, s.rentedMachines, s.catalogs);
+    const served = withServedModel(s.setup, s.rentedMachines, s.catalogs);
+    // Pressing "Use in <studio>" on a machine is a CHOICE of where the work
+    // runs, so the tab has to stop following Automatic. Re-pointing the model
+    // alone was not enough and looked like the handoff doing nothing at all:
+    // Automatic's ladder deliberately ranks a rented box LAST — it is the only
+    // rung billed by the hour — so it picked the free local model straight back
+    // and the studio opened on Wan 2.2 every single time. Reproduced against a
+    // real attached box 2026-09-14: the picker showed Rental 3 with the H3
+    // lanes right there, and AUTOMATIC sitting on "Wan 2.2 — free, stays here".
+    const next = { ...served, runOnAutomatic: false };
+    // Committed even when the model did not move: turning Automatic off IS the
+    // change on a tab already pointed at a lane this machine serves.
     // Persisted, unlike the old raw commit: this is the completion of a switch
     // the user made, and a reload should not undo half of it.
-    if (next !== s.setup) commit(next);
+    commit(next);
   };
 
   // Rented source mode: keep attached-machine state fresh while mounted and
@@ -566,11 +656,12 @@ export function VideoStudio({
       bump();
     });
     claimRentedHandoff();
+    claimModelHandoff();
     sync(false);
     // Claim BEFORE syncing: the Machines view announces this immediately after
     // setting the handoff, and waiting for the fetch is what made the switch
     // arrive late.
-    const onChanged = () => { claimRentedHandoff(); sync(true); };
+    const onChanged = () => { claimRentedHandoff(); claimModelHandoff(); sync(true); };
     const onVisible = () => { if (!document.hidden) sync(false); };
     window.addEventListener(RENTED_CHANGED_EVENT, onChanged);
     document.addEventListener('visibilitychange', onVisible);
@@ -586,7 +677,7 @@ export function VideoStudio({
   // A tab that becomes the front one inherits a handoff nobody could claim
   // while it was in the background.
   useEffect(() => {
-    if (tabActive) claimRentedHandoff();
+    if (tabActive) { claimRentedHandoff(); claimModelHandoff(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabActive]);
 
@@ -627,6 +718,11 @@ export function VideoStudio({
     seed: s.setup.seed,
     steps: s.setup.steps,
     fastHighRes: s.setup.fastHighRes,
+    interpolate: s.setup.interpolate,
+    // The fight preset's snapshot — dial values only, so it belongs here with
+    // the dials it restores rather than with the prompt.
+    combat: s.setup.combat,
+    h3Native: s.setup.h3Native,
     motionContextUrl: s.setup.motionContextUrl,
     motionContextIndex: s.setup.motionContextIndex,
     // Advanced / Task settings. normalizeVideoPreferences already had fields
@@ -764,7 +860,7 @@ export function VideoStudio({
       referenceAudios: rows.audios,
     });
   };
-  const runWeave = (text, { standIns, scaffold = false, template = null } = {}) => weavePrompt(text, {
+  const runWeave = (text, { standIns, scaffold = false, template = null, recast = false } = {}) => weavePrompt(text, {
     cast: s.cast,
     limits: weaveLimits(),
     durationSeconds: Number(s.setup.duration) || 0,
@@ -775,6 +871,10 @@ export function VideoStudio({
     // flattened into one paragraph — the Story studio. Ignored by every target
     // that is not the six-section form, which then renders `text` as it came.
     template,
+    // Re-performing an attached clip rather than driving a shot of your own:
+    // the pictures are told they are a design guide and the clip is told it may
+    // have the shot. Off for every other door — see lib/h3Recast.js.
+    recast: recast || isRecastPrompt(text),
   });
   // A snapshot the Undo on a weave toast restores.
   const weaveSnapshot = () => ({
@@ -808,9 +908,9 @@ export function VideoStudio({
   // the Shot Builder, the hub's insert bridge, a canvas restore, the Weave
   // button, or the attach that changed who is in the shot. `standIns` rides
   // with a freshly rendered starter; undefined means "what the composer holds".
-  const acceptPrompt = (text, { standIns, scaffold = false, announce = true, template = null } = {}) => {
+  const acceptPrompt = (text, { standIns, scaffold = false, announce = true, template = null, recast = false } = {}) => {
     syncCast();
-    const woven = runWeave(text, { standIns, scaffold, template });
+    const woven = runWeave(text, { standIns, scaffold, template, recast });
     if (announce && woven.refit.changed) announceRefit(woven.refit);
     s.standIns = woven.standIns;
     s.castWarnings = woven.warnings;
@@ -1199,7 +1299,7 @@ export function VideoStudio({
     const next = { ...current };
     let touched = false;
     if ('prompt' in patch) { next.setup = { ...(current.setup || {}), prompt: patch.prompt }; touched = true; }
-    for (const key of ['cast', 'standIns', 'shotTimeline']) {
+    for (const key of ['cast', 'standIns', 'shotTimeline', 'recastPlan']) {
       if (key in patch) { next[key] = patch[key]; touched = true; }
     }
     if (touched) writeDraft(scope, next);
@@ -1260,6 +1360,61 @@ export function VideoStudio({
     s.setup = { ...s.setup, prompt: next.prompt, emotionDirectionId: next.id };
     updateComposerDraft({ prompt: next.prompt });
     bump();
+  };
+
+  // The fight preset — the one door here that moves DIALS rather than writing
+  // words, so it is the one that has to be able to put them back. Arming reads
+  // the lane's own capabilities (the same readers the send path gates on),
+  // records what each applicable dial held, writes the combat values, selects
+  // an installed combat LoRA if the lane has one, and appends the direction
+  // sentence. Disarming replays the snapshot — never a default, never a guess.
+  //
+  // The LoRA selection lives per MODEL rather than on setup, so it is
+  // snapshotted and restored through its own store beside the dials.
+  const combatContext = () => {
+    const entry = currentModel(s.setup, s.catalogs);
+    return {
+      capabilities: {
+        spectrum: supportsSpectrum(entry),
+        fastHighRes: supportsFastHighRes(entry),
+        interpolation: supportsInterpolation(entry),
+        nativeH3: Boolean(entry?.nativeH3),
+      },
+      resolutions: resolutionsFor(s.setup, s.setup.modelId),
+      availableLoras: s.availableVideoLoras,
+    };
+  };
+  const currentCombatPlan = () => combatPlan({ setup: s.setup, ...combatContext() });
+  const applyCombat = (armed) => {
+    const context = combatContext();
+    const h3 = isH3();
+    if (armed) {
+      const selection = currentVideoLoraSelection();
+      const { setup: next } = armCombat(s.setup, {
+        capabilities: context.capabilities,
+        resolutions: context.resolutions,
+        loraIds: selection.map((lora) => lora.id),
+      });
+      const lora = combatLoraFrom(context.availableLoras);
+      if (lora && !selection.some((item) => item.id === lora.id)) {
+        setCurrentVideoLoraSelection(toggleLoraSelection(selection, lora), { render: false });
+      }
+      const prompt = applyCombatPrompt(s.setup.prompt, true, { h3 });
+      commit({ ...next, prompt });
+      updateComposerDraft({ prompt });
+    } else {
+      const restoredLoras = combatRestoredLoraIds(s.setup);
+      if (restoredLoras) {
+        // Back to the rows that were selected before, with the weights and
+        // mute state they had: the entries themselves are still in the store,
+        // so this drops whatever the preset added rather than rebuilding them.
+        const selection = currentVideoLoraSelection().filter((lora) => restoredLoras.includes(lora.id));
+        setCurrentVideoLoraSelection(selection, { render: false });
+      }
+      const prompt = applyCombatPrompt(s.setup.prompt, false, { h3 });
+      commit({ ...disarmCombat(s.setup), prompt });
+      updateComposerDraft({ prompt });
+    }
   };
 
   // UGC mode — same idempotent-block contract as the phrases above, with one
@@ -1386,6 +1541,9 @@ export function VideoStudio({
   const sceneRoleMap = () => Object.fromEntries(sceneMembersNow().flatMap(
     (member) => (member.data?.images || []).map((url) => [url, member.retention || 'attribute_transfer']),
   ));
+  const sceneSpotMap = () => Object.fromEntries(sceneMembersNow().flatMap(
+    (member) => (member.data?.images || []).filter(() => member.spot).map((url) => [url, member.spot]),
+  ));
   const onSceneRefsChange = (urls) => {
     const next = (Array.isArray(urls) ? urls : []).filter(Boolean);
     const roles = sceneRoleMap();
@@ -1395,7 +1553,7 @@ export function VideoStudio({
     // edited.
     const said = Object.fromEntries(sceneMembersNow().flatMap(
       (member) => (member.data?.images || []).map(
-        (url) => [url, { name: member.name || '', carries: member.carries || '' }],
+        (url) => [url, { name: member.name || '', carries: member.carries || '', spot: member.spot || null }],
       ),
     ));
     // Read BEFORE the cast is rebuilt. Asking afterwards makes a picture that
@@ -1413,11 +1571,21 @@ export function VideoStudio({
       carries: said[url]?.carries || '',
       images: [url],
       retention: roles[url] || 'attribute_transfer',
+      spot: said[url]?.spot || null,
     }))];
     setRows({ ...currentRows(), images: [...characters, ...next] });
     afterRowsChanged();
   };
   const onSceneRole = (url, retention) => {
+    // Leaving the spot role takes the circle back OFF the picture, by putting
+    // the original back in the row. It has to: the ring is drawn into the
+    // pixels, and a picture carrying one under a prompt that no longer explains
+    // it is an unexplained mark in a reference — which the model draws.
+    const circled = sceneMembersNow().find((member) => (member.data?.images || []).includes(url) && member.spot);
+    if (circled && retention !== 'spot' && circled.spot.source) {
+      removeSceneSpot(url, retention);
+      return;
+    }
     s.cast = s.cast.map((member) => (member.kind === 'scene' && (member.data?.images || []).includes(url)
       // A picture re-classified by hand loses the sentence a sender wrote for
       // it: a plate called staging is no longer described as a plate.
@@ -1426,6 +1594,98 @@ export function VideoStudio({
     rememberCast();
     if (weaveTargetNow() === 'reference' && s.setup.prompt.trim()) acceptPrompt(s.setup.prompt, { announce: false });
     bump();
+  };
+
+  /* ---------------- the circled spot ---------------- */
+  //
+  // Circling part of a location picture is the only way to point at part of a
+  // reference: H3 takes no coordinates, so the mark goes in the PIXELS and the
+  // prompt is told what it means (lib/sceneSpot.js writes both sentences, the
+  // cast compiler files them, Prompt Check refuses a circle the prompt never
+  // mentions).
+  //
+  // So the swap is real: a second upload, circled, replaces the picture in the
+  // row, and the original rides along on the spot as `source`. That is what
+  // makes "a place" again free and exact rather than a second edit — and what
+  // keeps the row's own thumbnail honest, since the tile is the picture that
+  // will actually be sent, ring and all.
+  //
+  // The last circle drawn on a picture is remembered by its ORIGINAL url, so
+  // taking the ring off and putting it back reopens the editor where it was
+  // instead of on a blank picture.
+  const spotMemory = () => (s.spotMemory ||= new Map());
+
+  const openSpotEditor = (url) => {
+    const member = sceneMembersNow().find((entry) => (entry.data?.images || []).includes(url));
+    const source = member?.spot?.source || url;
+    const at = (s.setup.referenceImageUrls || []).indexOf(url);
+    s.spotEdit = {
+      url,
+      source,
+      spot: member?.spot || spotMemory().get(source) || null,
+      // The label the sentence in the editor quotes. Empty rather than wrong if
+      // the row is somehow not in the picture list: a preview naming the wrong
+      // picture is worse than one naming none.
+      label: at >= 0 ? `<Picture ${at + 1}>` : '',
+    };
+    bump();
+  };
+
+  const closeSpotEditor = () => { s.spotEdit = null; s.spotBusy = false; bump(); };
+
+  // Put the picture back the way it arrived, and let the cast forget the ring.
+  const removeSceneSpot = (url, retention = 'attribute_transfer') => {
+    const member = sceneMembersNow().find((entry) => (entry.data?.images || []).includes(url));
+    const source = member?.spot?.source;
+    if (!source) return;
+    spotMemory().set(source, member.spot);
+    s.cast = s.cast.map((entry) => (entry === member
+      ? { ...entry, retention, carries: '', spot: null, data: { ...entry.data, images: [source] } }
+      : entry));
+    setRows({
+      ...currentRows(),
+      images: (s.setup.referenceImageUrls || []).map((item) => (item === url ? source : item)),
+    });
+    afterRowsChanged();
+  };
+
+  // Draw the circle in, upload the result, and swap it into the row the
+  // original occupied — position kept, because the <Picture N> numbering is the
+  // order of supply and a picture that jumped to the end would renumber the
+  // prompt underneath the user.
+  const applySceneSpot = async (spot) => {
+    const editing = s.spotEdit;
+    if (!editing || !spot) return;
+    s.spotBusy = true;
+    bump();
+    try {
+      const source = spot.source || editing.source;
+      const pixels = await resolveMediaSrc(source);
+      if (!pixels) throw new Error('That picture could not be opened.');
+      const file = await renderSpotFile(pixels, spot);
+      const upload = await uploadFnForFrame(file);
+      const circled = typeof upload === 'string' ? upload : upload?.url;
+      if (!circled) throw new Error('The circled picture did not upload.');
+      const armed = { ...spot, source };
+      spotMemory().set(source, armed);
+      s.cast = s.cast.map((member) => (member.kind === 'scene' && (member.data?.images || []).includes(editing.url)
+        ? { ...member, retention: 'spot', carries: '', spot: armed, data: { ...member.data, images: [circled] } }
+        : member));
+      setRows({
+        ...currentRows(),
+        images: (s.setup.referenceImageUrls || []).map((item) => (item === editing.url ? circled : item)),
+      });
+      s.spotEdit = null;
+      s.spotBusy = false;
+      // Rows first, then the weave — the same order every other row change
+      // takes, so the definition is written against the picture now attached.
+      afterRowsChanged();
+    } catch (err) {
+      console.error('[VideoStudio] circling a spot failed:', err);
+      toast.error(err?.message || 'That spot could not be drawn in.');
+      s.spotBusy = false;
+      bump();
+    }
   };
 
   // Voice clips (<Audio N>) and motion clips (<Video N>) of the same Reference
@@ -2439,6 +2699,7 @@ export function VideoStudio({
     segments: s.timelineSegments,
     selectedId: s.timelineSelectedId,
     extend: s.timelineExtend,
+    withSound: s.timelineWithSound,
     showCombined: s.timelineShowCombined,
   });
 
@@ -2551,7 +2812,23 @@ export function VideoStudio({
     focusPrompt();
   };
 
-  const timelineAdd = () => {
+  // `mode` is what the press SAID the next shot is, and the rail's "+" asks:
+  //
+  //   'continue'  it picks up from the last filled shot — the mechanism is the
+  //               model's (chain for motion context, last frame for everything
+  //               with a start-image input), and timelineExtendModeFor decides
+  //   'cut'       a new shot in the same scene: same references and settings,
+  //               nothing carried over from the previous clip
+  //   ''          no opinion (a clip dropped on the "+", a lane that cannot
+  //               continue at all) — leave the scene's mode alone
+  //
+  // The choice is written to s.timelineExtend rather than to the new segment,
+  // so there is still exactly ONE piece of continuation state: the strip's
+  // Auto-continue switch always reads back what the "+" was last told, and the
+  // re-arm in timelineSelect can never disagree with the press that made the
+  // slot. It was also the only way to turn Auto-continue on outside H3 —
+  // openSceneAt is reached from "Continue scene", which is motion-context only.
+  const timelineAdd = (mode = '') => {
     // Opening the scene is implied by asking for the next shot. It used to be a
     // separate press, and once a finished render started landing in the strip
     // before the scene was opened, that first press seeded nothing and added
@@ -2560,13 +2837,23 @@ export function VideoStudio({
       s.timelineOn = true;
       seedTimelineSegments();
     }
+    if (mode === 'continue' || mode === 'sound') {
+      s.timelineExtend = true;
+      s.timelineWithSound = mode === 'sound';
+    } else if (mode === 'cut') {
+      s.timelineExtend = false;
+    }
     const next = addTimelineSegment(s.timelineSegments);
     s.timelineSegments = next.segments;
     s.timelineSelectedId = next.selectedId;
     s.timelineShowCombined = false;
     s.resultUrl = null;
     s.resultModel = null;
-    armTimelineContinuation();
+    // A cut does not just skip the arming: it takes back an arming a previous
+    // press left on the composer, so "different angle" starts from the frames
+    // the person chose rather than from the last clip's tail.
+    if (mode === 'cut') disarmTimelineContinuation();
+    else armTimelineContinuation();
     afterTimelineChange();
     focusPrompt();
   };
@@ -2591,8 +2878,15 @@ export function VideoStudio({
   // The mechanism is a property of the MODEL: H3 chains through Motion Context
   // (pinned tail, room tone carries), everything else with a start-image input
   // opens on the previous clip's last frame, grabbed on this device.
-  const timelineExtendModeFor = (entry) => (entry?.supportsMotionContext ? 'chain'
-    : (entry?.supportsStartFrame ? 'frame' : ''));
+  // TWO fields decide a continuation, and each answers a different question:
+  // s.timelineExtend is whether the next shot continues at all (the strip's
+  // Auto-continue switch), and s.timelineWithSound is which mechanism it uses
+  // where the lane has more than one. Neither is derived from the other, and
+  // the "+" writes both in one press, so a row can never mean something the
+  // strip's switch disagrees with.
+  const timelineExtendModeFor = (entry, withSound = s.timelineWithSound) => timelineContinuationMode(
+    entry, { withSound },
+  );
 
   const seedStartFrameFromClip = async (url) => {
     try {
@@ -2621,9 +2915,30 @@ export function VideoStudio({
 
   const armTimelineContinuation = () => {
     if (!s.timelineOn || !s.timelineExtend) return;
-    const entry = currentModel(s.setup, s.catalogs);
-    const plan = timelineContinuationPlan(entry, s.timelineSegments, s.timelineSelectedId);
+    // The SAME lane the "+" read when it offered the choice — the one this run
+    // would reach, so a row can never arm a mechanism the run cannot use. On a
+    // sheetless ingredients lane that is the family's plain lane, which is the
+    // graph that takes a clip back in.
+    const entry = ingredientsFallback || currentModel(s.setup, s.catalogs);
+    const plan = timelineContinuationPlan(entry, s.timelineSegments, s.timelineSelectedId, { withSound: s.timelineWithSound });
     if (!plan) return;
+    if (plan.mode === 'extend') {
+      // The whole previous clip goes in as the source, and the gateway hands
+      // back only the frames this run adds (extend_return_tail). A start frame
+      // or an armed chain here would be a second, contradictory opening.
+      if (s.setup.videoUrl === plan.fromUrl && s.setup.extendTail) return;
+      commit({
+        ...s.setup,
+        imageUrl: null,
+        motionContextUrl: null,
+        motionContextIndex: null,
+        videoUrl: plan.fromUrl,
+        videoName: `Shot ${plan.fromIndex + 1}`,
+        extendTail: true,
+      });
+      s.timelineArmedExtendUrl = plan.fromUrl;
+      return;
+    }
     if (plan.mode === 'chain') {
       if (s.setup.motionContextUrl === plan.fromUrl) return;
       // Same shape as continueSceneFrom: the chain replaces the frames, and
@@ -2646,6 +2961,11 @@ export function VideoStudio({
   const disarmTimelineContinuation = () => {
     let next = s.setup;
     let changed = false;
+    if (s.timelineArmedExtendUrl && s.setup.videoUrl === s.timelineArmedExtendUrl) {
+      next = { ...next, videoUrl: null, videoName: null, extendTail: false };
+      changed = true;
+    }
+    s.timelineArmedExtendUrl = '';
     if (s.timelineArmedChainUrl && s.setup.motionContextUrl === s.timelineArmedChainUrl) {
       next = { ...next, motionContextUrl: null, motionContextIndex: null };
       changed = true;
@@ -2764,6 +3084,15 @@ export function VideoStudio({
     // cut in the moment it lands.
     scheduleTimelineBuild();
     bump();
+  };
+
+  // The rail's Full cut sits outside the scene, and buildTimelineCut refuses to
+  // run for a closed one — a press there that left the scene shut would set the
+  // toggle, schedule a build that bails on its first line, and spin forever. So
+  // asking for the cut opens the scene, exactly as asking for the next shot does.
+  const railToggleCombined = (view) => {
+    if (view && !s.timelineOn) openTimelineView();
+    timelineToggleCombined(view);
   };
 
   // The cut an object URL alone would lose with the tab: stored ONCE per shot
@@ -2997,6 +3326,7 @@ export function VideoStudio({
       s.timelineSegments = saved.segments;
       s.timelineSelectedId = saved.selectedId;
       s.timelineExtend = saved.extend;
+      s.timelineWithSound = saved.withSound;
       s.timelineShowCombined = false;
       bump();
       if (saved.on) scheduleTimelineBuild();
@@ -3022,11 +3352,94 @@ export function VideoStudio({
 
   /* ---------------- generation ---------------- */
 
-  const generateNow = async () => {
+  /**
+   * Why this request cannot be sent, in the sentence the user should read — or
+   * '' when it can. Lifted out of generateNow so BOTH doors ask the same
+   * question: the press that generates now, and the press that queues behind a
+   * render. A queued shot that was always going to be refused must be refused
+   * at the press, not three minutes later when its turn comes.
+   */
+  const videoRequestBlocker = ({ setup, prompt, extendSourceId, ingredients }) => {
+    const model = currentModel(setup, s.catalogs);
+    const isHivemindLocal = isHivemindVideoModelId(setup.modelId);
+    const isHivemindVideoInput = isHivemindLocal && Boolean(setup.videoUrl);
+    const ingredientModel = currentIngredientModel(setup, s.catalogs);
+    const activeItems = activeIngredientSheetItems(ingredientModel, ingredients);
+    const hasIngredientReferences = isHivemindLocal && Boolean(model?.supportsIngredientImages) && activeItems.length > 0;
+    const ingredientsOffTarget = isHivemindLocal && Boolean(model?.supportsIngredientImages)
+      && !hasIngredientReferences
+      ? textToVideoWorkflowForHivemindModel(setup.modelId)
+      : null;
+
+    // Head swap needs BOTH media; the readiness line under the Task strip was
+    // display-only, so the request went out as a plain generation tagged
+    // head-swap with no clip and failed on the backend.
+    const swapCheck = headSwapReadiness(setup);
+    if (swapCheck.active && !swapCheck.ready) return `${'Still needed: '}${swapCheck.missing.join(' and ')}`;
+    if (isHivemindVideoInput) {
+      // The lane this run REACHES, not the one in the picker: a sheetless
+      // ingredients run is already routed to the family's plain lane, and that
+      // is the graph that has to accept the clip. Judging the picker's lane
+      // refused an extension the run would have been perfectly able to make.
+      const videoLane = ingredientsOffTarget || model;
+      if (!videoLane?.supportsVideoInput) return 'This local workflow does not support source-video extension.';
+    } else if (setup.v2vMode) {
+      if (!setup.videoUrl) return 'Please upload a video first.';
+      if (model?.imageField && !setup.imageUrl) return 'Please upload a reference image for motion control.';
+      if (model?.promptRequired && !prompt) return 'Please describe the motion you want.';
+    } else if (model?.requiresRequestId) {
+      if (!extendSourceId) return 'No Seedance 2.0 generation found to extend. Generate a video first.';
+    } else if (setup.imageMode) {
+      // LTX 2.3 supports text-to-video: for a Hivemind LTX model a prompt alone
+      // is a valid request — the start frame is optional. An ingredients lane
+      // counts too, as long as the registry names a plain lane to run it on
+      // (ingredientsOffTarget): its IC-LoRA is conditioning, not the model.
+      const hiveTextToVideo = isHivemindLocal
+        && (!model?.supportsIngredientImages || Boolean(ingredientsOffTarget));
+      if (!setup.imageUrl && !hasIngredientReferences) {
+        if (hiveTextToVideo) {
+          if (!prompt) return 'Please enter a prompt to generate a video.';
+        } else {
+          return model?.supportsIngredientImages
+            ? 'Please add reference views or select an ingredients sheet.'
+            : 'Please upload a start frame image first.';
+        }
+      }
+      if (hasIngredientReferences && !prompt) return 'Please describe the shot to generate from these references.';
+      // The fallback is a different GRAPH, and three of the four LTX ingredient
+      // lanes fall back to one with no start-frame input. Sending a frame there
+      // would drop it and render text-to-video instead — a silent downgrade of
+      // the one thing the person attached — so the press says so, and names
+      // both ways out of it.
+      if (setup.imageUrl && ingredientsOffTarget && !ingredientsOffTarget.supportsStartFrame) {
+        return `${ingredientsOffTarget.name} has no start-frame input, and with no reference views attached this run goes there. Attach reference views to stay on ${model?.name || 'this lane'}, or remove the start frame.`;
+      }
+    } else if (!prompt) {
+      return 'Please enter a prompt to generate a video.';
+    }
+    return '';
+  };
+
+  /**
+   * @param {object|null} queued  a generation context captured AT THE PRESS
+   *   (captureGenerationContext) for a run that had to wait its turn. Null is
+   *   the ordinary case: render whatever the composer holds right now.
+   *
+   * A queued run is rebuilt into a LOCAL setup and never written back into the
+   * composer — by the time its turn comes the composer holds the next shot the
+   * user is writing, and a queue that overwrites that would cost typed work.
+   */
+  const generateNow = async (queued = null) => {
+    const applied = queued ? applyGenerationContext(s.setup, queued, s.catalogs) : null;
+    if (queued && !applied) {
+      toast.error('Could not start a queued shot — the model it was made with is no longer in the catalog.');
+      return;
+    }
+    const setup = applied ? applied.setup : s.setup;
     // The pin promises WHERE this runs — refuse rather than quietly falling
     // back to this Mac's GPU.
-    if (s.setup.localMode && s.setup.rentedMachineId
-        && !servedByAnyMachine(s.rentedMachines, { id: s.setup.modelId, name: s.setup.modelName })) {
+    if (setup.localMode && setup.rentedMachineId
+        && !servedByAnyMachine(s.rentedMachines, { id: setup.modelId, name: setup.modelName })) {
       // Same honesty as the source panel: name the actual blocker.
       toast.error(
         s.rentedBroken?.length
@@ -3043,85 +3456,75 @@ export function VideoStudio({
     // pass can see. References attached under a prompt that never mentions
     // them is the one shape H3 reliably turns into a stranger — so the weave
     // runs here too, visibly, before anything is sent. The composer shows
-    // exactly what the model gets.
-    syncCast();
-    if (weaveTargetNow() === 'reference' && s.cast.length && s.setup.prompt.trim()
-        && !isWovenForReference(s.setup.prompt)) {
-      const before = weaveSnapshot();
-      const woven = acceptPrompt(s.setup.prompt);
-      if (woven.prompt !== before.prompt) {
-        announceWeave('Wove your references into the prompt before sending', before);
+    // exactly what the model gets. A queued run skips it: its prompt was woven
+    // at the press, and weaving now would read the composer's current cast.
+    if (!queued) {
+      syncCast();
+      if (weaveTargetNow() === 'reference' && s.cast.length && s.setup.prompt.trim()
+          && !isWovenForReference(s.setup.prompt)) {
+        const before = weaveSnapshot();
+        const woven = acceptPrompt(s.setup.prompt);
+        if (woven.prompt !== before.prompt) {
+          announceWeave('Wove your references into the prompt before sending', before);
+        }
       }
     }
-    const prompt = s.setup.prompt.trim();
-    const setup = s.setup;
+    const prompt = (queued ? setup.prompt : s.setup.prompt).trim();
     const catalogs = s.catalogs;
     const model = currentModel(setup, catalogs);
     const isExtendMode = model?.requiresRequestId;
+    const extendSourceId = queued ? (queued.sourceGenerationId || null) : s.lastGenerationId;
     const isWan2gpLocal = isWan2gpModelId(setup.modelId);
     const isHivemindLocal = isHivemindVideoModelId(setup.modelId);
     const isHivemindVideoInput = isHivemindLocal && Boolean(setup.videoUrl);
     const ingredientModel = currentIngredientModel(setup, catalogs);
+    // Same rule as the setup: a queued run carries its own sheet and its own
+    // panels, so swapping the composer's ingredients after the press cannot
+    // change what a shot already waiting in line renders.
+    const ingredientSelections = queued
+      ? normalizeVideoIngredientSelections(queued.ingredientImages || [])
+      : s.sharedIngredientSelections;
+    const ingredientSheets = queued
+      ? normalizeVideoIngredientSelections(queued.ingredientSheets || [])
+      : s.sharedIngredientSheets;
+    const selectedSheetId = queued ? (queued.ingredientSelectedSheet || '') : s.selectedIngredientSheet;
     const activeItems = activeIngredientSheetItems(ingredientModel, {
-      selectedSheet: s.selectedIngredientSheet,
-      selections: s.sharedIngredientSelections,
-      sheets: s.sharedIngredientSheets,
+      selectedSheet: selectedSheetId,
+      selections: ingredientSelections,
+      sheets: ingredientSheets,
     });
     const hasIngredientReferences = isHivemindLocal && Boolean(model?.supportsIngredientImages) && activeItems.length > 0;
-    // An ingredients lane with nothing attached: the IC-LoRA graph has no sheet
-    // to condition on, so this run goes to the family's plain text-to-video lane
+    // An ingredients lane with no SHEET: the IC-LoRA graph has no reference to
+    // condition on, so this run goes to the family's plain text-to-video lane
     // instead of being refused. Null when the registry names no such lane.
+    //
+    // A start frame does not change that, and used to: the rule also required
+    // `!setup.imageUrl`, on the reading that an attached input meant "I want the
+    // IC graph". It is not an input the IC graph can use in place of a sheet —
+    // every ingredients lane carries the registry's `ltx23-ingredients`
+    // prompt_contract, which refuses any run without `reference_description`
+    // (sent only alongside a sheet) or a prompt already carrying both of its
+    // headings. So a start frame with no sheet routed itself onto a lane that
+    // could only refuse it — "Media Studio did not return a job id", with the
+    // reason redacted on a machine-private gateway.
     const ingredientsOffTarget = isHivemindLocal && Boolean(model?.supportsIngredientImages)
-      && !hasIngredientReferences && !setup.imageUrl
+      && !hasIngredientReferences
       ? textToVideoWorkflowForHivemindModel(setup.modelId)
       : null;
 
     // ── Validation (aborts stay aborts; alert() → toast.error()) ──────────────
-    // Head swap needs BOTH media; the readiness line under the Task strip was
-    // display-only, so the request went out as a plain generation tagged
-    // head-swap with no clip and failed on the backend.
-    const swapCheck = headSwapReadiness(setup);
-    if (swapCheck.active && !swapCheck.ready) {
-      toast.error(`${'Still needed: '}${swapCheck.missing.join(' and ')}`);
-      return;
-    }
-    if (isHivemindVideoInput) {
-      if (!model?.supportsVideoInput) {
-        toast.error('This local workflow does not support source-video extension.');
-        return;
-      }
-    } else if (setup.v2vMode) {
-      if (!setup.videoUrl) { toast.error('Please upload a video first.'); return; }
-      if (model?.imageField && !setup.imageUrl) { toast.error('Please upload a reference image for motion control.'); return; }
-      if (model?.promptRequired && !prompt) { toast.error('Please describe the motion you want.'); return; }
-    } else if (isExtendMode) {
-      if (!s.lastGenerationId) { toast.error('No Seedance 2.0 generation found to extend. Generate a video first.'); return; }
-    } else if (setup.imageMode) {
-      // LTX 2.3 supports text-to-video: for a Hivemind LTX model a prompt alone
-      // is a valid request — the start frame is optional. An ingredients lane
-      // counts too, as long as the registry names a plain lane to run it on
-      // (ingredientsOffTarget): its IC-LoRA is conditioning, not the model.
-      const hiveTextToVideo = isHivemindLocal
-        && (!model?.supportsIngredientImages || Boolean(ingredientsOffTarget));
-      if (!setup.imageUrl && !hasIngredientReferences) {
-        if (hiveTextToVideo) {
-          if (!prompt) { toast.error('Please enter a prompt to generate a video.'); return; }
-        } else {
-          toast.error(model?.supportsIngredientImages
-            ? 'Please add reference views or select an ingredients sheet.'
-            : 'Please upload a start frame image first.');
-          return;
-        }
-      }
-      if (hasIngredientReferences && !prompt) { toast.error('Please describe the shot to generate from these references.'); return; }
-    } else if (!prompt) {
-      toast.error('Please enter a prompt to generate a video.');
-      return;
-    }
+    const blocker = videoRequestBlocker({
+      setup,
+      prompt,
+      extendSourceId,
+      ingredients: { selectedSheet: selectedSheetId, selections: ingredientSelections, sheets: ingredientSheets },
+    });
+    if (blocker) { toast.error(blocker); return; }
 
     // Re-assert the sheet-matched aspect at generation time even if a restored
-    // session or a later model switch reverted it.
-    if (hasIngredientReferences && selectedUploadedIngredientSheet()) {
+    // session or a later model switch reverted it. Only for a live press: this
+    // writes s.setup, and a queued run already captured the matched aspect.
+    if (!queued && hasIngredientReferences && selectedUploadedIngredientSheet()) {
       await matchAspectToIngredientSheet(s.selectedIngredientSheet);
     }
 
@@ -3129,14 +3532,14 @@ export function VideoStudio({
     if (!isLocal) {
       // The shared store counts: a machine holding MUAPI_API_KEY is never asked.
       if (muapiKeyMissing()) {
-        s.authRetry = () => generate();
+        s.authRetry = () => { void runGeneration(queued); };
         s.authOpen = true;
         bump();
         return;
       }
     }
 
-    s.lastSubmittedContext = captureGenerationContext(prompt);
+    s.lastSubmittedContext = queued || captureGenerationContext(prompt);
     void primeCompletionPing();
     s.generateError = '';
     s.generateFailure = null;
@@ -3181,7 +3584,7 @@ export function VideoStudio({
     try {
       // ─── Local Media Studio (Hivemind) — job-based, 90-min poll in lib ──────
       if (isHivemindLocal) {
-        const finishedSheet = selectedUploadedIngredientSheet();
+        const finishedSheet = ingredientSheets.find((sheet) => sheet.url === selectedSheetId) || null;
         // "Use starting frame aspect ratio": when on with a start frame (and not
         // extending a video or using an ingredient sheet), send an empty aspect so
         // the backend derives output dimensions from the frame itself — no crop.
@@ -3215,7 +3618,7 @@ export function VideoStudio({
           // Number(null) is 0 — which sent nag_scale: 0 (NAG off) for "Default".
           ...(typeof setup.nagScale === 'number' && Number.isFinite(setup.nagScale) ? { nag_scale: setup.nagScale } : {}),
           ...(Number(setup.detailerStrength) > 0 ? { detailer_strength: Number(setup.detailerStrength) } : {}),
-          loras: loraGenerationPayload(currentVideoLoraSelection()),
+          loras: loraGenerationPayload(queued ? (queued.loras || []) : currentVideoLoraSelection()),
           ...(hasIngredientReferences ? {
             ingredientImages: activeItems.map((item) => ({ image: item.url, description: item.description })),
             // A finished sheet's description stands alone as the full sheet
@@ -3246,6 +3649,7 @@ export function VideoStudio({
         if (plan.sendVideo && setup.videoUrl) localParams.video = setup.videoUrl;
         if (plan.sendImage && setup.imageUrl) localParams.image = setup.imageUrl;
         if (plan.videoMode && setup.videoUrl) localParams.video_mode = plan.videoMode;
+        if (plan.extendTail) localParams.extend_return_tail = true;
         // Scene chaining: the armed previous clip seeds this shot's opening
         // frames + room tone. It is a sealed output; the lib decrypts it
         // in-browser at submit, like any saved reference.
@@ -3312,6 +3716,20 @@ export function VideoStudio({
         // can never leak into a turbo or LTX graph.
         if (Number(setup.steps) > 0 && supportsQualitySteps(currentModel(setup, s.catalogs))) {
           localParams.steps = Math.round(Number(setup.steps));
+        }
+        // Frame interpolation, gated the same way: a multiplier left on from
+        // MiniMax H3 must not ride into a graph with no interpolation node,
+        // where the compiler would have nothing to map it to.
+        if (Number(setup.interpolate) >= 2 && supportsInterpolation(currentModel(setup, s.catalogs))) {
+          localParams.interpolate = Math.round(Number(setup.interpolate));
+        }
+        // The h3.c dials, gated on the lane declaring them for the same reason
+        // as the two above. Only what was changed travels: an untouched studio
+        // sends nothing, which is what asks the gateway to pick a preset for
+        // whatever Mac this is.
+        if (currentModel(setup, s.catalogs)?.nativeH3) {
+          const h3 = h3NativeRequest(setup.h3Native);
+          if (h3) localParams.h3_native = h3;
         }
         // What the Refinement control promised, so the progress readout can be
         // held to it. Spectrum reports twice this (see updateGenerationProgress).
@@ -3479,7 +3897,7 @@ export function VideoStudio({
       // ─── Remote T2V (+ Seedance extend) ────────────────────────────────────
       const params = { model: setup.modelId, onRequestId, signal: runSignal, ...getAdvancedVideoPayload(model, setup.advancedValues) };
       if (prompt) params.prompt = prompt;
-      if (isExtendMode) params.request_id = s.lastGenerationId;
+      if (isExtendMode) params.request_id = extendSourceId;
       else params.aspect_ratio = setup.ar;
       if (durationsFor(setup, setup.modelId).length > 0) params.duration = setup.duration;
       if (resolutionsFor(setup, setup.modelId).length > 0) params.resolution = setup.resolution;
@@ -3535,7 +3953,66 @@ export function VideoStudio({
       bump();
     }
   };
-  const generate = () => generationQueueRef.current.enqueue(generateNow);
+  /** A waiting shot's one line in the composer's list: what it says, and the
+   *  shape it was pressed at. */
+  const queueEntryMeta = (context) => ({
+    label: (context?.prompt || '').trim() || context?.modelName || 'Untitled shot',
+    detail: [
+      context?.modelName,
+      context?.aspectRatio,
+      context?.duration ? `${context.duration}s` : '',
+    ].filter(Boolean).join(' · '),
+  });
+
+  /** Run a captured request when the machine is free. The auth prompt's retry
+   *  lands here too, carrying the same context the refused press carried. */
+  const runGeneration = (context) => generationQueueRef.current.enqueue(
+    () => generateNow(context),
+    context ? queueEntryMeta(context) : {},
+  );
+
+  /**
+   * The press.
+   *
+   * While a render is out this does not bounce off a dead button — it captures
+   * what is on screen NOW and joins the queue, leaving the composer free for the
+   * next shot immediately. The capture is the whole point: a queued shot that
+   * read the composer when its turn finally came would render whatever had been
+   * typed since, which is not what anybody pressed.
+   */
+  const generate = () => {
+    if (!s.generating && !generationQueueRef.current.pending) return runGeneration(null);
+    // Weave BEFORE the capture, not at the run: what gets queued has to be the
+    // prompt the composer is showing, down to the woven subject lines.
+    syncCast();
+    if (weaveTargetNow() === 'reference' && s.cast.length && s.setup.prompt.trim()
+        && !isWovenForReference(s.setup.prompt)) {
+      const before = weaveSnapshot();
+      const woven = acceptPrompt(s.setup.prompt);
+      if (woven.prompt !== before.prompt) {
+        announceWeave('Wove your references into the prompt before queueing it', before);
+      }
+    }
+    const prompt = s.setup.prompt.trim();
+    const blocker = videoRequestBlocker({
+      setup: s.setup,
+      prompt,
+      extendSourceId: s.lastGenerationId,
+      ingredients: {
+        selectedSheet: s.selectedIngredientSheet,
+        selections: s.sharedIngredientSelections,
+        sheets: s.sharedIngredientSheets,
+      },
+    });
+    if (blocker) { toast.error(blocker); return Promise.resolve(); }
+    return runGeneration(captureGenerationContext(prompt));
+  };
+
+  /** The waiting list, and the one way out of it. Removing a shot that has not
+   *  started is not Cancel — Cancel, on the stage, interrupts a real render. */
+  const queuedShots = generationQueueRef.current.list();
+  const removeQueuedShot = (id) => { generationQueueRef.current.remove(id); };
+  const clearQueuedShots = () => { generationQueueRef.current.clearWaiting(); };
 
   // Cancel / reset the in-flight generation. Aborts the poll immediately, forwards
   // a best-effort interrupt to whichever backend is running the job, and ALWAYS
@@ -3645,6 +4122,9 @@ export function VideoStudio({
       // that were a guess — so re-point it at its refreshed entry and stop.
       const target = resolveVideoModel(s.setup.modelId, s.catalogs);
       if (target) s.setup = withSelectedModel(s.setup, target);
+      // A handoff held for this catalogue outranks the refreshed selection:
+      // pressing "Use in Video studio" is newer than whatever was open.
+      finishModelHandoff();
       bump();
       return;
     }
@@ -3660,6 +4140,10 @@ export function VideoStudio({
         if (target) s.setup = selectHivemindWorkflowTransition(s.setup, target, s.catalogs);
       }
     }
+    // Last, so it wins over both the restored preferences and the workflow
+    // default: a model handed over from the Models route is the most recent
+    // thing the user actually asked for.
+    finishModelHandoff();
     bump();
   };
 
@@ -3771,6 +4255,11 @@ export function VideoStudio({
         const restored = ownDraft[field];
         if (Array.isArray(restored) && restored.length && !s[field]?.length) s[field] = restored;
       }
+      // The recast plan is an OBJECT, not a list, so it cannot ride the loop
+      // above. Restored only over a plan nobody has touched this session — a
+      // shot list built here outranks one saved before the reload.
+      const savedRecast = ownDraft.recastPlan;
+      if (savedRecast?.shots?.length && !recastShotsWritten(s.recastPlan)) s.recastPlan = savedRecast;
       let changed = false;
       // Descriptions are not part of `setup`, so they get their own flag: they
       // must not drag the setup/cast restore below through a re-derive.
@@ -4187,7 +4676,17 @@ export function VideoStudio({
   // now, with progress bars, instead of a refusal after the upload.
   const dependencyModel = currentModel(s.setup, s.catalogs);
   const dependencyWorkflowId = dependencyModel?.provider === 'hivemind-media-studio' ? String(dependencyModel.workflowId || '') : '';
-  const dependencyRunOn = s.setup.rentedMachineId || '';
+  // Which machine to ASK. The tab's pin when it has one — but a tab that has
+  // made no choice has no pin, and falling through to the default lane asks
+  // THIS MAC about a workflow only a rented box can run. It answers, correctly,
+  // that the card is wrong and four files are missing, and the tab is bounced
+  // off a lane the attached machine was already serving in full: measured
+  // 2026-09-14, minimax-h3-eros reported hardware.supported=false + 6 missing
+  // on `default` and supported with nothing missing on the rental lane in the
+  // same second. So with no pin, ask whichever attached machine Automatic
+  // would route this lane to. Generation always would have landed there (it
+  // routes on the graph's own model names); only the preflight was pessimistic.
+  const dependencyRunOn = preflightRunOn(s.setup, s.rentedMachines, dependencyModel);
 
   /**
    * Where to send this tab when its lane refuses.
@@ -4326,6 +4825,22 @@ export function VideoStudio({
   // full-step lane only.
   const minimaxSelected = isHivemindVideoModelId(s.setup.modelId) && isMinimaxFamilyModel(s.setup);
   const minimaxStepsAvailable = minimaxSelected && supportsQualitySteps(model);
+  // The turntable capture asks a DIFFERENT question of the same model, and the
+  // two must not be confused. `minimaxSelected` above is a graph question — does
+  // this run through the local MiniMax H3 workflow, so do that graph's dials
+  // apply — and it is deliberately false for every remote row. Freeze-and-orbit
+  // is a property of MiniMax's WEIGHTS, so it holds wherever they run: this Mac,
+  // a rented box, the hosted credit lane, or the provider's own API.
+  const turntableAvailable = isMinimaxVendorModel(model) || isMinimaxVendorModel(s.setup);
+  // Armed is read back off the PROMPT, never from a flag beside it — Start
+  // fresh, a saved prompt and a restored generation all replace the text
+  // without knowing about the capture.
+  const turntableArmed = hasTurntable(s.setup.prompt);
+  // MiniMax H3 through h3.c on this Mac: a different engine for the same model,
+  // so a different bench. The registry block IS the bench — presets, dials,
+  // ranges — and only the native lane carries one, which is what keeps this
+  // null (and the whole panel unrendered) everywhere else.
+  const h3Native = model?.nativeH3 || null;
   // Preset boundary at 24: anything the High preset wrote (32) reads back as
   // High; the model default (null) and small values read as Standard.
   const minimaxRefinement = Number(s.setup.steps) >= 24 ? 'high' : 'standard';
@@ -4365,6 +4880,100 @@ export function VideoStudio({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [endFrameVisible]);
+  // An armed capture MEANS one picture at both ends — that pin is the whole
+  // difference between an orbit that closes and one that drifts into a
+  // different subject on the far side. So a start frame swapped while it is
+  // armed re-pins the end. Without this the old picture stayed pinned at the
+  // far end silently: nothing on screen said the two ends had stopped agreeing,
+  // and the render came back subtly wrong with no visible cause.
+  useEffect(() => {
+    if (!turntableArmed || !endFrameVisible) return;
+    if (!s.setup.imageUrl || s.setup.endImageUrl === s.setup.imageUrl) return;
+    s.setup = { ...s.setup, endImageUrl: s.setup.imageUrl };
+    bump();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turntableArmed, endFrameVisible, s.setup.imageUrl]);
+
+  // The fight preset follows you between lanes, and re-arms when it does.
+  //
+  // A snapshot is a set of values read off ONE workflow. Carrying it across a
+  // model switch would mean disarming on the Apple-silicon lane wrote back a
+  // resolution and a Spectrum state that lane never had — and applyModelDefaults
+  // has already re-derived the per-model selections underneath it. So a lane
+  // change re-reads the new lane's capabilities, snapshots ITS values, and
+  // applies the preset there: what is armed stays armed, and turning it off
+  // still restores what this lane was set to before.
+  useEffect(() => {
+    if (!isCombatArmed(s.setup)) return;
+    if (combatSnapshotModelId(s.setup) === s.setup.modelId) return;
+    const context = combatContext();
+    // Snapshot the setup with the preset REMOVED, never the one it is already
+    // holding. Arming straight over the armed values would record Max/on/2x as
+    // "what it was before", and a lane you armed on, left and came back to
+    // could then never be turned off again.
+    const restored = disarmCombat(s.setup);
+    // Except a restored value the new lane does not offer — a resolution from
+    // an H3 graph is not one a cloud row has in its enum. There the lane's own
+    // default, which applyModelDefaults just wrote, is the honest "before".
+    const clean = context.resolutions.length && !context.resolutions.includes(restored.resolution)
+      ? { ...restored, resolution: s.setup.resolution }
+      : restored;
+    const { setup: next } = armCombat(clean, {
+      capabilities: context.capabilities,
+      resolutions: context.resolutions,
+      loraIds: currentVideoLoraSelection().map((lora) => lora.id),
+    });
+    s.setup = next;
+    persistVideoPreferences();
+    bump();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.setup.modelId, s.setup.combat]);
+
+  // Arming writes the block AND pins the picture, in one place, because the two
+  // together are the recipe: the prompt alone gives you a nice orbit that does
+  // not reconstruct.
+  const armTurntable = (nextPrompt, { pinEndFrame = false } = {}) => {
+    acceptPrompt(nextPrompt);
+    if (pinEndFrame && endFrameVisible && s.setup.imageUrl) {
+      commit({ ...s.setup, endImageUrl: s.setup.imageUrl });
+    }
+    focusPrompt();
+  };
+
+  // Removing takes the block out, and the pin with it — but ONLY the pin this
+  // feature made. An end frame someone chose by hand is a different picture
+  // from the start frame, and clearing that would be the studio throwing away
+  // their work to tidy up after itself.
+  const removeTurntable = () => {
+    acceptPrompt(stripTurntable(s.setup.prompt));
+    if (s.setup.endImageUrl && s.setup.endImageUrl === s.setup.imageUrl) {
+      commit({ ...s.setup, endImageUrl: null });
+    }
+  };
+
+  /* ---------------- recast ---------------- */
+  //
+  // Re-performing an attached clip with this cast in it. Armed FROM THE PROMPT
+  // like UGC mode is, never from a flag: loading a saved prompt or pressing
+  // Start fresh has to turn the chip off with it, and a flag would still be lit
+  // over a prompt that no longer holds a recast.
+  const recastArmed = () => isRecastPrompt(s.setup.prompt);
+  // Reconcile before opening so the panel's <Subject N> numbering is the one
+  // the prompt will be written with — a picture attached a moment ago must
+  // already be a cast member when its row is drawn.
+  const openRecast = () => { syncCast(); s.recastOpen = true; bump(); };
+  // The panel hands over the summary and description it previewed; the cast
+  // half is written here, onto the prompt in the box — which keeps the author's
+  // own soundscape and music, because the template carries neither.
+  const applyRecast = (template) => {
+    acceptPrompt(s.setup.prompt, { template, recast: true });
+    focusPrompt();
+  };
+
+  // A frame grabbed off the review dial becomes the next run's start frame. The
+  // pin effect above re-pins the far end, so a capture stays closed across a
+  // hand-off from one orbit to the next.
+  const useTurntableFrame = (dataUrl) => { commit({ ...s.setup, imageUrl: dataUrl }); };
   useEffect(() => {
     if (!ltxFramesVisible && (s.setup.ltxMiddleUrl || s.setup.ltxEndUrl)) {
       s.setup = { ...s.setup, ltxMiddleUrl: null, ltxEndUrl: null };
@@ -4459,9 +5068,10 @@ export function VideoStudio({
     : 0;
   // The plain lane this run would go to, resolved once: the composer banner and
   // the ingredients panel must name the same one, and generate() must send to
-  // it. Null while a sheet is armed or a start frame is attached — then the run
-  // is the IC graph's own, which is what those inputs are for.
-  const ingredientsFallback = ingredientModel && !activeIngredients && !s.setup.imageUrl
+  // it. Null while a SHEET is armed — then the run is the IC graph's own, which
+  // is what a sheet is for. A start frame is not a sheet and never routed the
+  // run anywhere the IC graph could accept it (see generate()).
+  const ingredientsFallback = ingredientModel && !activeIngredients
     ? textToVideoWorkflowForHivemindModel(s.setup.modelId)
     : null;
   // These two are declared here rather than up with the other derived state
@@ -4578,7 +5188,10 @@ export function VideoStudio({
   })();
 
   const isSeedanceResult = s.resultModel === 'seedance-v2.0-t2v' || s.resultModel === 'seedance-v2.0-i2v';
-  const generateLabel = s.generating ? t('common.generating') : t('common.generate');
+  // The press names what it will actually do. While a render is out it does not
+  // say "Generating…" at a button you cannot press — it queues, and says so.
+  const studioBusy = s.generating || generationQueueRef.current.pending > 0;
+  const generateLabel = studioBusy ? t('common.addToQueue') : t('common.generate');
 
   const progressStageLabel = t(`video.progress.${s.progress.stage}`);
   const progressPct = Math.max(0, Math.min(1, Number(s.progressDisplay) || 0));
@@ -4759,7 +5372,9 @@ export function VideoStudio({
       viewsOnly={!referenceEntry}
       scene={sceneUrls()}
       sceneRoles={sceneRoleMap()}
+      sceneSpots={sceneSpotMap()}
       onSceneRole={onSceneRole}
+      onOpenSpot={openSpotEditor}
       onChange={{
         images: onCharacterRefsChange,
         scene: onSceneRefsChange,
@@ -4854,7 +5469,20 @@ export function VideoStudio({
       spectrumAvailable={supportsSpectrum(model)}
       chainArmed={chainArmed}
       fastHighResAvailable={supportsFastHighRes(model)}
+      interpolationAvailable={supportsInterpolation(model)}
+      // Armed by the fight preset, and the drawer says so: a switch somebody
+      // else moved is the one thing a settings panel must never present as
+      // their own choice.
+      combatArmed={isCombatArmed(s.setup)}
       denoiseAvailable={denoiseAvailable}
+      h3Native={h3Native}
+      // Only what this tab changed. `{}` is untouched, which the gateway reads
+      // as "recommend a preset for this machine" — so it must stay `{}` rather
+      // than being seeded with one machine's answer at mount.
+      h3Setup={s.setup.h3Native || {}}
+      setH3Setup={(next) => commit({ ...s.setup, h3Native: next })}
+      h3ReferencesAttached={['referenceImageUrls', 'referenceVideos', 'referenceAudios']
+        .some((key) => Array.isArray(s.setup[key]) && s.setup[key].filter(Boolean).length > 0)}
       setNegativePrompt={setNegativePrompt}
       advancedInputs={advancedInputs}
       setAdvanced={setAdvanced}
@@ -5091,40 +5719,53 @@ export function VideoStudio({
   /* ---------------- the sequence, and the composer ---------------- */
 
   const selectedSeg = s.timelineSegments.find((seg) => seg.id === s.timelineSelectedId);
+  // How THIS lane continues a scene, read once: the rail's "+" offers the
+  // choice and the strip's Auto-continue switch labels it, and the two can
+  // never describe a mechanism the other does not have.
+  // The PICTURE continuation this lane has (chain on H3, last frame elsewhere),
+  // read with the sound preference off: it is what the "Continue the scene" row
+  // does, whatever the last press chose. The strip's Auto-continue label reads
+  // the live choice instead, which is why the two are computed separately.
+  const sceneContinueMode = timelineExtendModeFor(currentModel(s.setup, s.catalogs), false);
+  // And whether this lane offers a sound-carrying continuation as a SEPARATE
+  // choice. H3 does not: its chain already carries room tone, so there is
+  // nothing to choose between.
+  // Read on the lane the run would REACH: a sheetless ingredients run routes to
+  // the family's plain lane, which is the one that can take a clip back in.
+  const sceneCanContinueWithSound = timelineCanContinueWithSound(
+    ingredientsFallback || currentModel(s.setup, s.catalogs),
+  );
+
   // The manual sequence surface, handed to the composer's `more` menu as a node.
   // The rail draws the shots, but it cannot express reorder-by-drag, exclude,
   // cut, combine or delete-with-file — so the full strip stays one press away
   // rather than being replaced by the rail.
-  const timelineStrip = s.timelineOn ? (() => {
-    const modelEntry = currentModel(s.setup, s.catalogs);
-    const extendMode = timelineExtendModeFor(modelEntry);
-    return (
-      <TimelineStrip
-        segments={s.timelineSegments}
-        selectedId={s.timelineSelectedId}
-        pendingSegmentId={s.generating && selectedSeg && !selectedSeg.url ? selectedSeg.id : ''}
-        extendAvailable={Boolean(extendMode)}
-        extendMode={extendMode}
-        extendOn={s.timelineExtend}
-        onToggleExtend={timelineToggleExtend}
-        canCombine={timelineCanCombine(s.timelineSegments)}
-        showCombined={s.timelineShowCombined}
-        combined={s.timelineCombined}
-        building={s.timelineBuilding}
-        buildError={s.timelineBuildError}
-        onToggleCombined={timelineToggleCombined}
-        onExportCombined={() => void exportTimelineCut()}
-        onSelect={timelineSelect}
-        onAdd={timelineAdd}
-        onRemove={timelineRemoveRequest}
-        onClose={closeTimelineView}
-        onDrop={timelineHandleDrop}
-        promptFor={timelinePromptFor}
-        onExportSegment={(seg) => void timelineExportSegment(seg)}
-        onToggleExcluded={timelineToggleExcluded}
-      />
-    );
-  })() : null;
+  const timelineStrip = s.timelineOn ? (
+    <TimelineStrip
+      segments={s.timelineSegments}
+      selectedId={s.timelineSelectedId}
+      pendingSegmentId={s.generating && selectedSeg && !selectedSeg.url ? selectedSeg.id : ''}
+      extendAvailable={Boolean(sceneContinueMode)}
+      extendMode={sceneContinueMode}
+      extendOn={s.timelineExtend}
+      onToggleExtend={timelineToggleExtend}
+      canCombine={timelineCanCombine(s.timelineSegments)}
+      showCombined={s.timelineShowCombined}
+      combined={s.timelineCombined}
+      building={s.timelineBuilding}
+      buildError={s.timelineBuildError}
+      onToggleCombined={timelineToggleCombined}
+      onExportCombined={() => void exportTimelineCut()}
+      onSelect={timelineSelect}
+      onAdd={timelineAdd}
+      onRemove={timelineRemoveRequest}
+      onClose={closeTimelineView}
+      onDrop={timelineHandleDrop}
+      promptFor={timelinePromptFor}
+      onExportSegment={(seg) => void timelineExportSegment(seg)}
+      onToggleExcluded={timelineToggleExcluded}
+    />
+  ) : null;
 
   // Thirteen labelled chips over two lines became a sentence plus five doors.
   // VideoComposerBar draws it; every value below is the one the drawer renders
@@ -5165,7 +5806,9 @@ export function VideoStudio({
       referenceLimits={referenceLimits()}
       sceneRefs={sceneUrls()}
       sceneRoles={sceneRoleMap()}
+      sceneSpots={sceneSpotMap()}
       onSceneRole={onSceneRole}
+      onOpenSpot={openSpotEditor}
       onCharacterRefsChange={onCharacterRefsChange}
       onSceneRefsChange={onSceneRefsChange}
       onReferenceAudiosChange={onReferenceAudiosChange}
@@ -5193,6 +5836,12 @@ export function VideoStudio({
       onApplyCameraMotions={applyCameraMotions}
       emotionDirectionId={s.setup.emotionDirectionId || null}
       onApplyEmotion={applyEmotion}
+      combatArmed={isCombatArmed(s.setup)}
+      // Computed here because the plan is a question about the LANE: which of
+      // the preset's dials this workflow exposes, and whether a fight LoRA is
+      // installed on it. The menu only draws the answer.
+      combatPlan={isH3() ? currentCombatPlan() : null}
+      onApplyCombat={applyCombat}
       ugcActive={hasUgcVideoBrief(s.setup.prompt)}
       ugcVariantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
       ugcFormatId={ugcFormatInPrompt(s.setup.prompt) || s.setup.ugcFormat || UGC_DEFAULT_FORMAT}
@@ -5205,6 +5854,12 @@ export function VideoStudio({
       onApplyRestyle={applyRestyle}
       shotTimeline={s.shotTimeline}
       onOpenShotBuilder={() => { s.shotBuilderOpen = true; bump(); }}
+      recastArmed={recastArmed()}
+      recastShots={recastShotsWritten(s.recastPlan)}
+      onOpenRecast={openRecast}
+      turntableAvailable={turntableAvailable}
+      turntableArmed={turntableArmed}
+      onOpenTurntable={() => { s.turntableOpen = true; bump(); }}
       promptCheckRefs={attachedReferences()}
       promptCheckDurations={referenceDurations()}
       onRefit={() => commit({ ...s.setup, prompt: adoptPrompt(s.setup.prompt) })}
@@ -5224,8 +5879,6 @@ export function VideoStudio({
       onAspectChange={setAr}
       onMatchStartFrameAr={setMatchStartFrameAr}
       runOn={runOn}
-      advancedOpen={s.advancedOpen}
-      onToggleAdvanced={toggleAdvanced}
       onNewPrompt={requestNewPrompt}
       onClearPrompt={clearPromptOnly}
       timeline={timelineStrip}
@@ -5237,10 +5890,14 @@ export function VideoStudio({
           ? 'Rent a machine (or switch the source to Local) to generate.'
           : (swapState.active && !swapState.ready)
             ? `${'Still needed: '}${swapState.missing.join(' and ')}`
-            : `${t('video.generateTooltip')} (⌘/Ctrl+Enter)`}
+            : studioBusy
+              ? t('composer.queueTitle')
+              : `${t('video.generateTooltip')} (⌘/Ctrl+Enter)`}
       rentedBlocked={rentedBlocked}
       onGenerate={generate}
-      onCancel={cancelGeneration}
+      queuedShots={queuedShots}
+      onRemoveQueuedShot={removeQueuedShot}
+      onClearQueuedShots={clearQueuedShots}
     />
   );
 
@@ -5326,6 +5983,7 @@ export function VideoStudio({
         composer={composer}
         drawerTitle={t('common.advanced')}
         drawerOpen={s.advancedOpen}
+        onDrawerToggle={toggleAdvanced}
         onDrawerClose={closeAdvanced}
         drawer={panel}
         notices={(
@@ -5428,6 +6086,11 @@ export function VideoStudio({
             segments={s.timelineSegments}
             selectedId={s.timelineSelectedId}
             showCombined={s.timelineShowCombined}
+            canCombine={timelineCanCombine(s.timelineSegments)}
+            combinedSeconds={Number(s.timelineCombined?.seconds) || 0}
+            combineBuilding={s.timelineBuilding}
+            combineError={s.timelineBuildError}
+            onToggleCombined={railToggleCombined}
             pendingSegmentId={s.generating && selectedSeg && !selectedSeg.url ? selectedSeg.id : ''}
             timelineOn={s.timelineOn}
             generating={s.generating}
@@ -5440,6 +6103,8 @@ export function VideoStudio({
             promptFor={timelinePromptFor}
             onSelect={timelineSelect}
             onAdd={timelineAdd}
+            continueMode={sceneContinueMode}
+            canContinueWithSound={sceneCanContinueWithSound}
             onOpenTimeline={openTimelineView}
             onRemove={timelineRemoveRequest}
             onDrop={timelineHandleDrop}
@@ -5460,11 +6125,12 @@ export function VideoStudio({
             clipUrl={s.resultUrl}
             clipModel={s.resultModel}
             clipUnmuted={Boolean(s.resultUnmuted)}
-            // H3 renders audio with every clip; other lanes are silent unless a
-            // join carried sound through.
-            clipHasAudio={/minimax/.test(String(s.resultModel || ''))
-              || (s.chainCombined?.url === s.resultUrl && Boolean(s.chainCombined?.audioJoined))
-              || (s.timelineCombined?.url === s.resultUrl && Boolean(s.timelineCombined?.audioJoined))}
+            // Read off the clip itself. This used to be a model-name test with
+            // the note "H3 renders audio with every clip; other lanes are
+            // silent" — which stopped being true when LTX 2.3 landed: it
+            // denoises a joint audio+video latent and scores everything it
+            // renders, so every LTX clip on this stage was going unbadged.
+            clipHasAudio={clipHasAudio}
             clipAspect={String(s.progressContext?.aspectRatio || s.setup.ar || '16:9').replace(':', ' / ')}
             shotLabel={stageShotLabel}
             videoRef={stageVideoRef}
@@ -5543,6 +6209,54 @@ export function VideoStudio({
       />
       ) : null}
 
+      {/* Same gate as the Shot Builder above: a recast writes H3's six-section
+          grammar, so switching family closes it rather than leaving it open
+          over a run that cannot take the prompt. Mounted only while open — it
+          decrypts and decodes the source clip, which is not work to keep alive
+          behind a closed dialog. */}
+      {Boolean(s.recastOpen) && isH3() ? (
+      <RecastDialog
+        open
+        onClose={() => { s.recastOpen = false; bump(); }}
+        plan={s.recastPlan}
+        onPlanChange={(next) => {
+          s.recastPlan = next;
+          updateComposerDraft({ recastPlan: next });
+          bump();
+        }}
+        prompt={s.setup.prompt}
+        durationSeconds={Number(s.setup.duration) || 0}
+        references={attachedReferences()}
+        subjects={castLineup(s.cast)}
+        onSetDuration={setDuration}
+        onApply={applyRecast}
+      />
+      ) : null}
+
+      {/* Same gate as the chip — switching to a non-MiniMax model closes it
+          rather than leaving an orbit panel open over a run that will not take
+          the recipe. Mounted only while open: the review side decrypts and
+          holds the finished clip, which is not something to keep alive behind a
+          closed dialog. */}
+      {Boolean(s.turntableOpen) && turntableAvailable ? (
+      <TurntableDialog
+        open
+        onClose={() => { s.turntableOpen = false; bump(); }}
+        rig={s.turntableRig}
+        onRigChange={(next) => { s.turntableRig = next; bump(); }}
+        prompt={s.setup.prompt}
+        armed={turntableArmed}
+        canPinEndFrame={endFrameVisible}
+        modelName={s.setup.modelName || s.setup.modelId || ''}
+        startFrameUrl={s.setup.imageUrl || ''}
+        resultUrl={s.resultUrl || ''}
+        durationSeconds={Number(s.setup.duration) || 0}
+        onApply={armTurntable}
+        onRemove={removeTurntable}
+        onUseFrame={useTurntableFrame}
+      />
+      ) : null}
+
       {/* targetModel is the workflow id, not the picker id: the helper chooses its
           guidance from it, and 10Eros 1.3/1.4 want a different prompt shape than
           the 1.2-era lanes. */}
@@ -5594,6 +6308,21 @@ export function VideoStudio({
             updateComposerDraft({ prompt: s.setup.prompt });
             bump();
           }}
+        />
+      ) : null}
+      {/* Circle a spot. Opened from a scene row's "A spot" switch, which is the
+          role AND the act: what comes back is a circled copy of the picture in
+          the row it occupied, and a cast member that writes what the ring
+          means. Cancelling changes nothing, which is why the switch can open
+          it without first committing to the role. */}
+      {s.spotEdit ? (
+        <SpotCircleDialog
+          url={s.spotEdit.source}
+          label={s.spotEdit.label}
+          spot={s.spotEdit.spot}
+          busy={Boolean(s.spotBusy)}
+          onClose={closeSpotEditor}
+          onSubmit={(spot) => { void applySceneSpot(spot); }}
         />
       ) : null}
       <PromptHelperDialog

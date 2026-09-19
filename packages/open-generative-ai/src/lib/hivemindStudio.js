@@ -227,6 +227,21 @@ export function mapHivemindWorkflowModels(catalog) {
                 // lane, so the switch appears only where the registry says the
                 // workflow can compile it.
                 supportsFastHighRes: accepts.includes('fast_high_res'),
+                // Frame interpolation on the decoded frames (FrameInterpolate,
+                // multiplier 1 = off). Registry-gated like the two above: the
+                // node sits in every H3 graph, and a graph without it would
+                // silently ignore the multiplier rather than refuse it.
+                supportsInterpolation: accepts.includes('interpolate'),
+                // MiniMax H3 through h3.c on this Mac. The whole panel — the
+                // Effort ladder, the dials behind it, the ranges, the sentence
+                // on token reduction — is the registry's own `h3_native` block,
+                // so the studio never holds a second copy of what the engine
+                // can do. Null on every other workflow, which is the render
+                // condition: no block, no panel.
+                nativeH3: accepts.includes('h3_native') && workflow.h3_native
+                    && typeof workflow.h3_native === 'object'
+                    ? workflow.h3_native
+                    : null,
                 // The refinement (sampling steps) control needs a registry-mapped
                 // steps slot AND a full-step lane. A distilled turbo build
                 // registers 4-8 steps, where a 32-step "high detail" override
@@ -272,6 +287,15 @@ export function mapHivemindWorkflowModels(catalog) {
         // Registry family (ltx-2.3 / ltx / minimax): drives which controls
         // apply. `family` above is the display/provider grouping.
         workflowFamily: String(workflow.family || ''),
+        // What this lane must RUN on ('cuda', 'mps', …), or '' when it runs
+        // anywhere. A name is not a capability — the Apple-silicon H3 lane's id
+        // contains "minimax_h3" and was therefore offered on a rented NVIDIA
+        // box whose needles say the same thing.
+        // Two shapes, one fact: the studio catalog (media_catalog.py) flattens
+        // it to `accelerator`, the MCP's own workflow descriptor keeps the
+        // registry's nested `hardware`. Read both so neither surface silently
+        // reports "runs anywhere".
+        accelerator: String(workflow.accelerator || workflow.hardware?.accelerator || ''),
         provider: 'hivemind-media-studio',
         needsImage: !Array.isArray(workflow.accepts) || !workflow.accepts.some((field) => String(field).startsWith('video_')),
         ready: Boolean(provider.available),
@@ -788,6 +812,9 @@ export async function generateHivemindVideo(params) {
         // so the workflow's own default stays the one place it is written down.
         ...(params.inpaint && Object.keys(params.inpaint).length ? { inpaint: params.inpaint } : {}),
         ...(params.video_mode ? { video_mode: params.video_mode } : {}),
+        // Hand back only the frames this extension added. The soundtrack still
+        // carries — that happens in the latent, long before anything is cut.
+        ...(params.extend_return_tail ? { extend_return_tail: true } : {}),
         ...(middleBase64 ? { middle_image_base64: middleBase64 } : {}),
         ...(endBase64 ? { end_image_base64: endBase64 } : {}),
         duration_seconds: params.duration || params.duration_seconds || 4,
@@ -813,6 +840,19 @@ export async function generateHivemindVideo(params) {
         // keeps whatever the registered workflow ships with.
         ...(typeof params.spectrum === 'boolean' ? { spectrum: params.spectrum } : {}),
         ...(typeof params.fast_high_res === 'boolean' ? { fast_high_res: params.fast_high_res } : {}),
+        // Frame interpolation multiplier. Below 2 is no interpolation at all
+        // and the compiler lifts the node out, so only a real multiplier is
+        // sent — an omitted field leaves the registered graph alone.
+        ...(Number.isFinite(Number(params.interpolate)) && Number(params.interpolate) >= 2
+            ? { interpolate: Math.round(Number(params.interpolate)) }
+            : {}),
+        // MiniMax H3 (Apple Silicon): the Effort preset and any dial moved off
+        // it. Sent only when the studio put something in it — an absent bag is
+        // how the gateway is asked to recommend a preset for this Mac, and an
+        // empty object would mean the same thing more noisily.
+        ...(params.h3_native && typeof params.h3_native === 'object' && Object.keys(params.h3_native).length
+            ? { h3_native: params.h3_native }
+            : {}),
         // Sampling-steps override (H3 refinement). Omitted = workflow default.
         ...(Number.isFinite(Number(params.steps)) && Number(params.steps) > 0
             ? { steps: Math.round(Number(params.steps)) }

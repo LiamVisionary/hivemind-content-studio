@@ -9,6 +9,7 @@
 //   - prompt text never goes to localStorage (it stays in the encrypted composer),
 //     so the localStorage copy is written without the negative prompt.
 import { getComposerSection, updateComposerSection } from '../../../lib/composerState.js';
+import { requestStudioModel } from '../../../lib/studioHandoff.js';
 import { cloudCatalogReady, t2iModels } from '../../../lib/cloudCatalog.js';
 import { IMAGE_PREFERENCES_KEY, normalizeImagePreferences } from '../../../studios/image/imagePrefs.js';
 import { VIDEO_PREFERENCES_KEY, normalizeVideoPreferences } from '../../../studios/video/videoLogic.js';
@@ -74,6 +75,11 @@ export async function openLocalImageModel(modelId, { prompt = '' } = {}) {
 export function openLocalVideoModel(modelId) {
   const current = normalizeVideoPreferences(readJson(VIDEO_PREFERENCES_KEY)) || {};
   writeJson(VIDEO_PREFERENCES_KEY, { ...current, modelId: String(modelId) });
+  // The preference alone is only enough for a studio with no tab yet. Every
+  // other time, the front tab restores its own `setup` over the top and the
+  // handoff vanished — "Use in Video studio" landed on whatever that tab was
+  // last used with. The studio claims this and applies it to the front tab.
+  requestStudioModel('video', modelId);
   navigate('video');
 }
 

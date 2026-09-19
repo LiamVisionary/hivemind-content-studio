@@ -22,6 +22,9 @@ import {
   DIALOGUE_STUB, WORDS_PER_SECOND, parseFieldPrompt, referenceLabels,
 } from './h3References.js';
 import { normalizePersonaGender, personaGenderWords } from './personaId.js';
+import {
+  normalizeSpot, spotDefinitionSentence, spotPlacementClause, spotRetentionLine,
+} from './sceneSpot.js';
 import { bindStandIns } from './subjectTemplate.js';
 
 const DEFAULT_LIMITS = { images: 9, videos: 3, audios: 3 };
@@ -128,6 +131,17 @@ export const SCENE_RETENTION = Object.freeze({
       + 'drawing style, not its panel grid, not its borders, labels or captions, and no face in it is a '
       + 'subject. The clip is ONE continuous take and must never come back as a grid of panels.',
   },
+  // A place with a circle drawn on it, choosing WHERE in the picture the clip
+  // happens. Both sentences come from the spot itself (lib/sceneSpot.js) — they
+  // name the colour that was actually drawn and the corner it was drawn in —
+  // so these are only the fallback for a mode set without a circle, which
+  // Prompt Check reports rather than letting reach a run.
+  spot: {
+    definition: 'a location guide: the place marked by the circle drawn on it',
+    retention: 'attribute_transfer — read it as a positional instruction. The circled area is where the clip '
+      + 'takes place, the place around it carries, nobody in it is a subject, and the circle itself must never '
+      + 'be drawn in any frame.',
+  },
 });
 
 export const sceneRetention = (member) => SCENE_RETENTION[member?.retention] || SCENE_RETENTION.attribute_transfer;
@@ -143,7 +157,7 @@ export const sceneRetention = (member) => SCENE_RETENTION[member?.retention] || 
  * picture as another subject and puts a person in the room. Neither is what an
  * empty plate is for, so it gets its own kind.
  */
-export function castScene(name, { images = [], retention = 'attribute_transfer', carries = '' } = {}) {
+export function castScene(name, { images = [], retention = 'attribute_transfer', carries = '', spot = null } = {}) {
   return {
     kind: 'scene',
     name: String(name || ''),
@@ -151,6 +165,11 @@ export function castScene(name, { images = [], retention = 'attribute_transfer',
     // Overrides the retention mode's default sentence when the caller knows
     // something more specific ("the empty harbour shelter at blue hour").
     carries: String(carries || ''),
+    // The circle drawn on the picture, if there is one: normalized geometry,
+    // its colour and whether the picture is a map. It writes its own two
+    // sentences, which is why it travels with the member rather than being
+    // flattened into `carries` — a sentence cannot be re-opened and nudged.
+    spot: normalizeSpot(spot),
     images: (images || []).filter(Boolean).map(String),
     videos: [],
     audios: [],
@@ -327,6 +346,13 @@ export const APPEARANCE_BLANK =
 function sceneDefinition(role) {
   const labels = role.pictures || [];
   if (!labels.length) return '';
+  // A circled picture says all three of its own things — which area, how to
+  // read it, and that the ring is not part of the scene — naming the colour
+  // that was actually drawn. One picture per member, so one label.
+  if (role.member.spot) {
+    const written = spotDefinitionSentence({ labels, spot: role.member.spot, name: role.member.name });
+    if (written) return written;
+  }
   const plural = labels.length > 1;
   const what = String(role.member.carries || '').trim() || sceneRetention(role.member).definition;
   const named = String(role.member.name || '').trim();
@@ -334,8 +360,27 @@ function sceneDefinition(role) {
     + `${plural ? 'They hold' : 'It holds'} no subject and ${plural ? 'are' : 'is'} not a person.`;
 }
 
+/**
+ * What a picture is FOR, said out loud.
+ *
+ * Ordinarily nothing needs to: a picture attached to a shot you wrote is read
+ * as what the person looks like, because there is nothing else for it to be.
+ * Under a recast there is — the run is re-performing somebody else's clip, and
+ * a character sheet sitting beside it is just as readable as a frame to copy or
+ * a pose to strike. It gets copied: the cast lands in the sheet's pose in the
+ * first shot and the source's staging never arrives.
+ *
+ * So a recast says design-guide-only, in the definition where the picture is
+ * introduced and again in its retention line. See lib/h3Recast.js.
+ */
+const DESIGN_GUIDE_CLAUSE = (subject) => (
+  `The reference pictures are a guide to ${subject}'s character design only — hair, face, build, `
+  + 'wardrobe and coloring. They are NOT frames and NOT poses: do not reproduce their framing, '
+  + `camera angle, pose or expression. ${subject} is posed and framed by the shots described below.`
+);
+
 /** How the model should be told to identify this member. */
-function subjectDefinition(role, shared = false) {
+function subjectDefinition(role, shared = false, { recast = false } = {}) {
   const { member, subject } = role;
   if (member.kind === 'scene') return sceneDefinition(role);
   if (member.kind === 'character') {
@@ -368,6 +413,9 @@ function subjectDefinition(role, shared = false) {
   // The blank is the same words the reference scaffold leaves, so the Prompt
   // Check's SCAFFOLD_BLANKS catches it wherever it came from.
   const lines = [`${subject} is ${parts[0]}: ${member.appearance || APPEARANCE_BLANK}.`];
+  // Only where there ARE pictures: with the subject bound to a clip instead,
+  // the clip is the identity reference and "not a pose" would contradict it.
+  if (recast && role.pictures.length) lines.push(DESIGN_GUIDE_CLAUSE(subject));
   // Stated per subject, so a scene style cannot quietly restyle a real person.
   if (member.style) lines.push(`${subject} is rendered as ${member.style}.`);
   // H3 binds a voice to a subject through this pairing, written out. Without
@@ -390,12 +438,35 @@ function subjectDefinition(role, shared = false) {
   return lines.join('\n');
 }
 
+/**
+ * What a clip may give under a recast — a WIDER grant than the motion contract
+ * beside it, and a narrower one.
+ *
+ * Wider: the shot itself carries. Its cuts, its staging, its framing, its
+ * timing, and the expressions and actions the performers play. That is the
+ * whole point of recasting a clip and the motion contract refuses all of it.
+ *
+ * Narrower: the art style is named as something that does not carry. The
+ * motion contract never had to — a shot you wrote yourself has no competing
+ * style — but a recast is the clip's own scene, so its rendering is the thing
+ * most likely to come through, and the reference pictures lose to it silently.
+ */
+const RECAST_VIDEO_RETENTION = (label, subject) => (
+  `${label}: attribute_transfer — its shot structure, camera cuts, framing, staging, timing and the `
+  + `performers' expressions and actions carry, re-performed by ${subject} and the other subjects above. `
+  + `Its ART STYLE does NOT carry, and neither do its performers' faces, hair, build, wardrobe or identity: `
+  + 'those come from the reference pictures only.'
+);
+
 /** The retention contract for every reference this cast brought. */
-function retentionLines(role) {
+function retentionLines(role, { recast = false } = {}) {
   if (role.member.kind === 'character') return [];
   if (role.member.kind === 'scene') {
     const mode = sceneRetention(role.member);
-    return (role.pictures || []).map((label) => `${label}: ${mode.retention}`);
+    return (role.pictures || []).map((label) => (
+      (role.member.spot && spotRetentionLine({ label, spot: role.member.spot }))
+      || `${label}: ${mode.retention}`
+    ));
   }
   const lines = [];
   // The SUBJECT gets a contract of its own, before the pictures that identify
@@ -410,7 +481,10 @@ function retentionLines(role) {
     );
   }
   for (const label of role.pictures) {
-    lines.push(`${label}: fully_preserved — ${role.subject}'s face, hair and wardrobe carry into the clip.`);
+    lines.push(`${label}: fully_preserved — ${role.subject}'s face, hair and wardrobe carry into the clip.`
+      + (recast
+        ? ' It is a character-design guide only: its framing, pose and expression do NOT carry.'
+        : ''));
   }
   // With no picture the first MOTION clip is the character reference and
   // carries the person; any further clip is motion-only, as every clip is when
@@ -428,6 +502,8 @@ function retentionLines(role) {
         `${label.video}: fully_preserved — ${role.subject} IS the person in this clip: face, hair, build, wardrobe `
         + `and manner of movement all carry. Only the clip's setting and framing do NOT carry.`,
       );
+    } else if (recast) {
+      lines.push(RECAST_VIDEO_RETENTION(label.video, role.subject));
     } else {
       lines.push(
         `${label.video}: attribute_transfer — only its manner of movement carries. Its performer's appearance, `
@@ -604,6 +680,10 @@ const SOUNDSCAPE_VOCAL = /\b(exhale[sd]?|inhale[sd]?|breath(?:s|ing|e|es)?|pant(
 export function compileCastPrompt({
   members = [], template = {}, limits = DEFAULT_LIMITS, speakingOrder = null, durationSeconds = 0,
   previousCast = [], standIns = [], scaffold = false,
+  // Recasting somebody else's clip rather than driving a shot of your own:
+  // the pictures become a design guide and the clip is allowed the shot. Two
+  // wordings, one flag — see lib/h3Recast.js for why they are not defaults.
+  recast = false,
 } = {}) {
   const beats = Array.isArray(template.beats) ? template.beats : [];
   // Who speaks — and first, whether ANYBODY does.
@@ -651,17 +731,19 @@ export function compileCastPrompt({
     (index) => subjectRoles[index - 1]?.subject || null,
   );
   binding.text.split(SEAM).forEach((text, index) => { carried[CREATIVE[index]] = text; });
-  const recast = (text) => recastCreative(text, subjectRoles, previousCast);
+  // Named for what it does to TEXT — not to be confused with the `recast`
+  // option above, which is the clip-replacement contract.
+  const recarry = (text) => recastCreative(text, subjectRoles, previousCast);
 
   const sections = [];
   sections.push(['subject_definitions',
-    roles.map((role) => subjectDefinition(role, subjectRoles.length > 1)).filter(Boolean).join('\n')]);
+    roles.map((role) => subjectDefinition(role, subjectRoles.length > 1, { recast })).filter(Boolean).join('\n')]);
 
   // Description before summary: the stand-in is bound where it is first
   // written, and a summary that repeats the phrase binds on its own pass.
   let description = beats.length
     ? renderBeats(beats, roles, { style: template.style })
-    : recast(carried.detailed_description);
+    : recarry(carried.detailed_description);
   if (!beats.length && description && !/\[Shot\s+\d+\]/.test(description)) {
     // Loose prose is the shot. A prompt that already carries its own timeline
     // keeps it; adding [Shot 1] in front of one that opens with it gave the
@@ -677,7 +759,7 @@ export function compileCastPrompt({
     description = `${description}\n${speaker ? `${speaker.subject} ` : ''}${DIALOGUE_STUB}`;
   }
 
-  let summary = recast(carried.summary);
+  let summary = recarry(carried.summary);
   if (!summary) summary = summaryFor(roles);
   // The summary audio tag is a contract about the WHOLE clip, so it is written
   // once here rather than per reference: with a voice reference attached, the
@@ -686,7 +768,7 @@ export function compileCastPrompt({
     ? `[audio reference] ${summary}`
     : summary]);
 
-  const retention = roles.flatMap(retentionLines);
+  const retention = roles.flatMap((role) => retentionLines(role, { recast }));
   if (retention.length) sections.push(['retention_analysis', retention.join('\n')]);
 
   if (description) sections.push(['detailed_description', description]);
@@ -694,11 +776,11 @@ export function compileCastPrompt({
   // carries. The default is for a prompt that had none — and its voice sentence
   // is the one that prevented four seconds of invented speech, so it is kept
   // for exactly that case.
-  const soundscape = recast(carried.overall_soundscape) || (anyVoice
+  const soundscape = recarry(carried.overall_soundscape) || (anyVoice
     ? `A quiet interior. Only ${roles.find((role) => roleVoiceLabel(role))?.subject || '<Subject 1>'}'s voice, close and dry, over faint room tone. No other speakers, no music, and no speech before or after the written lines.`
     : 'A quiet interior with faint room tone. No speech and no music.');
   sections.push(['overall_soundscape', soundscape]);
-  const music = recast(carried.non_diegetic_music) || 'none';
+  const music = recarry(carried.non_diegetic_music) || 'none';
   sections.push(['non_diegetic_music', music]);
 
   // MiniMax's own guide asks for roughly 350-500 English words of description.
@@ -825,9 +907,23 @@ const DESCRIPTION_PLACEHOLDER = 'Medium shot of <Subject 1> against [setting], i
   + '<Subject 1> looks into the lens to speak, then holds a beat of stillness.';
 
 /** A summary for a prompt that had none: one line naming every subject and what drives it. */
+const sentenceCase = (text) => (text ? text[0].toUpperCase() + text.slice(1) : '');
+
 function summaryFor(allRoles) {
   const roles = (allRoles || []).filter((role) => role.member.kind !== 'scene');
-  if (!roles.length) return '';
+  // Where the take happens, when a picture has been circled. The definition
+  // already says the circled area chooses the location; saying it again in the
+  // summary is what puts the SUBJECTS there rather than merely describing a
+  // place the shot could have been in.
+  const circled = (allRoles || []).find((role) => role.member.kind === 'scene' && role.member.spot);
+  const placement = circled
+    ? spotPlacementClause({ label: (circled.pictures || [])[0], spot: circled.member.spot })
+    : '';
+  // A circled place with NOBODY attached is an ordinary way to use this: pick a
+  // location, describe the shot, attach no character sheet. The summary still
+  // has to say where the clip happens, or the weave writes an empty summary
+  // section — which is not merely unhelpful, it is a section H3 reads.
+  if (!roles.length) return placement ? `One continuous take, ${placement}.` : '';
   const clauses = roles.map((role) => {
     const voice = roleVoiceLabel(role);
     const motion = (role.videos || []).map((label) => label?.video).filter(Boolean);
@@ -839,7 +935,7 @@ function summaryFor(allRoles) {
     if (manner.length) bits.push(`moving in the manner of ${manner.join(' and ')}`);
     return bits.join(', ');
   });
-  return `One continuous take of ${clauses.join('; and ')}.`;
+  return `One continuous take of ${clauses.join('; and ')}${placement ? `. ${sentenceCase(placement)}` : ''}.`;
 }
 
 // ---------------------------------------------------------------------------

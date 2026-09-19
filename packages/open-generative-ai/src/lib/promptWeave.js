@@ -63,6 +63,7 @@ import {
 } from './h3Characters.js';
 import { parseFieldPrompt } from './h3References.js';
 import { normalizePersonaGender, personaGenderWords } from './personaId.js';
+import { describeSpot, normalizeSpot } from './sceneSpot.js';
 import { fitShotTimeline } from './shotTimeline.js';
 import { bindStandIns, liveStandIns } from './subjectTemplate.js';
 
@@ -148,12 +149,19 @@ export function newPersonMember(members = []) {
  * plate is that it holds nobody. It occupies picture slots and gets its own
  * retention contract; it never takes a <Subject N>, a speaker id or a voice.
  */
-export const sceneMember = ({ key, name = '', images = [], retention = 'attribute_transfer', carries = '' } = {}) => ({
+export const sceneMember = ({
+  key, name = '', images = [], retention = 'attribute_transfer', carries = '', spot = null,
+} = {}) => ({
   key: String(key || 'scene'),
   kind: 'scene',
   name: String(name || ''),
   retention: SCENE_RETENTION[retention] ? retention : 'attribute_transfer',
   carries: String(carries || ''),
+  // The circle drawn on this picture, when there is one: the geometry, its
+  // colour, and the URL of the picture BEFORE it was drawn on. The picture in
+  // `data.images` is the circled one — that is what is sent — and `spot.source`
+  // is what makes removing the circle exact rather than a second edit.
+  spot: normalizeSpot(spot),
   data: { v: 1, images: [...images].filter(Boolean), videos: [], audios: [] },
 });
 
@@ -179,6 +187,7 @@ export function toCastMember(member) {
       images: (member.data?.images || []).map(urlOf).filter(Boolean),
       retention: member.retention,
       carries: member.carries,
+      spot: member.spot,
     });
   }
   // A member may carry its own render style. The photoreal default is right for
@@ -374,12 +383,41 @@ export function castSubjects(members = []) {
   }));
 }
 
+/**
+ * The cast as a LOCAL panel labels it: the subject tag, the member's own name,
+ * and the look the recognition line is written from.
+ *
+ * Deliberately not castSubjects(), and the difference is the point. That one
+ * feeds the prompt helper — a model call — so it withholds a persona's name,
+ * which is sealed to the owner's vault. This never leaves the browser: it
+ * labels rows beside the same names the cast strip already draws, so it may
+ * say them.
+ *
+ * `kind` separates the two sorts of identity. A persona is recognised by a
+ * written look; a known character is recognised by being named, and asking for
+ * a look about SpongeBob is a nag with no fix.
+ */
+export function castLineup(members = []) {
+  return (members || []).filter((member) => !isScene(member)).map((member, index) => ({
+    subject: `<Subject ${index + 1}>`,
+    kind: isPersonaLike(member) ? 'persona' : 'character',
+    name: String(member.name || ''),
+    look: isPersonaLike(member) ? String(member.data?.look || '') : '',
+    // The render style asserted about this member, if any — a recast needs to
+    // know, because it contradicts taking the style from the pictures.
+    style: String(member.style === undefined
+      ? (isPersonaLike(member) ? PERSONA_DEFAULT_STYLE : '')
+      : (member.style || '')),
+  }));
+}
+
 /** "You · 3 pictures · voice" / "SpongeBob · known character" for a chip. */
 export function describeMember(member) {
   if (isScene(member)) {
     const count = (member.data?.images || []).length;
     const staging = member.retention === 'weak_reference';
-    return `${staging ? 'staging sheet' : 'place'} · ${count} picture${count === 1 ? '' : 's'} · nobody`;
+    const what = member.spot ? describeSpot(member.spot) : (staging ? 'staging sheet' : 'place');
+    return `${what} · ${count} picture${count === 1 ? '' : 's'} · nobody`;
   }
   if (!isPersonaLike(member)) return 'known character';
   const data = member.data || {};
@@ -421,10 +459,13 @@ export function weaveTarget({ h3 = false, referenceLane = false, rows = null } =
  */
 export function castApplication({
   members = [], prompt = '', limits = DEFAULT_LIMITS, durationSeconds = 0, standIns = [], scaffold = false,
-  template = null,
+  template = null, recast = false,
 } = {}) {
   const result = applyCastToPrompt(prompt, {
     members: members.map(toCastMember), limits: limits || DEFAULT_LIMITS, durationSeconds, standIns, scaffold,
+    // Recasting somebody else's clip: the pictures are told they are a design
+    // guide and the clip is told it may have the shot. lib/h3Recast.js.
+    recast,
     // A door that arrives with the creative half already broken out — the Story
     // studio hands over beats, a soundscape and a music rule rather than one
     // paragraph — supplies it here. Everything else passes null and the prompt
@@ -488,7 +529,7 @@ function weaveCharacterProse(text, entry) {
  */
 export function weavePrompt(text, {
   cast = [], limits = DEFAULT_LIMITS, durationSeconds = 0, target = 'prose', standIns = null, scaffold = false,
-  template = null,
+  template = null, recast = false,
 } = {}) {
   const source = String(text || '');
   const live = liveStandIns(source, standIns || []);
@@ -499,7 +540,7 @@ export function weavePrompt(text, {
   let remaining = live;
 
   if (target === 'reference' && cast.length) {
-    const woven = castApplication({ members: cast, prompt: source, limits, durationSeconds, standIns: live, scaffold, template });
+    const woven = castApplication({ members: cast, prompt: source, limits, durationSeconds, standIns: live, scaffold, template, recast });
     prompt = woven.prompt;
     rows = { images: woven.images, videos: woven.videos, audios: woven.audios };
     warnings = woven.warnings;

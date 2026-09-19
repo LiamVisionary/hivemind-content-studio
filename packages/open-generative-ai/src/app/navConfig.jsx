@@ -11,6 +11,7 @@ export const NAV_SECTIONS = [
     items: [
       { page: 'image', icon: 'image', label: () => t('nav.image') },
       { page: 'video', icon: 'video', label: () => t('common.video') },
+      { page: 'music', icon: 'music', label: () => t('nav.music') },
       { page: 'story', icon: 'persona', label: () => t('nav.story') },
       { page: 'restore', icon: 'wand', label: () => t('nav.restore') },
 
@@ -48,6 +49,13 @@ export const NAV_SECTIONS = [
     storageKey: 'nav.advanced',
     items: [
       { page: 'machines', icon: 'cpu', label: () => t('nav.machines') },
+      // What a rented machine is provisioned WITH — its LoRAs and its base
+      // checkpoint — written into a file that gets committed. `checkout: true`
+      // hides the row unless this install is a git checkout the control API
+      // can write that file into: a packaged app has no repository to commit
+      // to, so the page is not something it can offer. The page key still
+      // resolves everywhere, because a key is a wire contract.
+      { page: 'rental-build', icon: 'layers', label: () => t('nav.rentalBuild'), checkout: true },
       { page: 'providers', icon: 'plug', label: () => t('nav.providers') },
       { page: 'passbook', icon: 'key', label: () => t('nav.passbook') },
       { page: 'canvas', icon: 'nodes', label: () => t('nav.canvas') },
@@ -70,6 +78,13 @@ export function navGroups(section) {
 export const NAV_GROUPS = NAV_SECTIONS.flatMap(navGroups);
 export const NAV_ITEMS = NAV_GROUPS.flatMap((g) => g.items);
 
+// The rows a particular install may show. One predicate, used by the sidebar,
+// the mobile More menu and ⌘K alike — a row hidden in the rail but reachable
+// from the palette is a row that exists, which is exactly what a gate is for.
+export function visibleNavItems(items, { checkout = false } = {}) {
+  return (items || []).filter((item) => !item.checkout || checkout);
+}
+
 // ⌘1..⌘9 — the first nine rows of the flat list, in the order the sidebar shows
 // them. ONE list, because the palette advertises these hints and App.jsx binds
 // them: they used to be derived separately (the palette off NAV_ITEMS, the
@@ -84,7 +99,7 @@ export const APP_NAME = t('app.name');
 // keeps them alive so an in-flight generation survives a page switch); hub pages
 // persist the same way once the hub layer exists. Cinema folded into the Image
 // composer's Camera menu and survives as an alias below.
-export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'lipsync', 'restore'];
+export const STUDIO_PAGES = ['image', 'video', 'music', 'sprite', 'story', 'lipsync', 'restore'];
 // Routable pages with no nav row of their own. The document title is derived
 // from the nav item, so without an entry here a page like Activity — reachable
 // by URL and from inside Productions, but deliberately not in the rail — leaves
@@ -107,6 +122,7 @@ export const PALETTE_ITEMS = [
 
 export const HUB_PAGES = {
   planner: 'create',
+  'rental-build': 'rentalbuild',
   canvas: 'canvas',
   inspo: 'inspo',
   models: 'models',

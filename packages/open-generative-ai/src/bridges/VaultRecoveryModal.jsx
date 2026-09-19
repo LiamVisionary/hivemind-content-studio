@@ -121,7 +121,10 @@ export function VaultRecoveryModal() {
             type="checkbox"
             checked={stored}
             onChange={(e) => setStored(e.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-[var(--honey)]"
+            // The label around it is already the hit area; this is only the
+            // glyph, and a 14px box next to 13px text reads as decoration on a
+            // phone rather than the switch that unlocks Continue.
+            className="mt-0.5 h-4 w-4 touch:h-[20px] touch:w-[20px] accent-[var(--honey)]"
           />
           <span className="text-[13px] leading-relaxed text-ink2">
             I stored this key somewhere safe (password manager, printed copy, offline note).

@@ -26,9 +26,10 @@ export const KIND_META = {
     add: () => 'Add scene reference',
     tag: (index) => `<Picture ${index + 1}>`,
     icon: 'image',
-    hint: () => ('A location plate or a storyboard. A place carries its architecture, materials, light and layout; '
-        + 'staging is read as the order of the action and roughly where things sit, and its drawing style and '
-        + 'panel grid do not carry. Neither is a subject.'),
+    hint: () => ('A location plate, a map or a storyboard. A place carries its architecture, materials, light and '
+        + 'layout; staging is read as the order of the action and roughly where things sit, and its drawing style '
+        + 'and panel grid do not carry. Neither is a subject. Circle a spot on one to choose which part of it the '
+        + 'clip happens in.'),
   },
   videos: {
     accept: 'video/*',

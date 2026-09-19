@@ -60,9 +60,13 @@ test('the route mounts on the frame: one floating composer, a rail, and no scrol
     // attribute so a clip dropped on the composer is loaded rather than read as
     // a settings payload.
     assert.match(markup, /data-studio-composer/);
-    // The settings are a sentence now, with Advanced as the way to the rest.
-    assert.match(text, /Restore this clip at 2K with 7B FP8 on/);
-    assert.match(text, /Advanced/);
+    // The render reads as a before and after, and the way to the rest is the
+    // tab on the frame's left edge. With nothing loaded, the before is the word
+    // the stage uses for the clip.
+    assert.match(text, /Original → 2K 7B · standard/);
+    const tab = /<button[^>]*data-drawer-tab[^>]*>/.exec(markup);
+    assert.ok(tab, 'the Restore studio has no tab to open Advanced with');
+    assert.match(tab[0], /aria-expanded="false"/, 'the Advanced tab reports itself shut');
 });
 
 test('a clip that is loaded but not restored is SHOWN, with the sentence as a note', async () => {
@@ -135,29 +139,71 @@ test('the compare door is offered only when there are two clips to compare', asy
 test('the composer says what the render will be, and offers the cheap press beside the dear one', async () => {
     const markup = await renderComponent('src/studios/restore/RestoreComposer.jsx', 'RestoreComposer', {
         clipName: 'holiday-1997.mp4',
-        clipDetail: '640x360 · 480 frames · 24.00fps · sound',
+        clipDetail: '640×360 · 480 frames · 24.00fps · sound',
         onPickClip: () => {},
+        source: SOURCE,
         settings: SETTINGS, onChangeSettings: () => {}, plan: PLAN,
         previewSeconds: 2, previewAt: 3.5, previewMax: 18, onPreviewAt: () => {},
         runOn: await runOn('default'),
-        advancedOpen: false, onToggleAdvanced: () => {},
         primary: { label: 'Restore 14 chunks', onClick: () => {} },
         alternate: { label: 'Test 2s', onClick: () => {} },
         billLabel: 'free',
     });
     const text = textOf(markup);
     assert.match(text, /holiday-1997\.mp4/);
-    assert.match(text, /640x360 · 480 frames · 24\.00fps · sound/);
-    // Every value in the sentence is the control that sets it.
-    assert.match(text, /Restore 14 chunks at 2K with 7B FP8 on This Mac/);
-    // The test's starting point is part of the sentence, not a card of its own.
+    assert.match(text, /640×360 · 480 frames · 24\.00fps · sound/);
+    // The render as a before and after: the size the clip is, the size it comes
+    // out, the model, and the machine with its bill. Every value after the
+    // arrow is the control that sets it.
+    assert.match(text, /640×360 → 2K · 2560×1440 7B · standard This Mac · free/);
+    // The bill is said once, on the machine — not again beside the press.
+    assert.equal(text.match(/\bfree\b/g)?.length, 1, 'the bill is printed more than once');
+    // The render is not described as its chunks: the count is on the button.
+    assert.doesNotMatch(text, /Restore 14 chunks at/);
+    // The test's starting point is a line of its own, not a card of its own.
     assert.match(text, /Test 2s from 3\.5s/);
     // Two presses. The quieter one is the one to reach for first.
     assert.match(text, /Test 2s/);
     assert.match(text, /Restore 14 chunks/);
-    assert.match(text, /free/);
     // The clip row IS the door: a hidden input, so the whole row loads a clip.
     assert.match(markup, /type="file"[^>]*accept="video\/\*"/);
+});
+
+test('three ComfyUI processes on this Mac are one machine in the composer, named with its bill', async () => {
+    // As this Mac's gateway lists them: one install started on three ports. The
+    // token used to read "This Mac — anima — free, stays …", cut off mid-word.
+    const lanes = [
+        { lane: 'anima', available: true, paid: false, assembles_here: true },
+        { lane: 'default', available: true, paid: false, assembles_here: true },
+        { lane: 'ltx', available: true, paid: false, assembles_here: true },
+        {
+            lane: 'cloud', available: false, paid: true, remedy: 'connect',
+            reason: 'connect your HivemindOS account to restore on the hosted service',
+        },
+    ];
+    const { runTargetsFromRows } = await import('../src/lib/runTargets.js');
+    const { laneEntryFor, laneReadinessFor, mergeLocalLanes, restoreRunTargets } = await import('../src/lib/videoRestore.js');
+    const machines = mergeLocalLanes(lanes);
+    const targets = runTargetsFromRows(restoreRunTargets(machines), { kind: 'video' });
+    assert.equal(targets.filter((target) => target.place === 'this-mac').length, 1);
+    // A project that ran on the anima process still reopens on This Mac.
+    const selected = targets.find((target) => target.id === laneEntryFor(machines, 'anima')?.lane) || null;
+    assert.ok(selected, 'a project on the anima lane has no row to reopen on');
+
+    const markup = await renderComponent('src/studios/restore/RestoreComposer.jsx', 'RestoreComposer', {
+        clipName: '', onPickClip: () => {},
+        settings: SETTINGS, onChangeSettings: () => {}, plan: null,
+        runOn: {
+            targets, value: selected, onChange: () => {},
+            readinessFor: laneReadinessFor(machines), onFixReadiness: () => {},
+        },
+        primary: { label: 'Restore', disabled: true, onClick: () => {} },
+        billLabel: 'free',
+    });
+    const text = textOf(markup);
+    assert.match(text, /Original → 2K 7B · standard This Mac · free/);
+    const names = [...markup.matchAll(/(?:aria-label|title)="([^"]*)"/g)].map((match) => match[1]).join(' | ');
+    assert.doesNotMatch(`${text} ${names}`, /\b(anima|ltx)\b/);
 });
 
 test('past projects have a door that survives a window too narrow for the rail', async () => {
@@ -182,12 +228,29 @@ test('past projects have a door that survives a window too narrow for the rail',
         settings: SETTINGS, onChangeSettings: () => {}, plan: null,
         previewSeconds: 2, previewAt: 0, previewMax: 0, onPreviewAt: () => {},
         runOn: await runOn('default'),
-        onToggleAdvanced: () => {},
         primary: { label: 'Restore', disabled: true, onClick: () => {} },
         projects: [{ id: 'a', width: 2560, height: 1440, status: 'running', progress: {} }],
         onOpenProject: () => {},
     });
     assert.match(composer, /aria-label="More"/);
+
+    // Resume and Delete live in the rail's long-press menu, and the rail is the
+    // thing that is not there below 640px — so the door carries them too when
+    // the studio hands them over.
+    const acting = await renderComponent('src/studios/restore/RestoreComposer.jsx', 'ProjectDoorItems', {
+        projects: [
+            { id: 'a', width: 2560, height: 1440, status: 'running', has_source: true, progress: { chunks_done: 6, chunks_total: 14 } },
+            { id: 'b', width: 1920, height: 1080, status: 'complete', progress: { chunks_done: 14, chunks_total: 14 } },
+        ],
+        activeProjectId: 'a',
+        onOpenProject: () => {},
+        onResumeProject: () => {},
+        onDeleteProject: () => {},
+    });
+    assert.match(acting, /aria-label="Resume 2560x1440 — Running"/);
+    assert.match(acting, /aria-label="Delete 2560x1440 — Running"/);
+    // A finished project has nothing left to resume.
+    assert.doesNotMatch(acting, /aria-label="Resume 1920x1080 — Finished"/);
 });
 
 test('a project in the rail carries its whole row in one accessible name', async () => {

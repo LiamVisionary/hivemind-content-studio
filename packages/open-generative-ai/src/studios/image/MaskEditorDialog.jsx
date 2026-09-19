@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { Modal } from '../../ui/Modal.jsx';
-import { ActionButton, Button, Field, Slider, TextArea, TextInput, cx } from '../../ui/kit.jsx';
+import { ActionButton, Button, Field, Segmented, Slider, TextArea, TextInput, cx } from '../../ui/kit.jsx';
 
 const BRUSH_MIN = 12;
 const BRUSH_MAX = 160;
@@ -29,6 +29,11 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect
   // image-fraction coordinates so the gateway never needs the display size.
   const [selecting, setSelecting] = useState(false);
   const [pointMode, setPointMode] = useState(false);
+  // Whether a tap adds the thing under it or takes it out again. Alt-tap and
+  // right-click still say "not this" — but neither of those exists on a phone,
+  // and without an on-screen switch half of SAM3's point protocol was
+  // unreachable there.
+  const [pointPolarity, setPointPolarity] = useState('include');
   const [selectText, setSelectText] = useState('');
   const [selectError, setSelectError] = useState('');
 
@@ -123,8 +128,9 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect
       void runSmartSelect([{
         x: point.x / canvas.width,
         y: point.y / canvas.height,
-        // Alt/right-click taps say "not this" — the donor's negative points.
-        foreground: !(e.altKey || e.button === 2),
+        // The switch decides; alt/right-click survive as the desktop shortcut
+        // for the same thing — the donor's negative points.
+        foreground: pointPolarity === 'include' && !(e.altKey || e.button === 2),
       }]);
       return;
     }
@@ -194,7 +200,7 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect
 
         {onSmartSelect ? (
           <div className="flex flex-col gap-1.5 rounded-lg border border-line1 bg-bg1 p-2.5">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Smart select</span>
               <Button
                 size="sm"
@@ -203,11 +209,24 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect
                 aria-pressed={pointMode}
                 onClick={() => setPointMode((on) => !on)}
                 disabled={busy || selecting}
-                title="Tap the thing on the image instead of naming it (alt-tap to exclude)"
+                title="Tap the thing on the image instead of naming it"
                 className={cx(pointMode && 'border-honey/60 bg-honey-tint text-honey hover:border-honey')}
               >
                 {pointMode ? 'Tap to select: on' : 'Tap to select'}
               </Button>
+              {/* Only while taps mean something — a polarity switch sitting
+                  beside the name field would be a control for nothing. */}
+              {pointMode ? (
+                <Segmented
+                  size="sm"
+                  value={pointPolarity}
+                  onChange={setPointPolarity}
+                  options={[
+                    { value: 'include', label: 'Include' },
+                    { value: 'exclude', label: 'Exclude' },
+                  ]}
+                />
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <TextInput
@@ -230,7 +249,7 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect
             </div>
             <p className="text-[11px] leading-relaxed text-ink3">
               {pointMode
-                ? 'Tap the object on the image; alt-tap something to exclude it. The silhouette is added to your mask.'
+                ? 'Tap the object on the image. Switch to Exclude to tap something back out (alt-tap does the same with a mouse). The silhouette is added to your mask.'
                 : 'The selection is added to whatever you have already painted, so you can refine it with the brush.'}
             </p>
             {selectError ? <p className="text-[11px] text-danger">{selectError}</p> : null}
@@ -244,7 +263,7 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect
               alt={entry?.prompt || 'Source'}
               draggable={false}
               onLoad={sizeCanvasToImage}
-              className="max-h-[46vh] w-auto max-w-full select-none object-contain"
+              className="max-h-[46dvh] w-auto max-w-full select-none object-contain"
             />
             <canvas
               ref={canvasRef}

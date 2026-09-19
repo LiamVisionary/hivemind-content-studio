@@ -85,13 +85,14 @@ export function ShipStage({
                     blocks publishing
                   </span>
                 ) : null}
-                <span className="ml-auto inline-flex shrink-0 items-center gap-0.5 rounded-lg border border-line1 bg-bg1 p-0.5">
+                <span className="ml-auto inline-flex shrink-0 items-center gap-0.5 rounded-lg border border-line1 bg-bg1 p-0.5 touch:gap-1">
                   <button
                     type="button"
                     onClick={() => onVerdict(check.id, 'pass')}
                     aria-pressed={state === 'pass'}
                     className={cx(
                       'h-6 rounded-md px-2.5 text-[11px] font-semibold transition-colors',
+                      'touch:h-ctl-md touch:px-3.5 touch:text-[13px]',
                       state === 'pass' ? 'bg-ok-tint text-ok' : 'text-ink2 hover:text-ink1',
                     )}
                   >
@@ -103,6 +104,7 @@ export function ShipStage({
                     aria-pressed={state === 'fail'}
                     className={cx(
                       'h-6 rounded-md px-2.5 text-[11px] font-semibold transition-colors',
+                      'touch:h-ctl-md touch:px-3.5 touch:text-[13px]',
                       state === 'fail' ? 'bg-warn/10 text-warn' : 'text-ink2 hover:text-ink1',
                     )}
                   >
@@ -147,7 +149,7 @@ export function ShipStage({
             value={caption.caption}
             readOnly
             placeholder="The seven beats below are joined into the caption as you write them."
-            className="!bg-bg1 !text-[12px]"
+            className="!bg-bg1 !text-[12px] touch:!text-[16px]"
           />
           <span className="text-[10.5px] leading-snug text-ink3">
             Hook, scene, friction, signature, turn, invitation, one CTA — the producer drafts all seven from the story.

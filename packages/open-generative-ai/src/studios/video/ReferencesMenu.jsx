@@ -68,6 +68,7 @@ import { Icon } from '../../ui/icons.jsx';
 import { IconButton, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
 import { PersonaBar } from './PersonaBar.jsx';
 import { ReferenceThumb } from './ReferenceThumb.jsx';
+import { describeSpot } from '../../lib/sceneSpot.js';
 import { KIND_META, describeReferenceRejection, plainReferenceLabel } from './referenceKinds.js';
 import { toastFailure } from '../../ui/failureToast.jsx';
 
@@ -76,10 +77,14 @@ import { toastFailure } from '../../ui/failureToast.jsx';
 // as two sections because what each contributes is a different promise.
 const KINDS = ['images', 'scene', 'videos', 'audios'];
 
-/** A place or a staging sheet — the two things a non-subject picture can be. */
+/** What a non-subject picture is. A spot is a place with a circle drawn on it
+ *  choosing which PART of it the clip happens in — the role and the circle are
+ *  one act, so pressing it opens the editor and cancelling leaves the row as it
+ *  was (see openSpot in ReferenceRow). */
 export const SCENE_ROLES = Object.freeze([
   { id: 'attribute_transfer', label: () => 'A place' },
   { id: 'weak_reference', label: () => 'Staging' },
+  { id: 'spot', label: () => 'A spot' },
 ]);
 
 function fileLabel(item) {
@@ -131,7 +136,11 @@ function RowSwitch({ on, disabled = false, title, onClick, children }) {
       onClick={onClick}
       title={title}
       className={cx(
+        // 21px is a cursor's switch. These are the doors to a scene picture's
+        // ROLE and to a clip's motion/sound split — the two decisions this panel
+        // exists to make — so under a thumb they take a thumb's room.
         'rounded px-2 py-1 text-[10px] font-medium transition-colors',
+        'touch:min-h-[44px] touch:px-3 touch:text-[13px]',
         disabled
           ? 'cursor-not-allowed text-ink3 opacity-50'
           : (on ? 'bg-honey-tint text-honey' : 'text-ink3 hover:bg-bg3 hover:text-ink2'),
@@ -144,7 +153,7 @@ function RowSwitch({ on, disabled = false, title, onClick, children }) {
 
 function ReferenceRow({
   kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio, onToggleMotion, onToggleCompact,
-  compactLocked = false, onPrep, onOpen, role = '', onRole,
+  compactLocked = false, onPrep, onOpen, role = '', onRole, spot = null, onSpot,
 }) {
   const meta = KIND_META[kind];
   const url = typeof item === 'string' ? item : item?.url;
@@ -174,7 +183,9 @@ function ReferenceRow({
             other kinds have nothing to open, so their tile stays a plain
             preview rather than a button that does nothing. */}
         <div className={cx(
-          'group/thumb relative h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3',
+          // The thumbnail IS the door to head replacement wherever `onOpen` is
+          // given, so under a thumb it is sized as the control it is.
+          'group/thumb relative h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3 touch:h-[44px] touch:w-[44px]',
           onOpen ? 'cursor-pointer' : '',
         )}>
           {kind === 'images' || kind === 'scene' || kind === 'videos' ? (
@@ -194,7 +205,10 @@ function ReferenceRow({
               onClick={onOpen}
               title="Open this clip — scrub it and mask the head to replace"
               aria-label="Open and mask this clip"
-              className="absolute inset-0 grid place-items-center bg-bg0/70 text-ink1 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/thumb:opacity-100"
+              // A door that only exists under a hover does not exist on a phone.
+              // At rest on a touch screen it is drawn, over a lighter scrim so
+              // the frame underneath still says which clip this row is.
+              className="absolute inset-0 grid place-items-center bg-bg0/70 text-ink1 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/thumb:opacity-100 touch:bg-bg0/45 touch:opacity-100"
             >
               <Icon name="expand" size={13} />
             </button>
@@ -215,8 +229,8 @@ function ReferenceRow({
             {soundOnly ? <span className="ml-1 font-sans text-ink3">sound only</span> : null}
             {kind === 'scene' ? (
               <span className="ml-1 font-sans text-ink3">
-                {(role || 'attribute_transfer') === 'weak_reference'
-                  ? 'staging direction'
+                {spot ? describeSpot(spot)
+                  : (role || 'attribute_transfer') === 'weak_reference' ? 'staging direction'
                   : 'the place'}
               </span>
             ) : null}
@@ -234,13 +248,24 @@ function ReferenceRow({
           copy none of it", and it used to be reachable only from a chip in
           another control. */}
       {kind === 'scene' ? (
-        <div className="flex items-center gap-1 pl-11">
+        <div className="flex items-center gap-1 pl-11 touch:flex-wrap touch:pl-0">
           {SCENE_ROLES.map((option) => (
             <RowSwitch
               key={option.id}
               on={(role || 'attribute_transfer') === option.id}
-              title={KIND_META.scene.hint()}
-              onClick={() => onRole?.(option.id)}
+              // "A spot" is not a mode you can be in without a circle, so it
+              // always goes through the editor: pressing it opens it, and
+              // pressing it again on a row that already has one re-opens it to
+              // be nudged. Leaving it takes the circle back off the picture,
+              // which the title says before the click rather than after.
+              title={option.id === 'spot'
+                ? (spot
+                  ? 'Edit the circle — or press a different one to take it back off the picture'
+                  : 'Circle the part of this picture where the clip happens')
+                : (role === 'spot' && spot
+                  ? 'Back to a plain picture — the circle is removed from it'
+                  : KIND_META.scene.hint())}
+              onClick={() => (option.id === 'spot' ? onSpot?.() : onRole?.(option.id))}
             >
               {option.label()}
             </RowSwitch>
@@ -250,7 +275,14 @@ function ReferenceRow({
         </div>
       ) : null}
       {kind === 'videos' ? (
-        <div className="hive-edge-fade flex items-center gap-1 overflow-x-auto pl-11">
+        <div
+          // Switches indented 38.5px inside a 320px panel and scrolled sideways
+          // INSIDE a panel that scrolls down: a horizontal flick in a vertical
+          // scroller is a coin toss, and at 44px the row is well past its box.
+          // Under a thumb it wraps onto a second line instead, from the row's
+          // own left edge.
+          className="hive-edge-fade flex items-center gap-1 overflow-x-auto overscroll-x-contain pl-11 touch:flex-wrap touch:overflow-visible touch:pl-0"
+        >
           {/* What of the clip is used. MOTION is its movement;
               SOUND is its soundtrack. Both on = the clip with its
               own sound; sound alone = a voice reference whose pixels are never
@@ -315,7 +347,7 @@ export function ReferenceSection({
   busy, recent, onPickRecent, dropTarget, posters = {}, onPosterCaptured, onPrep,
   // Character pictures and scene pictures share ONE row of slots (they are one
   // <Picture N> sequence), so both sections count against the same total.
-  used = null, roles = {}, onRole,
+  used = null, roles = {}, onRole, spots = {}, onSpot,
 }) {
   const meta = KIND_META[kind];
   const taken = used == null ? items.length : used;
@@ -364,6 +396,8 @@ export function ReferenceSection({
           onPrep={onPrep ? () => onPrep(index) : null}
           role={roles[typeof item === 'string' ? item : item?.url] || ''}
           onRole={onRole ? (next) => onRole(typeof item === 'string' ? item : item?.url, next) : null}
+          spot={spots[typeof item === 'string' ? item : item?.url] || null}
+          onSpot={onSpot ? () => onSpot(typeof item === 'string' ? item : item?.url) : null}
         />
       ))}
       <button
@@ -385,14 +419,17 @@ export function ReferenceSection({
         // Saved clips and voice notes get a wider tile with their filename:
         // six identical film icons told you nothing about which clip was which,
         // which is the one thing this list exists to answer.
-        <div className={cx('flex gap-1', kind === 'images' || kind === 'scene' ? 'flex-wrap' : 'flex-col')}>
+        <div className={cx('flex gap-1 touch:gap-2', kind === 'images' || kind === 'scene' ? 'flex-wrap' : 'flex-col')}>
           {recent.slice(0, 6).map((entry) => (kind === 'images' || kind === 'scene' ? (
             <button
               key={entry.id}
               type="button"
               onClick={() => onPickRecent(entry.uploadedUrl)}
               title={entry.name || entry.uploadedUrl}
-              className="h-8 w-8 overflow-hidden rounded border border-line1 bg-bg3 transition-colors hover:border-honey/60"
+              // The one-tap door back to a saved reference, so it takes a
+              // thumb's room; six of them wrap to two rows rather than one
+              // cramped line, which is what the wrapper's touch gap is for.
+              className="h-8 w-8 overflow-hidden rounded border border-line1 bg-bg3 transition-colors hover:border-honey/60 touch:h-[44px] touch:w-[44px]"
             >
               <ReferenceThumb
                 url={entry.uploadedUrl}
@@ -434,6 +471,11 @@ export function ReferencesMenu({
   scene = [],
   sceneRoles = {},
   onSceneRole = null,
+  // The circle drawn on a scene picture, by that picture's URL, and the door
+  // that opens the editor for one. Both are the studio's: the panel knows which
+  // row was pressed, and the studio owns the re-render and the upload.
+  sceneSpots = {},
+  onOpenSpot = null,
   audios = [],
   videos = [],
   prompt = '',
@@ -445,6 +487,13 @@ export function ReferencesMenu({
   // editor, and the framing dials. Null on a workflow family that has no
   // inpaint graph, which is what keeps the thumbnail a plain tile there.
   onOpenClip = null,
+  // Open the Recast panel — re-performing an attached clip with this cast in
+  // it. Offered HERE because this is the moment somebody wants it: they have
+  // just attached a clip of a scene they want their characters in, and the
+  // motion contract below is about to tell them the clip may not have the shot.
+  // Null on a family with no recast grammar (everything but H3).
+  onRecast = null,
+  recastArmed = false,
   // What the run is set to produce, so the panel can say when the clip is
   // longer than the prompt accounts for.
   durationSeconds = 0,
@@ -796,7 +845,12 @@ export function ReferencesMenu({
           }}
           onDrop={(event) => { dragDepthRef.current = 0; void handleDrop(event); }}
           className={cx(
-            'absolute bottom-full z-40 mb-2 flex max-h-[70vh] w-[320px] max-w-[calc(100vw-1.5rem)] flex-col gap-3 overflow-y-auto rounded-lg border bg-bg1 p-2.5 shadow-pop',
+            // `vh` is iOS's LARGE viewport, so 70vh measured against a screen
+            // taller than the one under the browser chrome — and this panel opens
+            // UPWARD from a composer at the bottom of it, so the overflow came
+            // off the TOP, where nothing can scroll it back. dvh, capped by the
+            // room the composer actually leaves above itself.
+            'absolute bottom-full z-40 mb-2 flex max-h-[min(70dvh,calc(100dvh-var(--frame-composer-h,140px)-3rem))] w-[320px] max-w-[calc(100vw-1.5rem)] flex-col gap-3 overflow-y-auto overscroll-contain rounded-lg border bg-bg1 p-2.5 shadow-pop',
             side === 'end' ? 'right-0' : 'left-0',
             dragDepthRef.current ? 'border-honey/60' : 'border-line1',
           )}
@@ -839,6 +893,8 @@ export function ReferencesMenu({
               used={kind === 'images' || kind === 'scene' ? orderedImages.length : null}
               roles={kind === 'scene' ? sceneRoles : undefined}
               onRole={kind === 'scene' ? onSceneRole : null}
+              spots={kind === 'scene' ? sceneSpots : undefined}
+              onSpot={kind === 'scene' ? onOpenSpot : null}
               labels={labels[kind]}
               busy={busyKind === kind}
               recent={recent[kind] || []}
@@ -927,6 +983,38 @@ export function ReferencesMenu({
                 ? `Your prompt never names ${motionWarning.labels.join(', ')}. An unnamed motion clip tends to bring its own performer — face, clothing and setting — into the shot.`
                 : "Say what must NOT carry from the motion clip — its performer's appearance, clothing, setting and framing — or it can replace your subject entirely."}
             </p>
+          ) : null}
+          {/* The other thing a clip can be for. Everything above treats it as a
+              MOTION reference — the performer's manner, borrowed into a shot you
+              wrote. Someone who attached a scene they want their characters in
+              wants the opposite deal, and until this card existed the only sign
+              of it was the warning above telling them their subject was about to
+              be replaced. Named rather than hidden behind a menu, because
+              nobody looks for a mode they have never heard of. */}
+          {onRecast && motionReferenceRows(videos).length ? (
+            <button
+              type="button"
+              onClick={onRecast}
+              className={cx(
+                'flex w-full items-start gap-2 rounded-md border px-2 py-1.5 text-left transition-colors',
+                recastArmed
+                  ? 'border-honey/50 bg-honey-tint'
+                  : 'border-line1 bg-bg1 hover:border-line2 hover:bg-bg2',
+              )}
+            >
+              <Icon name="clapper" size={13} className={cx('mt-px shrink-0', recastArmed ? 'text-honey' : 'text-ink3')} />
+              <span className="min-w-0 flex-1">
+                <span className={cx('block text-[11px] font-semibold', recastArmed ? 'text-honey' : 'text-ink1')}>
+                  {recastArmed ? 'Recast — open the shot list' : 'Want the clip’s shots too, not just its movement?'}
+                </span>
+                <span className="mt-0.5 block text-[10px] leading-snug text-ink3">
+                  {recastArmed
+                    ? 'This prompt re-performs the clip with your cast in it.'
+                    : 'Recast re-performs it with your cast in it — its cuts, staging and expressions carry, its art style and performers do not. Needs every shot described, which the panel does against the clip.'}
+                </span>
+              </span>
+              <Icon name="chevronRight" size={13} className="mt-px shrink-0 text-ink3" />
+            </button>
           ) : null}
         </div>
       ) : null}

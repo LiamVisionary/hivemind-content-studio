@@ -154,7 +154,7 @@ export function RegionBoxEditor({ regions, onChange, aspect = 1, disabled = fals
         onPointerCancel={endDrag}
         style={{ aspectRatio: String(aspect || 1) }}
         className={cx(
-          'relative w-full select-none overflow-hidden rounded-lg border border-line1 bg-bg2',
+          'relative w-full touch-none select-none overflow-hidden rounded-lg border border-line1 bg-bg2',
           'bg-[linear-gradient(to_right,rgba(255,255,255,0.05)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.05)_1px,transparent_1px)]',
           'bg-[length:33.333%_33.333%]',
           disabled ? 'opacity-50' : atCap ? 'cursor-not-allowed' : 'cursor-crosshair',
@@ -190,7 +190,15 @@ export function RegionBoxEditor({ regions, onChange, aspect = 1, disabled = fals
             <span
               onPointerDown={(event) => startResize(event, region)}
               className={cx(
-                'absolute -bottom-1 -right-1 h-3 w-3 rounded-sm border border-black/40 touch-none',
+                // The chip is 10.5px, which a finger cannot land on and a
+                // cursor can. So the chip grows only on touch (14px — `h-4` is
+                // 1rem on this 14px root, not 16), and the invisible halo that
+                // makes it a real target is gated the same way: ungated, a
+                // 38px transparent square sat over the region's bottom-right
+                // corner for every mouse user, swallowing the drag that moves
+                // the box and the click that selects what is under it.
+                'absolute -bottom-1 -right-1 h-3 w-3 rounded-sm border border-black/40 touch-none touch:h-4 touch:w-4',
+                "touch:after:absolute touch:after:-inset-4 touch:after:content-['']",
                 disabled ? '' : 'cursor-nwse-resize',
               )}
               style={{ backgroundColor: region.color }}

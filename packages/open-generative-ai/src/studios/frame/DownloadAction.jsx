@@ -9,6 +9,9 @@
 //                  LoRAs stamped into the file itself
 //           ▸ hand it to the system share sheet
 //           ▸ the switch that decides whether the first of those does anything
+//           ▸ (video) the clip in pieces: its sound alone, its picture alone,
+//                  or its sound separated into dialogue, effects, music and
+//                  a track per voice (lib/soundExport.js)
 //
 // The switch is the reason this is a menu rather than three buttons. Stamping
 // is not undoable in any copy somebody already has: once the prompt is inside
@@ -21,15 +24,22 @@
 // Shared by the Image and Video stages, like everything else in this folder:
 // one definition, so the two studios cannot drift into two answers about what
 // leaves the machine.
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
-import { t } from '../../lib/i18n.js';
+import { t, tf } from '../../lib/i18n.js';
 import { canShareMedia, downloadMediaWithSettings, shareMedia } from '../../lib/mediaExport.js';
+import { lazyChunk } from '../../lib/lazyChunk.js';
 import { allowsUnencryptedDownload, setAllowUnencryptedDownload, subscribePrefs } from '../../lib/prefs.js';
+import { downloadTrack } from '../../lib/soundExport.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Menu, MenuItem } from '../../ui/Menu.jsx';
 import { Spinner, Toggle, cx } from '../../ui/kit.jsx';
+
+// Shut on arrival, and this file is part of the LANDING studio's stage: a
+// static import would make every first paint download a dialog that only a
+// video's menu can open.
+const SoundSplitDialogLazy = lazyChunk(() => import('./SoundSplitDialog.jsx').then((m) => ({ default: m.SoundSplitDialog })));
 
 /**
  * @param {'image'|'video'} studio   which switch this menu reads and writes
@@ -53,6 +63,7 @@ export function StageDownloadAction({
 }) {
   const [allowed, setAllowed] = useState(() => allowsUnencryptedDownload(studio));
   const [busy, setBusy] = useState('');
+  const [splitting, setSplitting] = useState(false);
   // Two tabs, one document: a switch thrown in the Image studio must not leave
   // a stale copy of itself on a stage that is still mounted behind it.
   useEffect(() => subscribePrefs(() => setAllowed(allowsUnencryptedDownload(studio))), [studio]);
@@ -85,6 +96,27 @@ export function StageDownloadAction({
     }
   };
 
+  // The clip in halves. Neither half carries the settings stamp, whatever the
+  // switch below says: a WAV has nowhere the ecosystem would read one, and a
+  // person who asked for "the video without sound" did not ask to publish a
+  // prompt with it.
+  const runTrack = async (close, mode) => {
+    close();
+    setBusy(mode);
+    try {
+      const result = await downloadTrack(url, filename, mode);
+      if (result.blocked || result.cancelled) return;
+      if (result.ok) {
+        toast.success(tf('sound.saved', result.filename));
+        return;
+      }
+      // "This clip has no sound" is an answer about the file, said as it is.
+      toast.error(result.message || t('sound.failed'));
+    } finally {
+      setBusy('');
+    }
+  };
+
   const runShare = async (close) => {
     close();
     setBusy('share');
@@ -99,6 +131,7 @@ export function StageDownloadAction({
   };
 
   return (
+    <>
     <Menu
       align="end"
       width="w-[268px]"
@@ -107,7 +140,7 @@ export function StageDownloadAction({
         // buttons" — without it the arrow reads as decoration on a wide button.
         <div
           className={cx(
-            'flex h-8 items-center overflow-hidden rounded-full backdrop-blur transition-colors',
+            'flex h-8 items-center overflow-hidden rounded-full backdrop-blur transition-colors touch:h-[44px]',
             open ? 'bg-honey text-on-honey' : 'bg-bg0/[0.72] text-ink1',
           )}
         >
@@ -118,7 +151,7 @@ export function StageDownloadAction({
             title={saveLabel}
             aria-label={saveLabel}
             className={cx(
-              'grid h-8 w-8 place-items-center transition-colors',
+              'grid h-8 w-8 place-items-center transition-colors touch:h-[44px] touch:w-[44px]',
               open ? 'hover:bg-black/10' : 'hover:bg-bg0',
               busy && 'cursor-not-allowed opacity-40',
             )}
@@ -134,7 +167,9 @@ export function StageDownloadAction({
             aria-haspopup="menu"
             aria-expanded={open}
             className={cx(
-              'grid h-8 w-6 place-items-center transition-colors',
+              // 21px wide, and the only door to Share, the stamped save and the
+              // sound split. Half a finger under a thumb.
+              'grid h-8 w-6 place-items-center transition-colors touch:h-[44px] touch:w-[44px]',
               open ? 'hover:bg-black/10' : 'hover:bg-bg0',
             )}
           >
@@ -180,8 +215,49 @@ export function StageDownloadAction({
               {t('download.allowUnencryptedHint')}
             </p>
           </div>
+
+          {/* A clip is a picture AND a soundtrack, and an editor wants them
+              apart more often than together. Video only: a still has neither
+              half to take. BELOW the switch, not above it: the switch has to
+              stay touching the row it governs, or a grey "Download
+              unencrypted" stops explaining itself. */}
+          {studio === 'video' ? (
+            <>
+              <div className="mb-0.5 mt-1.5 h-px bg-line1" />
+              <MenuItem
+                icon="music"
+                disabled={Boolean(busy)}
+                onClick={() => void runTrack(close, 'audio')}
+                title={t('sound.audioOnlyHint')}
+              >
+                {busy === 'audio' ? t('sound.working') : t('sound.audioOnly')}
+              </MenuItem>
+              <MenuItem
+                icon="film"
+                disabled={Boolean(busy)}
+                onClick={() => void runTrack(close, 'silent')}
+                title={t('sound.silentVideoHint')}
+              >
+                {busy === 'silent' ? t('sound.working') : t('sound.silentVideo')}
+              </MenuItem>
+              <MenuItem
+                icon="scissors"
+                disabled={Boolean(busy)}
+                onClick={() => { close(); setSplitting(true); }}
+                title={t('sound.splitHint')}
+              >
+                {t('sound.split')}
+              </MenuItem>
+            </>
+          ) : null}
         </>
       )}
     </Menu>
+    {splitting ? (
+      <Suspense fallback={null}>
+        <SoundSplitDialogLazy url={url} filename={filename} onClose={() => setSplitting(false)} />
+      </Suspense>
+    ) : null}
+    </>
   );
 }

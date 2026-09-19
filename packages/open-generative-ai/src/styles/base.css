@@ -15,9 +15,37 @@ html, body {
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* iOS inflates text in a rotated page unless it is told the layout already
+     handles the width. Without this, landscape redraws the studio at a size
+     nothing was measured at. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
+
+/* ---- Touch ----
+   Three things every touch surface in the app wants, set once.
+
+   `manipulation` drops the 300ms wait a mobile browser spends deciding whether
+   a tap was the first half of a double-tap zoom — the single biggest reason a
+   web app feels slower than a native one under a thumb.
+
+   The tap highlight is the house accent rather than the browser's grey box, so
+   a press reads as this app pressing back; hover states say nothing on a phone,
+   and without a highlight a tap on a chip gives no feedback at all until the
+   menu opens. */
+button,
+[role='button'],
+a,
+label,
+summary,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(246, 178, 27, 0.16);
+}
 
 ::selection { background: var(--honey-tint-strong); color: var(--ink-1); }
 
@@ -45,25 +73,115 @@ html, body {
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
+/* Applied in nineteen places and defined in none of them until now — the class
+   was doing literally nothing. It is what a pane inside the app asks for when
+   it scrolls, so it is the right place to put the two things every inner
+   scroller on a phone needs: momentum, and a flick that stops at its own end
+   instead of dragging the page behind it. */
+.custom-scrollbar,
+.no-scrollbar,
+.hive-edge-fade {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.custom-scrollbar { scrollbar-width: thin; }
+
 /* Horizontal strips that scroll (mobile nav, chip rows): hide the bar but fade the
    clipped edge so it is obvious there is more. */
 .hive-edge-fade::-webkit-scrollbar { display: none; }
 .hive-edge-fade {
   -ms-overflow-style: none;
   scrollbar-width: none;
+  /* A sideways flick that reaches the end of the strip must not become the
+     browser's own back gesture and leave the app. */
+  overscroll-behavior-x: contain;
   -webkit-mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 20px), transparent);
   mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 20px), transparent);
 }
 
-/* The studio frame (Image/Video) reserves its right rail's width on the stage and
-   the floating composer. Below sm the rail is not drawn, so the reservation has
-   to go with it or both leave a dead strip down the right edge. */
-@media (max-width: 639px) {
-  [data-studio-frame] { --frame-rail-w: 0px; }
+/* The studio frame (Image/Video/Music/Restore) reserves its right rail's width
+   on the stage, the notices, the tab strip and the floating composer. Below sm
+   the rail is not drawn (`hidden sm:flex`), so the reservation has to go with
+   it or all four leave a dead strip down the right edge of a phone.
+
+   TWO properties on purpose. StudioFrame publishes the rail's width INLINE, and
+   an inline custom property beats any stylesheet rule regardless of the media
+   query around it — the version of this block that tried to zero --frame-rail-w
+   directly never applied once, and the composer sat 235px wide on a 375px
+   phone. So the frame publishes --frame-rail-px and this is the only place
+   --frame-rail-w is ever written. min-width matches Tailwind's own sm exactly,
+   so the band and the rail that fills it turn on at the same pixel. */
+[data-studio-frame] { --frame-rail-w: 0px; }
+@media (min-width: 640px) {
+  [data-studio-frame] { --frame-rail-w: var(--frame-rail-px, 0px); }
+}
+
+/* The air the stage keeps between the picture and the two things floating over
+   it. The desktop values are generous on purpose; on a phone the composer is
+   two and a half times taller inside a window a third the height, so the same
+   generosity is most of the picture. Same reason as above for living here
+   rather than in StudioFrame's inline style. */
+[data-studio-frame] {
+  --frame-stage-gap: 20px;
+  --frame-tabs-reserve: 44px;
+}
+@media (min-width: 640px) {
+  [data-studio-frame] {
+    --frame-stage-gap: 44px;
+    --frame-tabs-reserve: 56px;
+  }
+}
+
+/* How much of the stage the results rail takes when it is a strip lying on the
+   composer (below sm). From sm up the rail is a pill in its own reserved band
+   and costs the stage no height at all, so this goes back to zero there —
+   StudioFrame measures the element either way and publishes the raw px. */
+[data-studio-frame] { --frame-rail-strip: var(--frame-rail-strip-px, 0px); }
+@media (min-width: 640px) {
+  [data-studio-frame] { --frame-rail-strip: 0px; }
+}
+
+/* ...and below sm an EMPTY rail is not drawn at all. As a pill in the corner
+   its heading and its "Nothing yet" cost the stage nothing; as a strip lying
+   across the composer they cost a phone 40px to say that nothing has happened,
+   which the stage's own empty state has already said in full. */
+@media (max-width: 639.98px) {
+  [data-studio-frame] > aside:not(:has([data-rail-card])) { display: none; }
+}
+
+/* The composer's measured height, for surfaces OUTSIDE the frame — the toast
+   container, which react-hot-toast makes a child of <body>. Zero from sm up:
+   above a phone the composer is a centred 880px panel and a bottom-right toast
+   never reaches it, so a lift there would only float the toasts oddly high.
+   StudioFrame publishes the raw px as --app-composer-px; this is the only place
+   --app-composer-h is written. */
+:root { --app-composer-h: 0px; }
+@media (max-width: 639.98px) {
+  :root { --app-composer-h: var(--app-composer-px, 0px); }
 }
 
 /* ---- Native control restyling ---- */
 input, textarea, select, button { font: inherit; color: inherit; }
+
+/* iOS zooms the WHOLE PAGE in when a field under 16px takes focus, and it does
+   not zoom back out — so one tap on any of the app's 13px fields left the
+   studio scaled up and scrolled sideways, with the composer off the edge.
+   16px is the threshold, not a preference. Applied by pointer rather than by
+   width so a desktop keeps its density. */
+@media (pointer: coarse) {
+  /* The :not()s are not only filters, they are SPECIFICITY. A bare `textarea`
+     selector is (0,0,1) and loses to the `text-[13.5px]` utility on the element
+     — which is how the music studio's lyrics box, the one field people type
+     paragraphs into, would have kept zooming the page while everything around
+     it was fixed. Each attribute selector adds a class's worth of weight, and
+     these come out at (0,3,1) and (0,1,1): above any single utility, below
+     anything deliberate. */
+  input:not([type='range']):not([type='checkbox']):not([type='radio']),
+  textarea:not([hidden]),
+  select:not([hidden]) {
+    font-size: 16px;
+  }
+}
 
 input[type='range'].hive-range {
   -webkit-appearance: none;
@@ -87,6 +205,22 @@ input[type='range'].hive-range::-webkit-slider-thumb {
   transition: transform var(--t-fast);
 }
 input[type='range'].hive-range::-webkit-slider-thumb:hover { transform: scale(1.15); }
+
+/* A 4px track and a 14px thumb is a cursor's control. Under a thumb the track
+   keeps its drawn height and gains 18px of transparent padding either side
+   (background-clip: content-box keeps the paint where it was), the grip grows,
+   and touch-action stops a drag along the slider from scrolling the panel it
+   is in. */
+@media (pointer: coarse) {
+  input[type='range'].hive-range {
+    height: 40px;
+    padding-block: 18px;
+    background-clip: content-box;
+    touch-action: none;
+  }
+  input[type='range'].hive-range::-webkit-slider-thumb { width: 22px; height: 22px; }
+  input[type='range'].hive-range::-moz-range-thumb { width: 22px; height: 22px; }
+}
 input[type='range'].hive-range::-moz-range-thumb {
   width: 14px; height: 14px; border-radius: 50%;
   background: var(--ink-1); border: none;
@@ -102,6 +236,12 @@ input[type='range'].hive-range::-moz-range-thumb {
   from { opacity: 0; transform: scale(0.97); }
   to { opacity: 1; transform: none; }
 }
+/* A sheet arrives from the edge it is anchored to, not by scaling up out of
+   the middle of the screen. Paired with Modal's `items-end` below sm. */
+@keyframes hive-sheet-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
 @keyframes hive-spin { to { transform: rotate(360deg); } }
 @keyframes hive-pulse { 50% { opacity: 0.45; } }
 @keyframes hive-indeterminate {
@@ -111,6 +251,13 @@ input[type='range'].hive-range::-moz-range-thumb {
 
 .hive-fade-in { animation: hive-fade-in var(--t-med) both; }
 .hive-scale-in { animation: hive-scale-in var(--t-med) both; }
+/* One class, two entrances. `sm:hive-sheet-in` would generate nothing — a
+   hand-written class is not a Tailwind utility, so it has no variants — and
+   the breakpoint has to match Modal's own `sm:items-center`. */
+.hive-sheet-in { animation: hive-sheet-in var(--t-med) both; }
+@media (min-width: 640px) {
+  .hive-sheet-in { animation: hive-scale-in var(--t-med) both; }
+}
 
 /* ---- Work in flight, drawn on the picture itself ----
    The rim an image wears while something is being made FROM it (an upscale

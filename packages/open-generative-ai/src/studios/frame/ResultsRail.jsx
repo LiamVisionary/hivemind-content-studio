@@ -56,6 +56,11 @@ export function RailCard({
   return (
     <button
       type="button"
+      // What the frame counts to decide whether the rail has anything in it.
+      // Below sm the rail lies across the composer, and a strip that is only a
+      // heading and the words "Nothing yet" is 40px of a phone spent saying
+      // nothing — so the frame hides itself when no card carries this.
+      data-rail-card=""
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       onContextMenu={onContextMenu}
@@ -125,6 +130,7 @@ export function RailOverflow({ count, onClick, label = 'Show every result in the
       onClick={onClick}
       title={label}
       aria-label={label}
+      data-rail-card=""
       className="grid h-[30px] shrink-0 place-items-center rounded-[8px] font-mono text-[10px] text-inkSoft transition-colors hover:bg-white/5 hover:text-ink1"
       style={{ width }}
     >

@@ -4,7 +4,7 @@
 // read as a toolbar and stopped the prompt bar reading as a prompt bar, so the
 // settings people actually change are written as a sentence instead —
 //
-//   Make [1 image] at [9:16] in [photoreal] with [2 references] on [this Mac · Z-Image] .  Advanced →
+//   Make [1 image] at [9:16] in [photoreal] with [2 references] on [this Mac · Z-Image] .
 //
 // Every underlined value is still the control the chip was: pressing it opens
 // the same menu, writing to the same engine field, and the SAME control still
@@ -40,9 +40,10 @@ import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import { CompletionPingToggle } from '../../ui/CompletionPingToggle.jsx';
 import { DrawerChoice } from '../frame/AdvancedDrawer.jsx';
 import { PromptLibraryItem } from '../frame/PromptLibraryItem.jsx';
+import { QUICK_PROMPT_ART, starterArtFor } from './starterArt.js';
 import { PromptLibraryMenu } from '../frame/PromptLibraryMenu.jsx';
 import {
-  ComposerMeta, ComposerPanel, ComposerPrimary, ComposerPrompt, ComposerPromptAction, ComposerSecondary, ComposerTool,
+  ComposerMeta, ComposerPanel, ComposerPrimary, ComposerPrompt, ComposerPromptAction, ComposerTool,
 } from '../frame/ComposerPanel.jsx';
 import { RecipeLine } from '../frame/RecipeLine.jsx';
 import { Thumb, UploadPicker } from '../UploadPicker.jsx';
@@ -180,6 +181,8 @@ export function ImageComposer({
   captureContext,
   onRestoreContext,
   onApplyStarterSetup,
+  // Opens a prompt-writing workflow by id ('object-to-character').
+  onOpenWorkflow,
   onApplyUgc,
   ugcArmed,
   // ---- camera rig (the folded Cinema studio) ----
@@ -202,9 +205,6 @@ export function ImageComposer({
   onSelectAspect,
   onSelectStyle,
   onSelectBatch,
-  // ---- the drawer ----
-  advancedOpen,
-  onToggleAdvanced,
   // ---- generate ----
   coupleOn,
   // The selected model takes a picture and NOTHING else — no prompt field
@@ -224,7 +224,6 @@ export function ImageComposer({
   // figure for THIS run.
   costLabel = '',
   onGenerate,
-  onCancel,
   onNewPrompt,
   onClearPrompt,
 }) {
@@ -660,12 +659,40 @@ export function ImageComposer({
             chip={startersChip}
             extraSections={(close) => (
               <>
+                {/* A workflow, not a prompt: it WRITES the prompt from a
+                    picture, on whichever model is selected, so it sits above
+                    the shelf the model filters rather than inside it. */}
+                <MenuHeading>Workflows</MenuHeading>
+                <MenuItem
+                  icon="sparkles"
+                  note="Drop a picture of a thing; a vision model designs a character from it"
+                  onClick={() => { onOpenWorkflow?.('object-to-character'); close(); }}
+                >
+                  Object → character
+                </MenuItem>
                 <MenuHeading>{t('image.quickStarters')}</MenuHeading>
-                {QUICK_PROMPTS.map((q) => (
-                  <MenuItem key={q.label} onClick={() => { setPromptValue(q.prompt); close(); }}>
-                    {q.label}
-                  </MenuItem>
-                ))}
+                {/* Two columns of pictures: each tile is its own prompt, rendered
+                    on Krea 2 Turbo — eight one-word rows said nothing about
+                    what eight lines of style tags actually draw. */}
+                <div className="grid grid-cols-4 gap-1 px-1 pb-1">
+                  {QUICK_PROMPTS.map((q) => (
+                    <button
+                      key={q.label}
+                      type="button"
+                      role="menuitem"
+                      title={q.prompt}
+                      onClick={() => { setPromptValue(q.prompt); close(); }}
+                      className="group relative aspect-square overflow-hidden rounded-md border border-line1 bg-bg3 text-left transition-colors duration-150 hover:border-honey focus-visible:border-honey"
+                    >
+                      {QUICK_PROMPT_ART[q.label] ? (
+                        <img src={QUICK_PROMPT_ART[q.label]} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover transition-transform duration-200 group-hover:scale-105" />
+                      ) : null}
+                      <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/75 to-transparent px-1.5 pb-1 pt-3 text-[10px] font-medium text-white">
+                        {q.label}
+                      </span>
+                    </button>
+                  ))}
+                </div>
                 <MenuHeading>UGC first frame</MenuHeading>
                 <MenuItem
                   icon="persona"
@@ -686,7 +713,8 @@ export function ImageComposer({
               </>
             )}
             capture={captureContext}
-            onLoadPrompt={({ prompt, negativePrompt, setup }) => {
+            starterArtFor={starterArtFor}
+            onLoadPrompt={({ prompt, negativePrompt, setup, workflow }) => {
               setPromptValue(prompt);
               s.negativePrompt = negativePrompt;
               // A shipped image starter is a recipe, not just words: the studio
@@ -695,7 +723,10 @@ export function ImageComposer({
               onApplyStarterSetup?.(setup);
               persist();
               bump();
-              promptRef.current?.focus();
+              // A workflow starter loaded only the framing half; its dialog
+              // writes the rest, so focus goes there rather than to the box.
+              if (workflow) onOpenWorkflow?.(workflow);
+              else promptRef.current?.focus();
             }}
             onLoadContext={onRestoreContext}
           />
@@ -824,21 +855,15 @@ export function ImageComposer({
         />
       )}
       recipe={(
-        <RecipeLine
-          parts={uploadOnly ? uploadOnlyRecipe : recipeParts}
-          advancedOpen={advancedOpen}
-          onToggleAdvanced={onToggleAdvanced}
-        />
+        <RecipeLine parts={uploadOnly ? uploadOnlyRecipe : recipeParts} />
       )}
       tools={uploadOnly ? null : tools}
       meta={!s.generating && metaLabel ? (
         <ComposerMeta title={t('composer.etaTitle')}>{metaLabel}</ComposerMeta>
       ) : null}
-      secondary={s.generating ? (
-        <ComposerSecondary onClick={onCancel} title={t('composer.cancelTitle')}>
-          {t('common.cancel')}
-        </ComposerSecondary>
-      ) : null}
+      // No Cancel here. The run in flight is drawn on the stage and its Cancel
+      // sits on that readout, beside the bar it stops — a second one down here
+      // only ever asked which of the two you meant.
       primary={(
         <ComposerPrimary
           loading={s.generating}

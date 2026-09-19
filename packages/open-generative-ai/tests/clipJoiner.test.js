@@ -30,6 +30,66 @@ function probe(path) {
     return JSON.parse(out);
 }
 
+// --- does this clip carry sound? --------------------------------------------
+//
+// The stage's "Sound" badge used to be `/minimax/.test(model)`, under a comment
+// saying other lanes were silent. True when written; wrong since LTX 2.3, which
+// denoises a JOINT audio+video latent and scores every clip it renders — so
+// every LTX clip went unbadged. A name test also cannot tell a graph that wires
+// the audio out from one that samples it and drops it, which this codebase has
+// actually shipped (the eros v1.4 graph decoded only the picture half).
+//
+// So the badge asks the FILE now, through the probe clipPrep already uses for
+// the last-frame grab. Real clips, real mediabunny — the same code the browser
+// runs — because "it reports the track that is there" is the whole claim.
+test('probeClip reports the audio track a clip does or does not have', { skip: !haveFfmpeg() }, async () => {
+    const { probeClip } = await import('../src/lib/clipPrep.js');
+    const dir = mkdtempSync(join(tmpdir(), 'clipaudio-'));
+    try {
+        const scored = join(dir, 'scored.mp4');
+        const silent = join(dir, 'silent.mp4');
+        makeClip(scored, 2, 440);
+        // The same clip WITHOUT the sine: one ffmpeg input, no audio stream.
+        execFileSync('ffmpeg', [
+            '-y', '-loglevel', 'error',
+            '-f', 'lavfi', '-i', 'testsrc2=size=192x128:rate=12:duration=2',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silent,
+        ], { timeout: 60000 });
+
+        const withSound = await probeClip(new Blob([readFileSync(scored)]));
+        assert.equal(withSound.hasAudio, true);
+        assert.equal(withSound.audioCodec, 'aac');
+
+        const without = await probeClip(new Blob([readFileSync(silent)]));
+        assert.equal(without.hasAudio, false, 'a video-only clip must not claim sound');
+        assert.equal(without.audioCodec, null);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// Deliberately textual: the claim is WHICH hook the stage badge is wired to,
+// and the hook answers from an effect — effects never run under a server
+// render, so a render of VideoStudio would show the same empty badge either
+// way. The behaviour it rests on (does probeClip see the track?) is the real
+// test above, and the live path was driven in a browser against one scored and
+// one silent clip on the same lane.
+test('the Sound badge reads the clip, not the model name', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const studio = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
+    assert.doesNotMatch(studio, /clipHasAudio=\{\/minimax\//,
+        'the badge is guessing from the model again — LTX 2.3 renders audio too');
+    assert.match(studio, /const clipHasAudio = useClipHasAudio\(s\.resultUrl\);/);
+
+    const hooks = fs.readFileSync(path.join(__dirname, '../src/hooks/hooks.js'), 'utf8');
+    // Dynamic import on purpose: clipPrep carries mediabunny, which should not
+    // weigh down the studio chunk just to badge a clip.
+    assert.match(hooks, /await import\('\.\.\/lib\/clipPrep\.js'\)/);
+    // Unknown answers "no badge", never a guessed yes.
+    assert.match(hooks, /clipAudioCache\.set\(resolved, false\);/);
+});
+
 test('joinClips packet-copies two clips into one MP4 with audio', { skip: !haveFfmpeg() }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clipjoin-'));
     try {

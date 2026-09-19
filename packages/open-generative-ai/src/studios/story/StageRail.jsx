@@ -18,7 +18,60 @@ export const STORY_STAGES = Object.freeze([
   { id: 'ship', label: 'Sign-off' },
 ]);
 
-export function StageRail({ stages, stage, onStage, title, promise, locked, onNew, onExample }) {
+// The strip is always wider than a phone — four labelled chips at touch sizing
+// measure about 510px — so the stage you are ON has to be brought into view, or
+// the answer to "which of the four am I in" is off the right edge for anyone
+// past the second one. A callback ref rather than an effect: it runs on the
+// chip that IS current, whenever that changes, and on nothing else. Same helper
+// shape as the shell's own mobile navigation, which has the same problem.
+function scrollCurrentStepIntoView(node) {
+  if (!node || typeof node.scrollIntoView !== 'function') return;
+  try { node.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch { /* older engines */ }
+}
+
+export function StageRail({ stages, stage, onStage, title, promise, locked, onNew, onExample, compact = false }) {
+  // Below lg the rail is not drawn at all — it lives in the settings sheet
+  // behind a button — which left a phone with no answer to the one question
+  // this studio is arranged around: which of the four decisions am I in, and
+  // which are done. `compact` is that answer on screen, in the app's own
+  // mobile-navigation shape: a strip of chips that scrolls, with the edge fade
+  // saying there is more of it.
+  if (compact) {
+    return (
+      <nav
+        className="hive-edge-fade flex min-h-11 w-full items-center gap-1.5 overflow-x-auto px-4 py-1.5 touch:min-h-[52px]"
+        aria-label="Production stages"
+      >
+        {stages.map((entry, index) => {
+          const on = entry.id === stage;
+          return (
+            <button
+              key={entry.id}
+              type="button"
+              onClick={() => onStage(entry.id)}
+              aria-current={on ? 'step' : undefined}
+              ref={on ? scrollCurrentStepIntoView : undefined}
+              className={cx(
+                'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[12px] font-semibold transition-colors duration-150',
+                'touch:h-[38px] touch:px-3 touch:text-[13px]',
+                on ? 'border-honey/40 bg-honey-tint text-ink1' : 'border-transparent text-ink2 hover:bg-bg2 hover:text-ink1',
+              )}
+            >
+              <span
+                className={cx(
+                  'grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-[10px] font-bold',
+                  entry.done ? 'bg-ok-tint text-ok' : on ? 'bg-bg0/50 text-ink2' : 'bg-bg2 text-ink3',
+                )}
+              >
+                {entry.done ? <Icon name="check" size={11} /> : index + 1}
+              </span>
+              {entry.label}
+            </button>
+          );
+        })}
+      </nav>
+    );
+  }
   return (
     <>
       <div className="flex flex-col gap-2 rounded-lg border border-line1 bg-bg2 p-3">
@@ -47,6 +100,7 @@ export function StageRail({ stages, stage, onStage, title, promise, locked, onNe
               type="button"
               onClick={() => onStage(entry.id)}
               aria-current={on ? 'step' : undefined}
+              ref={on ? scrollCurrentStepIntoView : undefined}
               className={cx(
                 'flex w-full items-center gap-2.5 rounded-md border px-2.5 py-2 text-left transition-colors duration-150',
                 on ? 'border-honey/40 bg-honey-tint text-ink1' : 'border-transparent text-ink2 hover:bg-bg2 hover:text-ink1',

@@ -10,7 +10,7 @@
 // locked vault lists no prompts and offers the unlock instead of a dead group.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { useSavedLibrary } from '../hooks/hooks.js';
+import { useRentalBuild, useSavedLibrary } from '../hooks/hooks.js';
 import { buildPaletteEntries, filterPaletteEntries, paletteGroupLabel } from '../lib/commandPalette.js';
 import { localAI } from '../lib/localInferenceClient.js';
 import { LIBRARIES } from '../lib/savedLibraryStore.js';
@@ -20,7 +20,7 @@ import { requestVaultUnlock } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import { Kbd, TextInput, cx } from '../ui/kit.jsx';
-import { PALETTE_ITEMS } from './navConfig.jsx';
+import { PALETTE_ITEMS, visibleNavItems } from './navConfig.jsx';
 import { insertIntoActivePrompt } from './promptTarget.js';
 
 
@@ -56,19 +56,22 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
 
   useEffect(() => { if (open) { setQuery(''); setCursor(0); } }, [open]);
 
+  // ⌘K is the map of the app, so it shows what this install can actually open —
+  // the Rental build page is only a page where there is a checkout to write to.
+  const build = useRentalBuild(open);
   const entries = useMemo(() => {
     if (!open) return [];
     // Only the tabbed studios ever publish a strip, so a page with none simply
     // reads back an empty list — no second list of which pages have tabs.
     const tabs = readTabLabels(page);
     return buildPaletteEntries({
-      navItems: PALETTE_ITEMS,
+      navItems: visibleNavItems(PALETTE_ITEMS, { checkout: build.editable }),
       studioType: tabs.length ? page : '',
       tabs,
       prompts: library.entries || [],
       models,
     });
-  }, [open, page, library.entries, models]);
+  }, [open, page, library.entries, models, build.editable]);
 
   const shown = useMemo(() => filterPaletteEntries(entries, query), [entries, query]);
   const active = shown[Math.min(cursor, Math.max(shown.length - 1, 0))] || null;
@@ -116,8 +119,16 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
   let lastKind = '';
   return (
     <Modal open onClose={onClose} title={TEXT.title()} size="lg">
-      <div onKeyDown={onKeyDown}>
+      {/* Below sm the Modal is a bottom sheet capped at 88dvh, and the software
+          keyboard eats the bottom half of that the instant the box below
+          autofocuses. So the palette fills the sheet and scrolls INSIDE it: the
+          search box stays pinned at the top where the caret is, and only the
+          result list moves. Above sm the wrapper is a plain block again and the
+          list keeps the 52vh cap it has always had, so the dialog still sizes
+          itself to its content rather than standing 86vh tall on every ⌘K. */}
+      <div onKeyDown={onKeyDown} className="flex h-full min-h-0 flex-col sm:block sm:h-auto">
         <TextInput
+          className="shrink-0"
           data-autofocus
           value={query}
           onChange={(event) => { setQuery(event.target.value); setCursor(0); }}
@@ -131,14 +142,14 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
           <button
             type="button"
             onClick={() => { onClose(); requestVaultUnlock(); }}
-            className="mt-3 flex w-full items-center gap-2.5 rounded-md border border-honey/40 bg-honey-tint px-2.5 py-2 text-left text-[13px] font-semibold text-honey"
+            className="mt-3 flex w-full shrink-0 items-center gap-2.5 rounded-md border border-honey/40 bg-honey-tint px-2.5 py-2 text-left text-[13px] font-semibold text-honey"
           >
             <Icon name="unlock" size={15} />
             {TEXT.unlock()}
           </button>
         ) : null}
 
-        <div ref={listRef} className="mt-3 max-h-[52vh] overflow-y-auto" role="listbox" aria-label={TEXT.title()}>
+        <div ref={listRef} className="mt-3 min-h-0 flex-1 overflow-y-auto overscroll-contain sm:max-h-[52vh] sm:flex-none" role="listbox" aria-label={TEXT.title()}>
           {shown.length === 0 ? (
             <p className="px-1 py-6 text-center text-[13px] text-ink3">{TEXT.empty()}</p>
           ) : null}
@@ -161,6 +172,9 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
                   onClick={() => run(entry)}
                   className={cx(
                     'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors duration-150',
+                    // Same row, same rule as Menu's MenuItem: a 33px option is
+                    // a cursor's option, and this list is the whole app.
+                    'touch:py-3 touch:text-[14px]',
                     on ? 'bg-honey-tint text-ink1' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
                     entry.disabled && 'opacity-40',
                   )}
@@ -174,7 +188,10 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
           })}
         </div>
 
-        <div className="mt-3 flex items-center gap-3 border-t border-line1 pt-2.5 text-[11px] text-ink3">
+        {/* Three keyboard hints, on the device with no keyboard to press them
+            with — and they were holding the bottom of the sheet, which is the
+            part the software keyboard covers anyway. */}
+        <div className="mt-3 hidden shrink-0 items-center gap-3 border-t border-line1 pt-2.5 text-[11px] text-ink3 sm:flex">
           <span className="inline-flex items-center gap-1"><Kbd>↑</Kbd><Kbd>↓</Kbd> {TEXT.hintNav()}</span>
           <span className="inline-flex items-center gap-1"><Kbd>↵</Kbd> {TEXT.hintOpen()}</span>
           <span className="inline-flex items-center gap-1"><Kbd>esc</Kbd> to close</span>

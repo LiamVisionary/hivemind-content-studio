@@ -16,6 +16,7 @@ import { normalizeCameraMotions } from './cameraMotion.js';
 import { emotionDirectionById } from './emotionDirection.js';
 import { UGC_DEFAULT_FORMAT, ugcFormat } from './ugcMode.js';
 import { restylePresetById } from './h3RestylePresets.js';
+import { normalizeCombatSnapshot } from './h3CombatPreset.js';
 
 const VIDEO_ADVANCED_EXCLUDED_INPUTS = new Set([
     'prompt',
@@ -90,6 +91,33 @@ export function getRestoredAdvancedVideoValues(model, values) {
 }
 
 /* ---------------- what survives a reload ---------------- */
+
+// The MiniMax H3 (Apple Silicon) dials, with the engine's own ranges (h3.c:
+// h3_valid_params). Every field is optional and an empty result is null, which
+// is the value that means "let the machine decide" — see the call site.
+const H3_NATIVE_PRESETS = ['draft', 'fast', 'balanced', 'reference'];
+const H3_NATIVE_RANGES = {
+    steps: [2, 1000, Math.round],
+    layers: [35, 50, Math.round],
+    reuse: [1, 3, Math.round],
+    core_reuse: [1, 6, Math.round],
+    render_scale: [0.25, 1, (n) => n],
+};
+
+export function normalizeH3NativePreferences(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const out = {};
+    if (H3_NATIVE_PRESETS.includes(value.preset)) out.preset = value.preset;
+    for (const [key, [low, high, round]] of Object.entries(H3_NATIVE_RANGES)) {
+        const number = Number(value[key]);
+        if (!Number.isFinite(number)) continue;
+        out[key] = round(Math.max(low, Math.min(high, number)));
+    }
+    for (const key of ['token_reduction', 'ssd_streaming', 'int8_row_fc2']) {
+        if (typeof value[key] === 'boolean') out[key] = value[key];
+    }
+    return Object.keys(out).length ? out : null;
+}
 
 export function normalizeVideoPreferences(value) {
     if (!value || typeof value !== 'object') return null;
@@ -179,6 +207,24 @@ export function normalizeVideoPreferences(value) {
         steps: (typeof value.steps === 'number' && Number.isFinite(value.steps) && value.steps >= 1 && value.steps <= 100)
             ? Math.round(value.steps)
             : null,
+        // Frame interpolation multiplier (H3). null = the workflow's own
+        // default, which is 1 — no interpolation. Anything under 2 is off, so
+        // it normalizes away rather than persisting as a no-op override.
+        interpolate: (typeof value.interpolate === 'number' && Number.isFinite(value.interpolate)
+            && value.interpolate >= 2 && value.interpolate <= 8)
+            ? Math.round(value.interpolate)
+            : null,
+        // The fight preset's snapshot: what the dials it moved were set to
+        // before it was armed. Settings only — no prompt text ever reaches
+        // this blob, and the preset's direction sentence rides with the prompt
+        // in the encrypted composer like every other phrase.
+        combat: normalizeCombatSnapshot(value.combat),
+        // MiniMax H3 (Apple Silicon). Only what was CHANGED, and an empty bag
+        // normalizes to null — because "nothing set" is what tells the gateway
+        // to recommend a preset for whatever Mac this is. Persisting a resolved
+        // preset instead would pin one machine's answer into a tab that may be
+        // reopened on another.
+        h3Native: normalizeH3NativePreferences(value.h3Native),
         // Head-swap identity strength. A setting, so it persists like the rest.
         headSwapLoraStrength: (typeof value.headSwapLoraStrength === 'number' && Number.isFinite(value.headSwapLoraStrength))
             ? Math.min(1.5, Math.max(0.5, value.headSwapLoraStrength))

@@ -540,7 +540,11 @@ export function SpriteStudio({ active = true } = {}) {
     view.width = sheet.canvas.width;
     view.height = sheet.canvas.height;
     view.getContext('2d').drawImage(sheet.canvas, 0, 0);
-    view.className = 'max-w-full rounded-md border border-line1 bg-[repeating-conic-gradient(#0000_0_25%,#8883_0_50%)_50%/16px_16px]';
+    // NOT max-w-full: a packed sheet is the one picture on this page whose
+    // individual cells are the point, and fitting a 2048px atlas into a 319px
+    // column squeezes every cell to nine pixels. It keeps its own size and the
+    // box around it scrolls instead.
+    view.className = 'rounded-md border border-line1 bg-[repeating-conic-gradient(#0000_0_25%,#8883_0_50%)_50%/16px_16px]';
     view.style.imageRendering = 'pixelated';
     host.replaceChildren(view);
   }, [sheet]);
@@ -705,11 +709,17 @@ export function SpriteStudio({ active = true } = {}) {
         <Card className="flex flex-col gap-3 p-4">
           <StageHeader index={1} stage={STAGES[1]} done={Boolean(clipUrl)} />
           <Field label="What it does">
-            <Segmented
-              value={action}
-              onChange={setAction}
-              options={SPRITE_ACTIONS.map((entry) => ({ value: entry.id, label: entry.label }))}
-            />
+            {/* Segmented is one unwrapping row on purpose (the composer chip rows
+                depend on it), and five labels ending in "Describe it myself" are
+                wider than a 375px screen. The row scrolls sideways here rather
+                than running off the edge. */}
+            <div className="hive-edge-fade -mx-1 overflow-x-auto px-1">
+              <Segmented
+                value={action}
+                onChange={setAction}
+                options={SPRITE_ACTIONS.map((entry) => ({ value: entry.id, label: entry.label }))}
+              />
+            </div>
           </Field>
           {action === 'custom' ? (
             <>
@@ -817,7 +827,10 @@ export function SpriteStudio({ active = true } = {}) {
               {packProgress} <span className="text-ink3/70">A warm cut-out is about 20 seconds a frame.</span>
             </p>
           ) : null}
-          <div ref={sheetHostRef} className="overflow-x-auto" />
+          {/* Both axes now that the canvas is life-size, capped so a tall atlas
+              does not become the page. hive-edge-fade (base.css) fades the
+              clipped edge, which is what says there is more of it. */}
+          <div ref={sheetHostRef} className="hive-edge-fade max-h-[60dvh] overflow-auto" />
           {sheet ? (
             <p className="text-[11px] text-ink3">
               {sheet.atlas.columns}×{sheet.atlas.rows} grid · {sheet.atlas.frame_width}×{sheet.atlas.frame_height} cells ·

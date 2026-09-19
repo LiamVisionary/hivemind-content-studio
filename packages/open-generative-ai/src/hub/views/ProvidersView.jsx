@@ -29,6 +29,7 @@ import toast from 'react-hot-toast';
 import { Button, EmptyState, Field, Pill, SectionLabel, TextInput } from '../../ui/kit.jsx';
 import { api, providerLabel, refreshAll, startOAuth, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
+import { Icon } from '../../ui/icons.jsx';
 import { toastFailure } from '../../ui/failureToast.jsx';
 import { t, tf } from '../../lib/i18n.js';
 
@@ -320,12 +321,55 @@ function OAuthAction({ row, link }) {
 // Everything about the one row being looked at. A row with no field to offer
 // and no account to connect still gets its sentence and its metadata — the
 // panel is never empty, because the board's dot is never the whole answer.
-function DetailPanel({ row, link, onSaved }) {
+
+// Whether there is room for the board and the panel side by side. This is a
+// width question, not a pointer one: a 1024px tablet shows both, and a narrow
+// desktop window gets the same push navigation a phone does.
+const TWO_PANE_QUERY = '(min-width: 1024px)';
+
+function useTwoPane() {
+  const [wide, setWide] = useState(() => {
+    try { return Boolean(window.matchMedia?.(TWO_PANE_QUERY)?.matches); } catch { return true; }
+  });
+  useEffect(() => {
+    let query = null;
+    try { query = window.matchMedia?.(TWO_PANE_QUERY) || null; } catch { query = null; }
+    if (!query?.addEventListener) return undefined;
+    const onChange = (event) => setWide(Boolean(event.matches));
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return wide;
+}
+
+function DetailPanel({ row, link, onSaved, onClose }) {
   return (
-    <aside className="flex min-h-0 flex-col gap-[18px] overflow-y-auto border-t border-line1 bg-bg1 px-6 py-7 lg:border-l lg:border-t-0">
-      <div>
-        <h3 className="text-base font-semibold leading-tight text-ink1">{row.label}</h3>
-        <div className={`mt-1.5 text-xs font-medium ${row.stateTone}`}>{row.state}</div>
+    // Below lg this is pushed OVER the board rather than set beside it: at
+    // 375px the two-pane split left the board a column of truncated names and
+    // the panel a column too narrow for its key field. Fixed rather than
+    // absolute so it covers the toolbar too, and it pays its own safe-area
+    // insets because it sits outside the shell's padded box (Shell.jsx).
+    // The full-screen sheet is a PHONE shape, so it ends at md — not at lg,
+    // where the two-column board begins. Gated at lg it also covered a desktop
+    // window between 768 and 1023px: the whole app, nav included, replaced by
+    // one provider's key field. Between md and lg the panel is simply the
+    // second row of a one-column board, which is what it was before.
+    <aside className="fixed inset-0 z-50 flex min-h-0 flex-col gap-[18px] overflow-y-auto overscroll-contain bg-bg1 px-6 pb-[calc(1.75rem+env(safe-area-inset-bottom))] pt-[calc(1.75rem+env(safe-area-inset-top))] md:static md:inset-auto md:z-auto md:px-0 md:pb-6 md:pt-0 lg:border-l lg:border-line1 lg:px-6 lg:py-7">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-base font-semibold leading-tight text-ink1">{row.label}</h3>
+          <div className={`mt-1.5 text-xs font-medium ${row.stateTone}`}>{row.state}</div>
+        </div>
+        {/* The way back. There is no second pane to look at down here, so
+            without this the board is unreachable once a row is opened. */}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={t('common.close')}
+          className="grid h-ctl-md w-ctl-md shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1 active:bg-bg2 md:hidden"
+        >
+          <Icon name="x" size={16} />
+        </button>
       </div>
       {row.main ? (
         <p className="break-words text-[13px] leading-relaxed text-ink2 [overflow-wrap:anywhere]">{row.main}</p>
@@ -381,6 +425,7 @@ export function ProvidersView({ active }) {
   const s = useHub();
   const [checking, setChecking] = useState(false);
   const [selected, setSelected] = useState('');
+  const twoPane = useTwoPane();
   // Which credential names this studio may write, and which of them the store
   // already holds — the same allow-list the PassBook page reads. Unknown until
   // it answers; an empty map just means no inline field, never a broken one,
@@ -420,7 +465,9 @@ export function ProvidersView({ active }) {
   // draws — the two accounts included. One denominator, both numbers.
   const readyCount = rows.filter((row) => row.ready).length;
   const brokenCount = rows.length - readyCount;
-  const current = rows.find((row) => row.id === selected) || rows[0] || null;
+  // With one pane the panel is a sheet, so an auto-selected first row would
+  // open it on arrival and hide the board behind it.
+  const current = rows.find((row) => row.id === selected) || (twoPane ? rows[0] : null) || null;
 
   const checkStatus = async () => {
     setChecking(true);
@@ -462,7 +509,9 @@ export function ProvidersView({ active }) {
                       type="button"
                       onClick={() => setSelected(row.id)}
                       aria-pressed={row.id === current?.id}
-                      className={`-ml-2 flex h-[30px] w-full items-center gap-[9px] rounded-md px-2 text-left text-[12.5px] transition-colors duration-150 ${
+                      // Hit size is a pointer question, not a width one: 30px is fine
+                      // under a cursor and unmissable-by-a-thumb is 44.
+                      className={`-ml-2 flex h-[30px] w-full items-center gap-[9px] rounded-md px-2 text-left text-[12.5px] transition-colors duration-150 touch:h-ctl-md touch:text-[13px] ${
                         row.id === current?.id ? 'bg-honey-tint text-ink1' : 'text-ink2 hover:text-ink1'
                       }`}
                     >
@@ -488,6 +537,7 @@ export function ProvidersView({ active }) {
             row={current}
             link={s.oauthLinks?.[current.oauth] || ''}
             onSaved={() => setKeyEpoch((epoch) => epoch + 1)}
+            onClose={() => setSelected('')}
           />
         ) : null}
       </div>

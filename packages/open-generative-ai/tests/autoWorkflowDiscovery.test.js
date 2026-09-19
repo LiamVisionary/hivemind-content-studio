@@ -7,7 +7,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { discoverAutoImageWorkflows, inspectAutoWorkflow } = require('../auto-workflow-discovery');
+const {
+    discoverAutoImageWorkflows, discoverAutoImageWorkflowsDetailed,
+    inspectAutoWorkflow, inspectAutoWorkflowDetailed,
+} = require('../auto-workflow-discovery');
 
 const T2I_GRAPH = {
     1: { class_type: 'UNETLoader', inputs: { unet_name: 'waiANIMA_v10Base10.safetensors', weight_dtype: 'default' } },
@@ -46,9 +49,13 @@ test('accepts a {prompt: graph} wrapper export', () => {
     assert.equal(model.id, 'comfy-auto-wrapped');
 });
 
-test('skips web-format editor exports, utility graphs, and image-input graphs', () => {
+// A graph this loader cannot drive is still someone's file, sitting in a folder
+// they put it in deliberately. Each rejection therefore has to come back with a
+// sentence they could act on — the studio prints these verbatim.
+test('skips what it cannot drive, and says why in words a person can act on', () => {
     const webFormat = { nodes: [{ id: 1, type: 'KSampler' }], links: [] };
     assert.equal(inspectAutoWorkflow('/x/web.json', JSON.stringify(webFormat)), null);
+    assert.match(inspectAutoWorkflowDetailed('/x/web.json', JSON.stringify(webFormat)).reason, /Save \(API format\)/);
 
     const conversion = {
         0: { class_type: 'INT8PreLoraLoader', inputs: { lora_name_1: 'x.safetensors' } },
@@ -56,12 +63,76 @@ test('skips web-format editor exports, utility graphs, and image-input graphs', 
         2: { class_type: 'INT8ModelSave', inputs: { model: ['1', 0], filename_prefix: 'z' } },
     };
     assert.equal(inspectAutoWorkflow('/x/convert.json', JSON.stringify(conversion)), null);
-
-    const withImage = JSON.parse(JSON.stringify(T2I_GRAPH));
-    withImage[3] = { class_type: 'LoadImage', inputs: { image: 'ref.png' } };
-    assert.equal(inspectAutoWorkflow('/x/i2i.json', JSON.stringify(withImage)), null);
+    assert.match(inspectAutoWorkflowDetailed('/x/convert.json', JSON.stringify(conversion)).reason, /KSampler/);
 
     assert.equal(inspectAutoWorkflow('/x/broken.json', '{not json'), null);
+    assert.match(inspectAutoWorkflowDetailed('/x/broken.json', '{not json').reason, /valid JSON/);
+
+    // Every reason reads as the back half of "… was skipped because …", so the
+    // notice can print it after the filename without rewriting it.
+    for (const reason of [
+        inspectAutoWorkflowDetailed('/x/web.json', JSON.stringify(webFormat)).reason,
+        inspectAutoWorkflowDetailed('/x/convert.json', JSON.stringify(conversion)).reason,
+    ]) {
+        assert.match(reason, /^it /, `a reason has to be a sentence, got: ${reason}`);
+    }
+});
+
+// The rule this replaces: any graph containing a LoadImage was dropped, with
+// `// v1: text-to-image only` as the whole explanation. Somebody's own edit
+// workflow disappeared and nothing anywhere said so.
+test('an image-input graph becomes a model, and says whether the picture is required', () => {
+    const i2i = JSON.parse(JSON.stringify(T2I_GRAPH));
+    i2i[3] = { class_type: 'LoadImage', inputs: { image: 'ref.png' } };
+    i2i[5] = { class_type: 'VAEEncode', inputs: { pixels: ['3', 0], vae: ['3', 0] } };
+    i2i[7].inputs.latent_image = ['5', 0];
+
+    const edit = inspectAutoWorkflow('/x/my-edit.json', JSON.stringify(i2i));
+    assert.ok(edit, 'an edit workflow is a model like any other');
+    // Its latent IS the picture, so words alone cannot start this run.
+    assert.equal(edit.requires.image, true);
+    assert.equal(edit.supportsImage, true);
+    assert.equal(edit.maxReferenceImages, 1);
+    assert.ok(edit.accepts.includes('image_base64'));
+    assert.match(edit.description, /Starts from a picture/);
+
+    // Conditioning, not canvas: the latent still comes from an empty node, so
+    // the picture is optional — as long as the file the node names is there.
+    const control = JSON.parse(JSON.stringify(T2I_GRAPH));
+    control[3] = { class_type: 'LoadImage', inputs: { image: 'pose.png' } };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-comfy-'));
+    fs.mkdirSync(path.join(dir, 'input'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'input', 'pose.png'), 'PNG');
+    const previous = process.env.COMFY_DIR;
+    process.env.COMFY_DIR = dir;
+    try {
+        const optional = inspectAutoWorkflow('/x/my-control.json', JSON.stringify(control));
+        assert.equal(optional.requires.image, false, 'a bundled control image still runs prompt-only');
+        assert.equal(optional.maxReferenceImages, 1);
+
+        // …and the same graph whose bundled file is NOT on disk cannot run
+        // prompt-only, because ComfyUI would be handed a name that is not there.
+        fs.rmSync(path.join(dir, 'input', 'pose.png'));
+        assert.equal(inspectAutoWorkflow('/x/my-control.json', JSON.stringify(control)).requires.image, true);
+    } finally {
+        if (previous === undefined) delete process.env.COMFY_DIR;
+        else process.env.COMFY_DIR = previous;
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('a folder scan reports what it skipped, not just what it kept', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-workflows-skipped-'));
+    try {
+        fs.writeFileSync(path.join(dir, 'good_api.json'), JSON.stringify(T2I_GRAPH));
+        fs.writeFileSync(path.join(dir, 'editor_export.json'), JSON.stringify({ nodes: [], links: [] }));
+        const found = discoverAutoImageWorkflowsDetailed([dir]);
+        assert.deepEqual(found.models.map((model) => model.id), ['comfy-auto-good-api']);
+        assert.deepEqual(found.skipped.map((entry) => entry.file), ['editor_export.json']);
+        assert.match(found.skipped[0].reason, /API format/);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test('discovers from folders, skipping invalid files without failing', () => {

@@ -374,6 +374,16 @@ const PATHS = {
   ),
   star: <path d="m12 2.8 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.6l-5.8 3.1 1.1-6.5-4.7-4.6 6.5-.9L12 2.8z" />,
   heart: <path d="M19.5 12.6 12 20l-7.5-7.4a4.6 4.6 0 0 1 6.5-6.5l1 1 1-1a4.6 4.6 0 0 1 6.5 6.5z" />,
+  // A beamed pair, drawn in this family's weights rather than borrowed: the
+  // Music studio's nav row, its empty stage and its rail cards all need one
+  // mark that reads as "a track" at 13px.
+  music: (
+    <>
+      <path d="M10 18V6l9-2v12" />
+      <ellipse cx="7.5" cy="18" rx="2.5" ry="2.2" />
+      <ellipse cx="16.5" cy="16" rx="2.5" ry="2.2" />
+    </>
+  ),
   sound: (
     <>
       <path d="M11 5 6 9H2v6h4l5 4V5z" />

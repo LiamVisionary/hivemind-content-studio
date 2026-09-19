@@ -26,6 +26,10 @@ import {
   SectionLabel, Segmented, Spinner, StudioRestartAction, TextInput, cx,
 } from '../../ui/kit.jsx';
 import { api, humanize } from '../hubData.js';
+import { describeFailure } from '../../lib/describeFailure.js';
+import {
+  machineProgress, mergeOrders, orderOutcome, orderProgress, ordersToDraw, placingTiers,
+} from '../../lib/rentalOrders.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, requestRentedMode } from '../../lib/rentedMachines.js';
 import { ConnectComfyCard } from '../components/ConnectComfyCard.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
@@ -53,6 +57,10 @@ const PAGE_LABELS = { image: 'Image', video: 'Video', restore: 'Restore' };
 // 6s while the view is open: provisioning machines report via their beacon,
 // and the whole poll (list + beacon probes) is cheap.
 const POLL_MS = 6000;
+// While an order is being placed its stage changes every few seconds, and a bar
+// that moves in 6s jumps reads as the spinner again. Orders ride outside the
+// server's list snapshot, so this read costs the server almost nothing.
+const ORDER_POLL_MS = 1200;
 const MAX_BATCH = 8;
 
 function formatSeconds(seconds) {
@@ -71,7 +79,16 @@ function formatHours(hours) {
 
 // What one failure says about the NEXT rental, in the user's terms. A host that
 // never starts its container IS a bad host, and the GPU class is not indicted.
-function failureVerdict(reason = '') {
+// A rental that simply ended (`kind: 'vanished'`) indicts nothing: the studio
+// detached its lane because the marketplace no longer lists it.
+function failureVerdict(failure = {}) {
+  const reason = failure.reason || '';
+  if (failure.kind === 'vanished') {
+    if (failure.end_reason === 'keepalive-lapsed') {
+      return 'This Mac stopped checking in (asleep or offline) for longer than the hosted marketplace allows, so it released the box. Nothing is wrong with this kind of machine — rent again when you are back.';
+    }
+    return 'The rental ended outside the studio, so its lane was detached and jobs no longer wait on it. Rent again to continue.';
+  }
   if (/never started/i.test(reason)) {
     return 'That host never started the machine. Renting again lands on a different one.';
   }
@@ -126,8 +143,18 @@ function threeChoices(plan) {
     .sort((a, b) => a.usd_per_generation - b.usd_per_generation);
 
   const cheapest = byHour[0];
-  const fastest = bySeconds[0];
-  const balanced = byValue[0] || byHour[Math.min(1, byHour.length - 1)];
+  // A workload nobody has timed yet (a tier with no row in RENTAL_BENCHMARKS)
+  // can answer "cheapest" and nothing else. Balanced and Fastest are both
+  // functions of seconds per generation, and the fallbacks that used to stand
+  // in for them did not degrade — they INVERTED: `byHour[1]` handed the
+  // "Recommended" badge to the second-cheapest card for no reason but its
+  // position, which on the H3 ladder is the PRO 6000 at 2.3x the hourly rate
+  // that the measured rows say is the SLOWER of the two. So an untimed tier
+  // shows one card and the full ladder stays a click away under More options,
+  // rather than recommending a worse deal in a confident voice.
+  const timed = byValue.length > 0;
+  const fastest = timed ? bySeconds[0] : null;
+  const balanced = byValue[0] || null;
 
   // One card often wins two axes — the server ranks cheapest-first, so the best
   // value IS usually the cheapest. Dropping the later duplicate would throw away
@@ -136,7 +163,9 @@ function threeChoices(plan) {
   const out = [];
   const byClass = new Map();
   for (const entry of [
-    { key: 'cheapest', name: 'Cheapest', rung: cheapest },
+    // With no timings the cheapest card is the only defensible pick, so it
+    // carries the badge that Balanced would otherwise have taken.
+    { key: 'cheapest', name: 'Cheapest', rung: cheapest, recommended: !timed },
     { key: 'balanced', name: 'Balanced', rung: balanced, recommended: true },
     { key: 'fastest', name: 'Fastest', rung: fastest },
   ]) {
@@ -232,7 +261,9 @@ function SpendStrip({ account, rentals }) {
           <span className="text-[14px] text-ink2">/hr</span>
         </b>
       </div>
-      <div className="h-9 w-px bg-line1" />
+      {/* A vertical rule separates two things on ONE line. Below sm the strip
+          wraps to a stack and the rule becomes a stray mark above a heading. */}
+      <div className="hidden h-9 w-px bg-line1 sm:block" />
       <div className="flex flex-col gap-0.5">
         <span className="text-[12px] text-ink3">Credit left</span>
         <div className="flex items-center gap-2">
@@ -251,7 +282,7 @@ function SpendStrip({ account, rentals }) {
           latter by someone one click from renting. */}
       {running > 0 ? (
         <>
-          <div className="h-9 w-px bg-line1" />
+          <div className="hidden h-9 w-px bg-line1 sm:block" />
           <div className="flex flex-col gap-0.5">
             <span className="text-[12px] text-ink3">That lasts about</span>
             <b className="text-[22px] font-medium tracking-[-.01em] text-ink1">
@@ -262,7 +293,9 @@ function SpendStrip({ account, rentals }) {
           </div>
         </>
       ) : null}
-      <span className="ml-auto max-w-[260px] text-[12px] leading-relaxed text-ink3">
+      {/* Pushed right where there is room; a full-width sentence under the
+          figures where there is not, rather than a 260px column of two words. */}
+      <span className="w-full text-[12px] leading-relaxed text-ink3 sm:ml-auto sm:w-auto sm:max-w-[260px]">
         {running > 0 && credit == null
           ? 'A marketplace did not report its balance, so the runway above is unknown rather than unlimited.'
           : live
@@ -290,39 +323,15 @@ function SpendStrip({ account, rentals }) {
 /* Machines                                                           */
 /* ------------------------------------------------------------------ */
 
-// Provisioning lifecycle in on-box beacon order. `phase` "booting" precedes
-// beacon contact; after that the beacon's `step` drives the active row.
-const PROVISION_STEPS = [
-  { key: 'booting', label: 'Starting the machine' },
-  { key: 'installing', label: 'Installing the software' },
-  { key: 'downloading', label: 'Copying the models over' },
-  { key: 'starting-comfy', label: 'Almost ready' },
-  { key: 'ready', label: 'Ready' },
-];
+// The provisioning ladder lives in lib/rentalOrders.js, with the order that
+// rented the box as its first rung: one bar from the click to Ready.
 const STALE_BEACON_NOTICE_S = 45;
-
-function stepIndex(machine) {
-  if (machine.phase === 'booting') return 0;
-  const step = machine.provision?.step || 'booting';
-  // 'error' is not a step in the ladder: a box that had already died used to
-  // draw a spinner on "Booting host", so it looked like it was still starting.
-  if (step === 'error') {
-    return machine.provision?.done ? PROVISION_STEPS.findIndex((s) => s.key === 'downloading') : 0;
-  }
-  const idx = PROVISION_STEPS.findIndex((s) => s.key === (step === 'syncing' ? 'installing' : step));
-  return idx === -1 ? 0 : idx;
-}
 
 // One line and one bar, where five ladder rows used to be. The ladder was
 // engineering detail; what a person needs is the step, the count and the wait.
-function ProvisionProgress({ machine }) {
-  const current = stepIndex(machine);
+export function ProvisionProgress({ machine }) {
+  const { value, step } = machineProgress(machine);
   const p = machine.provision;
-  const step = PROVISION_STEPS[current];
-  const fraction = p?.total ? Math.min(1, (p.done || 0) / p.total) : null;
-  const value = step.key === 'downloading' && fraction != null
-    ? (current + fraction) / (PROVISION_STEPS.length - 1)
-    : current / (PROVISION_STEPS.length - 1);
   return (
     <div className="flex flex-col gap-1.5">
       <ProgressBar value={value} label="Getting ready" />
@@ -338,6 +347,38 @@ function ProvisionProgress({ machine }) {
         ) : null}
       </div>
     </div>
+  );
+}
+
+// An order on its way to becoming a machine: the machine's row and bar, drawn
+// from the click, so nothing waits on the marketplace to show that Rent was
+// heard. The machine's own row takes over at the same place on the bar once the
+// list shows it (ordersToDraw).
+export function OrderRow({ order }) {
+  const { value, label } = orderProgress(order);
+  return (
+    <Card className="flex flex-col gap-3 p-4">
+      <div className="flex flex-wrap items-center gap-4">
+        <Spinner size={14} className="shrink-0 text-honey" />
+        <div className="min-w-[190px]">
+          <b className="text-[14px] text-ink1">{order.tier_label?.replace(/^[^·]+· /, '') || order.gpu_label || 'Machine'}</b>
+          <div className="mt-0.5 text-[12px] text-ink3">
+            {order.gpu_label || 'GPU'}{order.count > 1 ? ` × ${order.count}` : ''}
+          </div>
+        </div>
+        <div className="min-w-[120px]">
+          <div className="font-mono text-[13px] text-ink1">{usd(order.usd_per_hour ?? order.quoted_usd_per_hour)}/hr</div>
+          <div className="mt-0.5 text-[12px] text-ink3">—</div>
+        </div>
+        <div className="min-w-[150px]">
+          <div className="text-[13px] text-ink1">Getting ready</div>
+        </div>
+      </div>
+      <div className="flex flex-col gap-1.5" role="status">
+        <ProgressBar value={value} label="Getting ready" />
+        <small className="text-[12px] text-ink2">{label}</small>
+      </div>
+    </Card>
   );
 }
 
@@ -454,7 +495,9 @@ function MachineRow({
           </Button>
         ) : null}
         {machine.managed || machine.ssh_command || machine.comfy_url ? (
-          <IconButton icon="more" size="sm" label="More for this machine" active={menuOpen} onClick={() => setMenuOpen((v) => !v)} />
+          // This menu holds Release. 34px is enough for a neighbouring glyph and
+          // not for the one press that ends a machine, so under a thumb it is 44.
+          <IconButton icon="more" size="sm" className="touch:h-ctl-md touch:w-ctl-md" label="More for this machine" active={menuOpen} onClick={() => setMenuOpen((v) => !v)} />
         ) : null}
       </div>
 
@@ -590,6 +633,12 @@ function ChoiceCard({ choice, unit, selected, onSelect, disabled }) {
   );
 }
 
+// Below sm the ladder is a stack of two-column rows, so each value carries the
+// column name the dropped header used to give it.
+function RungLabel({ children }) {
+  return <span className="text-[11px] uppercase tracking-[0.06em] text-ink3 sm:hidden">{children}</span>;
+}
+
 // The whole ladder, with the per-generation column that makes "pricier is not
 // faster" checkable rather than asserted. Only reachable from More options.
 function LadderTable({ plan, unit, selectedClass }) {
@@ -606,7 +655,9 @@ function LadderTable({ plan, unit, selectedClass }) {
   return (
     <div className="flex flex-col gap-2">
       <SectionLabel>Every card available for this job</SectionLabel>
-      <div className="grid grid-cols-[1.4fr_repeat(4,minmax(0,1fr))] gap-2 px-3 text-[11px] uppercase tracking-[0.06em] text-ink3">
+      {/* Five columns need ~275px of text in ~343px of phone. Below sm the
+          header is dropped and each row carries its own labels instead. */}
+      <div className="hidden grid-cols-[1.4fr_repeat(4,minmax(0,1fr))] gap-2 px-3 text-[11px] uppercase tracking-[0.06em] text-ink3 sm:grid">
         <span>Card</span>
         <span>Per hour</span>
         <span>Per {unit}</span>
@@ -622,30 +673,45 @@ function LadderTable({ plan, unit, selectedClass }) {
         <div
           key={rung.gpu_class}
           className={cx(
-            'grid grid-cols-[1.4fr_repeat(4,minmax(0,1fr))] items-center gap-2 rounded-md border px-3 py-2.5 text-[12px]',
+            'grid grid-cols-2 items-center gap-x-2 gap-y-1.5 rounded-md border px-3 py-2.5 text-[12px] sm:grid-cols-[1.4fr_repeat(4,minmax(0,1fr))] sm:gap-2',
             rung.gpu_class === selectedClass ? 'border-honey/55 bg-honey-tint' : 'border-line1 bg-bg2',
             !rung.available && 'opacity-60',
           )}
         >
-          <span className="text-ink1">
+          <span className="col-span-2 text-ink1 sm:col-span-1">
             {rung.label} <span className="text-ink3">{rung.vram_gb ? `${rung.vram_gb}GB` : ''}</span>
             {/* The trap this ladder exists to expose: more per hour, no more
                 speed. The per-unit column shows it; naming it stops a reader
-                having to do the comparison themselves. */}
+                having to do the comparison themselves. A title= is a hover, so
+                below sm the same sentence is printed rather than hidden. */}
             {rung.costs_more_no_faster ? (
-              <span className="text-warn" title="Another card on this ladder costs less per hour and is no slower for this job."> · costs more, no faster</span>
+              <>
+                <span className="hidden text-warn sm:inline" title="Another card on this ladder costs less per hour and is no slower for this job."> · costs more, no faster</span>
+                <span className="block text-[11px] leading-relaxed text-warn sm:hidden">
+                  Costs more, no faster: another card here costs less per hour and is no slower for this job.
+                </span>
+              </>
             ) : null}
           </span>
+          <RungLabel>Per hour</RungLabel>
           <span className="font-mono text-ink1">{rung.usd_per_hour ? `$${rung.usd_per_hour.toFixed(2)}` : '—'}</span>
+          <RungLabel>Per {unit}</RungLabel>
           <span className="font-mono text-ink2">
             {rung.usd_per_generation ? `$${rung.usd_per_generation.toFixed(rung.usd_per_generation < 0.01 ? 4 : 3)}` : '—'}
           </span>
+          <RungLabel>A {unit} every</RungLabel>
           <span className="text-ink2">
             {rung.seconds_per_generation ? formatSeconds(rung.seconds_per_generation) : '—'}
             {rung.estimate_basis === 'estimated' ? (
-              <span className="text-ink3" title="Scaled from a measured card by the marketplace's own benchmark — a generic mix, not a diffusion one. Treat it as unproven."> (est.)</span>
+              <>
+                <span className="hidden text-ink3 sm:inline" title="Scaled from a measured card by the marketplace's own benchmark — a generic mix, not a diffusion one. Treat it as unproven."> (est.)</span>
+                <span className="block text-[11px] leading-relaxed text-ink3 sm:hidden">
+                  Estimated from the marketplace's own benchmark — a generic mix, not a diffusion one. Treat it as unproven.
+                </span>
+              </>
             ) : null}
           </span>
+          <RungLabel>Ready in</RungLabel>
           <span className={cx(rung.warm ? 'text-ok' : 'text-ink2', !rung.available && 'text-ink3')}>
             {!rung.available
               ? (unshopped ? 'not asked' : 'sold out')
@@ -690,7 +756,7 @@ function RentPanelSkeleton({ hasMachines }) {
   );
 }
 
-function RentPanel({ plans, prefer, onPrefer, account, busy, onRent, hasMachines }) {
+function RentPanel({ plans, prefer, onPrefer, account, placing, onRent, hasMachines }) {
   const [tier, setTier] = useState(plans[0]?.tier);
   const [choiceKey, setChoiceKey] = useState('balanced');
   const [count, setCount] = useState(1);
@@ -699,6 +765,9 @@ function RentPanel({ plans, prefer, onPrefer, account, busy, onRent, hasMachines
   const [pendingRent, setPendingRent] = useState(null);
 
   const plan = plans.find((p) => p.tier === tier) || plans[0];
+  // One order per tier at a time (the server refuses a second): while this
+  // tier's is on its way, its row above IS the progress, and this is no button.
+  const busy = Boolean(placing?.has(plan?.tier));
   const unit = unitFor(plan);
   const choices = useMemo(() => threeChoices(plan), [plan]);
   // When one card wins two axes the named key can be absent; fall back to the
@@ -815,11 +884,13 @@ function RentPanel({ plans, prefer, onPrefer, account, busy, onRent, hasMachines
         <Button
           variant="primary"
           size="lg"
-          loading={busy}
           disabled={busy || !hourly || affordable < 1}
-          title="Rents the machine quoted here. If it is taken by the time the click lands, the next host is only taken within a few cents of this price — otherwise nothing is rented and the price refreshes."
+          title={busy
+            ? 'A machine for this is on its way — its progress is at the top of Your machines.'
+            : 'Rents the machine quoted here. If it is taken by the time the click lands, the next host is only taken within a few cents of this price — otherwise nothing is rented and the price refreshes.'}
           onClick={() => setPendingRent({
             tier: plan.tier,
+            tierLabel: plan.tier_label,
             gpu_class: rung.gpu_class,
             count: machines,
             offer: rung.offers?.[0] || null,
@@ -828,7 +899,7 @@ function RentPanel({ plans, prefer, onPrefer, account, busy, onRent, hasMachines
             purse: purse?.label,
           })}
         >
-          {machines > 1 ? `Rent ${machines} machines` : 'Rent this machine'}
+          {busy ? 'Renting…' : machines > 1 ? `Rent ${machines} machines` : 'Rent this machine'}
         </Button>
       </Card>
 
@@ -1151,7 +1222,19 @@ export function GpuMachinesView({ active }) {
   const [stale, setStale] = useState('');
   const [needsRestart, setNeedsRestart] = useState(false);
   const [marketRemedy, setMarketRemedy] = useState('');
-  const [renting, setRenting] = useState(false);
+  // Orders the server is placing (off the list), and this tab's drafts of them
+  // from the click until the POST answers — see lib/rentalOrders.js.
+  const [orders, setOrders] = useState([]);
+  const [drafts, setDrafts] = useState([]);
+  // The orders THIS tab placed, by id, with what to re-send if the price moves.
+  // Only the tab that asked says how an order ended; another tab watching the
+  // same list just sees the row come and go.
+  const placedHereRef = useRef(new Map());
+  const machinesRef = useRef(null);
+  // The market moved up between the quote and the order. Holds the server's
+  // two figures plus what to re-send, so confirming is one call and not a
+  // second trip through the card.
+  const [priceChange, setPriceChange] = useState(null);
   const [prefer, setPrefer] = useState('balanced');
   const [destroyingId, setDestroyingId] = useState(null);
   const [pendingDestroy, setPendingDestroy] = useState(null);
@@ -1178,8 +1261,32 @@ export function GpuMachinesView({ active }) {
       setFailures((rentalData.failures || []).filter(
         (failure) => !dismissedRef.current.has(String(failure.rental_id)),
       ));
+      const serverOrders = rentalData.orders || [];
+      setOrders(serverOrders);
+      // How an order ended is said once, by the tab that placed it.
+      let settled = false;
+      serverOrders.forEach((order) => {
+        const request = placedHereRef.current.get(order.order_id);
+        const outcome = request ? orderOutcome(order) : null;
+        if (!outcome) return;
+        placedHereRef.current.delete(order.order_id);
+        settled = true;
+        if (outcome.kind === 'price') {
+          setPriceChange({ ...outcome.priceChanged, request });
+        } else if (outcome.kind === 'error') {
+          // The same reading api() gives a refusal, since that is what this was.
+          const read = describeFailure({ message: outcome.message, remedy: outcome.remedy }, { operation: 'That request' });
+          setError(outcome.incident ? `${read.title} Incident ${outcome.incident}.` : read.title);
+          // Only a refusal the server understood can promise nothing was rented.
+          setErrorKind(outcome.unexpected ? '' : 'rent');
+        } else {
+          setNotice(outcome.notice);
+          notifyRentedMachinesChanged();
+        }
+      });
       hasDataRef.current = true;
-      if (withOffers) {
+      // Renting spent an ask, or found the quote stale: either way, re-price.
+      if (withOffers || settled) {
         // The server names its own tiers; the literal is only a floor for a
         // payload that predates the field, and it has to list every tier or a
         // whole lane (MiniMax H3) silently vanishes from the picker.
@@ -1229,16 +1336,30 @@ export function GpuMachinesView({ active }) {
     )
     : null;
 
+  const orderRows = useMemo(() => ordersToDraw(mergeOrders(orders, drafts), rentals), [orders, drafts, rentals]);
+  const placing = useMemo(() => placingTiers(mergeOrders(orders, drafts)), [orders, drafts]);
+  const ordersMoving = orderRows.length > 0;
+
+  useEffect(() => {
+    if (active) refresh(true);
+  }, [active, refresh]);
+
   useEffect(() => {
     if (!active) {
       clearInterval(pollRef.current);
       pollRef.current = null;
       return undefined;
     }
-    refresh(true);
-    pollRef.current = setInterval(() => { if (!document.hidden) refresh(false); }, POLL_MS);
+    pollRef.current = setInterval(() => { if (!document.hidden) refresh(false); }, ordersMoving ? ORDER_POLL_MS : POLL_MS);
     return () => clearInterval(pollRef.current);
-  }, [active, refresh]);
+  }, [active, ordersMoving, refresh]);
+
+  // Rent is pressed at the bottom of the page and its row is drawn at the top.
+  // Bring the row to the person rather than leave the answer off-screen.
+  const draftCount = drafts.length;
+  useEffect(() => {
+    if (draftCount) machinesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [draftCount]);
 
   useEffect(() => {
     preferRef.current = prefer;
@@ -1246,9 +1367,20 @@ export function GpuMachinesView({ active }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefer]);
 
-  const rent = async ({ tier, gpu_class: gpuClass, count, offer, usd_per_hour: quoted }) => {
+  const rent = async ({ tier, gpu_class: gpuClass, count, offer, usd_per_hour: quoted, label, tierLabel }) => {
     beginAction();
-    setRenting(true);
+    setPriceChange(null);
+    // One id per click: a retry after a proxy timeout replays the same order
+    // instead of renting a second billing machine, and it is how the list's
+    // copy of the order finds the draft below.
+    const requestId = rentalRequestId();
+    placedHereRef.current.set(requestId, { tier, gpuClass, count, label, tierLabel });
+    // Drawn before the request leaves: the row and its bar are the answer to
+    // the click, and nothing on the network gets to hold them up.
+    setDrafts((current) => [...current, {
+      order_id: requestId, tier, tier_label: tierLabel, gpu_class: gpuClass, gpu_label: label, count,
+      quoted_usd_per_hour: quoted, stage: 'sending', started_at: Date.now() / 1000, finished_at: null, rental_ids: [],
+    }]);
     try {
       const body = await api('/api/gpu-rentals', {
         method: 'POST',
@@ -1257,34 +1389,25 @@ export function GpuMachinesView({ active }) {
           gpu_class: gpuClass,
           count,
           prefer,
-          // One id per click: a retry after a proxy timeout replays the same
-          // rental instead of renting a second billing machine.
-          request_id: rentalRequestId(),
+          request_id: requestId,
+          // An order back at once; the list carries it until it resolves, and
+          // refresh() says how it ended.
+          background: true,
           // Pin the quoted ask and bound the fallbacks to its price.
           ...(offer ? { offer_id: offer.offer_id, provider: offer.provider } : {}),
           ...(quoted ? { max_usd_per_hour: quoted } : {}),
         }),
       });
-      await refresh(true);
-      const notices = [];
-      if (body.partial) notices.push(body.partial);
-      const landed = body.usd_per_hour;
-      if (quoted && landed && Math.abs(landed - quoted) >= 0.0005) {
-        // Three decimals, not two: the server lets a fallback land within
-        // max($0.02, 3%) of the quote, so the entire legal gap on a ~$0.34/hr
-        // tier rounds away at two — the sentence then contrasts a number with
-        // itself ("it cost $0.34/hr instead of the $0.34/hr quoted").
-        notices.push(`it cost $${landed.toFixed(3)}/hr instead of the $${quoted.toFixed(3)}/hr quoted — that machine was taken, and the next one was within a few cents`);
-      }
-      setNotice(notices.length ? notices.join('; ') : '');
+      if (body.order) setOrders((current) => mergeOrders(current, [body.order]));
     } catch (err) {
-      // A refusal means the quote was stale: re-price so the number on the
-      // button and the message agree, then say why nothing was rented.
-      try { await refresh(true); } catch { /* the message below still stands */ }
+      // Refused before any order existed: a card the tier cannot use, a tier
+      // already being rented, the studio not answering. Nothing was rented.
+      placedHereRef.current.delete(requestId);
+      refresh(true);
       setError(err.message);
       setErrorKind('rent');
     } finally {
-      setRenting(false);
+      setDrafts((current) => current.filter((draft) => draft.order_id !== requestId));
     }
   };
 
@@ -1509,12 +1632,12 @@ export function GpuMachinesView({ active }) {
             <>
               <SpendStrip account={account} rentals={rentals} />
 
-              <section className="flex flex-col gap-3">
+              <section ref={machinesRef} className="flex scroll-mt-4 flex-col gap-3">
                 <div className="flex flex-wrap items-baseline justify-between gap-3">
                   <h3 className="text-[15px] font-semibold text-ink1">Your machines</h3>
                   {failures.length ? (
                     <small className="text-[12px] text-ink3">
-                      {failures.length === 1 ? '1 machine failed earlier' : `${failures.length} machines failed earlier`}
+                      {`${failures.length} machine${failures.length === 1 ? '' : 's'} ${failures.every((f) => f.kind === 'vanished') ? 'ended' : 'failed'} earlier`}
                       {failureSpend ? ` · ${usd(failureSpend)} spent` : ''}
                       {' · '}
                       <button
@@ -1534,9 +1657,11 @@ export function GpuMachinesView({ active }) {
                       <Card key={`${failure.rental_id}-${failure.destroyed_at}`} className="flex items-start gap-3 bg-bg1 p-3.5">
                         <div className="flex min-w-0 flex-1 flex-col gap-1">
                           <b className="text-[13px] text-ink1">
-                            {failure.gpu || failure.gpu_class} could not start, so it was released for you
+                            {failure.kind === 'vanished'
+                              ? `${failure.tier_label || 'A rented'} machine ended on the marketplace, so its lane was detached`
+                              : `${failure.gpu || failure.gpu_class} could not start, so it was released for you`}
                           </b>
-                          <small className="text-[12px] leading-relaxed text-ink2">{failureVerdict(failure.reason)}</small>
+                          <small className="text-[12px] leading-relaxed text-ink2">{failureVerdict(failure)}</small>
                           {/* The beacon's own account of what went wrong. The
                               machine is destroyed, so once this card is gone
                               nothing else in the app or the API still holds it —
@@ -1552,6 +1677,7 @@ export function GpuMachinesView({ active }) {
                             Ran {formatSeconds((failure.uptime_hours || 0) * 3600)}
                             {failure.usd_spent ? ` · ${usd(failure.usd_spent)} spent, which is not refunded` : ''}
                             {failure.destroy_error ? ` · could not release it: ${failure.destroy_error}` : ''}
+                            {failure.detach_error ? ` · could not detach its lane: ${failure.detach_error}` : ''}
                           </small>
                         </div>
                         <IconButton icon="x" size="sm" label="Dismiss this notice" className="-mr-1 -mt-1" onClick={() => dismissFailures(failure.rental_id)} />
@@ -1563,9 +1689,10 @@ export function GpuMachinesView({ active }) {
                   </div>
                 ) : null}
 
-                {rentals?.length ? (
+                {rentals?.length || orderRows.length ? (
                   <div className="flex flex-col gap-2.5">
-                    {rentals.map((machine) => (
+                    {orderRows.map((order) => <OrderRow key={`order-${order.order_id}`} order={order} />)}
+                    {(rentals || []).map((machine) => (
                       <MachineRow
                         key={machine.rental_id}
                         machine={machine}
@@ -1596,9 +1723,9 @@ export function GpuMachinesView({ active }) {
                   prefer={prefer}
                   onPrefer={setPrefer}
                   account={account}
-                  busy={renting}
+                  placing={placing}
                   onRent={rent}
-                  hasMachines={Boolean(rentals?.length)}
+                  hasMachines={Boolean(rentals?.length || orderRows.length)}
                 />
               ) : loadError ? (
                 <small className="text-[12px] text-ink3">Prices unavailable — {loadError}</small>
@@ -1629,6 +1756,42 @@ export function GpuMachinesView({ active }) {
               Billing stops the moment it is released
               {Number.isFinite(Number(pendingDestroy.usd_per_hour)) ? ` (it is ${usd(pendingDestroy.usd_per_hour)}/hr now)` : ''}.
               {pendingDestroy.attached ? ' The studios using it fall back to this Mac.' : ''}
+            </p>
+          </div>
+        ) : null}
+      />
+
+      {/* The price went up while the order was in flight. Asked rather than
+          refused: nothing was rented and nothing was charged, so the only
+          question left is whether the new rate is still worth it. Confirming
+          re-sends WITHOUT the pinned offer — the pin is the ask that just went
+          away, and re-pinning it is how this became a loop in the first place. */}
+      <ConfirmModal
+        open={Boolean(priceChange)}
+        onClose={() => setPriceChange(null)}
+        onConfirm={() => {
+          const moved = priceChange;
+          setPriceChange(null);
+          rent({
+            ...moved.request,
+            gpu_class: moved.request.gpuClass,
+            label: moved.request.label || moved.gpuLabel,
+            usd_per_hour: moved.now,
+          });
+        }}
+        title="The price went up"
+        confirmLabel={priceChange ? `Rent at ${usd(priceChange.now)}/hr` : 'Rent'}
+        cancelLabel="Don't rent"
+        tone="primary"
+        body={priceChange ? (
+          <div className="flex flex-col gap-2 text-[13px] leading-relaxed text-ink2">
+            <p>
+              The {priceChange.gpuLabel} you picked at {usd(priceChange.quoted)}/hr was taken before the order
+              landed. The cheapest one now is <b className="text-ink1">{usd(priceChange.now)}/hr</b>
+              {priceChange.count > 1 ? ` each, for ${priceChange.count} machines` : ''}.
+            </p>
+            <p className="text-ink3">
+              Nothing was rented and you have not been charged. Renting now takes the new price.
             </p>
           </div>
         ) : null}

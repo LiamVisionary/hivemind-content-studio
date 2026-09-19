@@ -29,13 +29,18 @@ function Pill({ tone, children }) {
   );
 }
 
-/** A name or a role, editable in place — a box only when you are in it. */
+/** A name or a role, editable in place — a box only when you are in it, and a
+ *  box always wherever there is no "in it" to be. */
 function InlineInput({ className = '', ...rest }) {
   return (
     <input
       className={cx(
         'box-border h-[30px] rounded-lg border border-transparent bg-transparent px-1.5 text-ink1 transition-colors',
         'hover:border-line1 hover:bg-bg1 focus:border-honey/60 focus:bg-bg1 focus:outline-none placeholder:text-ink3',
+        // The hover reveal IS the affordance, and a coarse pointer never fires
+        // one: these read as a heading and a caption on a phone, with nothing
+        // saying the character's name is something you can change.
+        'touch:h-ctl-md touch:border-line1 touch:bg-bg1',
         className,
       )}
       {...rest}
@@ -82,7 +87,7 @@ function CharacterCard({ character, index, specs, busy, drawing, onFill, onPatch
             onClick={() => onRemove(index)}
             title="Remove this character"
             aria-label="Remove this character"
-            className="ml-auto grid h-6 w-6 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-danger-tint hover:text-danger"
+            className="ml-auto grid h-6 w-6 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-danger-tint hover:text-danger touch:h-ctl-md touch:w-ctl-md"
           >
             <Icon name="x" size={13} />
           </button>
@@ -192,6 +197,7 @@ function MovesPicker({ picked, onToggle }) {
                 onClick={() => onToggle(example)}
                 className={cx(
                   'rounded-full border px-2 py-0.5 text-[11px] transition-colors',
+                  'touch:min-h-[44px] touch:px-3',
                   on ? 'border-honey/40 bg-honey-tint text-ink1' : 'border-line1 bg-bg2 text-ink3 hover:border-line2',
                 )}
               >
@@ -207,7 +213,7 @@ function MovesPicker({ picked, onToggle }) {
 
 export function CastStage({
   story, specs, busy, thinking, drawing, onFill, onUpdate, onLocation, onPatchCharacter,
-  onAddCharacter, onRemoveCharacter, onDrawSheet, onDrawPlate, onChooseLocation,
+  onAddCharacter, onRemoveCharacter, onRemoveMove, onDrawSheet, onDrawPlate, onChooseLocation,
   draft, onCancel, onSuggestPlaces, draftHint, draftLabel,
   sheetChoices, sheetModel, onSheetModel, sheetAutomatic, plateChoices, plateModel, onPlateModel, plateAutomatic,
   readinessFor, onFixReadiness, fixing, localNotice = null,
@@ -270,7 +276,7 @@ export function CastStage({
             <NativeSelect
               value={story.sheetBackground}
               onChange={(event) => onUpdate({ sheetBackground: event.target.value })}
-              className="[&>select]:!h-8 [&>select]:!bg-bg1 [&>select]:!text-[12px]"
+              className="[&>select]:!h-8 touch:[&>select]:!h-ctl-md [&>select]:!bg-bg1 [&>select]:!text-[12px] touch:[&>select]:!text-[16px]"
             >
               {SHEET_BACKGROUNDS.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
             </NativeSelect>
@@ -283,7 +289,7 @@ export function CastStage({
             <NativeSelect
               value={story.aspect}
               onChange={(event) => onUpdate({ aspect: event.target.value })}
-              className="[&>select]:!h-8 [&>select]:!bg-bg1 [&>select]:!text-[12px]"
+              className="[&>select]:!h-8 touch:[&>select]:!h-ctl-md [&>select]:!bg-bg1 [&>select]:!text-[12px] touch:[&>select]:!text-[16px]"
             >
               {LOCATION_ASPECTS.map((ratio) => <option key={ratio} value={ratio}>{ratio}</option>)}
             </NativeSelect>
@@ -319,7 +325,7 @@ export function CastStage({
       <button
         type="button"
         onClick={onAddCharacter}
-        className="inline-flex h-7 w-fit items-center gap-1.5 rounded-md border border-dashed border-line2 px-2.5 text-[12px] text-ink2 transition-colors hover:text-ink1"
+        className="inline-flex h-7 w-fit items-center gap-1.5 rounded-md border border-dashed border-line2 px-2.5 text-[12px] text-ink2 transition-colors hover:text-ink1 touch:h-ctl-md touch:px-3.5"
       >
         <Icon name="plus" size={13} />
         Add a character
@@ -342,7 +348,7 @@ export function CastStage({
               type="button"
               onClick={onSuggestPlaces}
               disabled={Boolean(busy)}
-              className="ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-[11px] text-ink3 transition-colors hover:text-ink1 disabled:opacity-40"
+              className="ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-[11px] text-ink3 transition-colors hover:text-ink1 disabled:opacity-40 touch:h-ctl-md touch:px-2.5"
             >
               <Icon
                 name={producerIsRunning(busy, 'location') ? 'refresh' : 'wand'}
@@ -383,21 +389,25 @@ export function CastStage({
             value={location.place}
             onChange={(event) => onLocation({ place: event.target.value })}
             placeholder="the last stand of an estuary bus terminus, one bus, shelter and timetable case"
-            inputClassName="!text-[13px] !leading-relaxed"
+            inputClassName="!text-[13px] touch:!text-[16px] !leading-relaxed"
           />
 
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-[11px] text-ink3">Moves:</span>
+            {/* Tapping the chip removes it, so the X has to be visible at rest —
+                on hover it was invisible on every phone, which made this a row
+                of chips that silently deleted themselves when touched. The
+                removal carries an Undo for the same reason. */}
             {moves.map((entry) => (
               <button
                 key={entry}
                 type="button"
-                onClick={() => onLocation({ motion: location.motion.filter((row) => row !== entry) })}
+                onClick={() => onRemoveMove(entry)}
                 title="Remove this one"
-                className="group/chip inline-flex items-center gap-1 rounded-full border border-honey/40 bg-honey-tint px-2 py-0.5 text-[11px] text-ink1"
+                className="inline-flex items-center gap-1 rounded-full border border-honey/40 bg-honey-tint px-2 py-0.5 text-[11px] text-ink1 touch:min-h-[44px] touch:px-3"
               >
                 {entry}
-                <Icon name="x" size={10} className="opacity-40 transition-opacity group-hover/chip:opacity-100" />
+                <Icon name="x" size={10} className="opacity-70" />
               </button>
             ))}
             {!moves.length ? <span className="text-[11px] text-warn">nothing yet — the motion stage would have nothing to animate</span> : null}

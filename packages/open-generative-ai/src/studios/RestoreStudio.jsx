@@ -46,9 +46,9 @@ import {
   CLOUD_LANE, FINISH_DEFAULTS, RESTORE_DEFAULTS,
   approvedSpendUsd, chunkOutputUrls, deleteRestoreProject, describeEta, describePrice,
   describeRestoreFailure, describeRetention, estimatePrice, fetchRestorePlan, fetchRestoreProject,
-  fetchRestoreProjects, finishRestore, laneReadinessFor, measureClip, planRestore, rentalForLane,
-  restoreCapabilities, restoreFailureLine, restoreRunTargets, sourceTooLargeAdvice, startRestore,
-  stopRestore, uploadRestoreSource,
+  fetchRestoreProjects, finishRestore, laneEntryFor, laneReadinessFor, measureClip, mergeLocalLanes,
+  planRestore, rentalForLane, restoreCapabilities, restoreFailureLine, restoreRunTargets,
+  sourceTooLargeAdvice, startRestore, stopRestore, uploadRestoreSource,
 } from '../lib/videoRestore.js';
 import { DrawerBody } from './frame/AdvancedDrawer.jsx';
 import { StudioFrame } from './frame/StudioFrame.jsx';
@@ -114,7 +114,9 @@ export function RestoreStudio({ active = true }) {
   const objectUrlRef = useRef('');
   const pollRef = useRef(null);
 
-  const laneInfo = lanes.find((item) => item.lane === lane) || null;
+  // Found by its own name, or by the name of a ComfyUI process folded into
+  // This Mac: a project that ran on any lane here reopens on that one row.
+  const laneInfo = laneEntryFor(lanes, lane);
   // Whether the GATEWAY can assemble this — which is a property of the project
   // that already ran, not of whichever lane is selected right now. Opening a
   // rented project while the local lane is picked used to make the finish panel
@@ -131,7 +133,10 @@ export function RestoreStudio({ active = true }) {
   // the time THIS project has actually measured. Before the first chunk lands
   // there is no honest duration, so there is no figure.
   const price = useMemo(() => {
-    if (!laneInfo?.paid) return null;
+    // The hosted lane is priced by the service, per render (cloudQuote), and has
+    // no hourly rate to multiply. Asked anyway, this answered "billed by the
+    // hour on that machine" for the one lane that is not.
+    if (!laneInfo?.paid || laneInfo.lane === CLOUD_LANE) return null;
     const perChunk = project?.progress?.seconds_per_chunk || 0;
     const chunks = plan?.chunks?.length || project?.progress?.chunks_total || 0;
     return estimatePrice({ usdPerHour: rental?.usd_per_hour, seconds: perChunk * chunks });
@@ -147,9 +152,13 @@ export function RestoreStudio({ active = true }) {
   // the studio opened is not down until a reload.
   const reloadCapabilities = useCallback(async () => {
     const data = await restoreCapabilities();
-    const usable = (data.lanes || []).filter((item) => item.available);
+    // Every ComfyUI process on this Mac is one machine (see mergeLocalLanes),
+    // folded here so the list, the selection and the readiness answer all read
+    // the same rows.
+    const machines = mergeLocalLanes(data.lanes || []);
+    const usable = machines.filter((item) => item.available);
     setCapabilities(data);
-    setLanes(data.lanes || []);
+    setLanes(machines);
     // The free one first when it can do the job: a paid default is a bill
     // nobody chose.
     setLane((current) => current || usable.find((item) => !item.paid)?.lane || usable[0]?.lane || '');
@@ -518,7 +527,8 @@ export function RestoreStudio({ active = true }) {
   );
   const runOn = {
     targets,
-    value: targets.find((target) => target.id === lane) || null,
+    // The row the selected lane belongs to: its own, or This Mac's.
+    value: targets.find((target) => target.id === laneInfo?.lane) || null,
     onChange: (target) => setLane(target.id),
     // A lane that cannot run the job says why, and — where the owner can do
     // something about it — carries the door.
@@ -617,14 +627,16 @@ export function RestoreStudio({ active = true }) {
     title: tooLarge || 'One chunk, from wherever the marker is — the cheap way to find out whether this model helps this footage',
   } : null;
 
-  // The bill, in the mono readout beside the press. The hosted lane's figure is
-  // already ON the button (it is the only press that moves money by itself) and
-  // the rented lane says "billed by the hour" in the sentence, so this carries
-  // the one number neither of those has: the RATE, which until now appeared
-  // only in the panel.
-  const billLabel = lane === CLOUD_LANE
+  // The bill, beside the machine's name in the composer's line, and said there
+  // once rather than again by the press: free here; the RATE for a rented box,
+  // the Machines page's own figure; and for the hosted lane the kind of bill,
+  // because its amount is already ON the button — the only press that moves
+  // money by itself.
+  const billLabel = !laneInfo
     ? ''
-    : (laneInfo?.paid ? (rental?.usd_per_hour ? `$${rental.usd_per_hour}/hr` : '') : (laneInfo ? 'free' : ''));
+    : laneInfo.lane === CLOUD_LANE
+      ? 'per render'
+      : (laneInfo.paid ? (rental?.usd_per_hour ? `$${rental.usd_per_hour}/hr` : 'by the hour') : 'free');
 
   /* ---------------- what the stage's lower edge reads ---------------- */
 
@@ -642,16 +654,18 @@ export function RestoreStudio({ active = true }) {
 
   const composer = (
     <RestoreComposer
-      clipName={file ? file.name : (project ? `${project.width}x${project.height}${project.preview ? ' preview' : ''}` : '')}
+      clipName={file ? file.name : (project ? `${project.width}×${project.height}${project.preview ? ' preview' : ''}` : '')}
       // The measured clip, under its name. A REOPENED project has no file — the
       // browser never had one — so the line says the shape it came FROM, which
       // is the only reading that makes sense under a name that is the output.
       clipDetail={source
-        ? `${file ? '' : 'from a '}${source.width}x${source.height}${file ? '' : ' clip'} · ${source.frames} frames · ${Number(source.fps).toFixed(2)}fps${source.hasAudio ? ' · sound' : ''}`
+        ? `${file ? '' : 'from a '}${source.width}×${source.height}${file ? '' : ' clip'} · ${source.frames} frames · ${Number(source.fps).toFixed(2)}fps${source.hasAudio ? ' · sound' : ''}`
         : ''}
       onPickClip={(picked) => void attach(picked)}
       onDetachClip={file || project ? clearClip : null}
       clipDisabled={Boolean(busy) || Boolean(running)}
+      // The composer line's "before": the size of the clip being restored.
+      source={source}
       settings={settings}
       onChangeSettings={setSettings}
       plan={plan}
@@ -660,8 +674,6 @@ export function RestoreStudio({ active = true }) {
       previewMax={previewMax}
       onPreviewAt={setPreviewAt}
       runOn={runOn}
-      advancedOpen={advancedOpen}
-      onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
       primary={primary}
       alternate={alternate}
       onStop={running ? stop : null}
@@ -670,6 +682,11 @@ export function RestoreStudio({ active = true }) {
       projects={projects}
       activeProjectId={project?.id || ''}
       onOpenProject={open}
+      // The same three handlers the rail's menu is built from, so a narrow
+      // window loses the rail without losing what the rail could do.
+      onResumeProject={(summary) => start({ projectId: summary.id })}
+      onDeleteProject={setConfirmDelete}
+      projectsBusy={Boolean(busy) || Boolean(running)}
     />
   );
 
@@ -681,6 +698,7 @@ export function RestoreStudio({ active = true }) {
         composer={composer}
         drawerTitle="Advanced"
         drawerOpen={advancedOpen}
+        onDrawerToggle={() => setAdvancedOpen((open) => !open)}
         onDrawerClose={() => setAdvancedOpen(false)}
         drawer={drawer}
         notices={(

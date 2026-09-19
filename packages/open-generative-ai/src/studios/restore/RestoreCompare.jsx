@@ -95,10 +95,15 @@ export function RestoreCompare({
     };
   }, [playing, resync]);
 
+  // Pointer events, not a mouse pair plus a touch pair: the handle captures the
+  // pointer on the way down, so every move and every release — including the
+  // cancel iOS fires when it decides the gesture was a scroll — arrives here
+  // whether or not the finger is still over the frame. `clientX` is the one
+  // coordinate a pointer event carries, for a mouse and a finger alike.
   const onDividerMove = useCallback((event) => {
     if (!draggingRef.current) return;
     const frame = event.currentTarget.getBoundingClientRect();
-    const x = (event.touches?.[0]?.clientX ?? event.clientX) - frame.left;
+    const x = event.clientX - frame.left;
     setSplit(Math.max(0, Math.min(1, x / Math.max(1, frame.width))));
   }, []);
 
@@ -118,7 +123,7 @@ export function RestoreCompare({
             Nothing restored yet — render a preview to see the difference.
           </div>
         ) : view === 'split' ? (
-          <div className="grid h-full grid-cols-2 gap-px bg-line1">
+          <div className="grid h-full grid-cols-1 grid-rows-2 gap-px bg-line1 sm:grid-cols-2 sm:grid-rows-1">
             <figure className="relative m-0 flex min-h-0 items-center justify-center bg-bg0">
               <video ref={originalRef} src={originalUrl} muted playsInline className="max-h-full max-w-full" />
               <figcaption className="absolute left-2 top-2 rounded bg-scrim px-2 py-0.5 text-[11px] text-ink1">{originalLabel}</figcaption>
@@ -131,11 +136,9 @@ export function RestoreCompare({
         ) : (
           <div
             className="relative h-full w-full select-none"
-            onMouseMove={onDividerMove}
-            onTouchMove={onDividerMove}
-            onMouseUp={() => { draggingRef.current = false; }}
-            onMouseLeave={() => { draggingRef.current = false; }}
-            onTouchEnd={() => { draggingRef.current = false; }}
+            onPointerMove={onDividerMove}
+            onPointerUp={() => { draggingRef.current = false; }}
+            onPointerCancel={() => { draggingRef.current = false; }}
           >
             {/* The original sits underneath in every stacked mode, so the wipe
                 only has to clip the restored copy on top of it. It takes the
@@ -185,10 +188,22 @@ export function RestoreCompare({
                 <button
                   type="button"
                   aria-label="Drag to compare"
-                  onMouseDown={() => { draggingRef.current = true; }}
-                  onTouchStart={() => { draggingRef.current = true; }}
-                  className="absolute top-1/2 z-10 -ml-4 -mt-4 flex h-8 w-8 cursor-ew-resize items-center justify-center rounded-full border border-line1 bg-bg1 text-ink1 shadow-overlay"
-                  style={{ left: `${split * 100}%` }}
+                  onPointerDown={(event) => {
+                    draggingRef.current = true;
+                    event.currentTarget.setPointerCapture?.(event.pointerId);
+                  }}
+                  className={cx(
+                    'absolute top-1/2 z-10 -ml-4 -mt-4 flex h-8 w-8 cursor-ew-resize items-center justify-center rounded-full border border-line1 bg-bg1 text-ink1 shadow-overlay',
+                    // This circle is the ONLY door into the comparison — the
+                    // divider beside it is decoration — so under a thumb it is a
+                    // full target. Literal px: the rem scale on this 14px root
+                    // would make h-11 38.5.
+                    'touch:-ml-[22px] touch:-mt-[22px] touch:h-[44px] touch:w-[44px]',
+                  )}
+                  // On the handle rather than on the frame: the drag starts
+                  // here, so this is the element whose gesture must not be read
+                  // as a page scroll, and the clip keeps its own gestures.
+                  style={{ left: `${split * 100}%`, touchAction: 'none' }}
                 >
                   <Icon name="expand" size={14} />
                 </button>

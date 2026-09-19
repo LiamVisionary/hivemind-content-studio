@@ -140,6 +140,11 @@ function AttachedChip({ url, name, thumbnail, onRemove, onPreview, disabled, ign
     <span
       className={cx(
         'group/chip relative inline-flex h-9 shrink-0 items-center gap-1.5 overflow-hidden rounded-md border border-line1 bg-bg2 pr-1 transition-all duration-150',
+        // The chip grows under a thumb so the two things inside it — look at
+        // this picture, take it off — stop being one 17px cluster. The whole
+        // chip is clipped (`overflow-hidden`), so a pseudo-element hit box
+        // would be cut back to this box: the buttons themselves have to grow.
+        'touch:h-11 touch:gap-2',
         ignored ? 'opacity-40 grayscale' : 'hover:border-line2',
         className,
       )}
@@ -151,7 +156,7 @@ function AttachedChip({ url, name, thumbnail, onRemove, onPreview, disabled, ign
         disabled={disabled}
         aria-label="View full size"
         title="View full size"
-        className="group/preview relative h-9 w-9 shrink-0 overflow-hidden border-r border-line1 bg-bg3"
+        className="group/preview relative h-9 w-9 shrink-0 overflow-hidden border-r border-line1 bg-bg3 touch:h-11 touch:w-11"
       >
         <Thumb src={thumbnail || url} alt={name || 'Reference'} />
         <span className="pointer-events-none absolute inset-0 grid place-items-center opacity-0 transition-opacity group-hover/preview:bg-black/40 group-hover/preview:opacity-100">
@@ -165,7 +170,7 @@ function AttachedChip({ url, name, thumbnail, onRemove, onPreview, disabled, ign
         disabled={disabled}
         aria-label="Remove reference"
         title="Remove reference"
-        className="grid h-5 w-5 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-40"
+        className="grid h-5 w-5 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-40 touch:h-9 touch:w-9"
       >
         <Icon name="x" size={11} />
       </button>
@@ -630,7 +635,25 @@ export function UploadPicker({
 
       {/* History / upload panel */}
       {panelOpen ? (
-        <div className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[288px] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop">
+        <div
+          className={cx(
+            'hive-scale-in z-50 rounded-lg border border-line1 bg-bg1 p-3 shadow-pop',
+            // 288px anchored to the left of a chip that can sit anywhere on the
+            // row runs off a 375px screen, and this panel has no measure-and-flip
+            // of its own. So the small window is the BASE here and the anchored
+            // popover is what `sm` restores: a sheet, clear of the home
+            // indicator.
+            //
+            // It is a sheet ON THE COMPOSER rather than on the window, and that
+            // is worth knowing: the composer panel carries `backdrop-blur-xl`,
+            // and a non-none backdrop-filter makes an element the containing
+            // block for its `fixed` descendants. So these offsets resolve
+            // against the composer, not the viewport — which is the anchor this
+            // wants, but it is inherited rather than asked for.
+            'fixed inset-x-2 bottom-[calc(8px+env(safe-area-inset-bottom))]',
+            'sm:absolute sm:inset-x-auto sm:bottom-[calc(100%+8px)] sm:left-0 sm:w-[288px]',
+          )}
+        >
           <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-line1 pb-2.5">
             <div className="flex min-w-0 items-center gap-1.5">
               {section ? (
@@ -730,7 +753,7 @@ export function UploadPicker({
                         would make a reference picker a place your work can be
                         destroyed from. The Library page owns that. */}
                     {entry.libraryOutput ? null : (
-                      <span className="absolute inset-x-0 bottom-0 flex justify-end bg-gradient-to-t from-black/60 to-transparent p-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/cell:opacity-100">
+                      <span className="absolute inset-x-0 bottom-0 flex justify-end bg-gradient-to-t from-black/60 to-transparent p-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/cell:opacity-100 touch:opacity-100">
                         <button
                           type="button"
                           aria-label="Remove from history"
@@ -741,7 +764,7 @@ export function UploadPicker({
                             // reference from the server — it asks first now.
                             setDeleteEntry(entry);
                           }}
-                          className="grid h-5 w-5 place-items-center rounded-sm bg-danger/80 text-white transition-colors hover:bg-danger"
+                          className="grid h-5 w-5 place-items-center rounded-sm bg-danger/80 text-white transition-colors hover:bg-danger touch:h-9 touch:w-9"
                         >
                           <Icon name="x" size={10} />
                         </button>

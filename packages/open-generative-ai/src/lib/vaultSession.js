@@ -28,6 +28,9 @@ const PASSPHRASE_KEY = 'hivemind.ownerPassphrase.once';
 // sign-in leaves no passphrase behind, so without this the app would have a
 // valid session and a permanently locked vault.
 const VAULT_HINT_KEY = 'hivemind.vaultUnlock.once';
+// The same window the gate stamps on its handoff. Only the secrets in it lapse;
+// see readVaultHint.
+const HANDOFF_MS = 24 * 60 * 60 * 1000;
 let readyPromise = null;
 
 function readHandoff(key) {
@@ -352,20 +355,68 @@ export function announceVaultUnlocked() {
 }
 
 /**
+ * Which workspace this tab's cookie names, in the server's own shape.
+ *
+ * `account` carries `has_password` and `has_passkey`, which is what decides
+ * the controls an unlock screen shows — see lib/vaultUnlockPolicy.js. Status 0
+ * is "could not reach the studio" and 401 is "nobody is signed in here": two
+ * different sentences, so they are not collapsed into one null.
+ */
+export async function currentWorkspace() {
+    let response;
+    try {
+        response = await fetch('/api/owner/session', { credentials: 'same-origin', cache: 'no-store' });
+    } catch {
+        return { ok: false, account: null, status: 0 };
+    }
+    if (!response.ok) return { ok: false, account: null, status: response.status };
+    const payload = await response.json().catch(() => null);
+    if (!payload?.unlocked || !payload.account) return { ok: false, account: null, status: 401 };
+    return { ok: true, account: payload.account, status: 200 };
+}
+
+/**
+ * Write the gate's own sign-in hint, from inside the app.
+ *
+ * Every in-app unlock path needs this and the password one used to skip it: it
+ * stashed the passphrase alone, so `bootstrap` had no account id, could not
+ * call `rememberOnThisDevice`, and left no device wrap behind. The next tab
+ * that opened met the same locked vault and the same password prompt, forever.
+ * The shape is exactly what `handOff` writes in account_gate.py, because
+ * `readVaultHint` on the other side is the same reader.
+ */
+export function stashVaultHint({ accountId, credentialId = null, prf = null }) {
+    if (accountId == null) return;
+    // A credential id this tab already knows is kept when the caller has none:
+    // it names which PRF wrap a later enrolment belongs to, and an unlock by
+    // password has no reason to forget it.
+    const known = readVaultHint();
+    const credential = credentialId || (known?.accountId === accountId ? known.credentialId : null) || null;
+    try {
+        sessionStorage.setItem(VAULT_HINT_KEY, JSON.stringify({
+            accountId,
+            method: prf ? 'passkey-prf' : (credentialId ? 'passkey' : 'password'),
+            prf,
+            credentialId: credential,
+            expiresAt: Date.now() + HANDOFF_MS,
+        }));
+    } catch { /* storage unavailable — the reload will fall back to the gate */ }
+}
+
+/**
  * Verify `password` against the signed-in workspace and, on success, stash it
- * exactly like the gate does (same key, same 24h expiry) so a reload bootstraps
- * the vault. Returns { ok, status } — status 429 means rate-limited, anything
+ * exactly like the gate does (same key, same 24h expiry) so the bootstrap can
+ * spend it. Returns { ok, status } — status 429 means rate-limited, anything
  * else falsy-ok means a wrong password, a lapsed session, or an unreachable
  * gate. The workspace is whichever one the session cookie names: the gate's
  * unlock route needs an account id, and /api/owner/session is what knows it.
  */
-export async function unlockOwnerSession(password) {
+export async function unlockOwnerSession(password, workspace = null) {
+    const current = workspace?.id != null ? { ok: true, account: workspace } : await currentWorkspace();
+    if (!current.ok) return { ok: false, status: current.status };
+    const accountId = current.account.id;
     let response;
     try {
-        const session = await fetch('/api/owner/session', { credentials: 'same-origin', cache: 'no-store' });
-        const current = session.ok ? await session.json().catch(() => null) : null;
-        const accountId = current?.unlocked ? current?.account?.id : null;
-        if (accountId == null) return { ok: false, status: session.ok ? 401 : session.status };
         response = await fetch('/api/accounts/unlock', {
             method: 'POST',
             credentials: 'same-origin',
@@ -379,10 +430,11 @@ export async function unlockOwnerSession(password) {
     try {
         sessionStorage.setItem(
             PASSPHRASE_KEY,
-            JSON.stringify({ password, expiresAt: Date.now() + 24 * 60 * 60 * 1000 }),
+            JSON.stringify({ password, expiresAt: Date.now() + HANDOFF_MS }),
         );
     } catch { /* storage unavailable — the reload will fall back to the gate */ }
-    return { ok: true, status: response.status };
+    stashVaultHint({ accountId });
+    return { ok: true, status: response.status, accountId };
 }
 
 // ── changing the password, and minting a new recovery key ────────────────────

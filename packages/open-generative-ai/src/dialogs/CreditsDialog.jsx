@@ -101,7 +101,10 @@ function ModeTabs({ mode, onMode, betterRate }) {
             aria-pressed={on}
             onClick={() => onMode(tab.key)}
             className={cx(
-              'flex h-[34px] flex-1 items-center justify-center gap-[7px] rounded-[7px] text-[13px] font-semibold transition-all duration-150 ease-swift',
+              // The sheet's opening question, and on a phone the sheet IS the
+              // page — so under a thumb it takes the full 44px rung rather than
+              // the 34px one it was drawn at for a mouse.
+              'flex h-[34px] touch:h-ctl-md flex-1 items-center justify-center gap-[7px] rounded-[7px] text-[13px] font-semibold transition-all duration-150 ease-swift',
               on ? 'bg-bg3 text-ink1 shadow-card' : 'text-ink2 hover:text-ink1',
             )}
           >

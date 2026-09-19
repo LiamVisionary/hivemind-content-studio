@@ -28,8 +28,9 @@ import { useState } from 'react';
 
 import { RATING_LABELS, RATING_TONE } from '../lib/capabilityMatrix.js';
 import {
-  PLACE_HIVEMINDOS, PLACE_THIS_MAC, TAB_RENTAL, defaultRunTab, groupRunTargets, readoutText, runOnReadout,
-  runTabsFor, tabOfTarget, accountSectionsOf,
+  PLACE_HIVEMINDOS, PLACE_THIS_MAC, STARTS_FROM_EITHER, STARTS_FROM_IMAGE, STARTS_FROM_TEXT, STARTS_FROM_VIDEO,
+  TAB_RENTAL, defaultRunTab, groupRunTargets, readoutText, runOnReadout,
+  runTabsFor, runTypesFor, tabOfTarget, accountSectionsOf,
 } from '../lib/runTargets.js';
 import { creditsForUsd, formatCredits, routeForAttached } from '../lib/hostedQuote.js';
 import { RentedSourceStatus } from '../studios/RentedSourceStatus.jsx';
@@ -38,31 +39,47 @@ import { Icon } from '../ui/icons.jsx';
 import { Button, Pill, SectionLabel, cx } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 
+/**
+ * What one row starts from, as the badge beside its name.
+ *
+ * Short on purpose: these sit next to the model's name and must lose to it on
+ * width — "Image to image" twice as wide as the name it qualifies is a worse
+ * row than no badge. The chips above the list carry the full words; this is
+ * the same fact said in the space a row has.
+ *
+ * There used to be one badge per ENDPOINT, and only the hosted rail declares
+ * those: `flux-3` wore "Text" and "Edit" side by side while the 107 MUAPI rows
+ * under it wore nothing at all, so "no badge" meant both "starts from a
+ * prompt" and "nobody said". Now the type is one badge, on every row that has
+ * one, and a row with none is a row whose inventory declared nothing.
+ */
+function typeBadgeFor(target) {
+  const label = {
+    [STARTS_FROM_TEXT]: t('runOn.badgeText'),
+    [STARTS_FROM_IMAGE]: t('runOn.badgeNeedsPicture'),
+    [STARTS_FROM_EITHER]: t('runOn.typeHybrid'),
+    [STARTS_FROM_VIDEO]: t('runOn.badgeNeedsClip'),
+  }[target?.startsFrom || ''] || '';
+  if (!label) return null;
+  // A requirement is not a feature. "Edit" beside a model name reads as "this
+  // one can also edit", which is how a prompt came to be typed into AI Ghibli
+  // Style — a model whose entire upstream schema is one required picture and
+  // no prompt field at all. The rows that cannot start from words are the ones
+  // that have to be read, so only they are tinted.
+  const needs = target.startsFrom === STARTS_FROM_IMAGE || target.startsFrom === STARTS_FROM_VIDEO;
+  return { label, tone: needs ? 'info' : 'neutral' };
+}
+
+// The doors the type does not cover. A hosted row that also takes a clip or a
+// soundtrack in is saying something "Hybrid" does not, and those two are the
+// only capabilities the four types leave unsaid.
+const EXTRA_CAPABILITY_LABELS = {
+  'video-to-video': t('runOn.badgeFromVideo'),
+  'audio-to-video': t('runOn.badgeFromAudio'),
+};
+
 /** One row: the model, where it runs, and — when it cannot — why not, on the
  *  row rather than at the press. */
-// What each capability is called on a row. Short on purpose: these sit beside
-// the model's name, several at a time, and "Image to image" twice as wide as
-// the name it qualifies is a worse row than no badge.
-const CAPABILITY_LABELS = {
-  'text-to-image': 'Text',
-  'image-to-image': 'Edit',
-  'text-to-video': 'Text',
-  'image-to-video': 'From image',
-  'video-to-video': 'From video',
-  'audio-to-video': 'From audio',
-};
-
-// When a capability is the ONLY thing a row does, the badge is a requirement
-// rather than an extra. "Edit" beside a model name reads as "this one can also
-// edit", which is how a prompt came to be typed into AI Ghibli Style — a model
-// whose entire upstream schema is one required picture and no prompt at all.
-const CAPABILITY_ONLY_LABELS = {
-  'image-to-image': 'Needs a picture',
-  'image-to-video': 'Needs a picture',
-  'video-to-video': 'Needs a video',
-  'audio-to-video': 'Needs audio',
-};
-
 function TargetRow({
   target, selected, onSelect, readiness = null, onFixReadiness = null, busyAction = '',
   priceContext = null,
@@ -70,6 +87,9 @@ function TargetRow({
   // the repair. A row under it that repeated all three is what made "Your
   // accounts" unreadable.
   accountSaid = false,
+  // The machine card under this list already names the box and its hourly
+  // rate. True when every row here is on that one box.
+  machineSaid = false,
 }) {
   // What one press on this row would cost, where a row can know.
   //
@@ -88,7 +108,7 @@ function TargetRow({
   // The place, never the provider id: "This Mac", "RTX 5090 · $0.42/hr",
   // "Your OpenAI account", "HivemindOS credits".
   const placeMetaLabel = target.machine
-    ? `${target.placeLabel} · $${(Number(target.machine.usd_per_hour) || 0).toFixed(2)}/hr`
+    ? (machineSaid ? '' : `${target.placeLabel} · $${(Number(target.machine.usd_per_hour) || 0).toFixed(2)}/hr`)
     // A row that IS its own place says it once, not twice. An account reachable
     // two ways names the door, or the two rows are one row printed twice.
     : [target.placeLabel === target.label ? '' : target.placeLabel, target.credentialLabel || '']
@@ -127,6 +147,12 @@ function TargetRow({
       ? [readiness.label, readiness.detail].filter(Boolean).join(' — ')
       : '');
   const actionKey = readiness?.action ? `${readiness.action.kind}:${readiness.action.provider || target.key}` : '';
+  const typeBadge = typeBadgeFor(target);
+  // Said once: a row whose type already IS "needs a clip" must not also wear
+  // "From video".
+  const extraCapabilities = target.startsFrom === STARTS_FROM_VIDEO
+    ? []
+    : (target.capabilities || []).filter((capability) => EXTRA_CAPABILITY_LABELS[capability]);
   return (
     <div className="flex flex-col">
       <MenuItem
@@ -150,15 +176,21 @@ function TargetRow({
                 {RATING_LABELS[target.rating] || target.rating}
               </Pill>
             ) : null}
-            {/* What this one row can do, when it stands for several endpoints.
-                The hosted rail lists `flux-3` four times upstream — text to
-                image, image editing, text to video, image to video — which is
-                four prices and one model. Collapsed to one row, the badges
-                are the only thing left that says it can start from a picture. */}
-            {(target.capabilities || []).map((capability) => (
+            {/* What this row starts from. The hosted rail lists `flux-3` four
+                times upstream — text to image, image editing, text to video,
+                image to video — which is four prices and one model; collapsed
+                to one row, this is the only thing left that says it can start
+                from a picture. The two studio catalogs derive the same fact
+                from the bucket a model is listed in, so every row with an
+                inventory behind it now carries it. */}
+            {typeBadge ? (
+              <Pill tone={typeBadge.tone} className="h-4 shrink-0 px-1.5 text-[9px]">
+                {typeBadge.label}
+              </Pill>
+            ) : null}
+            {extraCapabilities.map((capability) => (
               <Pill key={capability} tone="neutral" className="h-4 shrink-0 px-1.5 text-[9px]">
-                {(target.capabilities.length === 1 && CAPABILITY_ONLY_LABELS[capability])
-                  || CAPABILITY_LABELS[capability] || capability}
+                {EXTRA_CAPABILITY_LABELS[capability]}
               </Pill>
             ))}
           </span>
@@ -256,7 +288,9 @@ function AccountSection({ run, expanded, renderRow, onFixReadiness, busyAction }
           type="button"
           onClick={() => setOpen(true)}
           aria-expanded={false}
-          className="flex w-full items-center gap-1 px-2.5 pb-2 text-left text-[11px] text-ink3 hover:text-ink1"
+          // The only door to a folded account's 125 models, so it carries a full
+          // thumb target even though it draws as a line of small grey text.
+          className="flex w-full touch:min-h-[44px] items-center gap-1 px-2.5 pb-2 touch:py-2 text-left text-[11px] text-ink3 hover:text-ink1"
         >
           <Icon name="chevronRight" size={12} className="shrink-0" />
           {tf('runOn.accountModels', count)}
@@ -266,12 +300,58 @@ function AccountSection({ run, expanded, renderRow, onFixReadiness, busyAction }
   );
 }
 
+/**
+ * The type filter: what the rows in front of you start from.
+ *
+ * A second strip rather than four more tabs, and shaped differently on
+ * purpose — the tabs above are one choice with one answer (which bill), this
+ * is a narrowing you can drop. Only the types actually present are offered,
+ * each with its count, so a chip is never a promise of rows that are not
+ * there; "All" is how you come back.
+ *
+ * It is scoped to what is on screen: the open tab, or every match while a
+ * query spans them all. A chip counting models on a tab you are not looking at
+ * would be a number nobody can check.
+ */
+function TypeStrip({ types, active, onSelect }) {
+  const chip = (id, label, count) => (
+    <button
+      key={id || 'all'}
+      type="button"
+      aria-pressed={active === id}
+      onClick={() => onSelect(id)}
+      className={cx(
+        // Same ladder as the tabs above, one rung lower: these narrow a list
+        // rather than switch it, so they stay the smaller chip — but 17.5px is
+        // not a chip under a thumb, it is a miss.
+        'inline-flex h-5 touch:h-ctl-xs shrink-0 items-center gap-1 rounded-full border px-2 touch:px-2.5 text-[10px] touch:text-[11px] font-semibold transition-colors',
+        active === id
+          ? 'border-honey/50 bg-honey-tint text-ink1'
+          : 'border-line1 bg-bg2 text-ink2 hover:border-line2 hover:text-ink1',
+      )}
+    >
+      <span>{label}</span>
+      {count ? <span className="font-normal text-ink3">{count}</span> : null}
+    </button>
+  );
+  return (
+    <div role="group" aria-label={t('runOn.typesLabel')} className="flex flex-wrap items-center gap-1">
+      {/* `runs.filterAll` is the app's one word for "no filter" — the runs
+          list, the history list and the Models page all draw it. */}
+      {chip('', t('runs.filterAll'), 0)}
+      {types.map((type) => chip(type.id, type.label, type.targets.length))}
+    </div>
+  );
+}
+
 function TabStrip({ tabs, active, onSelect }) {
   return (
     <div
       role="tablist"
       aria-label={t('runOn.tabsLabel')}
-      className="flex items-center gap-1 rounded-md border border-line1 bg-bg0 p-0.5"
+      // A hair more inset under a thumb, so the tabs inside it can grow to the
+      // coarse ladder without their press areas touching the strip's border.
+      className="flex items-center gap-1 rounded-md border border-line1 bg-bg0 p-0.5 touch:p-1"
     >
       {tabs.map((tab) => (
         <button
@@ -285,7 +365,12 @@ function TabStrip({ tabs, active, onSelect }) {
             // to "My accoun…" the moment its count reached three digits, and a
             // tab label that has stopped naming its tab is not a tab. Content
             // width first, the slack shared out after.
-            'flex h-6 flex-auto items-center justify-center gap-1 truncate rounded-[7px] px-1.5 text-[11px] font-semibold transition-colors',
+            //
+            // 21px is a mouse target. Under a thumb the strip joins the control
+            // ladder (`--ctl-sm` is 34px on a coarse pointer), which is what the
+            // four doors to every machine the studio can reach deserve; the
+            // widths keep sharing the row, so nothing new truncates.
+            'flex h-6 touch:h-ctl-sm flex-auto items-center justify-center gap-1 truncate rounded-[7px] px-1.5 text-[11px] font-semibold transition-colors',
             active === tab.id ? 'bg-bg3 text-ink1 shadow-card' : 'text-ink2 hover:text-ink1',
           )}
         >
@@ -334,6 +419,10 @@ export function RunOnList({
   // render lets the default follow the models in, and it stops the moment a
   // person picks one.
   const [chosen, setChosen] = useState('');
+  // Which type the list is narrowed to, or '' for all of them. Held the same
+  // way and for the same reason: a type that the tab you just opened has none
+  // of falls back to all rather than showing an empty list (see `narrowed`).
+  const [chosenType, setChosenType] = useState('');
   const query = searchable ? filter.trim().toLowerCase() : '';
   const matches = (target) => !query || target.label.toLowerCase().includes(query)
     || target.placeLabel.toLowerCase().includes(query);
@@ -346,15 +435,26 @@ export function RunOnList({
   const tabs = runTabsFor(targets)
     .filter((tab) => tab.targets.length || (tab.id === TAB_RENTAL && showMachines));
   const tabbed = searchable && tabs.length > 1;
-  const active = tabs.some((tab) => tab.id === chosen) ? chosen : defaultRunTab(targets);
+  const active = tabs.some((tab) => tab.id === chosen) ? chosen : defaultRunTab(targets, value);
+  // What the type chips are about: the rows on screen right now — the open tab,
+  // or every match while a query spans them all. The kind comes off the rows
+  // themselves, because the studio that built them already said it and a second
+  // declaration is a second thing to keep in step.
+  const inScope = tabbed && !query ? (tabs.find((tab) => tab.id === active)?.targets || []) : found;
+  const types = searchable ? runTypesFor(inScope, targets?.[0]?.kind || 'image') : [];
+  // One type is a fact about the list, not a filter: a strip offering "All" and
+  // the only thing there is narrows nothing and costs a row of the panel.
+  const typed = types.length > 1;
+  const narrowed = typed && types.some((type) => type.id === chosenType) ? chosenType : '';
+  const shown = narrowed ? found.filter((target) => target.startsFrom === narrowed) : found;
   // While a query is typed the list spans every tab, because a model you can
   // name is a model you want found wherever it runs — the same rule the text
   // producer's picker applies, and the reason pressing a tab clears the box.
   const groups = tabbed
     ? (query
-      ? runTabsFor(found).filter((tab) => tab.targets.length)
-      : tabs.filter((tab) => tab.id === active))
-    : groupRunTargets(found);
+      ? runTabsFor(shown).filter((tab) => tab.targets.length)
+      : runTabsFor(shown).filter((tab) => tab.id === active))
+    : groupRunTargets(shown);
   // The Automatic pick is ONE target in ONE place, so it belongs on that
   // place's tab and nowhere else. Shown above every tab it read as a member
   // of each: a This Mac model sat at the top of the Hivemind list, under the
@@ -386,7 +486,13 @@ export function RunOnList({
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
               placeholder={t('common.searchModels')}
-              className="h-8 w-full border-none bg-transparent text-xs text-ink1 outline-none placeholder:text-ink3"
+              // The field's height is the whole box's height — the bordered row
+              // around it has no height of its own — so this is the one number
+              // that decides whether searching 137 models is a thumb-sized
+              // action. The 16px face a coarse pointer needs (which is what
+              // stops iOS zooming the panel out from under the list) comes from
+              // the global rule in base.css, not from here.
+              className="h-8 touch:h-ctl-md w-full border-none bg-transparent text-xs text-ink1 outline-none placeholder:text-ink3"
             />
           </div>
           {tabbed ? (
@@ -398,6 +504,13 @@ export function RunOnList({
               // control that did nothing.
               onSelect={(id) => { setFilter(''); setChosen(id); }}
             />
+          ) : null}
+          {/* …and under the bills, the types. The chip a person pressed is
+              KEPT when the tab changes: someone narrowing to image-to-image is
+              asking about editors, not about editors on one account, and a
+              tab holding none of them falls back to all on its own. */}
+          {typed ? (
+            <TypeStrip types={types} active={narrowed} onSelect={setChosenType} />
           ) : null}
           {/* The tab's caption belongs to the TAB, under the strip that names
               it. It used to print with the group below, where — the heading
@@ -432,7 +545,16 @@ export function RunOnList({
         </div>
       ) : null}
 
-      {groups.map((group) => (
+      {groups.map((group) => {
+        // Every row on this tab is on the SAME rented box, so the card below
+        // already names it and its rate. Repeating "RTX 5090 · $0.82/hr" on
+        // each row made three workflows on one machine read as three machines
+        // being billed ("we don't have 4 rentals rented do we?"). With two
+        // boxes attached it is kept, because then it is the thing that tells
+        // the rows apart. Same rule as the account line above.
+        const machines = new Set(group.targets.map((t) => t.machine?.rental_id).filter(Boolean));
+        const machineSaid = machines.size === 1;
+        return (
         <div key={group.id}>
           {headed ? <MenuHeading>{group.label}</MenuHeading> : null}
           {/* Who pays, on the section that is the bill. A rental prints its own
@@ -465,6 +587,7 @@ export function RunOnList({
                   // Said above, for the whole account: the row keeps its name
                   // and nothing else.
                   accountSaid={Boolean(run.shared)}
+                  machineSaid={machineSaid}
                 />
               )}
               onFixReadiness={onFixReadiness}
@@ -483,7 +606,8 @@ export function RunOnList({
             </div>
           ) : null}
         </div>
-      ))}
+        );
+      })}
     </>
   );
 }
@@ -543,7 +667,10 @@ export function RunOnPicker({
         // pays in a truncated tab label instead. The blurb under the strip
         // still names the bill in full.
         width="w-[min(360px,calc(100vw-3.5rem))]"
-        panelClassName="max-h-[min(480px,70vh)]"
+        // `dvh`, not `vh`: iOS reports the LARGE viewport for `vh`, so 70vh on a
+        // phone is measured against a screen the URL bar is covering part of —
+        // the last rows of the list end up under the browser chrome.
+        panelClassName="max-h-[min(480px,70dvh)]"
         trigger={(open, toggle) => (renderTrigger ? renderTrigger(open, toggle, readoutText(readout), readout) : (
           <ChipButton
             icon={shown?.place === PLACE_THIS_MAC ? 'cpu' : 'cloud'}

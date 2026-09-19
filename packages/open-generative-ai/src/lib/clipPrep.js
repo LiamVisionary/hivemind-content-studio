@@ -101,7 +101,15 @@ export async function prepareClip(blob, spec = {}, { onProgress } = {}) {
 // A single frame, for the start-image slot or a storyboard tile. Decoded through
 // CanvasSink so the frame is the DISPLAYED image — rotation metadata applied,
 // which a raw packet copy would leave for the consumer to guess at.
-export async function grabFrame(blob, timeSeconds, { width = null, height = null, crop = null } = {}) {
+// `type`/`quality` exist for the turntable export, which cuts up to 180 frames
+// at a go: PNG at that count runs to hundreds of megabytes, and re-encoding a
+// PNG the caller never wanted costs a second decode per frame. Both default to
+// the original behaviour, so every existing caller still gets a PNG.
+export async function grabFrame(
+  blob,
+  timeSeconds,
+  { width = null, height = null, crop = null, type = 'image/png', quality = undefined } = {},
+) {
   const { input, video } = await openSource(blob);
   const source = {
     width: video.displayWidth || video.codedWidth,
@@ -130,11 +138,68 @@ export async function grabFrame(blob, timeSeconds, { width = null, height = null
 
     const canvas = frame.canvas;
     // OffscreenCanvas exposes convertToBlob; a DOM canvas only has toBlob.
-    const png = canvas.convertToBlob
-      ? await canvas.convertToBlob({ type: 'image/png' })
-      : await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-    return { blob: png, timestamp: frame.timestamp, width: canvas.width, height: canvas.height };
+    const encoded = canvas.convertToBlob
+      ? await canvas.convertToBlob({ type, quality })
+      : await new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+    return { blob: encoded, timestamp: frame.timestamp, width: canvas.width, height: canvas.height };
   } finally {
     input.dispose();
   }
+}
+
+/**
+ * MANY frames out of one clip, in one pass.
+ *
+ * grabFrame above opens the file, seeks, decodes and disposes — right for one
+ * still, quadratically wrong for a hundred: a turntable export asks for up to
+ * 180 and would otherwise demux the whole clip 180 times, each seek decoding
+ * again from its nearest keyframe. mediabunny's canvasesAtTimestamps decodes
+ * each packet at most once when the timestamps are monotonically sorted, which
+ * an evenly spaced orbit sample always is, so this sorts them and streams.
+ *
+ * Yields `{ index, blob, timestamp }` in the order the timestamps were given.
+ * `onProgress(done, total)` is called after each frame, and returning `false`
+ * from it stops the pass — the cancel path, without a second mechanism.
+ */
+export async function grabFrames(blob, timeSeconds, {
+  width = null, height = null, type = 'image/jpeg', quality = 0.92, onProgress = null,
+} = {}) {
+  const wanted = [...timeSeconds].map((value) => Math.max(0, Number(value) || 0));
+  // Sorted because the fast path depends on it; the caller's order is restored
+  // through the index carried alongside each timestamp.
+  const ordered = wanted.map((at, index) => ({ at, index })).sort((a, b) => a.at - b.at);
+  if (!ordered.length) return [];
+
+  const { input, video } = await openSource(blob);
+  const source = {
+    width: video.displayWidth || video.codedWidth,
+    height: video.displayHeight || video.codedHeight,
+  };
+  const scale = width && !height ? Math.min(1, width / source.width) : 1;
+  const outWidth = width ? even(source.width * scale) : even(source.width);
+  const outHeight = height ? even(height) : even(source.height * scale);
+
+  const out = [];
+  try {
+    const sink = new CanvasSink(video, { width: outWidth, height: outHeight, fit: 'fill' });
+    let at = 0;
+    for await (const frame of sink.canvasesAtTimestamps(ordered.map((row) => row.at))) {
+      const row = ordered[at];
+      at += 1;
+      // A timestamp with no frame behind it (past the last packet) is skipped
+      // rather than written as a hole: an archive with a missing file is easier
+      // to reason about than one with a blank one.
+      if (frame) {
+        const canvas = frame.canvas;
+        const encoded = canvas.convertToBlob
+          ? await canvas.convertToBlob({ type, quality })
+          : await new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+        out.push({ index: row.index, blob: encoded, timestamp: frame.timestamp });
+      }
+      if (onProgress && onProgress(at, ordered.length) === false) break;
+    }
+  } finally {
+    input.dispose();
+  }
+  return out.sort((a, b) => a.index - b.index);
 }

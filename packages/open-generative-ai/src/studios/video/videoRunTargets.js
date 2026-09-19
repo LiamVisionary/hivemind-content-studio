@@ -13,7 +13,8 @@
 import { PLACE_ACCOUNTS, PLACE_HIVEMINDOS, buildRunTargets } from '../../lib/runTargets.js';
 import { clipRouteFor, placeFor, placeLabelFor } from '../../lib/modelRunner.js';
 import { isHivemindVideoModelId } from '../../lib/hivemindModelIds.js';
-import { isWan2gpModelId } from '../../lib/localModels.js';
+import { i2vModels, t2vModels, v2vModels } from '../../lib/cloudCatalog.js';
+import { getLocalModelById, isWan2gpModelId } from '../../lib/localModels.js';
 
 /** Which account or machine a video model belongs to. The studio's lists are
  *  keyed by id alone, so this is where an id becomes a routing identity. */
@@ -24,6 +25,47 @@ export function videoProviderFor(model) {
   // Everything else in the studio's generation lists is the vendored MUAPI
   // catalog, billed to the owner's MUAPI account.
   return { provider: 'muapi', source: 'cloud' };
+}
+
+/**
+ * What one video model starts from, in the shared capability words.
+ *
+ * MODE-BLIND, and that is the whole contract. The picker's list is scoped to
+ * the current mode (generationModelsFor) — with a start frame attached it is
+ * the i2v list and nothing else — so reading a capability off which list a
+ * model happens to be in right now answers the question "is a frame attached",
+ * not "what can this model do". videoLogic.js carries the same warning over
+ * resolveVideoModel, for the same bug.
+ *
+ * Four inventories, four answers, none of them guessed:
+ *   the v2v tools        start from footage and take no prompt
+ *   MUAPI                is bucketed t2v / i2v by the catalog itself
+ *   Wan2GP               declares `needsImage` per local model
+ *   the lane registry    lists the graph's own inputs, which is where the
+ *                        studio already reads every other capability from
+ */
+export function videoModelCapabilities(model) {
+  const id = String(model?.id || '');
+  if (!id) return null;
+  if (v2vModels.some((tool) => String(tool?.id) === id)) return ['video-to-video'];
+  if (isHivemindVideoModelId(id)) {
+    // A local lane is text-to-video first — H3 with no start frame is the
+    // studio's most common run — and takes what its graph wires on top. The
+    // flags are the registry mapper's; this never re-reads `accepts` itself,
+    // so a capability added there arrives here already named.
+    const capabilities = ['text-to-video'];
+    if (model.supportsStartFrame || model.supportsReferenceImages) capabilities.push('image-to-video');
+    if (model.supportsVideoInput || model.supportsHeadReplacement) capabilities.push('video-to-video');
+    return capabilities;
+  }
+  if (isWan2gpModelId(id)) {
+    return [getLocalModelById(id)?.needsImage ? 'image-to-video' : 'text-to-video'];
+  }
+  if (i2vModels.some((entry) => String(entry?.id) === id)) return ['image-to-video'];
+  if (t2vModels.some((entry) => String(entry?.id) === id)) return ['text-to-video'];
+  // A model no inventory here claims stays untyped rather than being called
+  // text-to-video by default — an unbadged row is honest, a wrong badge is not.
+  return null;
 }
 
 /**
@@ -47,6 +89,13 @@ export function videoRunTargets({
       label: model.name || model.id,
       name: model.name || model.id,
       family: model.workflowFamily || '',
+      // What it starts from, so the picker can badge and filter it. The video
+      // studio's rows used to carry nothing but a name and a family, which is
+      // why its picker was the one with no badges at all.
+      capabilities: videoModelCapabilities(model),
+      // What the lane must run on, so a rented box is never offered a lane it
+      // physically cannot execute (the Apple-silicon H3 engine).
+      accelerator: model.accelerator || '',
     });
   }
   const targets = buildRunTargets({

@@ -13,7 +13,7 @@
 import { useEffect, useState } from 'react';
 
 import { Icon } from '../../ui/icons.jsx';
-import { Button, ProgressBar, Spinner, TextArea, TextInput, cx } from '../../ui/kit.jsx';
+import { Button, ProgressBar, Spinner, TextArea, TextInput, cx, useHint } from '../../ui/kit.jsx';
 import { useMediaSealFailure, useMediaSrc } from '../../hooks/hooks.js';
 import { VaultLockedTile } from '../../hub/components/MediaThumb.jsx';
 import { producerIsRunning } from './state.js';
@@ -86,10 +86,15 @@ export function StageHead({ title, children }) {
  */
 export function Rule({ label, hint, children }) {
   return (
-    <div className="flex items-center gap-3">
+    // Wrapping, because the row is a label, a rule, a sentence of hint and
+    // whatever actions the section carries — four shrink-0 children on one
+    // line, which on a 375px screen pushed the whole page sideways rather than
+    // clipping. The hint takes a line of its own below sm for the same reason:
+    // it is the longest child and the least urgent.
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink3">{label}</span>
       <span className="h-px min-w-4 flex-1 bg-line1" />
-      {hint ? <span className="shrink-0 text-[11px] text-ink3">{hint}</span> : null}
+      {hint ? <span className="min-w-0 basis-full text-[11px] text-ink3 sm:basis-auto">{hint}</span> : null}
       {children}
     </div>
   );
@@ -109,7 +114,9 @@ export function Disclosure({ label, hint, children, className = '', tone = 'quie
         className={cx(
           'flex cursor-pointer list-none items-center gap-1.5 text-[12px] font-semibold text-ink2 transition-colors hover:text-ink1',
           '[&::-webkit-details-marker]:hidden',
-          tone === 'card' ? 'px-3 py-2.5' : 'py-1',
+          // The quiet tone is a ~24px row: fine for a cursor, a miss for a
+          // thumb, and it is the only way into the fields behind it.
+          tone === 'card' ? 'px-3 py-2.5' : 'py-1 touch:py-3',
         )}
       >
         <Icon name="chevronRight" size={13} className="shrink-0 transition-transform duration-150 group-open:rotate-90" />
@@ -139,8 +146,14 @@ export function FieldGrid({ columns = 2, className = '', children }) {
  * field in the studio, and forty "Auto-fill"s would drown the writing they sit
  * beside.
  */
-const COMPACT_INPUT = '!h-8 !rounded-lg !bg-bg1 !px-2.5 !text-[12px]';
-const COMPACT_AREA = '!rounded-lg !bg-bg1 !px-2.5 !py-2 !text-[12px] !leading-snug';
+// base.css puts a 16px floor under every field wherever the pointer is coarse
+// — iOS zooms the whole page in below that and never zooms back out — but it
+// does it at a specificity that beats a single utility, not an `!important`
+// one. These two carry `!` to beat the kit's own input styling, so they were
+// the two shapes in the app still zooming the studio on every tap, and they
+// have to opt into the floor themselves.
+const COMPACT_INPUT = '!h-8 touch:!h-ctl-md !rounded-lg !bg-bg1 !px-2.5 !text-[12px] touch:!text-[16px]';
+const COMPACT_AREA = '!rounded-lg !bg-bg1 !px-2.5 !py-2 !text-[12px] touch:!text-[16px] !leading-snug';
 
 export function WriteField({
   id, spec, busy, onFill, label, hint, multiline = false, rows = 2,
@@ -150,24 +163,36 @@ export function WriteField({
   const title = label || spec?.label || id;
   const guidance = hint === undefined ? spec?.hint : hint;
   const shape = compact ? (multiline ? COMPACT_AREA : COMPACT_INPUT) : '';
+  // The studio's own bubble rather than the browser's `title`: there is one of
+  // these on nearly every field in the studio, and the native tooltip is a
+  // second of waiting and an unstyled OS box each time.
+  const bubble = useHint('top');
+  const writes = `Write ${title.toLowerCase()} from the rest of the story`;
   return (
     <label className={cx('flex min-w-0 flex-col gap-1', className)}>
       <span className="flex items-center gap-1.5">
         <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-ink3">{title}</span>
         {onFill ? (
-          <button
-            type="button"
-            title={`Write ${title.toLowerCase()} from the rest of the story`}
-            aria-label={`Write ${title.toLowerCase()} from the rest of the story`}
-            onClick={() => onFill([id])}
-            disabled={Boolean(busy)}
-            className={cx(
-              'grid h-5 w-5 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-40',
-              running && 'animate-spin text-honey',
-            )}
-          >
-            <Icon name={running ? 'refresh' : 'wand'} size={12} />
-          </button>
+          <>
+            <button
+              type="button"
+              aria-label={writes}
+              disabled={Boolean(busy)}
+              {...bubble.bind({ onClick: () => onFill([id]) })}
+              className={cx(
+                // 17.5px is a mouse target, and this is the ONLY way to have the
+                // producer write the field. Under a thumb it grows to the control
+                // ladder's 44px and gives the height straight back as negative
+                // block margin, so the label row keeps the size it was drawn at.
+                'grid h-5 w-5 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-40',
+                'touch:-my-3 touch:h-ctl-md touch:w-ctl-md',
+                running && 'animate-spin text-honey',
+              )}
+            >
+              <Icon name={running ? 'refresh' : 'wand'} size={12} />
+            </button>
+            {bubble.render(writes)}
+          </>
         ) : null}
       </span>
       {children || (multiline

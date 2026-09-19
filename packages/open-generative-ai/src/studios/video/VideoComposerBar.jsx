@@ -32,7 +32,7 @@
 // deliberate asymmetry between the keyboard shortcut's guards
 // (rentedBlocked || generating) and the button's `disabled`, which is preserved
 // as it was rather than quietly reconciled.
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { aspectRatioName, t } from '../../lib/i18n.js';
 import { runOnReadout } from '../../lib/runTargets.js';
@@ -42,7 +42,7 @@ import { AspectRatioPicker, NativeSelect, Slider, Spinner, Toggle, cx } from '..
 import { ChipButton, MenuItem, useDismissable } from '../../ui/Menu.jsx';
 import { CompletionPingToggle } from '../../ui/CompletionPingToggle.jsx';
 import {
-  ComposerMeta, ComposerPanel, ComposerPrimary, ComposerPrompt, ComposerPromptAction, ComposerSecondary, ComposerTool,
+  ComposerMeta, ComposerPanel, ComposerPrimary, ComposerPrompt, ComposerPromptAction, ComposerQueue, ComposerTool,
 } from '../frame/ComposerPanel.jsx';
 import { PromptLibraryItem } from '../frame/PromptLibraryItem.jsx';
 import { PromptLibraryMenu } from '../frame/PromptLibraryMenu.jsx';
@@ -55,9 +55,12 @@ import { CastStrip } from './CastStrip.jsx';
 import { EmotionMenu } from './EmotionMenu.jsx';
 import { FrameSlotsPicker } from './FrameSlotsPicker.jsx';
 import { PromptCheckMenu } from './PromptCheckMenu.jsx';
+import { RecastChip } from './RecastDialog.jsx';
 import { ReferencesMenu } from './ReferencesMenu.jsx';
 import { RestyleMenu } from './RestyleMenu.jsx';
+import { CombatMenu } from './CombatMenu.jsx';
 import { ShotBuilderChip } from './ShotBuilder.jsx';
+import { TurntableChip } from './TurntableDialog.jsx';
 
 /**
  * A popover that does NOT clip what it holds.
@@ -73,16 +76,55 @@ import { ShotBuilderChip } from './ShotBuilder.jsx';
 function LoosePopover({ renderTrigger, width = 'w-[26rem]', align = 'start', children }) {
   const [open, setOpen] = useState(false);
   const ref = useDismissable(open, () => setOpen(false));
+  // The two measurements ui/Menu.jsx makes, for the same two reasons — this
+  // panel skipped both and was placed blind. Its trigger is a token inside a
+  // sentence that wraps, so on a narrow window `left-0` can start the panel far
+  // enough right that it runs off the side; and the composer it opens from sits
+  // at the BOTTOM of the screen, so a 30rem cast strip opening upward puts its
+  // own top above the viewport, where nothing can scroll it back.
+  const panelRef = useRef(null);
+  const [side, setSide] = useState(align);
+  // Set ONLY when even the room above cannot hold the panel — the clamp never
+  // widens what the panel would have been. While it is null the panel keeps its
+  // natural height and NO scroll box, which is this component's whole reason to
+  // exist: the cast editors, Style, Emotion and UGC all anchor popovers to their
+  // own triggers inside it, and a scrolling parent cuts those off mid-list. When
+  // there is genuinely no room the panel scrolls anyway, because a list whose
+  // first rows are off the top of the screen is the worse failure.
+  const [roomCap, setRoomCap] = useState(null);
+  useEffect(() => {
+    if (!open) { setSide(align); setRoomCap(null); return; }
+    const panel = panelRef.current;
+    const anchor = ref.current;
+    if (!panel || !anchor) return;
+    // offsetWidth/offsetHeight against the anchor's rect, not the panel's own:
+    // the panel is mid scale-in when this runs and its rect under-reports.
+    const rect = anchor.getBoundingClientRect();
+    const margin = 8;
+    const panelWidth = panel.offsetWidth;
+    const fits = panelWidth < window.innerWidth - 2 * margin;
+    setSide(align !== 'end' && fits && rect.left + panelWidth > window.innerWidth - margin ? 'end'
+      : align === 'end' && fits && rect.right - panelWidth < margin ? 'start'
+        : align);
+    // 6px is the gap the panel's own bottom-[calc(100%+6px)] leaves.
+    const room = rect.top - 6 - margin;
+    setRoomCap(panel.offsetHeight > room ? Math.max(180, Math.round(room)) : null);
+  }, [open, align, ref]);
   return (
     <div ref={ref} className="relative inline-block">
       {renderTrigger(open, () => setOpen((v) => !v))}
       {open ? (
         <div
+          ref={panelRef}
           role="menu"
+          style={roomCap ? { maxHeight: `${roomCap}px` } : undefined}
           className={cx(
             'hive-scale-in absolute bottom-[calc(100%+6px)] z-50 max-w-[calc(100vw-1rem)] rounded-lg border border-line1 bg-bg1 p-2 shadow-pop',
+            // A flick that reaches the end of a clamped panel stops there rather
+            // than scrolling the studio behind it.
+            roomCap && 'overflow-y-auto overscroll-contain',
             width,
-            align === 'end' ? 'right-0' : 'left-0',
+            side === 'end' ? 'right-0' : 'left-0',
           )}
         >
           {typeof children === 'function' ? children(() => setOpen(false)) : children}
@@ -138,7 +180,9 @@ export function VideoComposerBar({
   referenceLimits = {},
   sceneRefs = [],
   sceneRoles = {},
+  sceneSpots = {},
   onSceneRole,
+  onOpenSpot,
   onCharacterRefsChange,
   onSceneRefsChange,
   onReferenceAudiosChange,
@@ -174,8 +218,22 @@ export function VideoComposerBar({
   onApplyUgc,
   restylePresetId,
   onApplyRestyle,
+  // The fight preset. Unlike the doors above it, what it arms are SETTINGS —
+  // the plan it would apply on this lane is computed in the studio (where the
+  // model's capabilities live) and rendered here.
+  combatArmed = false,
+  combatPlan = null,
+  onApplyCombat,
   shotTimeline = null,
   onOpenShotBuilder,
+  // Recast — re-performing an attached clip with this cast. Armed from the
+  // PROMPT (lib/h3Recast.js isRecastPrompt), so Start fresh unlights it.
+  recastArmed = false,
+  recastShots = 0,
+  onOpenRecast,
+  turntableAvailable = false,
+  turntableArmed = false,
+  onOpenTurntable,
   promptCheckRefs = {},
   promptCheckDurations = {},
   onRefit,
@@ -201,10 +259,6 @@ export function VideoComposerBar({
   onMatchStartFrameAr,
   runOn,
 
-  /* ---- the drawer ---- */
-  advancedOpen,
-  onToggleAdvanced,
-
   /* ---- `more` ---- */
   onNewPrompt,
   onClearPrompt,
@@ -220,7 +274,10 @@ export function VideoComposerBar({
   rentedBlocked,
   etaLabel = '',
   onGenerate,
-  onCancel,
+  // Presses that have not started yet: [{ id, place, label, detail }].
+  queuedShots = [],
+  onRemoveQueuedShot,
+  onClearQueuedShots,
 }) {
   // Which extra card is open over the prompt. The timeline is the studio's own
   // component; this only decides whether it is on screen.
@@ -407,7 +464,12 @@ export function VideoComposerBar({
               title={readoutLabel}
               aria-label={readoutLabel}
               className={cx(
+                // The one token in the sentence that re-declares RecipeToken's
+                // class instead of using it (it needs RunOnPicker's own trigger
+                // contract), so it has to carry RecipeToken's thumb size too —
+                // otherwise the sentence is 44px tall except for this word.
                 'inline-flex max-w-[220px] items-center truncate rounded-md px-2 py-[3px] text-[12.5px] transition-colors',
+                'touch:min-h-[44px] touch:px-2.5',
                 'bg-white/[0.06] text-ink1 hover:bg-white/[0.11]',
                 open && 'ring-1 ring-inset ring-honey/60',
               )}
@@ -425,6 +487,9 @@ export function VideoComposerBar({
 
   const above = (
     <>
+      {/* What is already committed comes first: these are presses that have
+          happened, where everything else here is about the press to come. */}
+      <ComposerQueue items={queuedShots} onRemove={onRemoveQueuedShot} onClear={onClearQueuedShots} />
       {extendBanner ? (
         <div className="flex items-center gap-2 rounded-md border border-honey/30 bg-honey-tint px-3 py-2 text-xs text-honey">
           <Icon name="arrowRight" size={14} className="shrink-0" />
@@ -471,9 +536,12 @@ export function VideoComposerBar({
   // The `more` door lights when anything behind it is armed — a hidden setting
   // that steers the render must never be invisible state.
   const moreArmed = Boolean(clipUrl)
+    || Boolean(combatArmed)
     || Boolean(restylePresetId)
     || Boolean(emotionDirectionId)
     || Boolean(ugcActive)
+    || Boolean(turntableArmed)
+    || Boolean(recastArmed)
     || Boolean((shotTimeline?.shots || []).length);
 
   const tools = (
@@ -578,6 +646,12 @@ export function VideoComposerBar({
           scene={sceneRefs}
           sceneRoles={sceneRoles}
           onSceneRole={onSceneRole}
+          sceneSpots={sceneSpots}
+          onOpenSpot={onOpenSpot}
+          // H3 only: the recast grammar is H3's six sections, and the same gate
+          // the chip and the dialog use.
+          onRecast={h3 && onOpenRecast ? onOpenRecast : null}
+          recastArmed={recastArmed}
           onChange={{
             images: onCharacterRefsChange,
             scene: onSceneRefsChange,
@@ -677,6 +751,11 @@ export function VideoComposerBar({
                 {h3 ? (
                   <>
                     <RestyleMenu activeId={restylePresetId} onApply={onApplyRestyle} />
+                    {/* The fight preset sits with the H3 doors because it is
+                        one — but it is the only chip here that moves the
+                        Advanced drawer's controls, which is why its panel
+                        lists them before it touches any. */}
+                    <CombatMenu armed={combatArmed} plan={combatPlan} onApply={onApplyCombat} />
                     <UgcMenu
                       mode="video"
                       active={ugcActive}
@@ -693,7 +772,26 @@ export function VideoComposerBar({
                       prompt={s.setup.prompt}
                       onOpen={() => { onOpenShotBuilder(); close(); }}
                     />
+                    {/* Recast sits beside the Shot Builder because they are the
+                        same axis seen from two ends: one writes a timeline you
+                        invented, the other writes the timeline of a clip you
+                        attached. Both land in detailed_description. */}
+                    <RecastChip
+                      armed={recastArmed}
+                      shots={recastShots}
+                      onOpen={() => { onOpenRecast(); close(); }}
+                    />
                   </>
+                ) : null}
+                {/* The turntable is gated on the VENDOR, not on the local graph
+                    like the four above it: the freeze-and-orbit recipe is a
+                    property of MiniMax's weights, so it holds wherever they run
+                    — this Mac, a rented box, the hosted lane, or the API. */}
+                {turntableAvailable ? (
+                  <TurntableChip
+                    armed={turntableArmed}
+                    onOpen={() => { onOpenTurntable(); close(); }}
+                  />
                 ) : null}
               </div>
             ) : null}
@@ -777,23 +875,18 @@ export function VideoComposerBar({
             />
           )}
           // ⌘/Ctrl+Enter generates, the same as every other composer, behind the
-          // guards it has always used. Deliberately NOT the button's `disabled`
-          // expression: reconciling the two is a behaviour change, and this file
-          // does not make behaviour changes.
+          // guards it has always used — minus `s.generating`, which is no longer
+          // a refusal: the press queues instead, exactly as the button does.
           onKeyDown={(e) => {
             if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey)) return;
             e.preventDefault();
-            if (rentedBlocked || s.generating) return;
+            if (rentedBlocked) return;
             void onGenerate();
           }}
         />
       )}
       recipe={(
-        <RecipeLine
-          parts={recipeParts}
-          advancedOpen={advancedOpen}
-          onToggleAdvanced={onToggleAdvanced}
-        />
+        <RecipeLine parts={recipeParts} />
       )}
       tools={tools}
       meta={(
@@ -809,6 +902,13 @@ export function VideoComposerBar({
               videos={promptCheckRefs.videos}
               audios={promptCheckRefs.audios}
               durations={promptCheckDurations}
+              // A circle burned into a scene picture is a promise the prompt has
+              // to keep, and the check is the only thing that can see both.
+              scenes={sceneRefs.map((url) => ({
+                url,
+                retention: sceneRoles[url] || 'attribute_transfer',
+                spot: sceneSpots[url] || null,
+              }))}
               // The one finding with a mechanical fix, and the last door:
               // adoptPrompt catches a prompt arriving from somewhere, and
               // withDurationThatFits catches the length changing under one
@@ -824,14 +924,13 @@ export function VideoComposerBar({
           ) : null}
         </>
       )}
-      secondary={s.generating ? (
-        <ComposerSecondary onClick={onCancel} title={t('composer.cancelTitle')}>
-          {t('common.cancel')}
-        </ComposerSecondary>
-      ) : null}
+      // No Cancel here. The render in flight is drawn on the stage and its
+      // Cancel sits on that readout, beside the bar it stops — a second one
+      // down here only ever asked which of the two you meant.
       primary={(
         <ComposerPrimary
-          loading={s.generating}
+          // Deliberately not `loading`: a render already out is no reason to
+          // take the press away. It queues.
           disabled={generateBlocked}
           onClick={onGenerate}
           title={generateTitle}

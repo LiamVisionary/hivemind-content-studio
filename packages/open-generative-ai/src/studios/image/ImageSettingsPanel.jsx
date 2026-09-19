@@ -48,6 +48,7 @@ import { PLACE_THIS_MAC } from '../../lib/runTargets.js';
 import { EDIT_SHORT_SIDES, editBudgetForShortSide } from '../../lib/editResolution.js';
 import { AUTO_SAMPLER_LOW_STEP_THRESHOLD, STYLE_PRESETS, parseSeedInput } from './imagePrefs.js';
 import { LocalCatalogNotice } from '../LocalCatalogNotice.jsx';
+import { WorkflowDropInNotice } from '../WorkflowDropInNotice.jsx';
 import { LaneMemoryNotice } from '../LaneMemoryNotice.jsx';
 import { RegionBoxEditor } from './RegionBoxEditor.jsx';
 import { ReferenceRolesMenu } from './ReferenceRolesMenu.jsx';
@@ -209,6 +210,22 @@ export function ImageSettingsPanel({
           />
         )}
       />
+      {/* A workflow you put in the drop-in folder that did not become one of the
+          models in the picker above. Deliberately OUTSIDE the useLocalModel
+          gate below: that flag is only written when someone picks a run target
+          BY HAND, so a tab still following the Automatic pick has it false even
+          with This Mac chosen and twelve local models loaded. A drop-in folder
+          is local by definition and a skipped file is worth saying on the first
+          render, so the notice gates on the only thing that matters — it
+          renders nothing at all when there is nothing to report. */}
+      <div className="px-[19px] [&:empty]:hidden">
+        <WorkflowDropInNotice
+          skipped={s.workflowDropIns?.skipped || []}
+          directories={s.workflowDropIns?.directories || []}
+          onCheckAgain={() => { void onDiscoverLocalCatalog(); }}
+          className="mb-4"
+        />
+      </div>
       {/* A list that cannot run anything is worse than no list: it reads as a
           working studio right up to the press. When this machine has nothing to
           offer, the section says why and carries the one action that changes

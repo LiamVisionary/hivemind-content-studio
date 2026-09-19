@@ -12,8 +12,12 @@
 // DrawerSections (RUNS ON · OUTPUT · LOOK · CONTROL · SAMPLING · MEMORY ·
 // AVOID), because the drawer itself is the disclosure. The chip toolbar became
 // one sentence — Make [1 image] at [1:1] in [photoreal] with [2 references] on
-// [this Mac · Z-Image] . Advanced → — plus round icon doors on the action row.
+// [this Mac · Z-Image] . — plus round icon doors on the action row.
 // Every assertion below moved with them; none was relaxed on the way.
+//
+// 2026-09-15 — the door to the drawer left the end of that sentence (it was an
+// "Advanced →" link after the full stop) for a binder tab on the frame's left
+// edge, the edge the drawer slides out of.
 //
 // What a person SEES — what the studio opens on, what the drawer holds once it
 // is open, which doors the composer carries — is rendered. What is left textual
@@ -114,24 +118,28 @@ test('the studio opens on the recipe sentence, with every tuning control behind 
     const markup = await renderImageMarkup();
     const shown = textOf(markup);
     // The whole of the settings UI a person meets on arrival: five values,
-    // written as a sentence, with the door to the rest at the end of it.
+    // written as a sentence.
     const sentence = shown.slice(shown.indexOf('Make '));
-    assert.match(sentence, /^Make .+ at .+ in .+ with .+ on .+ \. Advanced/, 'the recipe sentence is the composer\'s settings row');
+    assert.match(sentence, /^Make .+ at .+ in .+ with .+ on .+ \./, 'the recipe sentence is the composer\'s settings row');
     assert.match(sentence, /\bno style\b/, 'the style token reads its own default rather than a placeholder');
     assert.match(sentence, /\bno references\b/, 'and so does the reference count');
     // Where it runs is a CONTROL in the sentence, not a readout beside one:
     // this is the old panel's always-visible "Runs on" block, moved into words.
-    const runOn = /\bon (.+?) \. Advanced/.exec(sentence);
+    const runOn = /\bon (.+?) \./.exec(sentence);
     assert.ok(runOn && runOn[1].trim(), 'the sentence names where it runs');
     assert.match(
         markup,
         new RegExp(`<button[^>]*aria-label="${attrPattern(runOn[1].trim())}"`),
         'where it runs opens a menu — it is not a label',
     );
-    // Advanced is SHUT, which now means the drawer does not exist: no dialog
-    // over the stage, and the door says so to a screen reader.
+    // Advanced is SHUT, which now means the drawer's body does not exist: no
+    // dialog over the stage, and its door — the tab on the frame's left edge —
+    // says so to a screen reader.
     assert.doesNotMatch(markup, /role="dialog"/, 'nothing is open over the stage on arrival');
-    assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>Advanced</, 'the Advanced door reports itself shut');
+    const tab = /<button[^>]*data-drawer-tab[^>]*>([\s\S]*?)<\/button>/.exec(markup);
+    assert.ok(tab, 'the frame has no tab to open Advanced with');
+    assert.match(tab[0], /^<button[^>]*aria-expanded="false"/, 'the Advanced tab reports itself shut');
+    assert.equal(textOf(tab[1]), 'Advanced', 'the tab is labelled with the drawer it opens');
     // Each of these paints unconditionally ONCE the drawer opens (the test
     // below proves it), so their absence here is the disclosure working.
     for (const inside of ['Runs on', 'Seed', 'Region boxes']) {

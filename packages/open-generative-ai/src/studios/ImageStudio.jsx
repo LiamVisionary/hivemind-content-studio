@@ -51,6 +51,7 @@ import {
   RENTED_CHANGED_EVENT, consumeRentedModeRequest, machineServesModel, rentedMachinesState, servedByAnyMachine,
 } from '../lib/rentedMachines.js';
 import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
+import { WorkflowDropInNotice } from './WorkflowDropInNotice.jsx';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
 import { t, tf } from '../lib/i18n.js';
@@ -69,7 +70,7 @@ import { referencesNeedingApproval, resolveCloudReferences, uploadHostedInput } 
 import { OWNERSHIP_HEADING, applyReferenceRoles, normalizeReferenceRoles, referenceLabelStyleFor } from '../lib/imageReferenceRoles.js';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { huntLoraIds, isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraHunt, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
-import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
+import { isPickableLocalImageModel, localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
 import { editBudgetForShortSide, editOutputDimensions } from '../lib/editResolution.js';
 import { composeRegionalPrompt, hasActiveRegions } from '../lib/regionPrompt.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
@@ -135,6 +136,7 @@ import { directionLane, directionPayload, directionPromptText } from '../lib/dir
 // instead of throwing the whole studio into its error boundary.
 const CivitaiDownloadDialogLazy = lazyChunk(() => import('../dialogs/CivitaiDownloadDialog.jsx').then((m) => ({ default: m.CivitaiDownloadDialog })));
 const CivitaiPostDialogLazy = lazyChunk(() => import('../components/CivitaiPostDialog.jsx').then((m) => ({ default: m.CivitaiPostDialog })));
+const ObjectToCharacterDialogLazy = lazyChunk(() => import('../dialogs/ObjectToCharacterDialog.jsx').then((m) => ({ default: m.ObjectToCharacterDialog })));
 const PromptHelperDialogLazy = lazyChunk(() => import('../dialogs/PromptHelperDialog.jsx').then((m) => ({ default: m.PromptHelperDialog })));
 const WorkflowDependencyPromptLazy = lazyChunk(() => import('../components/WorkflowDependencyPrompt.jsx').then((m) => ({ default: m.WorkflowDependencyPrompt })));
 const DirectionDialogLazy = lazyChunk(() => import('./image/DirectionDialog.jsx').then((m) => ({ default: m.DirectionDialog })));
@@ -331,6 +333,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // 'empty' | 'unreachable'. Read by the Model section and by the Generate
     // button, so a menu that cannot run anything never sits under a live press.
     localCatalogStatus: isLocalAIAvailable() ? 'discovering' : 'unreachable',
+    // Drop-in workflow files this machine could not read, each with its
+    // reason. Empty on every healthy machine, which is why the notice that
+    // renders it hides itself rather than leaving a gap.
+    workflowDropIns: { directories: [], skipped: [] },
     useLocalModel,
     // This tab's "Run on" pin: the rented machine (rental id) every generation
     // it sends carries as run_on. It is the ONE override — there is no rented
@@ -482,6 +488,8 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     hostedRefUploads: new Map(),
     civitaiOpen: false,
     localPromptHelperOpen: false,
+    objectToCharacterOpen: false,
+    objectToCharacterLast: null,
     resumeRemaining: 0,
     promptHelper: { open: false, busy: false, title: '', result: '', status: '', negative: '', ready: false },
     enhancerOpen: false,
@@ -597,9 +605,16 @@ export function ImageStudio({
   const pinnedMachine = () => (s.rentedMachineId
     ? (s.rentedMachines || []).find((machine) => String(machine.rental_id) === String(s.rentedMachineId)) || null
     : null);
-  const compatibleLocalModels = () => (pinnedMachine()
-    ? s.localImageModels.filter((m) => machineServesModel(pinnedMachine(), m))
-    : s.localImageModels);
+  // …and never offers a lane that is driven by its own button. The Klein
+  // direction tools (Point eyes, Move sun) steer a picture that already exists
+  // from a dialog opened ON that picture, so they are listed for the button to
+  // resolve but are not models a person picks and presses Generate on.
+  const compatibleLocalModels = () => {
+    const pickable = s.localImageModels.filter(isPickableLocalImageModel);
+    return pinnedMachine()
+      ? pickable.filter((m) => machineServesModel(pinnedMachine(), m))
+      : pickable;
+  };
 
   // The routing identity of the cloud selection: the model AND the account it
   // is on. Every cloud generation goes through this rather than assuming MUAPI,
@@ -665,6 +680,13 @@ export function ImageStudio({
     bump();
     const { models, status } = await localAI.listModels();
     s.localCatalogStatus = status;
+    // Asked on every pass, including the one that found nothing — a machine
+    // where no model loaded is exactly where "and here is why" matters most,
+    // and the early return below would have skipped it.
+    void localAI.listWorkflowDropIns().then((dropIns) => {
+      s.workflowDropIns = dropIns;
+      bump();
+    });
     const discovered = models.filter((model) => (
       model?.type !== 'video' && model?.state !== 'not-downloaded' && model?.ready !== false
     ));
@@ -3853,6 +3875,7 @@ export function ImageStudio({
       captureContext={() => captureImageContext(s.prompt)}
       onRestoreContext={(context) => restoreImageContext(context)}
       onApplyStarterSetup={applyImageStarterSetup}
+      onOpenWorkflow={(workflow) => { if (workflow === 'object-to-character') { s.objectToCharacterOpen = true; bump(); } }}
       onApplyUgc={applyUgc}
       cameraRig={s.cameraRig}
       cameraArmed={hasCameraRig(s.prompt)}
@@ -3872,8 +3895,6 @@ export function ImageStudio({
       onSelectAspect={selectAspect}
       onSelectStyle={selectStyle}
       onSelectBatch={selectBatch}
-      advancedOpen={s.advancedOpen}
-      onToggleAdvanced={toggleAdvanced}
       coupleOn={coupleOn}
       uploadOnly={uploadOnly}
       onUploadFiles={handleComposerFiles}
@@ -3891,7 +3912,6 @@ export function ImageStudio({
       etaLabel={etaLabel}
       costLabel={hostedCostLabel}
       onGenerate={generate}
-      onCancel={cancelGeneration}
       onNewPrompt={requestNewPrompt}
       onClearPrompt={clearPromptOnly}
     />
@@ -3906,6 +3926,7 @@ export function ImageStudio({
         composer={composer}
         drawerTitle={t('common.advanced')}
         drawerOpen={s.advancedOpen}
+        onDrawerToggle={toggleAdvanced}
         onDrawerClose={closeAdvanced}
         drawer={panel}
         notices={(
@@ -4268,6 +4289,27 @@ export function ImageStudio({
             // opposite of what the default image guidance optimises for.
             ugc={hasUgcFirstFrame(s.prompt)}
             onUse={(prompt) => { setPromptValue(prompt); persistImagePreferences(); }}
+          />
+        </Suspense>
+      ) : null}
+
+      {/* Object → character: the helper reads a picture of a thing and writes a
+          character; the dialog appends it to whatever is in the box. */}
+      {s.objectToCharacterOpen ? (
+        <Suspense fallback={<DialogLoading />}>
+          <ObjectToCharacterDialogLazy
+            open
+            onClose={() => { s.objectToCharacterOpen = false; bump(); }}
+            // Reopened on the prompt this dialog wrote, the frame is the one it
+            // was written ON — otherwise "Design again" after Use would append
+            // a second character to a prompt that already ends in one. Held in
+            // memory only: prompt text never goes to localStorage.
+            frame={s.objectToCharacterLast?.prompt === s.prompt ? s.objectToCharacterLast.frame : s.prompt}
+            onUse={(prompt, frame) => {
+              s.objectToCharacterLast = { prompt, frame };
+              setPromptValue(prompt);
+              persistImagePreferences();
+            }}
           />
         </Suspense>
       ) : null}

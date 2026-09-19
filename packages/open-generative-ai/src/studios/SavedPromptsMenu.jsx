@@ -89,6 +89,11 @@ export function SavedPromptsMenu({
   // trigger and `extraSections` renders above "Save current prompt…".
   chip = null,
   extraSections = null,
+  // A picture for a starter row: `(entry) => url | ''`. The image composer hands
+  // in the shipped example renders (studios/image/starterArt.js) — each one made
+  // from that row's own prompt at its own recipe — so a row shows what it draws
+  // instead of only saying so. Absent on the video shelf, which has none.
+  starterArtFor = null,
   // Controlled mode, forwarded verbatim to Menu. A caller that loads this
   // component lazily owns the open state: the chip it shows while the chunk is
   // in flight is the thing that was clicked, so the menu has to come up already
@@ -180,6 +185,9 @@ export function SavedPromptsMenu({
       // LoRA it was written around. Null on the video shelf, where the settings
       // that matter are the two fields above.
       setup: entry.setup || null,
+      // A starter that is the framing half of a WORKFLOW names it here, and the
+      // studio opens the dialog that writes the other half.
+      workflow: entry.workflow || '',
     });
     let name = entry.name;
     if (entry.variants?.length) name = `${entry.name} — ${slot.name}`;
@@ -344,6 +352,7 @@ export function SavedPromptsMenu({
                     // makes the row a disclosure: it has no prompt of its own,
                     // only the variants underneath it.
                     const Row = split ? 'div' : 'button';
+                    const art = starterArtFor?.(entry) || '';
                     return (
                       <div key={entry.id} className="rounded-md px-1 py-0.5">
                         <Row
@@ -357,21 +366,31 @@ export function SavedPromptsMenu({
                               : (entry.note || 'Replace the prompt text with this starter'),
                             'aria-expanded': variants.length ? open : undefined,
                           })}
-                          className={`flex w-full flex-col items-start rounded-md px-1.5 py-1 text-left transition-colors ${split ? '' : 'hover:bg-bg2'}`}
+                          className={`flex w-full items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors ${split ? '' : 'hover:bg-bg2'}`}
                         >
-                          <span className="flex w-full items-center gap-1">
-                            <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink1">{entry.name}</span>
-                            {variants.length ? (
-                              <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink3" />
+                          {art ? (
+                            <img
+                              src={art}
+                              alt=""
+                              loading="lazy"
+                              className="mt-0.5 h-11 w-11 shrink-0 rounded-md border border-line1 bg-bg3 object-cover"
+                            />
+                          ) : null}
+                          <span className="flex min-w-0 flex-1 flex-col items-start">
+                            <span className="flex w-full items-center gap-1">
+                              <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink1">{entry.name}</span>
+                              {variants.length ? (
+                                <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink3" />
+                              ) : null}
+                            </span>
+                            <span className="w-full truncate text-[10px] text-ink3">{describeDefaultPrompt(entry)}</span>
+                            {/* Media the prompt cannot run without — pasting one of
+                                these into an empty composer and pressing Generate
+                                produces a clip with no clip in it. */}
+                            {entry.requires ? (
+                              <span className="w-full truncate text-[10px] text-honey">Needs {entry.requires}</span>
                             ) : null}
                           </span>
-                          <span className="truncate text-[10px] text-ink3">{describeDefaultPrompt(entry)}</span>
-                          {/* Media the prompt cannot run without — pasting one of
-                              these into an empty composer and pressing Generate
-                              produces a clip with no clip in it. */}
-                          {entry.requires ? (
-                            <span className="truncate text-[10px] text-honey">Needs {entry.requires}</span>
-                          ) : null}
                         </Row>
                         {split ? (
                           <div className="mt-1 flex flex-wrap items-center gap-1 px-1.5 pb-1">

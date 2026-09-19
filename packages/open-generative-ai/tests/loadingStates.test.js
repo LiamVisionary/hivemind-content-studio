@@ -33,7 +33,10 @@ test('a page-level wait claims the space the content will claim', async () => {
     // The size IS the fix. `flex-1` covers the flex-column parents and the
     // min-height covers the scroll containers that are plain blocks, where
     // flex-1 does nothing at all — both are needed, so both are pinned.
-    assert.match(markup, /min-h-\[55vh\]/, 'the wait fills the majority of an empty page');
+    // dvh, not vh: on iOS `vh` is the LARGE viewport — taller than what is on
+    // screen while the URL bar is showing — so a 55vh loader overshot the page
+    // it was meant to fill.
+    assert.match(markup, /min-h-\[55dvh\]/, 'the wait fills the majority of an empty page');
     assert.match(markup, /flex-1/);
     assert.match(markup, /aria-busy="true"/, 'a wait announces itself as one');
     assert.match(textOf(markup), /Searching Civitai/, 'and says what it is waiting for');

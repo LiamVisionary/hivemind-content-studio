@@ -15,6 +15,10 @@
 // the two assertions that named the old markup were re-pointed: Cancel is the
 // composer's ComposerSecondary, and the "one primary, pinned right" shape is
 // now drawn by frame/ComposerPanel.jsx and asserted there.
+//
+// 2026-09-13 — the composer's Cancel was removed: the stage already draws one
+// on the progress readout, and two identical red words on screen at once made
+// the press ambiguous.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -178,8 +182,11 @@ test('the prompt badge clears the prompt alone, with an Undo and no dialog', () 
     assert.match(panel, /const clearable = Boolean\(onClear\) && !disabled && Boolean\(String\(value \|\| ''\)\.trim\(\)\)/,
         'no badge on an empty box, and none on a box that cannot be typed in');
     // Room for the corner cluster in pixels, not on the rem scale: this page's
-    // root is 14px, so `pr-14` would reserve 49 for a 52px pill.
-    assert.match(panel, /clearable \? 'pr-\[56px\]' : corner && !disabled \? 'pr-\[30px\]' : null/,
+    // root is 14px, so `pr-14` would reserve 49 for a 52px pill. A touch
+    // variant may reserve MORE — the cluster carries a gap between its two
+    // doors there so their hit boxes do not overlap — so what is pinned is the
+    // base reservation and that both faces still have one, not the whole string.
+    assert.match(panel, /clearable \? 'pr-\[56px\][^']*' : corner && !disabled \? 'pr-\[30px\][^']*' : null/,
         'the text makes room for it');
     assert.match(panel, /aria-label=\{armed \? t\('composer\.clearPromptConfirm'\) : t\('composer\.clearPrompt'\)\}/);
 });
@@ -281,21 +288,20 @@ test('cancel flags the run, tears down the timer and listener, and the late resu
     // …and a cancelled rejection is not an error.
     assert.match(studio, /if \(run\.cancelled \|\| e\?\.cancelled\) return;/);
     // No ghost Cancel anywhere: interrupting a paid render is not a quiet
-    // action. There are two doors onto it since the frame replaced the settings
-    // column — the composer's, beside Generate, and the stage's, on the
-    // progress readout that replaced GenerationProgressCard — and BOTH go
-    // through this one handler, so a cancel is a cancel either way.
+    // action. 2026-09-13 — and exactly ONE door onto it. The composer used to
+    // carry a second Cancel beside Generate while the stage drew its own on the
+    // progress readout, which put two identical red words on screen at once and
+    // made the press ambiguous. The stage's is the one that survived: it sits
+    // beside the bar it stops.
     assert.doesNotMatch(studio, /variant="ghost" onClick=\{cancel/);
     assert.equal(
         (studio.match(/onCancel=\{cancelGeneration\}/g) || []).length,
-        2,
-        'the composer and the stage both cancel through the one handler',
+        1,
+        'one Cancel, and it is the stage\'s',
     );
-    // In the composer, Cancel is the SECONDARY — it can never take the one
-    // primary press's place — and it only exists while a run is out.
     const composer = read('src/studios/image/ImageComposer.jsx');
-    assert.match(composer, /secondary=\{s\.generating \? \(\s*<ComposerSecondary onClick=\{onCancel\}/);
-    assert.equal((composer.match(/<ComposerSecondary\b/g) || []).length, 1, 'one Cancel, not one per state');
+    assert.doesNotMatch(composer, /<ComposerSecondary\b/, 'the composer carries no second Cancel');
+    assert.doesNotMatch(composer, /onCancel/, 'the composer is not even handed one');
     assert.doesNotMatch(composer, /<ComposerPrimary[^>]*onClick=\{onCancel\}/, 'Cancel is never the primary');
 });
 
@@ -482,17 +488,25 @@ test('a failed generation leaves ONE callout — described, with its remedy — 
 test('the composer keeps its doors on the left and Generate pinned in its own group', () => {
     const studio = read('src/studios/ImageStudio.jsx');
     const composer = read('src/studios/image/ImageComposer.jsx');
-    // ONE primary, pinned right, never wrapped under the doors. The action row
-    // belongs to the frame now, so the shape is pinned where it is drawn: the
-    // doors flow first, then a single `ml-auto` group holding the eta, Cancel
-    // and Generate in that order. Generate cannot wrap under the doors because
-    // it is not in the same flex group as them.
+    // ONE primary, pinned right, never left-aligned under the doors. The action
+    // row belongs to the frame now, so the shape is pinned where it is drawn:
+    // the doors flow first, then a single `ml-auto` group holding the eta,
+    // Cancel and Generate in that order.
+    //
+    // The row DOES wrap now, and that is the fix rather than a regression. It
+    // used to be one unwrapping row of `shrink-0` children, which at 375px did
+    // not squeeze and did not wrap — it drew Generate 111px outside the panel.
+    // What the group must keep is the thing the no-wrap rule was protecting:
+    // `ml-auto` plus `justify-end`, so the press is at the right edge of
+    // whichever line it lands on, never left-aligned beneath the doors.
+    //
+    // Pinned as a property rather than as one literal class string: the exact
+    // classes carry breakpoints now and will carry more.
     const panel = read('src/studios/frame/ComposerPanel.jsx');
-    assert.match(
-        panel,
-        /<div className="flex items-center gap-2">\s*\{tools\}\s*<div className="ml-auto flex min-w-0 items-center gap-\[15px\]">\s*\{meta\}\s*\{secondary\}\s*\{primary\}\s*<\/div>/,
-        'the action row is tools, then one right-hand group',
-    );
+    const actionRow = /<div className="([^"]*)">\s*\{tools\}\s*<div className="([^"]*)">\s*\{meta\}\s*\{secondary\}\s*\{primary\}\s*<\/div>/.exec(panel);
+    assert.ok(actionRow, 'the action row is tools, then one right-hand group');
+    assert.match(actionRow[2], /\bml-auto\b/, 'the press group is pushed to the right edge');
+    assert.match(actionRow[2], /\bjustify-end\b/, 'and stays right-aligned on the line it wraps to');
     // …and the Image composer puts exactly one press in that group, and none
     // among the doors. (imageTiering renders this and checks it holds.)
     assert.equal((composer.match(/<ComposerPrimary\b/g) || []).length, 1, 'one primary press');

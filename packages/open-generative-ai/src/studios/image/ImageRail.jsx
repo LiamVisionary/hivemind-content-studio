@@ -194,6 +194,13 @@ const ImageRailCard = memo(function ImageRailCard({
           'absolute right-0.5 top-0.5 grid h-[18px] w-[18px] place-items-center rounded-full bg-bg0/80 text-ink1',
           'opacity-0 transition-opacity duration-150 hover:bg-bg1 focus-visible:opacity-100',
           'group-focus-within:opacity-100 group-hover:opacity-100',
+          // A finger never hovers, so on a phone this door did not exist at
+          // all — the rail is a strip on the composer there and the card's
+          // long press was the only way in. Always drawn on a coarse pointer,
+          // and on the control ladder rather than 18px. Deliberately not the
+          // full 44: the cards are 48px and stand shoulder to shoulder, so a
+          // target that size would take taps off its neighbour.
+          'touch:h-ctl-xs touch:w-ctl-xs touch:opacity-100',
         )}
       >
         <Icon name="more" size={11} />
@@ -314,6 +321,10 @@ export function ImageRail({
         <span
           aria-hidden="true"
           title={t('common.generating')}
+          // Counts as a card: on a phone the rail is a strip on the composer
+          // and hides itself when it holds nothing, and a run in flight is
+          // something.
+          data-rail-card=""
           className="grid shrink-0 animate-pulse place-items-center rounded-[8px] bg-bg2"
           style={{ width: CARD_W, aspectRatio: '1 / 1' }}
         >

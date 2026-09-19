@@ -377,6 +377,10 @@
     modelCard,
     downloadBinary: async () => ({ ok: true, source: 'hosted' }),
     listModels: () => jsonFetch('/local-ai/models'),
+    // Why a workflow you dropped in is not in the list above. Its own call
+    // rather than a field on listModels, which every caller reads as a bare
+    // array of models.
+    listWorkflowDropIns: () => jsonFetch('/local-ai/workflow-drop-ins'),
     // The rendered control a direction edit sends to its LoRA. Same origin as
     // this bridge, so the picker can point an <img> straight at it instead of
     // round-tripping the bytes through here.

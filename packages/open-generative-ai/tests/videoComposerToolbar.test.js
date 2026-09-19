@@ -4,10 +4,10 @@
 // The markup these tests were written against is gone. There is no chip row and
 // no result row: VideoStudio.jsx keeps the state and the wiring and draws almost
 // none of the route. The composer is video/VideoComposerBar.jsx — a prompt, a
-// recipe sentence ("Make a [5s clip] at [16:9] with [cast] on [where] .
-// Advanced →"), round icon-only doors, and ONE ComposerPrimary pinned right by
+// recipe sentence ("Make a [5s clip] at [16:9] with [cast] on [where] ."),
+// round icon-only doors, and ONE ComposerPrimary pinned right by
 // ComposerPanel's `ml-auto` group. The finished clip is video/VideoStage.jsx and
-// its floating action column.
+// its floating action column. Advanced is a tab on the frame's left edge.
 //
 // What is pinned here is the contract, not the classes:
 //   - every door the thirteen chips opened is still reachable — as a recipe
@@ -86,8 +86,14 @@ test("the video composer offers every chip's door and one Generate", async () =>
     // a "Runs on" label over a picker; it is now the last clause of the recipe
     // sentence, and that clause is still the picker — a control with a menu and
     // an accessible name, not a printed word.
-    const runOn = studio.match(/ on (.+?) \. Advanced/);
+    const sentence = studio.slice(studio.indexOf('Make '));
+    const runOn = sentence.match(/ on (.+?) \./);
     assert.ok(runOn, 'the recipe sentence does not say where the clip will be made');
+    // Advanced is no longer a word after that sentence's full stop: it is the
+    // tab on the frame's left edge, and this studio has to wire it.
+    const tab = /<button[^>]*data-drawer-tab[^>]*>/.exec(markup);
+    assert.ok(tab, 'the Video studio has no tab to open Advanced with');
+    assert.match(tab[0], /aria-expanded="false"/, 'the Advanced tab reports itself shut');
     assert.match(
         markup,
         new RegExp(`aria-haspopup="menu"[^>]*aria-label="${escapeRe(runOn[1])}"`),
@@ -104,20 +110,34 @@ test('the tools stay one row and Generate is a pinned sibling', async () => {
     const primaries = markup.match(/<button[^>]*class="[^"]*bg-honey text-on-honey/g) || [];
     assert.equal(primaries.length, 1, 'exactly one filled press belongs on the frame');
 
-    // Pinned right and unsqueezable: the press lives in ComposerPanel's `ml-auto`
-    // group, and that group is a sibling of the doors inside a plain
-    // `flex items-center` row. No flex-wrap anywhere on that row is what stops
-    // Generate dropping to a second line, left-aligned, under the doors — the
-    // bug the flex-[1_1_280px] chip group used to hold off.
-    const group = markup.indexOf('<div class="ml-auto flex min-w-0 items-center gap-[15px]">');
-    assert.ok(group > 0, 'the primary group is no longer pinned right with ml-auto');
+    // Pinned right: the press lives in ComposerPanel's `ml-auto` group, and that
+    // group is a sibling of the doors inside the action row.
+    //
+    // The row wraps now. It used to be forbidden from wrapping, because a
+    // wrapped press landed on a second line LEFT-aligned under the doors — the
+    // bug the flex-[1_1_280px] chip group used to hold off. What actually stops
+    // that is `ml-auto` with `justify-end`, not the absence of flex-wrap, and
+    // refusing to wrap cost more than it saved: at 375px the row could neither
+    // squeeze nor wrap, so Generate simply drew outside the panel. So what is
+    // pinned here is the alignment, and that the press never shrinks.
+    const groupRe = /<div class="([^"]*\bml-auto\b[^"]*)">/g;
+    let group = -1;
+    let groupClasses = '';
+    for (const m of markup.matchAll(groupRe)) {
+        if (!/\bjustify-end\b/.test(m[1])) continue;
+        group = m.index;
+        groupClasses = m[1];
+        break;
+    }
+    assert.ok(group > 0, 'the primary group is no longer pinned right with ml-auto + justify-end');
+    assert.match(groupClasses, /\bjustify-end\b/, 'a wrapped press stays at the right edge, never under the doors');
     assert.match(
-        markup.slice(group, group + 800),
-        /<button[^>]*class="inline-flex h-10 shrink-0 items-center[^"]*bg-honey text-on-honey/,
-        'Generate must sit inside the pinned group, and must not shrink',
+        markup.slice(group, group + 900),
+        /<button[^>]*class="inline-flex h-\[44px\] grow shrink-0 items-center[^"]*bg-honey text-on-honey/,
+        'Generate must sit inside the pinned group, must not shrink, and must be a 44px touch target',
     );
-    const row = markup.lastIndexOf('<div class="flex items-center gap-2">', group);
-    assert.ok(row > 0, 'the action row must be one non-wrapping flex row holding the doors and the pinned group');
+    const row = markup.lastIndexOf('<div class="flex flex-wrap items-center gap-2">', group);
+    assert.ok(row > 0, 'the action row must be the one flex row holding the doors and the pinned group');
 
     // The all-studio completion chime rides in the composer's `more` panel — one
     // press from Generate, and still NOT in Advanced, which is where nobody
@@ -231,7 +251,10 @@ test('keyboard, confirms, and the stage actions behave', async () => {
     // button — deliberately NOT the button's own `disabled` expression. The
     // handler moved to the composer with the textarea; the studio hands it the
     // same generate() and the same rentedBlocked it guarded with before.
-    assert.match(composer, /if \(e\.key !== 'Enter' \|\| !\(e\.metaKey \|\| e\.ctrlKey\)\) return;[\s\S]*?if \(rentedBlocked \|\| s\.generating\) return;\s*void onGenerate\(\);/);
+    // 2026-09-13 — `s.generating` left those guards on both doors: a press made
+    // while a render is out now QUEUES rather than being swallowed.
+    assert.match(composer, /if \(e\.key !== 'Enter' \|\| !\(e\.metaKey \|\| e\.ctrlKey\)\) return;[\s\S]*?if \(rentedBlocked\) return;\s*void onGenerate\(\);/);
+    assert.doesNotMatch(composer, /if \(rentedBlocked \|\| s\.generating\) return;/, 'a render in flight no longer eats the press');
     assert.match(studio, /rentedBlocked=\{rentedBlocked\}\s*onGenerate=\{generate\}/);
 
     // No native confirm anywhere in the studio or the surfaces it draws; the
@@ -330,4 +353,55 @@ test('the video prompt box carries a clear badge, and Start fresh asks first', (
     assert.match(dialog.slice(0, 1200), /title=\{t\('common\.startFreshTitle'\)\}/);
     assert.match(dialog.slice(0, 1200), /cancelLabel=\{t\('common\.keepWhatIHave'\)\}/);
     assert.match(dialog.slice(0, 1200), /tone="primary"/, 'nothing is deleted — History keeps every clip');
+});
+
+/* ---------------- the waiting list ---------------- */
+
+test('a press made while a render is out queues instead of bouncing, with the settings it was pressed at', async () => {
+    const studio = read(STUDIO);
+    const composer = read(COMPOSER);
+
+    // ONE Cancel on the route, and it is the stage's — beside the bar it stops.
+    // The composer's ComposerSecondary was the second red word on screen, and
+    // the two together only ever asked which of them you meant.
+    assert.doesNotMatch(composer, /<ComposerSecondary\b/, 'the composer carries no second Cancel');
+    assert.doesNotMatch(composer, /onCancel/, 'the composer is not even handed one');
+    assert.equal((studio.match(/onCancel=\{cancelGeneration\}/g) || []).length, 1, "one Cancel, and it is the stage's");
+
+    // The press is never taken away by a render already running: `loading` is
+    // what disabled it, and ComposerPrimary disables on `disabled || loading`.
+    assert.doesNotMatch(composer, /<ComposerPrimary\b[\s\S]{0,240}?loading=/, 'a render in flight must not disable the press');
+    assert.match(studio, /const generateLabel = studioBusy \? t\('common\.addToQueue'\) : t\('common\.generate'\)/);
+
+    // The whole point of the capture: a queued shot renders what was on screen
+    // when it was PRESSED, not whatever the composer holds when its turn comes.
+    const generate = studio.match(/\n {2}const generate = \(\) => \{[\s\S]*?\n {2}\};/)[0];
+    assert.match(generate, /if \(!s\.generating && !generationQueueRef\.current\.pending\) return runGeneration\(null\)/);
+    assert.match(generate, /return runGeneration\(captureGenerationContext\(prompt\)\)/);
+    // …and it is refused at the PRESS if it was never going to run, through the
+    // same validator the run itself uses.
+    assert.match(generate, /const blocker = videoRequestBlocker\(\{/);
+    assert.match(studio, /const generateNow = async \(queued = null\) => \{/);
+    assert.match(studio, /const blocker = videoRequestBlocker\(\{\n\s+setup,\n\s+prompt,\n\s+extendSourceId,/);
+
+    // A queued run rebuilds its own setup and NEVER writes the composer, which
+    // by then holds the next shot the user is writing.
+    assert.match(studio, /const applied = queued \? applyGenerationContext\(s\.setup, queued, s\.catalogs\) : null;/);
+    assert.match(studio, /const setup = applied \? applied\.setup : s\.setup;/);
+    const generateNow = studio.slice(studio.indexOf('const generateNow = async (queued = null)'));
+    assert.doesNotMatch(generateNow.slice(0, 4000), /restoreGenerationContext/, 'a queued run must not restore into the composer');
+
+    // The list is shown where the press that made it is, and every row can leave:
+    // a queue you can only add to is a trap.
+    assert.match(composer, /<ComposerQueue items=\{queuedShots\} onRemove=\{onRemoveQueuedShot\} onClear=\{onClearQueuedShots\} \/>/);
+    const queue = await renderComponent('src/studios/frame/ComposerPanel.jsx', 'ComposerQueue', {
+        items: [
+            { id: 'gen-2', place: 1, label: 'a dog landing', detail: 'LTX 2.3 · 5s' },
+            { id: 'gen-3', place: 2, label: 'a dog running', detail: 'LTX 2.3 · 5s' },
+        ],
+    });
+    assert.match(textOf(queue), /Next up · 2/);
+    assert.match(textOf(queue), /a dog landing/);
+    assert.equal((queue.match(/aria-label="Remove from the queue"/g) || []).length, 2, 'every waiting shot can leave');
+    assert.equal(await renderComponent('src/studios/frame/ComposerPanel.jsx', 'ComposerQueue', { items: [] }), '');
 });

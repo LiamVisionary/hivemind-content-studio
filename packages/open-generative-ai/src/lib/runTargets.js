@@ -31,6 +31,7 @@
 // nothing and fetches nothing, so both the picker and the tests apply exactly
 // the rules the studio applies.
 import { t } from './i18n.js';
+import { localModelSupportsImageInput } from './localImageModelFilter.js';
 import {
   PLACE_ACCOUNTS, PLACE_HIVEMINDOS, PLACE_THIS_MAC, clipRouteFor, credentialLabelFor, needsBrowserKey, placeFor,
   placeLabelFor, transportFor,
@@ -123,12 +124,106 @@ export function runTabsFor(targets) {
  * and the only bill a fresh install already has. Neither: the first tab holding
  * anything, so an empty strip is never what opens.
  */
-export function defaultRunTab(targets) {
+export function defaultRunTab(targets, selected = null) {
   const tabs = runTabsFor(targets);
   const hasReady = (id) => tabs.some((tab) => tab.id === id && tab.targets.some((target) => target.ready));
+  // Wherever the CURRENT selection lives, first. Opening anywhere else answers
+  // a question nobody asked: the first thing you look for on opening a picker
+  // is the row that is already chosen. With a rented box selected this opened
+  // on This Mac and left the chosen row on a tab you had to go and find.
+  const current = selected && (targets || []).find(
+    (target) => target.id === selected.id && target.provider === selected.provider,
+  );
+  const currentTab = current ? tabOfTarget(current) : '';
+  if (currentTab && tabs.some((tab) => tab.id === currentTab && tab.targets.length)) return currentTab;
   if (hasReady(PLACE_THIS_MAC)) return PLACE_THIS_MAC;
   if (tabs.some((tab) => tab.id === PLACE_HIVEMINDOS && tab.targets.length)) return PLACE_HIVEMINDOS;
   return tabs.find((tab) => tab.targets.length)?.id || PLACE_THIS_MAC;
+}
+
+/* ---------------- what a model STARTS FROM ---------------- */
+
+/**
+ * The other question a person asks of a model list, and the one the picker
+ * could not answer.
+ *
+ * A bill says who pays. It says nothing about whether a prompt alone reaches
+ * the model — and in a list where 54 of MUAPI's 107 image rows are editors
+ * that take a required picture (19 of them no prompt at all), that is the
+ * fact a reader needs first. It was printed on the few rows the hosted
+ * rail happened to carry endpoint names for, and nowhere else: "AI Image
+ * Upscaler" sat between two text-to-image models looking exactly like them
+ * until the Generate press refused.
+ *
+ * Four answers, because there are four: a prompt, a picture, either, or a
+ * clip (the video tools — a watermark remover starts from footage and nothing
+ * else). `''` is the fifth and it is not an answer: a row whose inventory
+ * declares neither capabilities nor inputs is UNTYPED, shows no badge and
+ * joins no filter, because guessing here is how an editing-only model comes
+ * to be labelled as one that can start from text.
+ */
+export const STARTS_FROM_TEXT = 'text';
+export const STARTS_FROM_IMAGE = 'image';
+export const STARTS_FROM_EITHER = 'hybrid';
+export const STARTS_FROM_VIDEO = 'video';
+
+// The hosted rail names one endpoint per capability and these are its keys;
+// the studio catalogs speak the same words (imageRunTargets and
+// videoRunTargets derive them from the bucket a model is listed in), so one
+// table reads all three inventories.
+const TEXT_CAPABILITIES = new Set(['text-to-image', 'text-to-video']);
+const IMAGE_CAPABILITIES = new Set(['image-to-image', 'image-to-video']);
+
+/**
+ * What one row starts from, from whatever its inventory actually declared.
+ *
+ * Capabilities win where they exist, because they ARE the endpoint list. With
+ * none, the fields the model accepts answer instead — the same image-input
+ * grammar the Image studio filters its local models by — and `requiresImage`
+ * is the one thing that can rule text out.
+ */
+function startsFrom({ capabilities = [], accepts = null, requiresImage = false }) {
+  const declared = capabilities.length > 0;
+  // An EMPTY `accepts` is not a claim that the model takes nothing — the media
+  // catalog leaves it empty on every provider whose inputs it never listed, and
+  // GPT Image, which takes sixteen reference pictures, is one of them. Only a
+  // non-empty list is an inventory saying what it knows.
+  const listed = Array.isArray(accepts) && accepts.length > 0;
+  if (!declared && !listed && !requiresImage) return '';
+  const fromText = declared ? capabilities.some((name) => TEXT_CAPABILITIES.has(name)) : !requiresImage;
+  const fromImage = declared
+    ? capabilities.some((name) => IMAGE_CAPABILITIES.has(name))
+    : (requiresImage || localModelSupportsImageInput({ accepts }));
+  if (fromText && fromImage) return STARTS_FROM_EITHER;
+  if (fromImage) return STARTS_FROM_IMAGE;
+  if (fromText) return STARTS_FROM_TEXT;
+  // What is left takes a clip or a soundtrack and no prompt: the v2v tools,
+  // and the hosted rail's video-to-video and audio-to-video rows.
+  return STARTS_FROM_VIDEO;
+}
+
+/**
+ * The type filters for one list, each with the rows it holds.
+ *
+ * Ordered the way the question is asked — start from words, start from a
+ * picture, either — and EMPTY TYPES ARE DROPPED, so a chip is never a promise
+ * of rows that are not there. Untyped rows belong to no chip and stay in the
+ * unfiltered list, which is why pressing one narrows rather than hides.
+ *
+ * The words are the kind's own: an image model that takes a picture does
+ * image-to-image, a video model that takes one does image-to-video, and
+ * calling both "Edit" is how the picker came to describe neither.
+ */
+export function runTypesFor(targets, kind = 'image') {
+  const video = kind === 'video';
+  return [
+    { id: STARTS_FROM_TEXT, label: video ? t('runOn.typeTextToVideo') : t('runOn.typeTextToImage') },
+    { id: STARTS_FROM_IMAGE, label: video ? t('runOn.typeImageToVideo') : t('runOn.typeImageToImage') },
+    { id: STARTS_FROM_EITHER, label: t('runOn.typeHybrid') },
+    { id: STARTS_FROM_VIDEO, label: t('runOn.typeVideoIn') },
+  ]
+    .map((type) => ({ ...type, targets: (targets || []).filter((target) => target.startsFrom === type.id) }))
+    .filter((type) => type.targets.length > 0);
 }
 
 /** The rental a generation with this model would actually land on, honouring
@@ -204,12 +299,18 @@ export function credentialReady(row, available = true) {
 function makeTarget({
   id, provider, source, label, rating = '', ratingReason = '', accepts = null, family = '', available = true,
   needs = '', keys = null, detail = '', machines = null, pinned = '', kind = 'image', capabilities = null,
-  hostedRoutes = null, requiresImage = false,
+  hostedRoutes = null, requiresImage = false, accelerator = '',
 }) {
   const row = { id, provider, source, accepts, family };
+  const declared = Array.isArray(capabilities) ? capabilities.filter(Boolean).map(String) : [];
   const place = placeFor(row);
   const route = kind === 'video' ? clipRouteFor(row) : transportFor(row);
-  const machine = place === PLACE_THIS_MAC ? machineForModel(machines, { id, name: label }, pinned) : null;
+  // `accelerator` rides along because a name is not a capability: the matcher
+  // would otherwise offer the Apple-silicon H3 lane on a rented NVIDIA box,
+  // whose needles legitimately say "minimax_h3".
+  const machine = place === PLACE_THIS_MAC
+    ? machineForModel(machines, { id, name: label, accelerator }, pinned)
+    : null;
   const credentialled = credentialReady(row, available);
   return {
     key: `${place || 'unknown'}:${provider}:${id}`,
@@ -227,7 +328,7 @@ function makeTarget({
     // — which are four prices and one model. The catalog collapses them, and
     // these are the badges that say so, in the kind's own terms. Empty for
     // every row that is only ever one thing.
-    capabilities: Array.isArray(capabilities) ? capabilities.filter(Boolean).map(String) : [],
+    capabilities: declared,
     // capability -> {model, usd}. The endpoint each badge stands for, and its
     // catalogue price where it has one — ten of the rail's 538 do; the rest
     // are quoted per request, which is what the row asks for when it is on
@@ -239,6 +340,13 @@ function makeTarget({
     // the Generate press, after a prompt had been written for a model with no
     // prompt field. The catalog knows; now the picker and the composer do too.
     requiresImage: Boolean(requiresImage),
+    // Which of this studio's two kinds the row makes, carried so the picker can
+    // say "image to image" or "image to video" without being told twice — the
+    // list and the words on it then cannot disagree.
+    kind,
+    // A prompt, a picture, either, or a clip — '' where the inventory declared
+    // nothing to read it off. See startsFrom.
+    startsFrom: startsFrom({ capabilities: declared, accepts, requiresImage }),
     // The ONE display label for where this runs. When a rental serves the
     // model, the machine IS the place: "This Mac" would be a true sentence
     // about the lane and a false one about the hardware doing the work.
@@ -291,13 +399,29 @@ export function buildRunTargets({
     const verdict = ratings?.get(`${target.provider}:${target.id}`) || null;
     return verdict ? { ...target, rating: verdict.rating || '', ratingReason: verdict.reason || '' } : target;
   };
-  const local = (localModels || []).map((model) => rated(makeTarget({
+  // A lane the studio drives from its own button is not a place a generation
+  // can be sent, so it is not a run target. The Klein direction tools (Point
+  // eyes, Move sun) steer a picture that already exists, from a dialog opened
+  // ON that picture; listed here as well, they read as two more models to
+  // choose between — which is the choosing their dialog exists to remove.
+  // Filtered HERE rather than in a studio so every picker agrees at once.
+  const local = (localModels || []).filter((model) => !model?.actionOnly).map((model) => rated(makeTarget({
     id: model.id,
     provider: model.provider || 'sdcpp',
     source: 'local',
     label: model.name || model.label || model.id,
     family: model.family || '',
     accepts: model.accepts || null,
+    // A local inventory that names its capabilities outright is taken at its
+    // word (the Video studio's Wan2GP rows, which declare t2v or i2v per
+    // model); one that only lists inputs is read off those, below.
+    capabilities: Array.isArray(model.capabilities) ? model.capabilities : null,
+    // The browser's own catalog says it in its own words: `requires.image` is
+    // the local mapper's flag for a graph that cannot start from a prompt (the
+    // Krea 2 identity edit, the Klein edit lanes). Without it every local row
+    // read as text-to-image, badge and filter alike.
+    requiresImage: Boolean(model.requires?.image),
+    accelerator: model.accelerator || '',
     machines,
     pinned,
     kind,
@@ -317,12 +441,16 @@ export function buildRunTargets({
         family: String(model.family || ''),
         accepts: Array.isArray(model.accepts) ? model.accepts : null,
         // `hosted_routes` is capability -> {model, usd}; the keys are what
-        // this row can do in this kind.
+        // this row can do in this kind. A catalog with no routes may still name
+        // its capabilities outright — the two studio inventories derive theirs
+        // from the bucket a model is listed in, which is the same claim made by
+        // a list rather than by a price map.
         capabilities: model.hosted_routes && typeof model.hosted_routes === 'object'
           ? Object.keys(model.hosted_routes)
-          : null,
+          : (Array.isArray(model.capabilities) ? model.capabilities : null),
         hostedRoutes: model.hosted_routes || null,
         requiresImage: model.requires_image === true,
+        accelerator: model.accelerator || '',
         available: provider.available !== false,
         // The provider row's own account of what it is waiting for — the
         // sentence the server wrote ("Needs a MUAPI key") and the credential
@@ -363,6 +491,12 @@ export function runTargetsFromRows(rows, { kind = 'image', machines = null, pinn
       label: String(row.label || row.model_label || row.name || row.id || ''),
       family: String(row.family || ''),
       accepts: Array.isArray(row.accepts) ? row.accepts : null,
+      // Carried, never inferred: an inventory that knows what its rows start
+      // from says so here and gets the badge and the filter; one that does not
+      // leaves them untyped rather than being read as text-to-image. Restore's
+      // lanes and Sprite's rows are the second case.
+      capabilities: Array.isArray(row.capabilities) ? row.capabilities : null,
+      requiresImage: row.requiresImage === true || row.requires_image === true,
       rating: row.rating || '',
       ratingReason: row.reason || '',
       available: row.available !== false,

@@ -5,6 +5,12 @@
 // studio speaks Chinese. Every line says the consequence, not the rule — "this
 // cut never happens" rather than "cut > duration" — because the consequence is
 // the part that tells someone whether to care.
+//
+// Reference rows are named the way the panel names them — "Picture 3", not
+// "<Picture 3>" — because the angle brackets are the model's grammar and a
+// finding is for a reader.
+import { plainReferenceLabel } from './referenceKinds.js';
+
 // The six sections in plain words. H3 reads them positionally under their own
 // field names; a reader should not have to. The field name itself survives in
 // lib/castPrompt.js, which is what actually writes the document.
@@ -110,6 +116,14 @@ export function describeCheckFinding(finding) {
     }
     case 'subject-not-in-scene':
       return `Person ${finding.subject} is defined but never appears in the summary or description — the model decides who fills that slot. Weave, or ask the helper to write them into the scene.`;
+    case 'spot-unused':
+      return `A ${finding.color} circle is drawn on the ${finding.where} of `
+        + `${finding.label ? plainReferenceLabel(finding.label) : 'a scene picture'}, but the prompt never mentions it — `
+        + 'the model is not told the circle chooses where the clip is set, and an unexplained ring in a reference is '
+        + 'something it will draw into the video.';
+    case 'spot-uncircled':
+      return `${finding.label ? plainReferenceLabel(finding.label) : 'A scene picture'} is set to a circled spot but nothing is circled on it. `
+        + 'Open it from the scene row and draw the circle, or set the row back to a place.';
     case 'pictures-unnamed':
       return `${finding.count} picture${finding.count === 1 ? '' : 's'} attached, but the prompt never refers to them — the model is not told what to do with them.`;
     case 'motion-unnamed':

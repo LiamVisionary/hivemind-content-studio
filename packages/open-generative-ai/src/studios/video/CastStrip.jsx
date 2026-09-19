@@ -19,7 +19,7 @@
 // whether it is — so the status of the "magic" is never hidden.
 //
 // This file is the panel; every rule lives in lib/promptWeave.js.
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { PERSONA_DEFAULT_STYLE } from '../../lib/castPrompt.js';
 import {
@@ -257,13 +257,16 @@ function MemberEditor({
           <span className="block truncate text-[10px] text-honey" title={subjectToken}>{subject}</span>
         </span>
         <span className="flex shrink-0 items-center">
+          {/* The chip above advertises "drag to reorder", which no touch screen
+              can honour — these two ARE the reorder there, so at 21px the
+              fallback was as unreachable as the drag it stands in for. */}
           <button
             type="button"
             disabled={index === 0}
             onClick={() => onMove(index, -1)}
             aria-label="Move earlier"
             title="Move earlier — cast order is the numbering"
-            className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30"
+            className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30 touch:h-[44px] touch:w-[44px]"
           >
             <Icon name="arrowRight" size={11} className="rotate-180" />
           </button>
@@ -272,10 +275,13 @@ function MemberEditor({
             disabled={index === total - 1}
             onClick={() => onMove(index, 1)}
             aria-label="Move later"
-            className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30"
+            className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30 touch:h-[44px] touch:w-[44px]"
           >
             <Icon name="arrowRight" size={11} />
           </button>
+          {/* Remove is destructive and "Move later" is a repeat-press target
+              right beside it, so the two do not touch. */}
+          <span className="ml-0.5 w-px self-stretch bg-line1 touch:ml-2 touch:mr-1" />
           <button
             type="button"
             onClick={() => { onRemove(member.key); close(); }}
@@ -283,7 +289,7 @@ function MemberEditor({
             title={isPersonaLike(member)
               ? 'Remove from the shot — its pictures and clips leave the reference rows too'
               : 'Remove from the shot'}
-            className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+            className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 touch:h-[44px] touch:w-[44px]"
           >
             <Icon name="x" size={12} />
           </button>
@@ -447,6 +453,19 @@ function MemberChip({
   // name/look/+ Pictures are one tap away, and a drag must never read as a
   // click that pops the editor.
   const ref = useDismissable(open, () => onOpenChange(false));
+  // Same rule as ui/Menu.jsx and the references panel: a 19rem editor anchored
+  // at the left of a chip near the right edge ran off the screen — and the chip
+  // it hangs off is the LAST one on a wrapping strip about as often as not.
+  const panelRef = useRef(null);
+  const [side, setSide] = useState('start');
+  useEffect(() => {
+    if (!open) { setSide('start'); return; }
+    const panel = panelRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const margin = 8;
+    setSide(rect.right > window.innerWidth - margin && rect.width < window.innerWidth - 2 * margin ? 'end' : 'start');
+  }, [open]);
   return (
     <div
       ref={ref}
@@ -466,7 +485,11 @@ function MemberChip({
             ? 'Name, gender, look, references, order — drag to reorder'
             : 'Style, voice, order — drag to reorder'}
         className={cx(
+          // 24.5px at this root. The chip is the only door to a cast member's
+          // name, look, pictures and order, so under a thumb it is a thumb's
+          // size — h-11 would be 38.5px here, which is why the pixels are literal.
           'inline-flex h-7 max-w-[260px] cursor-grab items-center gap-1.5 rounded-md border px-1.5 text-[12px] transition-colors active:cursor-grabbing',
+          'touch:h-[44px] touch:px-3 touch:text-[13px]',
           open ? 'border-honey bg-honey-tint' : 'border-line1 bg-bg2 hover:border-line2 hover:bg-bg3',
           drag.overIndex === index && drag.fromIndex !== index && 'border-honey ring-1 ring-honey',
           drag.fromIndex === index && 'opacity-50',
@@ -481,7 +504,16 @@ function MemberChip({
         </span>
       </button>
       {open ? (
-        <div className="hive-scale-in absolute bottom-[calc(100%+6px)] left-0 z-50 max-h-[min(420px,60vh)] w-[19rem] overflow-y-auto rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop" role="dialog">
+        <div
+          ref={panelRef}
+          role="dialog"
+          className={cx(
+            // dvh, not vh: `vh` is iOS's LARGE viewport, so a 60vh panel could
+            // stand taller than the screen it was being clamped to.
+            'hive-scale-in absolute bottom-[calc(100%+6px)] z-50 max-h-[min(420px,60dvh)] w-[19rem] overflow-y-auto overscroll-contain rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop',
+            side === 'end' ? 'right-0' : 'left-0',
+          )}
+        >
           <MemberEditor
             member={member}
             index={index}

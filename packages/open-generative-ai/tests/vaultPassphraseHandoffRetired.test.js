@@ -142,8 +142,9 @@ test('without a device wrap the passphrase stays — it is still the only way ba
     const vault = await vaultPromise;
     const session = await sessionPromise;
     const { identity } = await vault.createVaultIdentity(PASSPHRASE);
-    // No hint at all (the in-app VaultUnlockModal path stashes only the
-    // passphrase): there is no account id to wrap for.
+    // No hint at all — sessionStorage refused the write, or a build older than
+    // the one that taught the in-app unlock to stash the account id. Either
+    // way there is nothing to wrap for.
     signIn({ accountId: null });
     await reset(() => ({ body: { ok: true, exists: true, identity } }));
 
@@ -200,4 +201,69 @@ test('a PRF unlock retires the passphrase the gate stashed alongside the secret'
     await reset(() => ({ body: { ok: true, exists: true, identity: enrolled } }));
     assert.equal(await session.ensureVaultReady(), true);
     assert.equal(vault.isVaultUnlocked(), true);
+});
+
+// ── the in-app unlock writes the same handoff the gate does ──────────────────
+//
+// It used to stash the passphrase and nothing else. `bootstrap` then had no
+// account id, could not call `rememberOnThisDevice`, and left no device wrap
+// behind — so the next tab met the same locked vault and the same password
+// prompt, forever, on a browser that had already proved the password twice.
+
+test('an in-app unlock leaves the account id, so this browser stops asking', async () => {
+    const vault = await vaultPromise;
+    const session = await sessionPromise;
+    const { identity } = await vault.createVaultIdentity(PASSPHRASE);
+    const workspace = { id: 11, has_password: true, has_passkey: false };
+    storage.clear();
+    await reset(
+        { body: { ok: true, account: workspace } },              // POST /api/accounts/unlock
+        () => ({ body: { ok: true, exists: true, identity } }),  // GET  /api/vault/identity
+    );
+
+    const result = await session.unlockOwnerSession(PASSPHRASE, workspace);
+    assert.equal(result.ok, true);
+    assert.equal(result.accountId, 11);
+    assert.equal(requests[0].url, '/api/accounts/unlock',
+        'the session probe is skipped when the caller already holds the workspace');
+    assert.equal(JSON.parse(storage.get(PASSPHRASE_KEY)).password, PASSPHRASE);
+    assert.equal(hint().accountId, 11, 'and the account id the device wrap needs');
+
+    assert.equal(await session.retryVaultBootstrap(), true);
+    assert.equal(storage.get(PASSPHRASE_KEY), undefined, 'retired once the wrap is written');
+    assert.deepEqual(hint(), { accountId: 11, credentialId: null, prf: null });
+
+    // The point of all of it: the next tab unlocks from the wrap alone.
+    await reset(() => ({ body: { ok: true, exists: true, identity } }));
+    assert.equal(await session.ensureVaultReady(), true, 'no password asked for a second time');
+    assert.equal(vault.isVaultUnlocked(), true);
+});
+
+test('a passkey proved in the app hands over exactly what the gate hands over', async () => {
+    const session = await sessionPromise;
+    const secret = Buffer.from(new Uint8Array(32).fill(4)).toString('base64url');
+    storage.clear();
+
+    session.stashVaultHint({ accountId: 5, credentialId: 'cred-app', prf: secret });
+    const written = JSON.parse(storage.get(HINT_KEY));
+    // The gate's `handOff` shape, field for field — `readVaultHint` is the same
+    // reader on the other side, and a missing `method` or `expiresAt` would be
+    // a second dialect of the one handoff.
+    assert.deepEqual(Object.keys(written).sort(),
+        ['accountId', 'credentialId', 'expiresAt', 'method', 'prf'].sort());
+    assert.equal(written.method, 'passkey-prf', 'a secret makes it the PRF flavour, as on the gate');
+    assert.equal(written.prf, secret);
+    assert.ok(written.expiresAt > Date.now(), 'the secret lapses; readVaultHint keeps the identifiers');
+
+    // A later password unlock on the same tab must not forget WHICH passkey
+    // this browser is enrolling for.
+    session.stashVaultHint({ accountId: 5 });
+    const afterPassword = JSON.parse(storage.get(HINT_KEY));
+    assert.equal(afterPassword.credentialId, 'cred-app', 'the credential id survives');
+    assert.equal(afterPassword.prf, null, 'the secret does not');
+    assert.equal(afterPassword.method, 'password');
+
+    // …but a different workspace's credential id is never carried across.
+    session.stashVaultHint({ accountId: 6 });
+    assert.equal(JSON.parse(storage.get(HINT_KEY)).credentialId, null);
 });

@@ -23,6 +23,7 @@ import {
   spokenSecondsIn,
   unscriptedTimeWarning,
 } from './h3References.js';
+import { normalizeSpot, promptNamesSpot, spotColor, spotPlaceWords } from './sceneSpot.js';
 
 // Published H3 ceilings. The reference counts live in H3_REFERENCE_LIMITS;
 // these are the ones only the prompt text can be measured against.
@@ -167,6 +168,10 @@ export function checkH3Prompt({
   videos = [],
   audios = [],
   durations = {},
+  // The scene rows, as `[{ url, retention, spot }]`. Only the circled ones
+  // matter here — a mark burned into a picture is a promise the prompt has to
+  // keep, and nothing else in the check can see it.
+  scenes = [],
 } = {}) {
   const text = String(prompt || '');
   const findings = [];
@@ -288,6 +293,29 @@ export function checkH3Prompt({
     const staged = new Set([...scene.matchAll(/<Subject (\d+)>/g)].map((hit) => Number(hit[1])));
     for (const number of [...defined].sort((a, b) => a - b)) {
       if (!staged.has(number)) findings.push(warn('subject-not-in-scene', { subject: number }));
+    }
+  }
+
+  // ── a circled spot, and whether the prompt knows about it ─────────────────
+  //
+  // The circle is drawn INTO the picture that is sent, so a prompt that never
+  // mentions it leaves the model with an unexplained coloured ring in its
+  // reference — and an unexplained thing in a reference is a thing to draw. The
+  // weave writes the sentence that both aims the shot and forbids the ring, so
+  // this is weavable; the reverse case (a row claiming a spot with nothing
+  // circled) can only come from a restored draft, and says so plainly.
+  for (const scene of Array.isArray(scenes) ? scenes : []) {
+    const at = images.indexOf(scene?.url);
+    const label = at >= 0 ? `<Picture ${at + 1}>` : '';
+    const spot = normalizeSpot(scene?.spot);
+    if (!spot) {
+      if (scene?.retention === 'spot') findings.push(error('spot-uncircled', { label }));
+      continue;
+    }
+    if (!promptNamesSpot(text, label)) {
+      // The colour and the place are carried apart, not as the row's own
+      // "red circle, right": that reads as a label and not as a sentence.
+      findings.push(warn('spot-unused', { label, color: spotColor(spot.color).word, where: spotPlaceWords(spot) }));
     }
   }
 

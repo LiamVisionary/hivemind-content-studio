@@ -198,8 +198,12 @@ export function WorkflowDependencyPrompt({ report, workflowId, runOn = '', onRep
           </p>
         )}
 
+        {/* `dvh`, not `vh`: on iOS `vh` measures the large viewport, so half of
+            it is taller than half the screen actually showing — the rows at the
+            bottom of a long install list scroll under the browser chrome and
+            the dialog's own footer goes with them. */}
         {report?.missing?.length ? (
-          <ul className="flex max-h-[50vh] flex-col gap-2 overflow-y-auto custom-scrollbar pr-1">
+          <ul className="flex max-h-[50dvh] flex-col gap-2 overflow-y-auto overscroll-contain custom-scrollbar pr-1">
             {[...installable, ...blocked].map((item) => (
               <DependencyRow key={item.id} item={item} workflowId={workflowId} api={api} busy={phase === 'restarting' || phase === 'checking'} />
             ))}
@@ -208,7 +212,10 @@ export function WorkflowDependencyPrompt({ report, workflowId, runOn = '', onRep
 
         {notice ? <div className="text-[11px] text-danger" role="alert">{notice}</div> : null}
 
-        <div className="flex items-center justify-between gap-3 border-t border-line1 pt-3">
+        {/* Three buttons and a progress sentence do not share 375px. The
+            sentence takes the row and the buttons take the next one, rather
+            than "Restart now" arriving as "Restart n…". */}
+        <div className="flex flex-col items-stretch gap-2 border-t border-line1 pt-3 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
           <span className="text-[11px] text-ink3">
             {phase === 'restarting' ? t('deps.restarting')
               : phase === 'checking' ? t('deps.checking')
@@ -216,7 +223,7 @@ export function WorkflowDependencyPrompt({ report, workflowId, runOn = '', onRep
                   : needsRestart ? t('deps.restartNeeded')
                     : ''}
           </span>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {needsRestart && phase !== 'restarting' ? (
               <Button size="sm" onClick={() => void restart()}>{t('deps.restartNow')}</Button>
             ) : null}

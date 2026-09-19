@@ -24,6 +24,7 @@ import { RunsView } from './views/RunsView.jsx';
 import { HistoryView } from './views/HistoryView.jsx';
 import { TelemetryView } from './views/TelemetryView.jsx';
 import { GpuMachinesView } from './views/GpuMachinesView.jsx';
+import { RentalBuildView } from './views/RentalBuildView.jsx';
 import { ProvidersView } from './views/ProvidersView.jsx';
 import { PassBookView } from './views/PassBookView.jsx';
 import { SettingsView } from './views/SettingsView.jsx';
@@ -76,6 +77,7 @@ export function HubLayer({ visible, view }) {
       <ErrorBoundary label="PassBook" hidden={current !== 'passbook'}><PassBookView active={current === 'passbook'} /></ErrorBoundary>
       <ErrorBoundary label="Settings" hidden={current !== 'settings'}><SettingsView active={current === 'settings'} /></ErrorBoundary>
       <ErrorBoundary label="Machines" hidden={current !== 'machines'}><GpuMachinesView active={current === 'machines'} /></ErrorBoundary>
+      <ErrorBoundary label="Rental build" hidden={current !== 'rentalbuild'}><RentalBuildView active={current === 'rentalbuild'} /></ErrorBoundary>
       <ErrorBoundary label="Agents &amp; API" hidden={current !== 'agents'}><McpCliStudio active={current === 'agents'} /></ErrorBoundary>
       <ErrorBoundary label="About" hidden={current !== 'about'}><AboutView active={current === 'about'} /></ErrorBoundary>
     </div>

@@ -5,7 +5,7 @@
 // stage to do it; each of them now lives where it belongs — see the note at the
 // main column below.
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { useOwnerSession } from '../hooks/hooks.js';
+import { useOwnerSession, useRentalBuild } from '../hooks/hooks.js';
 import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
 import { t, tf } from '../lib/i18n.js';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
@@ -13,11 +13,11 @@ import { Icon } from '../ui/icons.jsx';
 import { Button, CollapsibleSection, IconButton, Kbd, Spinner, cx, openSection, useHint } from '../ui/kit.jsx';
 import { AccountRow } from './AccountRow.jsx';
 import { getNavBadges, subscribeNavBadges } from './navBadges.js';
-import { APP_NAME, NAV_ITEMS, NAV_SECTIONS, OFF_NAV_PAGE_TITLES } from './navConfig.jsx';
+import { APP_NAME, NAV_ITEMS, NAV_SECTIONS, OFF_NAV_PAGE_TITLES, visibleNavItems } from './navConfig.jsx';
 import { APP_VERSION, shortCommit, versionLabel } from '../lib/appVersion.js';
 import { checkForUpdate } from '../lib/appUpdate.js';
 import { inDesktopShell, installUpdate } from '../lib/desktopShell.js';
-import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
+import { ChipButton, Menu, MenuHeading, MenuItem, MenuLayer } from '../ui/Menu.jsx';
 
 // The Hivemind prompt library's trigger used to live up here. It only ever
 // inserted into a studio's prompt, so it now lives where that prompt is — the
@@ -56,9 +56,23 @@ function VaultUnlockButton({ signedIn, railed }) {
         title={railed ? undefined : t('app.unlockVaultTitle')}
         aria-label={t('app.unlockVault')}
         {...(railed ? hint.bind({ onClick: requestVaultUnlock }) : null)}
-        className="grid h-ctl-md w-9 shrink-0 place-items-center rounded-md border border-honey/50 bg-honey-tint text-honey transition-colors hover:border-honey"
+        // Both axes off the same ladder. `w-9` stayed 31.5px while the height
+        // grew to 44 under a thumb, so the one control that reopens a sealed
+        // tab was drawn as a lozenge you had to aim at sideways.
+        //
+        // Off the rail it also says the word. Its only label was a `title`, and
+        // nothing on a touch screen reveals one — so on a phone this was an
+        // unexplained honey glyph offering no clue what it unlocks.
+        // `.hive-hint-label` is the house call for exactly that: hidden
+        // wherever the bubble can carry the label, visible wherever nothing
+        // can (base.css).
+        className={cx(
+          'flex h-ctl-md shrink-0 items-center justify-center gap-1.5 rounded-md border border-honey/50 bg-honey-tint text-[12.5px] font-semibold text-honey transition-colors hover:border-honey',
+          railed ? 'w-ctl-md' : 'min-w-[var(--ctl-md)] px-2',
+        )}
       >
-        <Icon name="unlock" size={15} />
+        <Icon name="unlock" size={15} className="shrink-0" />
+        {railed ? null : <span className="hive-hint-label">{t('app.unlockVault')}</span>}
       </button>
       {railed ? hint.render(t('app.unlockVaultTitle')) : null}
     </>
@@ -403,16 +417,32 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, onOpenA
     : '';
   const countFor = (item) => (item.page === 'runs' ? badges.runningProductions : 0);
 
+  // Rows this install may show. The Rental build page writes a file that gets
+  // committed, so it only exists where there is a checkout to write into — a
+  // fact the control API answers, not a flag a URL can set.
+  const build = useRentalBuild(true);
+  // The element the mobile strip's menus are drawn into. State through a
+  // callback ref rather than a ref, so the provider re-renders once it exists.
+  const [navMenuLayer, setNavMenuLayer] = useState(null);
+  const shownItems = (items) => visibleNavItems(items, { checkout: build.editable });
+  const shownGroup = (group) => ({ ...group, items: shownItems(group.items) });
+
   // Create and Produce ride the strip; Labs and Advanced ride the More menu.
-  const stripItems = NAV_SECTIONS.filter((s) => !s.collapsible).flatMap((s) => s.items);
+  const stripItems = NAV_SECTIONS.filter((s) => !s.collapsible).flatMap((s) => shownItems(s.items));
   const moreGroups = [
-    ...NAV_SECTIONS.flatMap((s) => (s.labs ? [s.labs] : [])),
-    ...NAV_SECTIONS.filter((s) => s.collapsible),
+    ...NAV_SECTIONS.flatMap((s) => (s.labs ? [shownGroup(s.labs)] : [])),
+    ...NAV_SECTIONS.filter((s) => s.collapsible).map(shownGroup),
   ];
   const moreItem = moreGroups.flatMap((g) => g.items).find((item) => item.page === page);
 
   return (
-    <div className="flex h-full w-full">
+    // The page is drawn edge to edge (index.html asks for viewport-fit=cover),
+    // so the chrome — not the stage behind it — is what has to clear the notch
+    // and the rounded corners. env() is 0 on every display that has no inset,
+    // so this is a no-op everywhere but a phone. The BOTTOM inset is left to
+    // the surfaces that sit on it (the studios' composer lifts itself clear),
+    // because taking it here would shorten every stage by the home indicator.
+    <div className="flex h-full w-full pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)]">
       {/* ---- Sidebar (≥ lg; icon rail when collapsed) ---- */}
       <aside
         className={cx(
@@ -461,7 +491,7 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, onOpenA
           {NAV_SECTIONS.map((section) => (
             <div key={section.id} className={cx('flex flex-col', railed ? 'gap-3' : 'gap-4')}>
               <NavGroup
-                group={section}
+                group={shownGroup(section)}
                 page={page}
                 collapsed={railed}
                 hint={section.id === 'advanced' ? advancedHint : ''}
@@ -521,11 +551,21 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, onOpenA
             poll, and the Hive prompt library opens from the composer that it
             inserts into. What it mostly did was take 52px off every stage. */}
         {/* ---- Mobile tab strip (< lg) ---- */}
-        <nav
-          className="hive-edge-fade flex h-11 w-full shrink-0 items-center gap-1 overflow-x-auto border-b border-line1 bg-bg1 px-3 lg:hidden"
-          aria-label="Studio navigation"
-        >
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-honey-tint text-honey">
+        {/* The scroller and the utility end are siblings, not one row. `ml-auto`
+            inside an overflowing flex row resolves to nothing, so Lock used to
+            be stranded a screen's width to the right of the last chip, behind
+            the edge fade — reachable only by scrolling the navigation to its
+            end. It is pinned outside the scroller now. */}
+        <div className="flex w-full shrink-0 items-center border-b border-line1 bg-bg1 lg:hidden">
+          <nav
+            // Taller under a thumb: 38px of strip holding 28px chips is a mouse
+            // control, and this is the app's ONLY navigation below lg. min-h
+            // rather than h, so the coarse-pointer control ladder can grow a
+            // chip without the row clipping it.
+            className="hive-edge-fade flex min-h-11 min-w-0 flex-1 items-center gap-1 overflow-x-auto px-3 py-1 touch:min-h-[52px] touch:gap-1.5"
+            aria-label="Studio navigation"
+          >
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-honey-tint text-honey touch:h-9 touch:w-9">
             <Icon name="logo" size={16} />
           </span>
           {stripItems.map((item) => {
@@ -539,6 +579,9 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, onOpenA
                 ref={on ? scrollActiveChipIntoView : undefined}
                 className={cx(
                   'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors duration-150',
+                  // 38px and a readable label on touch — text-xs on this 14px
+                  // root is 10.5px, which is a caption, not a navigation label.
+                  'touch:h-[38px] touch:px-3 touch:text-[13px]',
                   on ? 'bg-honey-tint text-honey' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
                 )}
               >
@@ -549,9 +592,12 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, onOpenA
           })}
           {/* Labs and Advanced, one press away instead of eighteen chips wide. */}
           <span className="shrink-0" ref={moreItem ? scrollActiveChipIntoView : undefined}>
-            <Menu
-              align="end"
-              width="w-56"
+            <MenuLayer.Provider value={navMenuLayer}>
+              <Menu
+                align="end"
+                // w-56 was sized for a list of one-word rows. It now carries the
+                // account card, whose second line is a balance beside a meter.
+                width="w-64"
               trigger={(open, togglePanel) => (
                 <ChipButton
                   icon="more"
@@ -582,14 +628,23 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, onOpenA
                   ))}
                   {/* Below lg there is no sidebar, so its footer rides here —
                       the same doors, in the same order. The account leads, as it
-                      does in the sidebar: it is the row about the person. */}
+                      does in the sidebar: it is the row about the person.
+
+                      The real row, not two words standing in for it. "Your
+                      account" and "Credits" as bare menu rows dropped the two
+                      things the row exists to show — the balance and how much
+                      of today's free allowance is left — so on a phone the
+                      meter only ever spoke by refusing a generation, which is
+                      the exact failure it was built to prevent. Same component
+                      as the sidebar's, so there is one of these to keep
+                      honest. */}
                   <div className="my-1 h-px bg-line1" />
-                  <MenuItem icon="persona" onClick={() => { onOpenAccount?.(); close(); }}>
-                    {t('account.title')}
-                  </MenuItem>
-                  <MenuItem icon="coin" onClick={() => { onOpenCredits?.(); close(); }}>
-                    {t('credits.title')}
-                  </MenuItem>
+                  <div className="p-1">
+                    <AccountRow
+                      onOpenAccount={() => { onOpenAccount?.(); close(); }}
+                      onOpenCredits={() => { onOpenCredits?.(); close(); }}
+                    />
+                  </div>
                   <MenuItem icon="search" onClick={() => { onOpenPalette?.(); close(); }}>
                     {t('app.paletteLabel')}
                   </MenuItem>
@@ -601,12 +656,21 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, onOpenA
                   </MenuItem>
                 </>
               )}
-            </Menu>
+              </Menu>
+            </MenuLayer.Provider>
           </span>
-          <span className="ml-auto flex shrink-0 items-center gap-1 pl-1">
+          </nav>
+          {/* Where this strip's menus are drawn. The nav scrolls, so it clips:
+              the More panel used to render INSIDE it at x=838 on a 375px phone
+              — off the end of the scroll space, invisible, and with it every
+              Labs and Advanced row, Settings, the account and the palette. A
+              menu drawn into a layer pins itself in viewport coordinates
+              instead (Menu.jsx). Outside the scroller, and untransformed. */}
+          <div ref={setNavMenuLayer} className="absolute left-0 top-0" data-menu-layer="" />
+          <span className="flex shrink-0 items-center gap-1 px-2">
             <LockButton />
           </span>
-        </nav>
+        </div>
 
         <main id="content-area" className="relative flex min-h-0 w-full flex-1 flex-col overflow-hidden bg-bg0">
           {children}

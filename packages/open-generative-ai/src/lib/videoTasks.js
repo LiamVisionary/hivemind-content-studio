@@ -57,7 +57,14 @@ export function isLtxFamilyModel(source) {
 /** MiniMax H3-family workflows get their own quality controls (15s duration
  *  ceiling, native-canvas resolution tier, refinement steps) because those
  *  tradeoffs are measured properties of THIS model, not of local video
- *  generally. */
+ *  generally.
+ *
+ *  This is a GRAPH question and it is false for every remote row, by the same
+ *  rule registryFamily states above. The VENDOR question — "did MiniMax train
+ *  these weights, wherever they are running" — is a different one with a
+ *  different answer, and it lives in lib/turntable.js as isMinimaxVendorModel.
+ *  Reach for that one when the behaviour you are gating on belongs to the
+ *  model; reach for this one when it belongs to the local workflow. */
 export function isMinimaxFamilyModel(source) {
     return registryFamily(source).startsWith('minimax');
 }
@@ -161,6 +168,12 @@ export function videoRequestPlan(setup) {
             sendVideo: true,
             sendImage: false,
             videoMode: 'extend',
+            // What comes BACK: the grown clip, or only the frames this run added.
+            // The sequence asks for the tail so one press makes one shot; the
+            // standalone "extend this clip" surface asks for nothing and keeps
+            // the grown clip. Separate from videoMode on purpose — the mode says
+            // how the source is used, this says what is returned.
+            extendTail: Boolean(setup?.extendTail),
             sendMotionContext: false,
             showFrameSlots: false,
             keepImageOnVideoUpload: false,
@@ -191,6 +204,7 @@ export function videoRequestPlan(setup) {
         sendVideo: Boolean(setup?.videoUrl),
         sendImage: !setup?.videoUrl && !sendMotionContext && !sendReferenceImages,
         videoMode: setup?.videoUrl ? 'extend' : null,
+        extendTail: Boolean(setup?.videoUrl && setup?.extendTail),
         sendMotionContext,
         sendReferenceImages,
         // Start/Middle/End keyframes are an LTX-graph capability. Other

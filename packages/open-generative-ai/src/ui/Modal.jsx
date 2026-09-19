@@ -7,6 +7,7 @@
 import { useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './icons.jsx';
+import { lockBodyScroll } from '../lib/scrollLock.js';
 import { Button, cx } from './kit.jsx';
 
 const SIZES = {
@@ -58,8 +59,10 @@ export function Modal({
     if (!open) return undefined;
     const panel = panelRef.current;
     const opener = document.activeElement;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    // Counted, not saved-and-restored: CompareViewer opens over this one, and
+    // two naive locks unmounting in the same commit leave the page frozen with
+    // nothing on screen to close. See lib/scrollLock.js.
+    const releaseScroll = lockBodyScroll();
     if (panel) {
       const preferred = initialFocus === 'auto'
         ? panel.querySelector('[autofocus]') || panel.querySelector('[data-autofocus]')
@@ -69,13 +72,13 @@ export function Modal({
       const raf = requestAnimationFrame(() => { try { target.focus({ preventScroll: true }); } catch { /* detached */ } });
       return () => {
         cancelAnimationFrame(raf);
-        document.body.style.overflow = previousOverflow;
+        releaseScroll();
         if (opener && typeof opener.focus === 'function' && document.contains(opener)) {
           try { opener.focus({ preventScroll: true }); } catch { /* non-critical */ }
         }
       };
     }
-    return () => { document.body.style.overflow = previousOverflow; };
+    return releaseScroll;
   }, [open, initialFocus]);
 
   if (!open) return null;
@@ -95,7 +98,17 @@ export function Modal({
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4" role="presentation">
+    // Below sm this is a BOTTOM SHEET, above it the centred dialog it has always
+    // been. Same panel, same focus trap, same children — only where it is
+    // anchored changes, which is the whole difference between a phone dialog
+    // and a desktop one: a sheet comes up from the edge the thumb is already
+    // at, keeps a strip of the page it came from visible above it, and is
+    // dismissed by pressing that strip.
+    //
+    // `items-end` + `p-0` do the anchoring; the panel drops its bottom corners
+    // and its bottom border, takes the home indicator as padding, and is capped
+    // in dvh rather than vh so a mobile browser's own chrome is counted.
+    <div className="fixed inset-0 z-[100] flex items-end justify-center p-0 sm:items-center sm:p-4" role="presentation">
       <div className="absolute inset-0 bg-scrim backdrop-blur-[2px]" onClick={dismissable ? onClose : undefined} />
       <div
         ref={panelRef}
@@ -105,10 +118,18 @@ export function Modal({
         tabIndex={-1}
         onKeyDown={onKeyDown}
         className={cx(
-          'hive-scale-in relative flex max-h-[86vh] w-full flex-col overflow-hidden rounded-xl border border-line1 bg-bg1 shadow-overlay outline-none',
+          'hive-sheet-in relative flex w-full flex-col overflow-hidden border border-line1 bg-bg1 shadow-overlay outline-none',
+          'max-h-[88dvh] rounded-t-2xl border-b-0 pb-[env(safe-area-inset-bottom)]',
+          'sm:max-h-[86vh] sm:rounded-xl sm:border-b sm:pb-0',
           SIZES[size],
         )}
       >
+        {/* The grab handle. It is not a control — the sheet is dismissed by the
+            scrim, the X and Escape — but its absence is what makes a web sheet
+            read as a page that has slid up rather than as a sheet. */}
+        <div className="flex shrink-0 justify-center pt-2 sm:hidden" aria-hidden="true">
+          <span className="h-1 w-9 rounded-full bg-white/15" />
+        </div>
         {title ? (
           <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line1 px-5 py-3.5">
             {/* Truncation is for a header that has to SHARE its row. Applied to
@@ -122,7 +143,10 @@ export function Modal({
                   type="button"
                   onClick={onClose}
                   aria-label="Close"
-                  className="grid h-7 w-7 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1"
+                  // Through the control ladder, so a thumb gets 44px and a
+                  // cursor keeps 24.5. `hover:` says nothing on touch, so the
+                  // press has an active state of its own to answer with.
+                  className="grid h-7 w-7 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1 active:bg-bg2 touch:h-ctl-md touch:w-ctl-md"
                 >
                   <Icon name="x" size={15} />
                 </button>
@@ -130,7 +154,7 @@ export function Modal({
             </div>
           </div>
         ) : null}
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4">{children}</div>
         {/* Footer wraps: an action row that outgrows the dialog falls to a second
             row instead of running off the left edge under justify-end. */}
         {footer ? (

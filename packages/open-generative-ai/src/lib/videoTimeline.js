@@ -82,10 +82,31 @@ export function openTimeline(resultUrl = '', resultModel = '') {
 
 const indexOfSegment = (segments, id) => (segments || []).findIndex((seg) => seg?.id === id);
 
-/** Append an empty slot after the last segment and select it ("+"). */
+/**
+ * Where the "+" lands: the empty TAIL when there is one, otherwise one past the
+ * end. A sequence whose last card is already an empty slot does not grow a
+ * second one — that card IS the next shot. Asking twice used to stack blank
+ * cards nobody had asked for, and the second buried the first. Same rule
+ * openSceneAt applies to the card after the clip it arms; and like that one,
+ * only the TAIL is reused — a gap in the middle is a placeholder somebody made
+ * on purpose.
+ *
+ * Exported because the rail has to NAME the slot ("Shot 03") in the menu the
+ * press opens, and a second copy of this rule would drift off by one.
+ */
+export function nextShotIndex(segments) {
+  const list = segments || [];
+  const last = list[list.length - 1];
+  return last && !last.url ? list.length - 1 : list.length;
+}
+
+/** The "+": the slot the next shot lands in, selected. */
 export function addTimelineSegment(segments) {
+  const list = segments || [];
+  const at = nextShotIndex(list);
+  if (at < list.length) return { segments: list, selectedId: list[at].id };
   const next = newTimelineSegment();
-  return { segments: [...(segments || []), next].slice(0, MAX_TIMELINE_SEGMENTS), selectedId: next.id };
+  return { segments: [...list, next].slice(0, MAX_TIMELINE_SEGMENTS), selectedId: next.id };
 }
 
 /** Put a clip into an existing segment (fill an empty slot, or replace). */
@@ -200,24 +221,50 @@ export function timelineDropPlan(segments, target, payload) {
  *            room tone across the cut (the real chaining feature).
  *   'frame'  Any other local workflow with a start-image input (LTX included):
  *            the next clip opens on the previous clip's LAST FRAME, grabbed
- *            client-side — the clip files stay separate, which is what a
- *            segment-per-clip strip needs. (LTX's own extend graph appends to
- *            the SAME file, so it cannot feed a new segment.)
+ *            client-side. Fast, and free to change the scene — but a still
+ *            frame carries no sound, so the next shot scores itself afresh.
+ *   'extend' LTX's own extension, asked for by `withSound`: the model
+ *            regenerates the previous clip AND the new frames from one latent,
+ *            holding the source's audio clean, so the soundtrack continues.
+ *            The gateway trims the source's span back off (extend_return_tail),
+ *            which is what lets a growing clip still feed a segment-per-shot
+ *            strip — the reason this mode used to be unusable here.
  *
  * Returns { mode, fromUrl, fromIndex } or null when there is nothing to
  * continue from or the model has no way to do it.
  */
-export function timelineContinuationPlan(modelEntry, segments, selectedId) {
+export function timelineContinuationPlan(modelEntry, segments, selectedId, { withSound = false } = {}) {
   const list = segments || [];
   const index = indexOfSegment(list, selectedId);
   if (index < 0 || list[index]?.url) return null;
   const before = list.slice(0, index).filter((seg) => seg.url);
   const prev = before[before.length - 1];
   if (!prev) return null;
-  const mode = modelEntry?.supportsMotionContext ? 'chain'
-    : (modelEntry?.supportsStartFrame ? 'frame' : null);
+  const mode = timelineContinuationMode(modelEntry, { withSound });
   if (!mode) return null;
   return { mode, fromUrl: prev.url, fromIndex: indexOfSegment(list, prev.id) };
+}
+
+/**
+ * Which mechanism this lane would continue with, before there is anything to
+ * continue from. The menu needs it to know which rows to draw; the plan above
+ * needs it to arm. One function, so a row can never be offered for a mechanism
+ * the arming would not use.
+ */
+export function timelineContinuationMode(modelEntry, { withSound = false } = {}) {
+  // H3 chains through Motion Context, which already carries room tone — there
+  // is no quieter variant to choose, so `withSound` does not apply.
+  if (modelEntry?.supportsMotionContext) return 'chain';
+  if (withSound && modelEntry?.supportsVideoInput) return 'extend';
+  return modelEntry?.supportsStartFrame ? 'frame' : '';
+}
+
+/** Can this lane continue WITH its sound, as a distinct choice from 'frame'? */
+export function timelineCanContinueWithSound(modelEntry) {
+  return Boolean(modelEntry)
+    && !modelEntry.supportsMotionContext
+    && Boolean(modelEntry.supportsVideoInput)
+    && Boolean(modelEntry.supportsStartFrame);
 }
 
 /* ---------------- per-tab persistence ---------------- */
@@ -232,7 +279,7 @@ const TIMELINE_STORE_PREFIX = 'studio.videoTimeline.';
 
 export const timelineStorageKey = (tabId) => `${TIMELINE_STORE_PREFIX}${Number(tabId) || 0}`;
 
-export function serializeTimeline({ on, segments, selectedId, extend, showCombined }) {
+export function serializeTimeline({ on, segments, selectedId, extend, withSound, showCombined }) {
   return {
     on: Boolean(on),
     segments: (segments || []).slice(0, MAX_TIMELINE_SEGMENTS)
@@ -241,6 +288,7 @@ export function serializeTimeline({ on, segments, selectedId, extend, showCombin
       })),
     selectedId: String(selectedId || ''),
     extend: Boolean(extend),
+    withSound: Boolean(withSound),
     showCombined: Boolean(showCombined),
   };
 }
@@ -268,6 +316,7 @@ export function reviveTimeline(raw) {
     segments,
     selectedId: ids.has(raw.selectedId) ? raw.selectedId : segments[0].id,
     extend: raw.extend === true,
+    withSound: raw.withSound === true,
     showCombined: raw.showCombined === true,
   };
 }

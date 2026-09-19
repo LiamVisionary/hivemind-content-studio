@@ -134,6 +134,26 @@ class LocalInferenceClient {
         return { models, status };
     }
 
+    /**
+     * The drop-in workflow files this machine could NOT turn into models, each
+     * with the reason. Always resolves — a bridge too old to answer simply has
+     * nothing to report, and the notice that reads this stays hidden.
+     */
+    async listWorkflowDropIns() {
+        if (!isLocalAIAvailable() || typeof window.localAI.listWorkflowDropIns !== 'function') {
+            return { directories: [], skipped: [] };
+        }
+        try {
+            const answer = await window.localAI.listWorkflowDropIns();
+            return {
+                directories: Array.isArray(answer?.directories) ? answer.directories : [],
+                skipped: Array.isArray(answer?.skipped) ? answer.skipped : [],
+            };
+        } catch {
+            return { directories: [], skipped: [] };
+        }
+    }
+
     // baseModels: optional compatible-base list from the workflow catalog. Video
     // workflows live in the MCP registry, which the hosted bridge cannot read, so
     // passing them keeps LoRAs working for every workflow without an id allowlist.

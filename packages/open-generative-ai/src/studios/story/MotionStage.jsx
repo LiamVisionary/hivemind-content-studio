@@ -34,7 +34,7 @@ function beatRole(index, total) {
   return 'turns it';
 }
 
-function BeatCard({ beat, index, total, busy, onFill, onPatch, onRemove, onDragStart, onDragEnd, onDrop, dragging }) {
+function BeatCard({ beat, index, total, busy, onFill, onPatch, onRemove, onMove, onDragStart, onDragEnd, onDrop, dragging }) {
   return (
     <div
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }}
@@ -45,7 +45,10 @@ function BeatCard({ beat, index, total, busy, onFill, onPatch, onRemove, onDragS
       )}
     >
       <div className="flex items-center gap-2">
-        <span className="inline-flex h-5 shrink-0 items-center gap-0.5 rounded-full bg-honey-tint px-2 font-mono text-[11px] font-semibold text-honey">
+        {/* The two numbers inside this pill are fields, so the coarse-pointer
+            16px floor applies to them — which a 17.5px pill clips. It grows
+            with them. */}
+        <span className="inline-flex h-5 shrink-0 items-center gap-0.5 rounded-full bg-honey-tint px-2 font-mono text-[11px] font-semibold text-honey touch:h-ctl-md touch:px-2.5 touch:text-[13px]">
           <input
             type="number"
             step="0.5"
@@ -66,7 +69,7 @@ function BeatCard({ beat, index, total, busy, onFill, onPatch, onRemove, onDragS
           s
         </span>
         <span className="text-[11px] text-ink3">{beatRole(index, total)}</span>
-        <span className="ml-auto flex items-center gap-0.5">
+        <span className="ml-auto flex items-center gap-0.5 touch:gap-1">
           <button
             type="button"
             title="Write this action from the rest of the story"
@@ -75,26 +78,50 @@ function BeatCard({ beat, index, total, busy, onFill, onPatch, onRemove, onDragS
             disabled={Boolean(busy)}
             className={cx(
               'grid h-[22px] w-[22px] place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-40',
+              'touch:h-ctl-md touch:w-ctl-md',
               producerIsRunning(busy, `fill:motion.beats[${index}].action`) && 'animate-spin text-honey',
             )}
           >
             <Icon name={producerIsRunning(busy, `fill:motion.beats[${index}].action`) ? 'refresh' : 'wand'} size={12} />
           </button>
+          {/* Order is part of the script, and until now the ONLY way to change
+              it was HTML5 drag-and-drop — which a touch browser never fires, so
+              on a phone the beats were frozen in the order the producer wrote
+              them. The handle stays for the pointer it was built for; the two
+              chevrons are the same move for the pointer that cannot drag. */}
           <span
             draggable
             onDragStart={(event) => { event.dataTransfer.effectAllowed = 'move'; onDragStart(index); }}
             onDragEnd={onDragEnd}
             title="Drag to reorder"
-            className="grid h-[22px] w-[22px] cursor-grab place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink2 active:cursor-grabbing"
+            className="grid h-[22px] w-[22px] cursor-grab place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink2 active:cursor-grabbing touch:hidden"
           >
             <Icon name="more" size={12} />
           </span>
           <button
             type="button"
+            onClick={() => onMove(index, -1)}
+            disabled={index === 0}
+            aria-label={`Move beat ${index + 1} earlier`}
+            className="hidden h-ctl-md w-ctl-md place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30 touch:grid"
+          >
+            <Icon name="chevronUp" size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={() => onMove(index, 1)}
+            disabled={index === total - 1}
+            aria-label={`Move beat ${index + 1} later`}
+            className="hidden h-ctl-md w-ctl-md place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30 touch:grid"
+          >
+            <Icon name="chevronDown" size={15} />
+          </button>
+          <button
+            type="button"
             onClick={() => onRemove(index)}
             title="Remove this beat"
             aria-label="Remove this beat"
-            className="grid h-[22px] w-[22px] place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-danger"
+            className="grid h-[22px] w-[22px] place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-danger touch:h-ctl-md touch:w-ctl-md"
           >
             <Icon name="x" size={12} />
           </button>
@@ -107,22 +134,17 @@ function BeatCard({ beat, index, total, busy, onFill, onPatch, onRemove, onDragS
         onChange={(event) => onPatch(index, { action: event.target.value })}
         placeholder="one dominant action — no “then”"
         aria-label={`Beat ${index + 1} — the one dominant action`}
-        className="!rounded-lg !border-transparent !bg-transparent !px-1.5 !py-[3px] !text-[14px] !leading-snug hover:!border-line1 hover:!bg-bg1 focus:!bg-bg1"
+        className="!rounded-lg !border-transparent !bg-transparent !px-1.5 !py-[3px] !text-[14px] touch:!text-[16px] !leading-snug hover:!border-line1 hover:!bg-bg1 focus:!bg-bg1"
       />
 
       <div className="flex items-baseline gap-1.5">
-        <span
-          title="How the moment reads once the action has happened — the emotional result a viewer with no explanation would name. Beats that read as nothing make a clip a list of attractive shots."
-          className="shrink-0 pl-1.5 text-[11px] text-ink3"
-        >
-          reads as
-        </span>
+        <span className="shrink-0 pl-1.5 text-[11px] text-ink3">reads as</span>
         <TextArea
           rows={1}
           value={beat.emotion}
           onChange={(event) => onPatch(index, { emotion: event.target.value })}
           placeholder="what is different afterwards"
-          className="!min-w-0 !flex-1 !rounded-lg !border-transparent !bg-transparent !px-1.5 !py-[3px] !text-[12px] !leading-snug !text-ink2 hover:!border-line1 hover:!bg-bg1 focus:!bg-bg1"
+          className="!min-w-0 !flex-1 !rounded-lg !border-transparent !bg-transparent !px-1.5 !py-[3px] !text-[12px] touch:!text-[16px] !leading-snug !text-ink2 hover:!border-line1 hover:!bg-bg1 focus:!bg-bg1"
         />
         <button
           type="button"
@@ -132,6 +154,7 @@ function BeatCard({ beat, index, total, busy, onFill, onPatch, onRemove, onDragS
           disabled={Boolean(busy)}
           className={cx(
             'grid h-5 w-5 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-40',
+            'touch:-my-3 touch:h-ctl-md touch:w-ctl-md',
             producerIsRunning(busy, `fill:motion.beats[${index}].emotion`) && 'animate-spin text-honey',
           )}
         >
@@ -157,12 +180,12 @@ function BoardPanel({ panel, index, specs, busy, onFill, onPatch, aspect }) {
         value={panel.verb}
         onChange={(event) => onPatch(index, { verb: event.target.value })}
         placeholder={panel.asks || 'the one thing that happens'}
-        className="!rounded-lg !bg-bg1 !px-2 !py-1.5 !text-[11px] !leading-snug"
+        className="!rounded-lg !bg-bg1 !px-2 !py-1.5 !text-[11px] touch:!text-[16px] !leading-snug"
       />
       <NativeSelect
         value={panel.shot}
         onChange={(event) => onPatch(index, { shot: event.target.value })}
-        className="[&>select]:!h-7 [&>select]:!bg-bg1 [&>select]:!px-2 [&>select]:!text-[11px]"
+        className="[&>select]:!bg-bg1 [&>select]:!px-2"
       >
         <option value="">shot?</option>
         {SHOT_REASONS.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
@@ -177,7 +200,6 @@ function BoardPanel({ panel, index, specs, busy, onFill, onPatch, aspect }) {
         value={panel.reason}
         onChange={(event) => onPatch(index, { reason: event.target.value })}
         placeholder="the viewer now needs to discover…"
-        inputClassName="!h-7 !text-[11px]"
       />
       <WriteField
         id={`board.panels[${index}].motion`}
@@ -188,7 +210,6 @@ function BoardPanel({ panel, index, specs, busy, onFill, onPatch, aspect }) {
         onFill={onFill}
         value={panel.motion}
         onChange={(event) => onPatch(index, { motion: event.target.value })}
-        inputClassName="!h-7 !text-[11px]"
       />
     </div>
   );
@@ -218,15 +239,18 @@ export function MotionStage({
   const recommendation = recommendBoard({ beats: written, seconds });
 
   const startDrag = (index) => { from.current = index; setDragging(index); };
-  const dropAt = (target) => {
-    const source = from.current;
-    from.current = -1;
-    setDragging(-1);
-    if (source < 0 || source === target) return;
+  const reorder = (source, target) => {
+    if (source < 0 || source === target || target < 0 || target >= beats.length) return;
     const next = [...beats];
     const [moved] = next.splice(source, 1);
     next.splice(target, 0, moved);
     onMotion({ beats: relayBeats(next) });
+  };
+  const dropAt = (target) => {
+    const source = from.current;
+    from.current = -1;
+    setDragging(-1);
+    reorder(source, target);
   };
 
   return (
@@ -254,6 +278,7 @@ export function MotionStage({
               aria-pressed={n === seconds}
               className={cx(
                 'h-7 rounded-[7px] px-3 text-xs font-medium transition-colors',
+                'touch:h-ctl-md touch:px-4 touch:text-[13px]',
                 n === seconds ? 'bg-bg3 text-ink1' : 'text-ink2 hover:text-ink1',
               )}
             >
@@ -266,6 +291,10 @@ export function MotionStage({
       {/* Beats. */}
       <div className="flex flex-col gap-2.5">
         <Rule label="Beats" hint="one action each · and how the moment reads" />
+        <p className="m-0 text-[10.5px] leading-snug text-ink3/80">
+          “Reads as” is the emotional result a viewer with no explanation would name, once the
+          action has happened. Beats that read as nothing make a clip a list of attractive shots.
+        </p>
         <div className="flex h-1.5 gap-[3px]">
           {beats.map((beat, index) => (
             // Width is the beat's real span and the fade follows its position,
@@ -291,6 +320,7 @@ export function MotionStage({
             onFill={onFill}
             onPatch={onPatchBeat}
             onRemove={(i) => onMotion({ beats: relayBeats(beats.filter((_, row) => row !== i)) })}
+            onMove={(row, step) => reorder(row, row + step)}
             onDragStart={startDrag}
             onDragEnd={() => { from.current = -1; setDragging(-1); }}
             onDrop={dropAt}
@@ -304,7 +334,7 @@ export function MotionStage({
               const from = round1(beats.at(-1)?.to || 0);
               return onMotion({ beats: [...beats, { from, to: round1(from + (each || 5)), action: '', emotion: '' }] });
             }}
-            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-dashed border-line2 px-2.5 text-[12px] text-ink2 transition-colors hover:text-ink1"
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-dashed border-line2 px-2.5 text-[12px] text-ink2 transition-colors hover:text-ink1 touch:h-ctl-md touch:px-3.5"
           >
             <Icon name="plus" size={13} />
             Add a beat
@@ -337,7 +367,7 @@ export function MotionStage({
             value={motion.force}
             onChange={(event) => onMotion({ force: event.target.value })}
             placeholder="still cold air off the water, and the pull of the one working lamp"
-            className="!rounded-[10px] !bg-bg1 !text-[14px]"
+            className="!rounded-[10px] !bg-bg1 !text-[14px] touch:!text-[16px]"
           />
         </label>
         <p className="m-0 text-[12px] leading-relaxed text-ink3">
@@ -390,7 +420,10 @@ export function MotionStage({
               <NativeSelect
                 value={motion.music}
                 onChange={(event) => onMotion({ music: event.target.value })}
-                className="[&>select]:!h-8 [&>select]:!bg-bg1 [&>select]:!text-[12px]"
+                // The desktop values are the ones this row was drawn at; only
+                // the touch overrides are new. A pass that grows a control for
+                // a thumb must leave the cursor's version exactly where it was.
+                className="[&>select]:!h-7 touch:[&>select]:!h-ctl-md [&>select]:!bg-bg1 [&>select]:!text-[11px] touch:[&>select]:!text-[16px]"
               >
                 {MUSIC_RULES.map((rule) => <option key={rule.id} value={rule.id}>{rule.label}</option>)}
               </NativeSelect>
@@ -430,6 +463,7 @@ export function MotionStage({
                 aria-pressed={entry.id === story.board.format}
                 className={cx(
                   'h-7 rounded-[7px] px-2.5 text-[11px] font-medium transition-colors',
+                  'touch:h-ctl-md touch:px-3.5 touch:text-[13px]',
                   entry.id === story.board.format ? 'bg-bg3 text-ink1' : 'text-ink2 hover:text-ink1',
                 )}
               >
@@ -465,7 +499,9 @@ export function MotionStage({
           </div>
         ) : null}
 
-        <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(132px,1fr))]">
+        {/* One panel per row below sm. auto-fit's 132px track fits TWICE on a
+            phone, which drew each panel's column of fields at half of 343px. */}
+        <div className="grid grid-cols-1 gap-2 sm:[grid-template-columns:repeat(auto-fit,minmax(132px,1fr))]">
           {story.board.panels.map((panel, index) => (
             <BoardPanel
               key={panel.n}
@@ -512,7 +548,7 @@ export function MotionStage({
           <PlateSlot url={story.board.sheetUrl} alt="Storyboard sheet" box="w-full max-h-[420px] rounded-md" fit="object-contain" />
         ) : null}
         <Disclosure label="The prompt this draws from">
-          <TextArea rows={10} value={boardText} readOnly className="!bg-bg1 font-mono !text-[11px]" />
+          <TextArea rows={10} value={boardText} readOnly className="!bg-bg1 font-mono !text-[11px] touch:!text-[16px]" />
         </Disclosure>
       </Disclosure>
     </div>

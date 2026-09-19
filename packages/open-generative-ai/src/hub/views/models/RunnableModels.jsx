@@ -106,7 +106,10 @@ function ModelCard({ model, onOpen }) {
           {unavailable ? <Pill tone="warn" dot className="bg-bg0/70 backdrop-blur-sm">{t('providers.offline')}</Pill> : null}
         </div>
         {/* Straight to the studio without reading the details first. */}
-        <div className="absolute inset-x-2 bottom-2 flex justify-end opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        {/* hoverOnlyWhenSupported stops `group-hover:` LATCHING after a tap; it
+            does not make the button appear. Without a hover to reveal it the
+            shortcut does not exist on a phone, so there it simply stands. */}
+        <div className="absolute inset-x-2 bottom-2 flex justify-end opacity-0 touch:opacity-100 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
           <Button
             size="sm"
             variant="primary"

@@ -4,6 +4,8 @@
 // letterboxed into a 16:9 hole is a worse look at the picture. The frame is the
 // only rounded surface behind the composer, so the composer's blur has
 // something to sit on.
+import { useRef } from 'react';
+
 import { Icon } from '../../ui/icons.jsx';
 import { cx } from '../../ui/kit.jsx';
 
@@ -39,7 +41,7 @@ export function StageAction({ icon, label, onClick, disabled = false, active = f
       aria-label={label}
       {...rest}
       className={cx(
-        'grid h-8 w-8 place-items-center rounded-full backdrop-blur transition-colors',
+        'grid h-8 w-8 place-items-center rounded-full backdrop-blur transition-colors touch:h-[44px] touch:w-[44px]',
         active ? 'bg-honey text-on-honey' : 'bg-bg0/[0.72] text-ink1 hover:bg-bg0',
         disabled && 'cursor-not-allowed opacity-40 hover:bg-bg0/[0.72]',
       )}
@@ -93,7 +95,10 @@ export function StageProgress({
             <button
               type="button"
               onClick={onCancel}
-              className="shrink-0 rounded-full border border-danger/40 px-3 py-1 text-[11px] font-medium text-danger transition-colors hover:bg-danger/10"
+              // A finger's worth of pill under a thumb. This is the ONLY door to
+              // stopping a render — both composers deliberately carry no Cancel
+              // — and at px-3/py-1 it was a 23px target over moving video.
+              className="shrink-0 rounded-full border border-danger/40 px-3 py-1 text-[11px] font-medium text-danger transition-colors hover:bg-danger/10 touch:min-h-[44px] touch:px-4 touch:text-[12.5px]"
             >
               {cancelLabel}
             </button>
@@ -115,6 +120,23 @@ export function StagePlayerBar({
   playing = false, onPlayPause, muted = false, onMute,
 }) {
   const pct = Math.max(0, Math.min(100, progress));
+  // Scrubbing, not just tapping. The rail is painted 1.75px tall, which is a
+  // fine LINE and an impossible TARGET: on a phone seeking meant landing a
+  // fingertip inside a two-pixel band, and a miss hit the video behind it.
+  //
+  // The fix is two separate things. The hit box is 44px tall with -21px of
+  // margin either side, so the finger gets a full target while the bar's own
+  // height is unchanged. And pointer events with capture turn the one tap into
+  // a drag: `onSeek` already takes { clientX, currentTarget } and computes a
+  // ratio from the rect, so the same handler serves both — it is handed the
+  // rail element rather than the event's own target, which during a captured
+  // drag is wherever the finger has wandered to.
+  const railRef = useRef(null);
+  const scrubbing = useRef(false);
+  const emitSeek = (event) => {
+    if (!onSeek || !railRef.current) return;
+    onSeek({ clientX: event.clientX, currentTarget: railRef.current });
+  };
   return (
     <div className="absolute inset-x-0 bottom-0 flex items-center gap-3 bg-gradient-to-t from-bg0/85 to-transparent px-4 pb-3.5 pt-8">
       {onPlayPause ? (
@@ -122,7 +144,7 @@ export function StagePlayerBar({
           type="button"
           onClick={onPlayPause}
           aria-label={playing ? 'Pause' : 'Play'}
-          className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-ink1 transition-colors hover:bg-white/10"
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-ink1 transition-colors hover:bg-white/10 touch:h-[44px] touch:w-[44px]"
         >
           <Icon name={playing ? 'pause' : 'play'} size={13} />
         </button>
@@ -131,17 +153,32 @@ export function StagePlayerBar({
       <button
         type="button"
         aria-label="Seek"
-        onClick={onSeek}
-        className="relative block h-0.5 flex-1 rounded-full bg-white/[0.18]"
+        onClick={emitSeek}
+        onPointerDown={(event) => {
+          scrubbing.current = true;
+          try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* unsupported */ }
+          emitSeek(event);
+        }}
+        onPointerMove={(event) => { if (scrubbing.current) emitSeek(event); }}
+        onPointerUp={(event) => {
+          scrubbing.current = false;
+          try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* unsupported */ }
+        }}
+        onPointerCancel={() => { scrubbing.current = false; }}
+        // touch-none so a drag along the rail scrubs instead of scrolling the
+        // page under it. -my-[21px] keeps the 44px box out of the bar's height.
+        className="relative -my-[21px] flex h-[44px] flex-1 touch-none items-center"
       >
-        <span className="absolute inset-y-0 left-0 rounded-full bg-ink1" style={{ width: `${pct}%` }} />
+        <span ref={railRef} className="relative block h-0.5 w-full rounded-full bg-white/[0.18]">
+          <span className="absolute inset-y-0 left-0 rounded-full bg-ink1" style={{ width: `${pct}%` }} />
+        </span>
       </button>
       {onMute ? (
         <button
           type="button"
           onClick={onMute}
           aria-label={muted ? 'Unmute' : 'Mute'}
-          className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-ink1 transition-colors hover:bg-white/10"
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-ink1 transition-colors hover:bg-white/10 touch:h-[44px] touch:w-[44px]"
         >
           <Icon name={muted ? 'mute' : 'sound'} size={13} />
         </button>

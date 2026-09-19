@@ -80,9 +80,18 @@ test('the tiers hold exactly the pages they are meant to', async () => {
     const produce = NAV_SECTIONS.find((section) => section.id === 'produce');
     const advanced = NAV_SECTIONS.find((section) => section.id === 'advanced');
 
-    assert.deepEqual(create.items.map((i) => i.page), ['image', 'video', 'story', 'restore']);
+    // Music sits with the other two primary generators rather than in Labs: it
+    // is a create surface a person arrives at on purpose, and the 10 GB
+    // checkpoint it needs is downloaded from inside the page rather than being
+    // a reason to fold the row away.
+    assert.deepEqual(create.items.map((i) => i.page), ['image', 'video', 'music', 'story', 'restore']);
     assert.deepEqual(produce.items.map((i) => i.page), ['planner', 'history', 'runs', 'inspo', 'models']);
-    assert.deepEqual(advanced.items.map((i) => i.page), ['machines', 'providers', 'passbook', 'canvas', 'mcp-cli', 'about']);
+    assert.deepEqual(advanced.items.map((i) => i.page),
+        ['machines', 'rental-build', 'providers', 'passbook', 'canvas', 'mcp-cli', 'about']);
+    // Rental build writes a file that gets committed, so it is a row only where
+    // there is a checkout to write into. The gate is a fact the control API
+    // answers, not a ?dev=1 URL a packaged window cannot type.
+    assert.deepEqual(advanced.items.filter((i) => i.checkout).map((i) => i.page), ['rental-build']);
     assert.deepEqual(create.labs.items.map((i) => i.page), ['sprite', 'lipsync']);
 
     // Both folds are collapsed by default and remember what you did with them.
@@ -97,6 +106,24 @@ test('the tiers hold exactly the pages they are meant to', async () => {
     // Create and Produce are the mobile strip; nothing else may be flat.
     assert.equal(Boolean(create.collapsible), false);
     assert.equal(Boolean(produce.collapsible), false);
+});
+
+test('a checkout-gated row is hidden everywhere until the checkout answers', async () => {
+    const { NAV_ITEMS, PALETTE_ITEMS, isKnownPage, visibleNavItems } = await importSrc('src/app/navConfig.jsx');
+    const gated = NAV_ITEMS.filter((item) => item.checkout).map((item) => item.page);
+    assert.ok(gated.length > 0, 'nothing is gated — this test has nothing to prove');
+    for (const items of [NAV_ITEMS, PALETTE_ITEMS]) {
+        const off = visibleNavItems(items).map((item) => item.page);
+        const on = visibleNavItems(items, { checkout: true }).map((item) => item.page);
+        for (const page of gated) {
+            assert.equal(off.includes(page), false, `'${page}' is visible with no checkout`);
+            assert.ok(on.includes(page), `'${page}' never appears even with a checkout`);
+        }
+        assert.equal(on.length - off.length, gated.length);
+    }
+    // Hidden is not unroutable: a page key is a wire contract, so ?page= and a
+    // 'navigate' event still resolve wherever the row is not drawn.
+    for (const page of gated) assert.ok(isKnownPage(page), `?page=${page} stopped resolving`);
 });
 
 test('STUDIO_PAGES is exactly the studio loader map in App.jsx', async () => {

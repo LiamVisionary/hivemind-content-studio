@@ -427,6 +427,40 @@ export function StoryStudio({ active = true } = {}) {
 
   const fillOne = useCallback((ids) => { void fill(ids); }, [fill]);
 
+  /**
+   * An edit that deletes something, with the version it replaced behind an Undo.
+   *
+   * The same shape a redraft gets above, for the same reason: these are single
+   * taps sitting beside the fields you are typing in, and under a thumb the
+   * control that deletes a character is a few millimetres from the one that
+   * renames them. Nothing here asks a confirm dialog — a question you answer
+   * "yes" to forty times is not a safeguard; a way back is.
+   */
+  const undoably = useCallback((message, mutate) => {
+    const before = storyRef.current;
+    update(mutate);
+    toast((t) => (
+      <span className="flex items-center gap-2 text-[12px]">
+        <span>{message}</span>
+        <Button size="sm" onClick={() => { update(() => before); toast.dismiss(t.id); }}>Undo</Button>
+      </span>
+    ), { duration: 10000 });
+  }, [update]);
+
+  const removeCharacter = useCallback((index) => {
+    const who = storyRef.current.characters[index]?.name?.trim();
+    undoably(`Removed ${who || 'the character'}.`, (current) => ({
+      ...current, characters: current.characters.filter((_, i) => i !== index),
+    }));
+  }, [undoably]);
+
+  const removeMove = useCallback((entry) => {
+    undoably(`Removed “${entry}”.`, (current) => ({
+      ...current,
+      location: { ...current.location, motion: current.location.motion.filter((row) => row !== entry) },
+    }));
+  }, [undoably]);
+
   /* ---------------- the models that draw ---------------- */
 
   useEffect(() => {
@@ -1063,6 +1097,14 @@ export function StoryStudio({ active = true } = {}) {
     />
   );
 
+  // Which of the four stages this is, for the widths where the rail is not
+  // drawn. Same data, same handler — a second shape of the one component,
+  // rather than a second list that can disagree with it.
+  const compactRail = <StageRail compact stages={stages} stage={stage} onStage={setStage} />;
+  const stageIndex = STORY_STAGES.findIndex((entry) => entry.id === stage);
+  const nextStage = STORY_STAGES[stageIndex + 1];
+  const previousStage = STORY_STAGES[stageIndex - 1];
+
   const dock = (
     <PromptDock
       story={story}
@@ -1093,6 +1135,12 @@ export function StoryStudio({ active = true } = {}) {
       composerWidth="max-w-[820px]"
       composer={dock}
     >
+      {/* The rail lives in a sheet below lg, so this strip is the only thing on
+          screen that says where in the four decisions this production is. It
+          sits above the producer bar rather than inside it: the bar is sticky,
+          and two sticky rows at top-0 stack on top of each other. */}
+      <div className="shrink-0 border-b border-line1 bg-bg1 lg:hidden">{compactRail}</div>
+
       <ProducerBar
         summary={[story.title || 'Untitled production', `${story.motion.seconds}s`, story.aspect].join(' · ')}
         producer={producer}
@@ -1111,7 +1159,7 @@ export function StoryStudio({ active = true } = {}) {
         }}
       />
 
-      <div className="mx-auto flex w-full max-w-[820px] flex-col gap-5 px-9 pb-12 pt-7 max-sm:px-4">
+      <div className="mx-auto flex w-full max-w-[820px] flex-col gap-5 px-4 pb-12 pt-7 sm:px-9">
         {!isHivemindStudioEnabled() ? (
           <p className="m-0 rounded-lg border border-warn/40 bg-warn/[0.08] p-3 text-[13px] leading-snug text-ink2">
             The producer runs on this machine’s models and on HivemindOS. Open the studio from the
@@ -1151,9 +1199,8 @@ export function StoryStudio({ active = true } = {}) {
             onLocation={setLocation}
             onPatchCharacter={patchCharacter}
             onAddCharacter={() => update((current) => ({ ...current, characters: [...current.characters, blankCharacter()] }))}
-            onRemoveCharacter={(index) => update((current) => ({
-              ...current, characters: current.characters.filter((_, i) => i !== index),
-            }))}
+            onRemoveCharacter={removeCharacter}
+            onRemoveMove={removeMove}
             onDrawSheet={drawSheet}
             onDrawPlate={drawPlate}
             onChooseLocation={chooseLocation}
@@ -1226,6 +1273,21 @@ export function StoryStudio({ active = true } = {}) {
             onFillCaption={() => { void fillStage('ship'); }}
           />
         ) : null}
+
+        {/* Above lg the rail is the way between stages and this would be a
+            second one. Below it the strip at the top of the page is a long
+            scroll away by the time a stage is written, so the way on has to be
+            where the writing ends. */}
+        <div className="flex items-center gap-2 border-t border-line1 pt-4 lg:hidden">
+          {previousStage ? (
+            <Button icon="chevronLeft" onClick={() => setStage(previousStage.id)}>Back</Button>
+          ) : null}
+          {nextStage ? (
+            <Button variant="primary" className="ml-auto" onClick={() => setStage(nextStage.id)}>
+              Next: {nextStage.label}
+            </Button>
+          ) : null}
+        </div>
       </div>
 
       <ConfirmModal

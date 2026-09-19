@@ -53,6 +53,13 @@ function DownloadOutcome({ download, onRetry }) {
   );
 }
 
+// A finger never hovers, so a video result here was a still nothing could
+// start. Read once, like kit.jsx's pointer test and InspoView's: a pointer does
+// not change under a running page.
+const COARSE_POINTER = typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches;
+
 function ResultCard({ item, installed, download, onDownload, nsfwAllowed }) {
   const [hover, setHover] = useState(false);
   // NSFW previews arrive blurred even when the filter lets them through; one
@@ -66,8 +73,16 @@ function ResultCard({ item, installed, download, onDownload, nsfwAllowed }) {
   const blurred = Boolean(item.nsfw) && nsfwAllowed && !revealed;
   return (
     <div
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      // Split by pointer rather than run both: a tap fires the compatibility
+      // `mouseenter` BEFORE its click, so a card that took both turned itself on
+      // and straight back off and never played until the second tap. And a
+      // click that reached a mouse would stop the preview the cursor is still
+      // over — every press inside the card bubbles here, Download included.
+      onMouseEnter={() => { if (!COARSE_POINTER) setHover(true); }}
+      onMouseLeave={() => { if (!COARSE_POINTER) setHover(false); }}
+      // The card itself is not a control — the buttons inside it are — so under
+      // a thumb its press is free to carry motion.
+      onClick={() => { if (COARSE_POINTER) setHover((v) => !v); }}
       className={cx(
         'flex min-w-0 flex-col overflow-hidden rounded-md border bg-bg2 transition-colors duration-150',
         done ? 'border-ok/40' : 'border-line1 hover:border-line2',
@@ -283,26 +298,28 @@ export function CivitaiBrowser({ onInstalled, baseModelOptions }) {
             {pastedUrl ? t('discover.installUrl') : t('discover.search')}
           </Button>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <NativeSelect aria-label={t('discover.type')} value={filters.types} onChange={(event) => setFilter('types', event.target.value)} className="w-[150px]">
+        {/* Fixed widths that wrap leave a ragged stack of half-rows on a phone.
+            Two even columns below sm; the desktop row is untouched. */}
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+          <NativeSelect aria-label={t('discover.type')} value={filters.types} onChange={(event) => setFilter('types', event.target.value)} className="w-full sm:w-[150px]">
             {CIVITAI_TYPES.map((value) => <option key={value} value={value}>{value === 'TextualInversion' ? t('assets.kindEmbedding') : value}</option>)}
           </NativeSelect>
-          <NativeSelect aria-label={t('discover.baseModel')} value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-[170px]">
+          <NativeSelect aria-label={t('discover.baseModel')} value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-full sm:w-[170px]">
             <option value="">{t('assets.anyBaseModel')}</option>
             {baseModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
           </NativeSelect>
-          <NativeSelect aria-label={t('discover.sort')} value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-[160px]">
+          <NativeSelect aria-label={t('discover.sort')} value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-full sm:w-[160px]">
             {CIVITAI_SORTS.map((value) => <option key={value} value={value}>{value}</option>)}
           </NativeSelect>
-          <NativeSelect aria-label={t('discover.period')} value={filters.period} onChange={(event) => setFilter('period', event.target.value)} className="w-[120px]">
+          <NativeSelect aria-label={t('discover.period')} value={filters.period} onChange={(event) => setFilter('period', event.target.value)} className="w-full sm:w-[120px]">
             {CIVITAI_PERIODS.map((value) => <option key={value} value={value}>{value === 'AllTime' ? t('discover.allTime') : value}</option>)}
           </NativeSelect>
-          <NativeSelect aria-label={t('discover.rating')} value={filters.nsfw} onChange={(event) => setFilter('nsfw', event.target.value)} className="w-[150px]">
+          <NativeSelect aria-label={t('discover.rating')} value={filters.nsfw} onChange={(event) => setFilter('nsfw', event.target.value)} className="w-full sm:w-[150px]">
             <option value="false">{t('discover.safeOnly')}</option>
             <option value="true">{t('discover.includeNsfw')}</option>
             <option value="">{t('discover.anyRating')}</option>
           </NativeSelect>
-          <NativeSelect aria-label={t('discover.perPage')} value={filters.limit} onChange={(event) => setFilter('limit', event.target.value)} className="w-[110px]">
+          <NativeSelect aria-label={t('discover.perPage')} value={filters.limit} onChange={(event) => setFilter('limit', event.target.value)} className="w-full sm:w-[110px]">
             {['20', '40', '60', '100'].map((value) => <option key={value} value={value}>{tf('discover.resultsPerPage', value)}</option>)}
           </NativeSelect>
         </div>

@@ -204,7 +204,9 @@ function LipSyncVideoCard({ entry, active, onOpen, onDownload, onDelete }) {
         <div className="truncate text-[11px] text-ink1">{entry.prompt || '—'}</div>
         <div className="truncate font-mono text-[10px] text-ink3">{entry.model || ''}</div>
       </div>
-      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+      {/* Download and Delete are the card's only doors, and a hover reveal is
+          not a door a finger can open — under a thumb they are simply there. */}
+      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 touch:opacity-100">
         <IconButton
           icon="download"
           size="sm"

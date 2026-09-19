@@ -41,7 +41,9 @@ function CopyRow({ code }) {
   };
   return (
     <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg0 py-1.5 pl-3.5 pr-1.5">
-      <code className="no-scrollbar min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-[13px] leading-relaxed text-ink1">
+      {/* A command line is longer than a phone is wide and the bar is hidden, so
+          the fade is the only thing that says the rest of it is there. */}
+      <code className="hive-edge-fade min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-[13px] leading-relaxed text-ink1">
         {code}
       </code>
       <IconButton

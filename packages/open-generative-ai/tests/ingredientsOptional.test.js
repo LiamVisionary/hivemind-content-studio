@@ -214,10 +214,65 @@ test('the composer banner names the lane, and goes quiet once a sheet is armed',
         logic.deriveExtendBanner(setup, catalogs, { ingredientsFallbackLabel: 'LTX 2.3 Regular FP8' }),
         /No ingredients attached — this renders from the prompt alone, on LTX 2\.3 Regular FP8\./,
     );
-    // Armed sheet, start frame, or no fallback lane: VideoStudio passes '' and
-    // the banner disappears rather than describing a run that is not happening.
+    // Armed sheet or no fallback lane: VideoStudio passes '' and the banner
+    // disappears rather than describing a run that is not happening.
     assert.equal(logic.deriveExtendBanner(setup, catalogs, { ingredientsFallbackLabel: '' }), '');
     assert.equal(logic.deriveExtendBanner(setup, catalogs), '');
+
+    // A start frame does NOT silence it — the run still goes to the plain lane —
+    // but "from the prompt alone" would then be a lie about what is in the
+    // render, so the sentence names the frame.
+    const framed = { ...setup, imageUrl: 'data:image/png;base64,AAA' };
+    const banner = logic.deriveExtendBanner(framed, catalogs, { ingredientsFallbackLabel: 'LTX 2.3 Regular FP8' });
+    assert.match(banner, /renders from your start frame and prompt, on LTX 2\.3 Regular FP8\./);
+    assert.doesNotMatch(banner, /from the prompt alone/);
+});
+
+// --- a start frame is not a reference sheet ----------------------------------
+//
+// Reported 2026-09-13: pressing the sequence's "Continue the scene" on the LTX
+// 2.3 IC-LoRA Ingredients lane and then Generate failed INSTANTLY with "Media
+// Studio did not return a job id: the backend redacted the reason". The gateway
+// log named it: `workflow ltx23-ic-ingredients-lora requires
+// reference_description, unless prompt already contains both ### Reference Sheet
+// Description and ### Target Description`.
+//
+// Cause: the routing rule was `!hasIngredientReferences && !setup.imageUrl`, so
+// a start frame cancelled the fallback and held the run on the IC lane — an
+// input that lane cannot use in place of a sheet. Continue attaches a start
+// frame by design, so it hit this every time.
+test('an ingredients lane with a start frame and no sheet still routes to the plain lane', () => {
+    // The contract is the registry's, and it is what makes the frame useless
+    // here: EVERY ingredients lane carries it, so there is no lane where a
+    // frame-without-sheet run could have been accepted.
+    const workflows = resolvedRegistry();
+    const ingredientLanes = workflows.filter((workflow) => (workflow.accepts || []).includes('ingredient_images'));
+    assert.ok(ingredientLanes.length);
+    for (const lane of ingredientLanes) {
+        assert.equal(lane.prompt_contract?.type, 'ltx23-ingredients',
+            `${lane.id} must declare the contract that refuses a sheetless run`);
+        // ...and it takes a start frame, which is exactly why the rule looked
+        // reasonable and was not.
+        assert.ok((lane.accepts || []).includes('image_base64'), `${lane.id} takes a start frame`);
+    }
+
+    const studio = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
+    // Neither copy of the rule may consult the start frame again.
+    assert.doesNotMatch(studio, /!hasIngredientReferences && !setup\.imageUrl/,
+        'the start frame is back in the routing rule, and the IC lane will refuse the run');
+    assert.doesNotMatch(studio, /!activeIngredients && !s\.setup\.imageUrl/);
+
+    // Three of the four lanes fall back to ltx23-eros-v14-comfy, which has NO
+    // start-frame input. Routing a frame there would drop it silently, so the
+    // press refuses instead and names both ways out.
+    const byId = new Map(workflows.map((workflow) => [workflow.id, workflow]));
+    const droppers = ingredientLanes.filter((lane) => {
+        const target = byId.get(String(lane.text_to_video_workflow || ''));
+        return target && !(target.accepts || []).includes('image_base64');
+    });
+    assert.ok(droppers.length, 'this guard is only worth its words while such a lane exists');
+    assert.match(studio, /if \(setup\.imageUrl && ingredientsOffTarget && !ingredientsOffTarget\.supportsStartFrame\) \{/);
+    assert.match(studio, /has no start-frame input, and with no reference views attached this run goes there/);
 });
 
 test('the composer generates from the prompt alone, and sends it to that lane', () => {
@@ -232,9 +287,10 @@ test('the composer generates from the prompt alone, and sends it to that lane', 
     assert.match(studio, /const hiveTextToVideo = isHivemindLocal\s*\n\s*&& \(!model\?\.supportsIngredientImages \|\| Boolean\(ingredientsOffTarget\)\);/);
     // ...and is actually sent to that lane, not to the IC graph.
     assert.match(studio, /localParams\.workflow_id = ingredientsOffTarget\.workflowId;/);
-    // ...and only while nothing is attached: a run WITH a sheet must still go to
-    // the IC graph, which is what the sheet is for.
-    assert.match(studio, /&& !hasIngredientReferences && !setup\.imageUrl/);
+    // ...and only while no SHEET is attached: a run WITH a sheet must still go
+    // to the IC graph, which is what the sheet is for. A start frame must NOT
+    // hold the run on the IC lane — see the start-frame test below.
+    assert.match(studio, /&& !hasIngredientReferences\n\s*\? textToVideoWorkflowForHivemindModel\(setup\.modelId\)/);
     // "Describe the shot to generate from these references" is only true when
     // there ARE references; it used to fire on the model alone and demanded a
     // prompt for a sheet that was not attached.
@@ -245,7 +301,7 @@ test('the composer generates from the prompt alone, and sends it to that lane', 
     assert.match(logic, /model\?\.supportsIngredientImages && ingredientsActive/);
     // One resolution, read by the banner, the panel label and the request — so
     // the three can never name different lanes.
-    assert.match(studio, /const ingredientsFallback = ingredientModel && !activeIngredients && !s\.setup\.imageUrl/);
+    assert.match(studio, /const ingredientsFallback = ingredientModel && !activeIngredients\n/);
     assert.match(studio, /ingredientsFallbackLabel: ingredientsFallback\?\.name \|\| ''/);
     assert.match(studio, /textToVideoLabel=\{ingredientsFallback\?\.name \|\| ''\}/);
 });

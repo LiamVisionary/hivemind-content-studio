@@ -73,14 +73,26 @@ export function normalizeRegions(input) {
 
 const SPATIAL_WORDS = /\b(left|right|top|bottom|upper|lower|center|centre|middle|foreground|background|corner|above|below|beside|behind|front)\b/i;
 
-/** Centroid → placement language. Thirds, not halves: a box has to lean
- *  decisively before it earns "left" or "right", so anything near the middle
- *  reads as centered instead of flipping on a pixel. */
-export function positionPhrase(region) {
+/** Which third of the frame a normalized box sits in, horizontally and
+ *  vertically. Thirds, not halves: a box has to lean decisively before it earns
+ *  "left" or "right", so anything near the middle reads as centered instead of
+ *  flipping on a pixel.
+ *
+ *  Exported because the scene-spot circle (lib/sceneSpot.js) places itself in
+ *  words too, and two modules deciding what "left" means at slightly different
+ *  thresholds is how one control says top-left while another says center. */
+export function regionThirds(region) {
   const cx = region.x + region.w / 2;
   const cy = region.y + region.h / 2;
-  const hSpot = cx < 0.38 ? 'left' : cx > 0.62 ? 'right' : 'center';
-  const vSpot = cy < 0.38 ? 'top' : cy > 0.62 ? 'bottom' : 'middle';
+  return {
+    h: cx < 0.38 ? 'left' : cx > 0.62 ? 'right' : 'center',
+    v: cy < 0.38 ? 'top' : cy > 0.62 ? 'bottom' : 'middle',
+  };
+}
+
+/** Centroid → placement language. */
+export function positionPhrase(region) {
+  const { h: hSpot, v: vSpot } = regionThirds(region);
   if (region.w > 0.85 && region.h > 0.85) return 'filling the entire frame';
   if (region.w > 0.85) return `spanning the full width across the ${vSpot === 'middle' ? 'center' : vSpot} of the frame`;
   if (region.h > 0.85) return `occupying the full ${hSpot === 'center' ? 'middle column' : `${hSpot} half`} of the frame`;

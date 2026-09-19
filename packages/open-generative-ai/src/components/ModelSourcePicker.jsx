@@ -82,7 +82,11 @@ function ConnectAccount({ busy, linking, onConnect, onLink, onTopUp }) {
           value={key}
           onChange={(event) => setKey(event.target.value)}
           placeholder="hmos_credit_…"
-          className="font-mono !text-[11px]"
+          // The `!` here outranks base.css's coarse-pointer 16px rule, which is
+          // the one thing that stops iOS zooming the page in on focus and never
+          // zooming back — so the touch size has to be `!` too, or pasting a
+          // credit key on a phone leaves the panel scaled off the screen.
+          className="font-mono !text-[11px] touch:!text-[16px]"
         />
         <Button size="sm" disabled={!key.trim() || busy} onClick={() => onConnect(key.trim())}>
           {busy ? 'Checking…' : 'Connect'}
@@ -408,9 +412,11 @@ export function CompactModelPicker({
           onChange={(event) => onQuery(event.target.value)}
           aria-label="Search models"
           placeholder={catalog === null ? 'Search models' : `Search ${total.toLocaleString('en-US')} models`}
-          className="!h-[34px] !text-[12.5px]"
+          // Same `!` trap as the key field above: an important font-size is the
+          // only kind that gets past base.css's coarse-pointer 16px floor.
+          className="!h-[34px] !text-[12.5px] touch:!h-ctl-md touch:!text-[16px]"
         />
-        <div className="flex items-center gap-1 rounded-md border border-line1 bg-bg0 p-0.5" role="tablist" aria-label="Where the model runs">
+        <div className="flex items-center gap-1 rounded-md border border-line1 bg-bg0 p-0.5 touch:p-1" role="tablist" aria-label="Where the model runs">
           {SECTIONS.map((section) => (
             <button
               key={section.id}
@@ -422,7 +428,10 @@ export function CompactModelPicker({
               // control that did nothing.
               onClick={() => { onQuery(''); onTab(section.id); }}
               className={cx(
-                'flex h-6 flex-1 items-center justify-center gap-1 truncate rounded-[7px] px-1 text-[11px] font-semibold transition-colors',
+                // 21px is a mouse target; under a thumb these join the control
+                // ladder (`--ctl-sm` is 34px on a coarse pointer), same as the
+                // Run-on picker's strip this one mirrors.
+                'flex h-6 touch:h-ctl-sm flex-1 items-center justify-center gap-1 truncate rounded-[7px] px-1 text-[11px] font-semibold transition-colors',
                 filter === section.id ? 'bg-bg3 text-ink1 shadow-card' : 'text-ink2 hover:text-ink1',
               )}
             >

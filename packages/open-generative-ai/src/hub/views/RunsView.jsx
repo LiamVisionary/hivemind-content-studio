@@ -92,7 +92,9 @@ function ArtifactCard({ run, artifact, onOpen }) {
         <span className="grid aspect-video place-items-center bg-bg3 text-xs text-ink3">{humanize(artifact.role)}</span>
       )}
 
-      <figcaption className="flex items-center gap-1.5 px-2.5 py-2">
+      {/* Under a thumb the two targets grow, so the gap has to grow with them
+          or Download and Copy-URL sit 5px apart. */}
+      <figcaption className="flex items-center gap-1.5 touch:gap-2.5 px-2.5 py-2">
         <span className="min-w-0 flex-1">
           <b className="block truncate text-[12px] font-semibold text-ink1">{humanize(artifact.role)}</b>
           <small className="text-[11px] text-ink3">{artifact.provider || 'studio'} · <span className="font-mono">{kb} KB</span></small>
@@ -102,7 +104,7 @@ function ArtifactCard({ run, artifact, onOpen }) {
           onClick={() => void downloadMedia(rawUrl, filename)}
           aria-label={tf('runs.downloadNamed', humanize(artifact.role))}
           title={t('common.download')}
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+          className="grid h-7 w-7 touch:h-ctl-md touch:w-ctl-md shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
         >
           <Icon name="download" size={15} />
         </button>
@@ -111,7 +113,7 @@ function ArtifactCard({ run, artifact, onOpen }) {
           onClick={copyUrl}
           aria-label={tf('runs.copyNamedUrl', humanize(artifact.role))}
           title={t('runs.copyUrl')}
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+          className="grid h-7 w-7 touch:h-ctl-md touch:w-ctl-md shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
         >
           <Icon name="copy" size={15} />
         </button>
@@ -148,11 +150,14 @@ function RunDetail({ run, operatorToken }) {
   const [cancelling, setCancelling] = useState(false);
   if (!run) {
     return (
+      // Below md there are no two panes to explain: with nothing picked the
+      // list IS the page, and an empty half-screen beside it would be the only
+      // thing on it.
       <EmptyState
         icon="stack"
         title={t('runs.pickAProduction')}
         hint={t('runs.pickAProductionHint')}
-        className="flex-1"
+        className="hidden flex-1 md:flex"
       />
     );
   }
@@ -174,6 +179,17 @@ function RunDetail({ run, operatorToken }) {
 
   return (
     <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-4 md:p-5">
+      {/* Below md the list and the detail are the same screen rather than two
+          panes, so this is the only way back to the list. It names what it
+          returns to, the way a push-navigation back row does. */}
+      <button
+        type="button"
+        onClick={() => setSelectedRunId('')}
+        className="-mx-1 -mb-2 inline-flex h-ctl-md w-fit items-center gap-1 self-start rounded-md px-1 text-[13px] font-medium text-ink2 transition-colors hover:text-ink1 active:bg-bg2 md:hidden"
+      >
+        <Icon name="chevronLeft" size={16} />
+        {t('nav.productions')}
+      </button>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           {/* The lane is the kicker unless it is already the title (a brief with no title of its own). */}
@@ -242,6 +258,11 @@ function RunDetail({ run, operatorToken }) {
           "No artifacts yet" would be a claim this run cannot support. */}
       {record ? null : (
       <Section title={t('runs.artifacts')}>
+        {/* A 180px floor, not the 150 the other grids use: an artifact's caption
+            sits BESIDE its two controls, and under a thumb those are 44px each.
+            At 150 a phone draws two 170px columns and leaves the caption 45px —
+            the role name cut to four letters, the size line broken over five.
+            One wide card per row reads; two do not. */}
         {run.artifact_records?.length ? (
           <div className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
             {run.artifact_records.map((artifact) => (
@@ -340,7 +361,11 @@ export function RunsView({ active }) {
 
       {tab === 'activity' ? <TelemetryPanel /> : (
       <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(240px,320px)_1fr]">
-        <div className="custom-scrollbar flex min-h-0 flex-col gap-2 overflow-y-auto border-b border-line1 p-3 md:border-b-0 md:border-r">
+        {/* Push navigation below md. The md: grid still splits the pane in two;
+            narrower than that, the list and the detail take turns. Gated on the
+            RESOLVED run, not the id: a run the poll drops would otherwise hide
+            the list while the detail had nothing to draw. */}
+        <div className={`custom-scrollbar ${selected ? 'hidden md:flex' : 'flex'} min-h-0 flex-col gap-2 overflow-y-auto border-b border-line1 p-3 md:border-b-0 md:border-r`}>
           <div className="flex items-center justify-between px-0.5 pb-1">
             <Pill tone="neutral" className="h-5 px-2 text-[10px]">{tf('runs.shownCount', runs.length)}</Pill>
           </div>

@@ -48,6 +48,9 @@ const withCloudCatalog = (load) => async () => (await Promise.all([load(), cloud
 const STUDIO_LOADERS = {
   image: withCloudCatalog(() => import('../studios/ImageStudio.jsx').then((m) => m.ImageStudio)),
   video: withCloudCatalog(() => import('../studios/VideoStudio.jsx').then((m) => m.VideoStudio)),
+  // No catalog wait: Music has no cloud row to boot off — its one model comes
+  // from the machine's own audio lane list, fetched inside the studio.
+  music: () => import('../studios/MusicStudio.jsx').then((m) => m.MusicStudio),
   sprite: () => import('../studios/SpriteStudio.jsx').then((m) => m.SpriteStudio),
   story: () => import('../studios/StoryStudio.jsx').then((m) => m.StoryStudio),
   lipsync: withCloudCatalog(() => import('../studios/LipSyncStudio.jsx').then((m) => m.LipSyncStudio)),
@@ -363,6 +366,22 @@ export function App() {
       <OutputRestoreDropZone />
       <Toaster
         position="bottom-right"
+        // The studios float their composer over the bottom of the stage, so the
+        // default 16px gutter put every toast on top of Generate — on a phone
+        // squarely on it, and on the home indicator besides. The container is
+        // lifted clear of the composer instead.
+        //
+        // --app-composer-h is the composer's MEASURED height, published at :root
+        // by StudioFrame for exactly this — the container is a child of <body>,
+        // so the frame's own --frame-composer-h is out of scope. base.css zeroes
+        // it from sm up, so the lift is a phone's and a desktop keeps the 24px
+        // gutter it has always had. left/right restate the library's own default
+        // so that merging this object does not drop them.
+        containerStyle={{
+          bottom: 'calc(var(--app-composer-h, 0px) + 24px + env(safe-area-inset-bottom, 0px))',
+          left: 16,
+          right: 16,
+        }}
         toastOptions={{
           // One baseline for the whole app: success messages are short and
           // confirm an action (3.5 s); errors need to be read (6 s); plain notices
@@ -387,7 +406,11 @@ export function App() {
 // Whole-app fallback: the shell itself failed, so there is no sidebar to lean on.
 function AppCrash({ error, retry }) {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-bg0 px-6 text-center text-ink1">
+    // dvh, not `min-h-screen`: on iOS `vh` is the LARGE viewport, so a crash
+    // screen sized in it stands taller than the window under the URL bar and
+    // pushes its own two buttons off the bottom — on the one screen in the app
+    // that has nothing else to press.
+    <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-bg0 px-6 text-center text-ink1">
       <div className="text-base font-semibold">Hivemind Content Studio hit an error</div>
       <div className="max-w-md text-[13px] leading-relaxed text-ink3">
         Nothing was lost on the server side — running generations keep running. Reload to pick them back up.
@@ -395,9 +418,14 @@ function AppCrash({ error, retry }) {
       <div className="max-w-lg rounded-md border border-line1 bg-bg2 px-3 py-2 font-mono text-[11px] text-ink2 break-words">
         {String(error?.message || error || 'Unknown error').slice(0, 240)}
       </div>
+      {/* Raw h-9 is 31.5px on this 14px root and misses the --ctl-* ladder
+          entirely, so the coarse-pointer bump never reached the only two
+          controls on this screen. h-ctl-md is what every other 13px button in
+          the app stands on (kit's BTN_SIZES.md): 36px under a cursor, 44 under
+          a thumb. */}
       <div className="flex items-center gap-2">
-        <button type="button" onClick={retry} className="h-9 rounded-md bg-honey px-4 text-[13px] font-semibold text-on-honey hover:bg-honey-bright">Try again</button>
-        <button type="button" onClick={() => window.location.reload()} className="h-9 rounded-md border border-line1 bg-bg2 px-4 text-[13px] font-medium text-ink1 hover:border-line2">Reload page</button>
+        <button type="button" onClick={retry} className="h-ctl-md rounded-md bg-honey px-4 text-[13px] font-semibold text-on-honey hover:bg-honey-bright">Try again</button>
+        <button type="button" onClick={() => window.location.reload()} className="h-ctl-md rounded-md border border-line1 bg-bg2 px-4 text-[13px] font-medium text-ink1 hover:border-line2">Reload page</button>
       </div>
     </div>
   );

@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMediaSrc } from '../../hooks/hooks.js';
+import { lockBodyScroll } from '../../lib/scrollLock.js';
 import {
   WHEEL_ZOOM_IN,
   WHEEL_ZOOM_OUT,
@@ -30,7 +31,10 @@ function ZoomButton({ label, title, onClick }) {
       onClick={onClick}
       title={title}
       aria-label={title}
-      className="rounded-sm px-2 py-1 text-[11px] font-semibold text-ink2 transition-colors hover:bg-bg2 hover:text-ink1"
+      // Through the control ladder on a coarse pointer: 20x22px is a
+      // cursor's button, and these five are the only zoom a thumb can reach
+      // besides the pinch on the stage.
+      className="rounded-sm px-2 py-1 text-[11px] font-semibold text-ink2 transition-colors hover:bg-bg2 hover:text-ink1 touch:h-ctl-md touch:min-w-[44px] touch:px-3 touch:text-[13px]"
     >
       {label}
     </button>
@@ -187,6 +191,14 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
     return Boolean(top && rootRef.current && top === rootRef.current);
   };
 
+  // The overlay is fixed but the page under it is not: without this the studio
+  // rubber-bands behind it on iOS while a reveal drag runs. Same lock Modal
+  // takes, and released the same way.
+  useEffect(() => {
+    // Counted: this opens OVER a Modal, which holds the same lock.
+    return lockBodyScroll();
+  }, []);
+
   useEffect(() => {
     const onKey = (e) => {
       if (!isTopmostDialog()) return;
@@ -229,15 +241,15 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
   );
 
   return createPortal(
-    <div ref={rootRef} className="fixed inset-0 z-[110] flex flex-col bg-bg0/95 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label={`Compare ${beforeLabel.toLowerCase()} and ${afterLabel.toLowerCase()}`}>
-      <div className="flex shrink-0 items-center gap-2 border-b border-line1 px-4 py-2.5">
+    <div ref={rootRef} className="fixed inset-0 z-[110] flex flex-col bg-bg0/95 backdrop-blur-[2px] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]" role="dialog" aria-modal="true" aria-label={`Compare ${beforeLabel.toLowerCase()} and ${afterLabel.toLowerCase()}`}>
+      <div className="flex shrink-0 flex-wrap items-center gap-2 gap-y-1.5 border-b border-line1 px-4 py-2.5">
         <span className="text-sm font-semibold text-ink1">Compare</span>
         <span className="hidden font-mono text-[11px] text-ink3 sm:inline">
           {beforeNatural ? `${beforeLabel} ${beforeNatural.width}×${beforeNatural.height}` : beforeLabel}
           {' → '}
           {natural ? `${afterLabel} ${natural.width}×${natural.height}` : afterLabel}
         </span>
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
           <Segmented
             size="sm"
             value={mode}
@@ -258,7 +270,7 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
             type="button"
             onClick={onClose}
             aria-label="Close compare"
-            className="grid h-7 w-7 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1"
+            className="grid h-7 w-7 touch:h-[44px] touch:w-[44px] place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1"
           >
             <Icon name="x" size={15} />
           </button>
@@ -267,7 +279,7 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
 
       <div
         ref={stageRef}
-        className={cx('relative min-h-0 flex-1 overflow-hidden', mode === 'reveal' ? 'cursor-col-resize' : 'cursor-grab')}
+        className={cx('relative min-h-0 flex-1 overflow-hidden overscroll-contain', mode === 'reveal' ? 'cursor-col-resize' : 'cursor-grab')}
         style={{ touchAction: 'none' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

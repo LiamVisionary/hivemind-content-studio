@@ -50,38 +50,66 @@ export const RESOLUTION_PRESETS = [
 // The node downloads a model it has not seen before, several GB on first use.
 // Said in the picker, because a 16GB download is not a surprise anyone wants
 // mid-render.
+//
+// Six checkpoints are two questions: how much detail to rebuild (the FAMILY)
+// and how much memory to spend on it (the PRECISION). The composer asks them as
+// two; the drawer lists all six. Both halves are carried as data rather than
+// read out of the filename — `…_fp8_e4m3fn_mixed_block35_fp16` is an fp8
+// model, and a substring match calls it fp16.
+export const RESTORE_FAMILIES = [
+  { id: '3b', label: 'Light', size: '3B', hint: 'Fastest and lightest. Good on clean-ish footage that mainly needs resolution.' },
+  { id: '7b', label: 'Standard', size: '7B', hint: 'The usual choice — more faithful than Light, and slower.' },
+  { id: '7b_sharp', label: 'Sharp', size: '7B', hint: 'More micro-detail, and more of it invented. Strong on soft or heavily compressed sources.' },
+];
+
+export const RESTORE_PRECISIONS = [
+  { id: 'fp8', label: 'FP8', hint: 'About half the memory of FP16, and the one the hosted service carries.' },
+  { id: 'fp16', label: 'FP16', hint: 'Full precision: a little more faithful, for twice the memory and the download.' },
+];
+
 export const RESTORE_MODELS = [
   {
     id: 'seedvr2_ema_3b_fp8_e4m3fn.safetensors',
-    label: '3B FP8', size: '~3.5GB',
+    family: '3b', precision: 'fp8',
+    label: 'Light 3B · FP8', size: '~3.5GB',
     hint: 'Fastest and lightest. Good on clean-ish footage that mainly needs resolution.',
   },
   {
     id: 'seedvr2_ema_3b_fp16.safetensors',
-    label: '3B FP16', size: '~7GB',
+    family: '3b', precision: 'fp16',
+    label: 'Light 3B · FP16', size: '~7GB',
     hint: 'The 3B model at full precision — a little more stable, twice the memory.',
   },
   {
     id: 'seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors',
-    label: '7B FP8', size: '~8.5GB',
+    family: '7b', precision: 'fp8',
+    label: 'Standard 7B · FP8', size: '~8.5GB',
     hint: 'The usual choice: 7B quality at roughly half the memory of FP16.',
   },
   {
     id: 'seedvr2_ema_7b_fp16.safetensors',
-    label: '7B FP16', size: '~16GB',
+    family: '7b', precision: 'fp16',
+    label: 'Standard 7B · FP16', size: '~16GB',
     hint: 'Full precision 7B. The most faithful, and the most memory.',
   },
   {
     id: 'seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors',
-    label: '7B Sharp FP8', size: '~8.5GB',
+    family: '7b_sharp', precision: 'fp8',
+    label: 'Sharp 7B · FP8', size: '~8.5GB',
     hint: 'Sharp variant: more micro-detail, and more of it invented. Strong on soft or heavily compressed sources.',
   },
   {
     id: 'seedvr2_ema_7b_sharp_fp16.safetensors',
-    label: '7B Sharp FP16', size: '~16GB',
+    family: '7b_sharp', precision: 'fp16',
+    label: 'Sharp 7B · FP16', size: '~16GB',
     hint: 'The largest and slowest. The one to reach for on footage worth the wait.',
   },
 ];
+
+/** The checkpoint for one family at one precision: the composer's two choices, as the one id the gateway takes. */
+export function restoreModelFor(family, precision) {
+  return RESTORE_MODELS.find((item) => item.family === family && item.precision === precision) || null;
+}
 
 export const COLOR_CORRECTIONS = [
   { id: 'lab', label: 'Lab', hint: 'Match the original colour in Lab space. The safe default.' },
@@ -381,7 +409,9 @@ export function describeLane(lane) {
   if (lane.paid) {
     return 'Rented GPU — billed by the hour for as long as it is rented. Chunks come back sealed and are joined here in the browser, so its seams are hard cuts.';
   }
-  return `${t('place.thisMac')} — free. Chunks are kept losslessly here, so seams dissolve and the finish can be redone any time.`;
+  // What choosing it changes. The row is already named This Mac and wears the
+  // Free badge, under a heading that says both again.
+  return 'Chunks are kept losslessly here, so seams dissolve and the finish can be redone any time.';
 }
 
 /**
@@ -416,6 +446,53 @@ export function laneHasTensorRt(lane) {
 }
 
 /**
+ * Every free lane on this Mac, as the ONE machine it is.
+ *
+ * The gateway lists each ComfyUI lane it can route to, and a Mac that runs more
+ * than one ComfyUI process — a `default` lane plus, say, an `anima` lane for one
+ * image model and an `ltx` lane started --gpu-only — lists each process as a
+ * lane. They are usually one install with one set of custom nodes, so every one
+ * of them reports SeedVR2, and the picker offered "This Mac", "This Mac — anima"
+ * and "This Mac — ltx" as three machines. Choosing between them did nothing
+ * either: a free render sends no `run_on`, and the gateway takes the first lane
+ * that has the nodes whichever row was picked.
+ *
+ * So the free lanes fold into one. It stands for the lane the gateway will use —
+ * `default` when it can restore, the first that can otherwise — and keeps every
+ * name it covers in `aliases`, so a project that ran on any of them reopens on
+ * This Mac. A rented box and the hosted service are other machines with other
+ * bills, and are left as they are. Folding a folded list changes nothing.
+ */
+export function mergeLocalLanes(lanes) {
+  const all = lanes || [];
+  const local = all.filter((lane) => !lane.paid && lane.lane !== CLOUD_LANE);
+  if (!local.length) return all;
+  const usable = local.filter((lane) => lane.available);
+  const chosen = usable.find((lane) => lane.lane === 'default') || usable[0]
+    || local.find((lane) => lane.lane === 'default') || local[0];
+  const machine = {
+    ...chosen,
+    aliases: [...new Set(local.flatMap((lane) => lane.aliases || [lane.lane]))],
+  };
+  // None of them can restore. If ANY of them answered, ComfyUI is running here
+  // and it is the nodes that are missing — a different repair from a machine
+  // that is not answering at all.
+  if (!usable.length && local.some((lane) => lane.state === 'missing-nodes')) {
+    machine.state = 'missing-nodes';
+  }
+  return all.flatMap((lane) => {
+    if (lane === local[0]) return [machine];
+    return local.includes(lane) ? [] : [lane];
+  });
+}
+
+/** The lane a name belongs to: its own row, or the This Mac row it was folded into. */
+export function laneEntryFor(lanes, name) {
+  if (!name) return null;
+  return (lanes || []).find((lane) => lane.lane === name || (lane.aliases || []).includes(name)) || null;
+}
+
+/**
  * The gateway's lanes, in the studio's ONE "where does this run" vocabulary.
  *
  * A lane is a place, and this studio used to be the last one that would not say
@@ -434,17 +511,16 @@ export function laneHasTensorRt(lane) {
  * rows the RunOnPicker shows everywhere else.
  */
 export function restoreRunTargets(lanes) {
-  return (lanes || []).map((lane) => {
+  // One This Mac, however many ComfyUI processes it runs — see mergeLocalLanes.
+  // Folded here as well as in the studio, so no caller can hand this a raw lane
+  // list and bring "This Mac — anima" back.
+  return mergeLocalLanes(lanes).map((lane) => {
     const hosted = lane.lane === CLOUD_LANE;
-    // Two local lanes both called "This Mac" is a picker nobody can use, so the
-    // default lane keeps the plain name and every other one is named.
     const label = hosted
       ? t('restore.laneHostedGpu')
       : lane.paid
         ? (lane.machine || t('place.rentedGpu'))
-        : lane.lane === 'default'
-          ? t('place.thisMac')
-          : `${t('place.thisMac')} — ${lane.lane}`;
+        : t('place.thisMac');
     const accel = lane.available ? describeTensorRt(lane) : '';
     return {
       // The lane name IS the id: it is what `run_on` carries to the gateway.
@@ -508,7 +584,7 @@ export function describeChunkPlan(plan) {
   if (!plan?.chunks?.length) return '';
   const count = plan.chunks.length;
   const seconds = plan.chunkFrames / (plan.fps || 24);
-  return `${count} chunk${count === 1 ? '' : 's'} of about ${seconds.toFixed(1)}s → ${plan.width}x${plan.height}`;
+  return `${count} chunk${count === 1 ? '' : 's'} of about ${seconds.toFixed(1)}s → ${plan.width}×${plan.height}`;
 }
 
 /** An ETA only ever extrapolated from chunks this project actually finished. */

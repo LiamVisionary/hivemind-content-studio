@@ -712,7 +712,11 @@ export function VideoInpaintDialog({
           {coverage.length ? (
             <div className="flex flex-col gap-1.5">
               <SectionLabel>{describeCoverage(coverage.length, usable.seconds)}</SectionLabel>
-              <div className="grid grid-cols-6 gap-1.5">
+              {/* Six columns of a 375px sheet is a 47px frame — too small to
+                  see whether the mask actually covers the head, which is the one
+                  question this strip is asked. Three across a phone, six once
+                  there is room for them. */}
+              <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-6">
                 {coverage.map((tile) => (
                   <div key={tile.at} className="relative overflow-hidden rounded border border-line1 bg-bg0">
                     <img src={tile.url} alt={tf('clipPrep.frameAt', clock(tile.at))} className="block w-full" />

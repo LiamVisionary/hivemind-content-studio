@@ -69,6 +69,20 @@ export function FrameSlotsPicker({
   // Suspended while a preview is up so closing the preview (scrim click or
   // Escape) doesn't also tear down the panel underneath it.
   const rootRef = useDismissable(panelOpen && !previewSlotKey, () => setPanelOpen(false));
+  // Same rule as ui/Menu.jsx and the references panel, which this one was
+  // written without: a 304px panel anchored at the left of a chip that sits in
+  // the right half of a phone ran off the screen edge, and with three slot rows
+  // plus a four-column recent grid it has no height clamp of its own either.
+  const panelRef = useRef(null);
+  const [side, setSide] = useState('start');
+  useEffect(() => {
+    if (!panelOpen) { setSide('start'); return; }
+    const panel = panelRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const margin = 8;
+    setSide(rect.right > window.innerWidth - margin && rect.width < window.innerWidth - 2 * margin ? 'end' : 'start');
+  }, [panelOpen]);
 
   const studioMode = isHivemindStudioEnabled();
   const doUpload =
@@ -176,7 +190,16 @@ export function FrameSlotsPicker({
       />
 
       {panelOpen ? (
-        <div className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[304px] max-w-[calc(100vw-1.5rem)] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop">
+        <div
+          ref={panelRef}
+          className={cx(
+            // dvh, and capped by the room the composer this hangs off actually
+            // leaves above itself — the panel opens UPWARD from the bottom of
+            // the screen, so anything it overflows leaves by the top.
+            'hive-scale-in absolute bottom-[calc(100%+8px)] z-50 max-h-[min(70dvh,calc(100dvh-var(--frame-composer-h,140px)-3rem))] w-[304px] max-w-[calc(100vw-1.5rem)] overflow-y-auto overscroll-contain rounded-lg border border-line1 bg-bg1 p-3 shadow-pop',
+            side === 'end' ? 'right-0' : 'left-0',
+          )}
+        >
           <div className="mb-2.5 border-b border-line1 pb-2.5">
             <SectionLabel>Keyframes</SectionLabel>
             <span className="mt-0.5 block text-[11px] text-ink3">{`${slotSummary[0].toUpperCase()}${slotSummary.slice(1)} frames — all optional`}</span>
@@ -193,7 +216,10 @@ export function FrameSlotsPicker({
                 <div
                   key={slot.key}
                   className={cx(
-                    'flex items-center gap-2 rounded-md border p-1.5 transition-colors',
+                    // touch:gap-3 because the last two controls in this row are
+                    // upload and clear, and clear wipes a frame: at 24.5px and
+                    // 8px apart they were one mis-aimed thumb from each other.
+                    'flex items-center gap-2 rounded-md border p-1.5 transition-colors touch:gap-3',
                     isActive ? 'border-honey/50 bg-honey-tint' : 'border-line1 hover:border-line2',
                   )}
                 >
@@ -243,7 +269,7 @@ export function FrameSlotsPicker({
                       setActiveKey(slot.key);
                       fileInputRef.current?.click();
                     }}
-                    className="grid h-7 w-7 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+                    className="grid h-7 w-7 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 touch:h-[44px] touch:w-[44px]"
                   >
                     <Icon name="upload" size={13} />
                   </button>
@@ -252,7 +278,7 @@ export function FrameSlotsPicker({
                       type="button"
                       title={`Clear the ${slot.label.toLowerCase()} frame`}
                       onClick={() => assign(slot.key, null)}
-                      className="grid h-7 w-7 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+                      className="grid h-7 w-7 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 touch:h-[44px] touch:w-[44px]"
                     >
                       <Icon name="x" size={13} />
                     </button>

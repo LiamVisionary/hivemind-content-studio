@@ -136,7 +136,7 @@ export function RestoreSettings({
       {/* ---- OUTPUT --------------------------------------------------------- */}
       <DrawerSection
         label={t('restorePanel.output')}
-        hint={plan?.width ? `${plan.width}x${plan.height}` : resolution.label}
+        hint={plan?.width ? `${plan.width}×${plan.height}` : resolution.label}
       >
         <Segmented
           size="sm"

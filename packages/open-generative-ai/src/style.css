@@ -7,10 +7,20 @@
 
 /* Shell frame — sidebar | (topbar / content) */
 #app {
-  width: 100vw;
+  /* 100% rather than 100vw: 100vw counts the scrollbar's width, which put a
+     few dead pixels of horizontal scroll under every page on a desktop browser
+     that draws one. */
+  width: 100%;
   height: 100vh;
+  /* dvh second so an engine that knows it wins: the shell does not scroll, so
+     it wants the viewport as it IS under a mobile browser's chrome, not the
+     taller one 100vh reports. */
   height: 100dvh;
   overflow: hidden;
+  /* The app owns the whole screen, so a drag that reaches the end of a scroller
+     inside it must not rubber-band the page behind it or trigger the browser's
+     pull-to-refresh. */
+  overscroll-behavior: none;
   background: var(--bg-0);
 }
 

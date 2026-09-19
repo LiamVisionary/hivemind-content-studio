@@ -157,7 +157,17 @@ export function useHint(placement = 'top') {
   const bind = (handlers = {}) => ({
     onMouseEnter: (e) => { handlers.onMouseEnter?.(e); reveal(e); },
     onMouseLeave: (e) => { handlers.onMouseLeave?.(e); dismiss(); },
-    onFocus: (e) => { handlers.onFocus?.(e); if (e.currentTarget.matches(':focus-visible')) reveal(e); },
+    // The test is on what actually took focus, the ANCHOR is what bind() was
+    // put on, and those are not always the same element: PromptDock binds this
+    // to a wrapper <span> around its Send button, React's focus events bubble,
+    // and a span is not focusable — so `currentTarget.matches(':focus-visible')`
+    // was false for every keyboard focus and the hint had no keyboard path at
+    // all there. Where bind() is on the control itself the two are identical.
+    onFocus: (e) => {
+      handlers.onFocus?.(e);
+      const focused = e.target?.matches ? e.target : e.currentTarget;
+      if (focused.matches(':focus-visible')) reveal(e);
+    },
     onBlur: (e) => { handlers.onBlur?.(e); dismiss(); },
     // A press that opens a sheet over the cursor never fires mouseleave, and the
     // bubble sits above the modal layer — so the press dismisses it itself.
@@ -190,12 +200,16 @@ export function ActionButton({ icon, label, className = '', ...rest }) {
   );
 }
 
-// Sizes: xs 24px (dense rows, card corners), sm 28, md 36, lg 44.
+// Sizes: xs 24px (dense rows, card corners), sm 28, md 36, lg 44 — and 32/34/
+// 44/48 wherever the pointer is a finger, because both axes come off the same
+// --ctl-* ladder now. They used to be `h-ctl-* w-[NNpx]`, so the coarse-pointer
+// bump stretched every icon button into a lozenge; `xs` missed the ladder
+// entirely and stayed a 21px target on a phone.
 const ICON_BTN_DIMS = {
-  xs: 'h-6 w-6 rounded-sm',
-  sm: 'h-ctl-sm w-[28px] rounded-md',
-  md: 'h-ctl-md w-[36px] rounded-md',
-  lg: 'h-ctl-lg w-[44px] rounded-md',
+  xs: 'h-ctl-xs w-ctl-xs rounded-sm',
+  sm: 'h-ctl-sm w-ctl-sm rounded-md',
+  md: 'h-ctl-md w-ctl-md rounded-md',
+  lg: 'h-ctl-lg w-ctl-lg rounded-md',
 };
 const ICON_BTN_GLYPH = { xs: 12, sm: 14, md: 17, lg: 18 };
 
@@ -300,7 +314,10 @@ export function Segmented({ options, value, onChange, size = 'md', className = '
             onClick={() => onChange(val)}
             className={cx(
               'rounded-[7px] font-medium transition-colors duration-150',
-              size === 'sm' ? 'h-6 px-2 text-[11px]' : 'h-7 px-2.5 text-xs',
+              // Through the --ctl-* ladder rather than raw heights, so these
+              // inherit the coarse-pointer bump the rest of the app has: 21/25px
+              // is a cursor's target, 34/44px is a thumb's.
+              size === 'sm' ? 'h-ctl-sm px-2 text-[11px]' : 'h-ctl-md px-2.5 text-xs',
               on ? 'bg-bg3 text-ink1 shadow-card' : 'text-ink2 hover:text-ink1',
             )}
           >
@@ -326,18 +343,75 @@ function arTileClass(on) {
 
 // Literal so Tailwind's scanner finds them; a template string would be purged.
 const COLS = { 2: 'grid-cols-2', 3: 'grid-cols-3', 4: 'grid-cols-4', 6: 'grid-cols-6' };
+// The grid's gap-1.5, in the unit the class resolves to (the root is 14px).
+const AR_GAP = '0.375rem';
 
 export function AspectRatioPicker({
   options, value, onChange, nameFor, custom = null, disabled = false, className = '',
-  // The settings panel gives this a full 320px column and three across; the
-  // studio frame's Advanced drawer packs the same tiles six across, without a
-  // per-ratio name. One control, two densities — not two controls.
+  // The most tiles a row may hold. The settings panel gives this a full 320px
+  // column and three across; the studio frame's Advanced drawer asks for six.
+  // One control, two densities — not two controls. A CEILING, not a promise
+  // that a tile's words fit: the floor below decides that.
   columns = 3,
 }) {
   const customOn = value === 'custom';
-  const cols = COLS[columns] || COLS[3];
+  const count = COLS[columns] ? columns : 3;
+  const gridRef = useRef(null);
+  // The widest tile's own content, measured: the narrowest any column may be.
+  // `grid-cols-6` is six `minmax(0, 1fr)` tracks, and those never grow — in the
+  // 320px drawer that left 42px a tile, "Landscape" is 55, and the names ran out
+  // of their cards and into each other. With a floor, a row holds as many tiles
+  // as fit at that width and the rest wrap.
+  const [floor, setFloor] = useState(0);
+  const contentKey = [
+    ...options.map((ar) => `${ar}=${nameFor ? nameFor(ar) || '' : ''}`),
+    custom ? `custom=${custom.name}/${custom.detail || ''}` : '',
+  ].join('|');
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) return undefined;
+    const measure = () => {
+      let widest = 0;
+      for (const tile of grid.children) {
+        const box = window.getComputedStyle(tile);
+        const chrome = parseFloat(box.paddingLeft) + parseFloat(box.paddingRight)
+          + parseFloat(box.borderLeftWidth) + parseFloat(box.borderRightWidth);
+        // scrollWidth rather than a rect: inside a menu this runs mid scale-in,
+        // and a rect would come back three percent short.
+        for (const part of tile.children) widest = Math.max(widest, part.scrollWidth + chrome);
+      }
+      // Nothing measured means nothing laid out yet (a background tab): keep
+      // the class until there is a size to read.
+      if (!widest) return;
+      const next = Math.ceil(widest) + 1;
+      setFloor((prev) => (prev === next ? prev : next));
+    };
+    measure();
+    // Two things change what fits after the first pass: the face landing on a
+    // cold load, and a hidden tab getting its first real size.
+    let live = true;
+    document.fonts?.ready?.then(() => { if (live) measure(); });
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(grid);
+    return () => {
+      live = false;
+      observer?.disconnect();
+    };
+  }, [contentKey]);
+  // Each column is the floor or the width `columns` across would give it,
+  // whichever is wider, so a roomy panel still lays out exactly as asked. The
+  // 1px keeps rounding from costing a column; auto-fill (not auto-fit) leaves an
+  // empty last column rather than stretching a short row.
+  const template = floor
+    ? `repeat(auto-fill, minmax(max(${floor}px, calc((100% - ${count - 1} * ${AR_GAP}) / ${count} - 1px)), 1fr))`
+    : undefined;
   return (
-    <div role="radiogroup" className={cx('grid gap-1.5', cols, disabled && 'opacity-40', className)}>
+    <div
+      ref={gridRef}
+      role="radiogroup"
+      className={cx('grid gap-1.5', template ? null : COLS[count], disabled && 'opacity-40', className)}
+      style={template ? { gridTemplateColumns: template } : undefined}
+    >
       {options.map((ar) => {
         const on = ar === value;
         const [w, h] = String(ar).split(':').map(Number);
@@ -362,10 +436,12 @@ export function AspectRatioPicker({
                 style={{ width: shapeW, height: shapeH }}
               />
             </span>
+            {/* nowrap: a name that wrapped inside its card would read as two
+                words, and the floor above measures one line. */}
             {name ? (
-              <span className={cx('text-[11px] font-medium leading-none', on ? 'text-ink1' : 'text-ink2')}>{name}</span>
+              <span className={cx('whitespace-nowrap text-[11px] font-medium leading-none', on ? 'text-ink1' : 'text-ink2')}>{name}</span>
             ) : null}
-            <span className={cx('font-mono text-[10px] leading-none', on ? 'text-ink2' : 'text-ink3')}>{ar}</span>
+            <span className={cx('whitespace-nowrap font-mono text-[10px] leading-none', on ? 'text-ink2' : 'text-ink3')}>{ar}</span>
           </button>
         );
       })}
@@ -388,8 +464,8 @@ export function AspectRatioPicker({
               ?
             </span>
           </span>
-          <span className={cx('text-[11px] font-medium leading-none', customOn ? 'text-ink1' : 'text-ink2')}>{custom.name}</span>
-          <span className={cx('font-mono text-[10px] leading-none', customOn ? 'text-ink2' : 'text-ink3')}>{custom.detail || 'W×H'}</span>
+          <span className={cx('whitespace-nowrap text-[11px] font-medium leading-none', customOn ? 'text-ink1' : 'text-ink2')}>{custom.name}</span>
+          <span className={cx('whitespace-nowrap font-mono text-[10px] leading-none', customOn ? 'text-ink2' : 'text-ink3')}>{custom.detail || 'W×H'}</span>
         </button>
       ) : null}
     </div>
@@ -407,6 +483,11 @@ export function Toggle({ checked, onChange, label, disabled = false }) {
       onClick={() => onChange(!checked)}
       className={cx(
         'relative h-5 w-9 shrink-0 rounded-full transition-colors duration-150',
+        // The switch stays 17.5x31.5px — it is drawn at the end of a settings
+        // row and a bigger one would change every row it sits in — but under a
+        // thumb it gets a 44px hit area centred on itself, drawn by a
+        // pseudo-element so nothing around it moves.
+        "touch:before:absolute touch:before:left-1/2 touch:before:top-1/2 touch:before:h-11 touch:before:w-11 touch:before:-translate-x-1/2 touch:before:-translate-y-1/2 touch:before:content-['']",
         checked ? 'bg-honey' : 'bg-bg3 border border-line1',
         disabled && 'opacity-40',
       )}
@@ -622,7 +703,11 @@ export function FailureCallout({
   const skin = CALLOUT_TONES[tone] || CALLOUT_TONES.danger;
   return (
     <div
-      className={cx('flex items-start justify-between gap-3 rounded-md border px-3.5 py-3', skin.box, className)}
+      // The action column cannot wrap under the sentence, so on a phone the
+      // sentence had to squeeze past a fixed 180px of buttons — a failure
+      // message reduced to two words a line beside the button that repairs it.
+      // Stacked below sm, the sentence gets the width and the actions keep it.
+      className={cx('flex flex-col items-stretch gap-2 rounded-md border px-3.5 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-3', skin.box, className)}
       role={skin.role}
     >
       <div className="min-w-0">
@@ -638,7 +723,7 @@ export function FailureCallout({
           </details>
         ) : null}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+      <div className="flex flex-wrap items-center justify-start gap-1.5 sm:shrink-0 sm:justify-end">
         {remedy && onRemedy ? (
           <Button size="sm" variant="primary" onClick={() => onRemedy(remedy)}>{remedy.label}</Button>
         ) : null}
@@ -732,7 +817,9 @@ export function LoadingState({ label, hint, size = 44, className = '' }) {
       aria-busy="true"
       aria-live="polite"
       className={cx(
-        'flex min-h-[55vh] w-full flex-1 flex-col items-center justify-center gap-3.5 px-6 py-16 text-center',
+        // dvh: on iOS 55vh is 55% of the LARGE viewport, which is taller than
+        // what is on screen while the URL bar is showing.
+        'flex min-h-[55dvh] w-full flex-1 flex-col items-center justify-center gap-3.5 px-6 py-10 text-center sm:py-16',
         className,
       )}
     >
@@ -908,7 +995,10 @@ function ComposerSlot({ drop, floating = false, width = 'max-w-[880px]', childre
               ? 'shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_2px_rgb(var(--honey-rgb))]'
               : 'shadow-[0_20px_60px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.07)]',
           )
-          : cx('border-t bg-bg1/80 p-3 backdrop-blur-sm', showing ? 'border-honey' : 'border-line1'),
+          // pb clears the home indicator: this bar is the bottom edge of the
+          // window in the studios that use it (Lip sync, Sprite), and `env()`
+          // is 0 on anything without an inset, so nothing else changes.
+          : cx('border-t bg-bg1/80 px-3 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur-sm', showing ? 'border-honey' : 'border-line1'),
       )}
     >
       {children}
@@ -930,7 +1020,11 @@ function ComposerSlot({ drop, floating = false, width = 'max-w-[880px]', childre
     </div>
   );
 
-  return floating ? <div className="relative shrink-0 px-[22px] pb-[22px] pt-2">{panel}</div> : panel;
+  // Same geometry the studio frame's own composer settled on: nearly edge to
+  // edge on a phone, and lifted clear of the home indicator.
+  return floating
+    ? <div className="relative shrink-0 px-3 pb-[calc(12px+env(safe-area-inset-bottom))] pt-2 sm:px-[22px] sm:pb-[22px]">{panel}</div>
+    : panel;
 }
 
 // THE remedy for a studio that is not answering, in the two shapes it can take.
@@ -1051,9 +1145,17 @@ export function StudioLayout({
             {panel}
           </aside>
           {panelOpen ? (
-            <div className="fixed inset-0 z-40 flex lg:hidden" role="dialog" aria-modal="true">
+            <div className="fixed inset-0 z-40 flex items-end sm:items-start lg:hidden" role="dialog" aria-modal="true">
               <div className="absolute inset-0 bg-scrim" onClick={() => setPanelOpen(false)} />
-              <div className="hive-scale-in relative m-3 mt-16 flex max-h-[80vh] w-[min(360px,92vw)] flex-col gap-4 overflow-y-auto rounded-xl border border-line1 bg-bg1 p-4 shadow-overlay">
+              {/* A bottom sheet below sm, the floating card it has always been
+                  above. It used to be a 345px card with a 16px top margin
+                  floating in the middle of a phone — the shape a desktop dialog
+                  takes when it is merely made narrower. */}
+              <div className={cx(
+                'hive-sheet-in relative flex flex-col gap-4 overflow-y-auto overscroll-contain border border-line1 bg-bg1 p-4 shadow-overlay',
+                'mt-auto max-h-[88dvh] w-full rounded-t-2xl border-b-0 pb-[calc(1rem+env(safe-area-inset-bottom))]',
+                'sm:m-3 sm:mt-16 sm:max-h-[80dvh] sm:w-[min(360px,92vw)] sm:rounded-xl sm:border-b sm:pb-4',
+              )}>
                 <div className="flex items-center justify-between">
                   <SectionLabel>{panelTitle}</SectionLabel>
                   <IconButton icon="x" label="Close" size="sm" onClick={() => setPanelOpen(false)} />
@@ -1070,7 +1172,7 @@ export function StudioLayout({
         {/* Below lg the panel lives in a sheet; its opener sits in its own row so it
             can never cover the composer (a floating button used to sit on the chips). */}
         {panel ? (
-          <div className="flex shrink-0 items-center border-t border-line1 bg-bg1 px-3 py-1.5 lg:hidden">
+          <div className="flex shrink-0 items-center border-t border-line1 bg-bg1 px-3 py-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))] lg:hidden">
             <Button icon="sliders" size="sm" onClick={() => setPanelOpen(true)} aria-haspopup="dialog" aria-expanded={panelOpen}>
               {panelTitle}
             </Button>

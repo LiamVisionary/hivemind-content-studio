@@ -83,7 +83,12 @@ function TabChip({ index, on, busy, label, preview, asleep = false, onSelect, on
     <div
       ref={chipRef}
       className={cx(
+        // 24.5px of chip is a cursor's target. Under a thumb the whole chip is
+        // 44 and the two icon buttons inside it grow with it — this strip is
+        // how you get back to a tab that is still rendering, so missing it and
+        // hitting Close instead is the expensive kind of miss.
         'group/tab inline-flex h-7 shrink-0 items-center rounded-md border pr-0.5 transition-colors duration-150',
+        'touch:h-[44px] touch:pr-1',
         on
           ? 'border-honey/50 bg-honey-tint text-honey'
           : 'border-line1 bg-bg2 text-ink2 hover:border-line2 hover:text-ink1',
@@ -100,7 +105,9 @@ function TabChip({ index, on, busy, label, preview, asleep = false, onSelect, on
         title={asleep
           ? `${TEXT.tab(index + 1)} — ${TEXT.sleeping()}`
           : `${TEXT.tab(index + 1)} — ${label}${busy ? ` · ${TEXT.busyDot()}` : ''}`}
-        className="flex h-full max-w-[190px] items-center gap-1.5 pl-1.5 pr-1 text-xs font-semibold"
+        // text-xs on this 14px root is 10.5px — a caption, not the name of the
+        // tab you are trying to find among six of them.
+        className="flex h-full max-w-[190px] items-center gap-1.5 pl-1.5 pr-1 text-xs font-semibold touch:pl-2.5 touch:text-[13px]"
       >
         {busy ? (
           <span
@@ -113,7 +120,14 @@ function TabChip({ index, on, busy, label, preview, asleep = false, onSelect, on
         <span className="min-w-0 truncate">{label}</span>
       </button>
       {/* Duplicate stays on the active chip; on the others it appears on hover
-          so a long strip is not a row of copy icons. */}
+          so a long strip is not a row of copy icons.
+
+          There is no hover on a phone, so `opacity-0` there was an invisible
+          but fully live 21px target welded to the side of every inactive chip —
+          a finger aiming at a tab duplicated a whole studio instead, and a
+          duplicate is a second mount with a second set of references. It does
+          not exist under a thumb: Duplicate is reached by opening the tab
+          first, which is what the active chip already offers. */}
       <button
         type="button"
         onClick={onDuplicate}
@@ -122,7 +136,8 @@ function TabChip({ index, on, busy, label, preview, asleep = false, onSelect, on
         tabIndex={on ? 0 : -1}
         className={cx(
           'grid h-6 w-6 place-items-center rounded text-current transition-opacity hover:opacity-100 focus-visible:opacity-100',
-          on ? 'opacity-60' : 'opacity-0 group-hover/tab:opacity-60',
+          'touch:h-[38px] touch:w-[38px]',
+          on ? 'opacity-60' : 'opacity-0 group-hover/tab:opacity-60 touch:hidden',
         )}
       >
         <Icon name="copy" size={12} />
@@ -133,7 +148,7 @@ function TabChip({ index, on, busy, label, preview, asleep = false, onSelect, on
           onClick={onClose}
           title={TEXT.close()}
           aria-label={TEXT.close()}
-          className="grid h-6 w-6 place-items-center rounded text-current opacity-60 transition-opacity hover:opacity-100"
+          className="grid h-6 w-6 place-items-center rounded text-current opacity-60 transition-opacity hover:opacity-100 touch:h-[38px] touch:w-[38px]"
         >
           <Icon name="x" size={12} />
         </button>
@@ -483,7 +498,7 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
           onClick={openNewTab}
           title={TEXT.newTab()}
           aria-label={TEXT.newTab()}
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line1 bg-bg2 text-ink2 transition-colors hover:border-line2 hover:text-ink1"
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line1 bg-bg2 text-ink2 transition-colors hover:border-line2 hover:text-ink1 touch:h-[44px] touch:w-[44px]"
         >
           <Icon name="plus" size={14} />
         </button>

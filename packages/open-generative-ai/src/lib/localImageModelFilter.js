@@ -14,8 +14,17 @@ export function localModelSupportsImageInput(model) {
     );
 }
 
+// A lane whose `actionOnly` is set is driven by its own button, not by the
+// model picker: the Klein direction tools open on a picture that already
+// exists and steer it. They stay in the model LIST — that is how the button
+// resolves the lane — and out of every list a person picks a model from.
+export function isPickableLocalImageModel(model) {
+    return !model?.actionOnly;
+}
+
 export function visibleLocalImageModels(models, hasImage) {
-    return hasImage ? models.filter(localModelSupportsImageInput) : [...models];
+    const pickable = models.filter(isPickableLocalImageModel);
+    return hasImage ? pickable.filter(localModelSupportsImageInput) : pickable;
 }
 
 // Some local workflows never wire a negative encoder (the Krea 2 identity graph

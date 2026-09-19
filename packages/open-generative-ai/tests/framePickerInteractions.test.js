@@ -32,7 +32,11 @@ test('both pickers dismiss from a region that includes their trigger', () => {
         // likewise while a delete confirm raised from the panel is up.
         assert.match(source, /const rootRef = useDismissable\(panelOpen && !preview\w+(?: && !\w+)*, \(\) => setPanelOpen\(false\)\)/, `${file} names the dismissable region rootRef`);
         assert.match(source, /ref=\{rootRef\}/, `${file} attaches it to the wrapper`);
-        assert.doesNotMatch(source, /ref=\{panelRef\}/, `${file} no longer scopes dismissal to the panel alone`);
+        // The panel may hold a ref of its OWN — FrameSlotsPicker measures itself
+        // to flip away from the screen edge, the way ui/Menu.jsx does — so what
+        // this pins is the PROPERTY (dismissal is the wrapper's), not the
+        // absence of any panel ref at all.
+        assert.doesNotMatch(source, /useDismissable\([^;]*panelRef/, `${file} no longer scopes dismissal to the panel alone`);
     }
 });
 

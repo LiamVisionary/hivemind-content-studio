@@ -153,7 +153,10 @@ test('a rented machine is described as the paid one, and says why', async () => 
     // The consequence, not just the price: its seams cannot dissolve.
     assert.match(paid, /hard cuts/i);
     const free = describeLane({ available: true, paid: false });
-    assert.match(free, /free/i);
+    // What choosing it changes — and nothing its row already says: the row is
+    // named This Mac and wears the Free badge.
+    assert.match(free, /losslessly/i);
+    assert.doesNotMatch(free, /This Mac|free/i);
     // A lane that cannot restore says so in words and names the repair. The
     // node CLASS names never appear: they are a graph detail, and the gateway
     // returns the whole list whenever a lane merely fails to answer — which is
@@ -411,4 +414,98 @@ test('a project the reaper took reads as the retention rule, not as a failed ren
     // the action is the rule and where the film went.
     assert.doesNotMatch(read.action, /Resume/);
     assert.match(read.action, /History/);
+});
+
+// --- which machines there are ---------------------------------------------------
+//
+// The gateway lists ComfyUI LANES, and a Mac running several ComfyUI processes
+// lists each one. The picker is a list of machines, so those fold into one.
+
+const localLane = (lane, extra = {}) => ({ lane, remote: false, paid: false, available: true, assembles_here: true, ...extra });
+
+test('the ComfyUI processes on one Mac are one machine, and a project on any of them reopens there', async () => {
+    const { CLOUD_LANE, laneEntryFor, mergeLocalLanes, restoreRunTargets } = await lib();
+    // As this Mac's gateway lists them: one install started on three ports,
+    // then the hosted lane waiting on an account.
+    const lanes = [
+        localLane('anima'), localLane('default'), localLane('ltx'),
+        {
+            lane: CLOUD_LANE, remote: true, paid: true, available: false, remedy: 'connect',
+            reason: 'connect your HivemindOS account to restore on the hosted service',
+        },
+    ];
+    const machines = mergeLocalLanes(lanes);
+    assert.deepEqual(machines.map((entry) => entry.lane), ['default', CLOUD_LANE]);
+    assert.deepEqual([...machines[0].aliases].sort(), ['anima', 'default', 'ltx']);
+
+    // One This Mac row, wearing its bill, and no process name reaches a reader.
+    const targets = restoreRunTargets(lanes);
+    const here = targets.filter((target) => target.place === 'this-mac');
+    assert.equal(here.length, 1);
+    assert.equal(here[0].label, 'This Mac');
+    assert.equal(here[0].badge.label, 'Free');
+    for (const target of targets) {
+        assert.doesNotMatch(`${target.label} ${target.placeLabel}`, /anima|ltx|default/, target.label);
+    }
+
+    // A project that ran on any of them reopens on that one row.
+    assert.equal(laneEntryFor(machines, 'ltx').lane, 'default');
+    assert.equal(laneEntryFor(machines, CLOUD_LANE).lane, CLOUD_LANE);
+    assert.equal(laneEntryFor(machines, 'gone'), null);
+    // And folding a folded list changes nothing.
+    assert.deepEqual(mergeLocalLanes(machines), machines);
+});
+
+test('a rented box and the hosted service stay machines of their own', async () => {
+    const { CLOUD_LANE, mergeLocalLanes } = await lib();
+    const lanes = [
+        localLane('default'), localLane('anima'),
+        { lane: 'rental50991951', remote: true, paid: true, available: true, assembles_here: false },
+        { lane: CLOUD_LANE, remote: true, paid: true, available: true },
+    ];
+    assert.deepEqual(mergeLocalLanes(lanes).map((entry) => entry.lane), ['default', 'rental50991951', CLOUD_LANE]);
+});
+
+test('This Mac stands for the lane the gateway would use, and names the right repair when none can', async () => {
+    const { describeLane, mergeLocalLanes } = await lib();
+    // The gateway takes `default` first when it has the nodes, and the first
+    // lane that has them otherwise.
+    const mixed = mergeLocalLanes([localLane('anima'), localLane('default', { available: false, state: 'missing-nodes' })]);
+    assert.equal(mixed.length, 1);
+    assert.equal(mixed[0].lane, 'anima');
+    assert.equal(mixed[0].available, true);
+
+    // None can restore. One of them answered, so ComfyUI is running here and it
+    // is the nodes that are missing — not a machine that is switched off.
+    const [none] = mergeLocalLanes([
+        localLane('default', { available: false, state: 'unreachable', remedy: 'attach-machine' }),
+        localLane('ltx', { available: false, state: 'missing-nodes', remedy: 'attach-machine' }),
+    ]);
+    assert.equal(none.available, false);
+    assert.equal(none.state, 'missing-nodes');
+    assert.equal(none.remedy, 'attach-machine');
+    assert.match(describeLane(none), /no SeedVR2 upscaler installed/i);
+});
+
+// --- the model, as two choices ---------------------------------------------------
+
+test('a family and a precision name exactly one checkpoint, carried rather than parsed', async () => {
+    const { RESTORE_DEFAULTS, RESTORE_FAMILIES, RESTORE_MODELS, RESTORE_PRECISIONS, restoreModelFor } = await lib();
+    for (const family of RESTORE_FAMILIES) {
+        for (const precision of RESTORE_PRECISIONS) {
+            const model = restoreModelFor(family.id, precision.id);
+            assert.ok(model, `${family.label} at ${precision.label} names no checkpoint`);
+            assert.equal(model.family, family.id);
+            assert.equal(model.precision, precision.id);
+        }
+    }
+    assert.equal(RESTORE_MODELS.length, RESTORE_FAMILIES.length * RESTORE_PRECISIONS.length);
+    // The mixed checkpoint's filename ENDS in fp16 and it is an fp8 model — the
+    // reason precision is data and not a substring match.
+    const standard = restoreModelFor('7b', 'fp8');
+    assert.equal(standard.id, 'seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors');
+    assert.equal(restoreModelFor('7b_sharp', 'fp16').id, 'seedvr2_ema_7b_sharp_fp16.safetensors');
+    // A first render runs on the standard 7B at fp8.
+    assert.equal(RESTORE_DEFAULTS.model, standard.id);
+    assert.equal(restoreModelFor('9b', 'fp8'), null);
 });

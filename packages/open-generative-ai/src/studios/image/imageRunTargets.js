@@ -16,13 +16,37 @@
 import { i2iModels, t2iModels } from '../../lib/cloudCatalog.js';
 import { buildRunTargets } from '../../lib/runTargets.js';
 
-/** An image model the studio's own cloud catalog knows, deduplicated: a model
- *  with both a text-to-image and an editing row is one model. */
+/**
+ * An image model the studio's own cloud catalog knows, deduplicated: a model
+ * with both a text-to-image and an editing row is one model.
+ *
+ * The two buckets are also the one honest answer to what that model starts
+ * from, and it is the answer this studio has always routed by (see
+ * ImageStudio's apiModelSupportsImage / apiModelRequiresImage): a row in the
+ * editing list takes a picture, and one that is ONLY there requires it. That
+ * is 54 of the 107 rows — every upscaler, background remover and colorizer,
+ * against 50 a prompt alone reaches and 3 that do both — and until this
+ * carried it through, the picker offered them all as the same grey names.
+ *
+ * Inferring the same thing from the media catalog's `reference_roles` would be
+ * wrong and was not done: `nano-banana-pro-edit` declares a reference role and
+ * is edit-only, so roles would have labelled an image-to-image model as one a
+ * prompt alone can reach.
+ */
 export function studioCloudImageModels() {
   const seen = new Map();
-  for (const model of [...t2iModels, ...i2iModels]) {
-    if (!model?.id || seen.has(model.id)) continue;
-    seen.set(model.id, { id: model.id, label: model.name || model.id, family: model.family || '' });
+  for (const [capability, list] of [['text-to-image', t2iModels], ['image-to-image', i2iModels]]) {
+    for (const model of list) {
+      if (!model?.id) continue;
+      const known = seen.get(model.id);
+      if (known) { known.capabilities.push(capability); continue; }
+      seen.set(model.id, {
+        id: model.id,
+        label: model.name || model.id,
+        family: model.family || '',
+        capabilities: [capability],
+      });
+    }
   }
   return [...seen.values()];
 }

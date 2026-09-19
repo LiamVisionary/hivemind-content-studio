@@ -23,14 +23,16 @@ import { SectionLabel, cx } from '../../ui/kit.jsx';
  * @param {Array}  props.videos          motion/sound-only clip rows, as attached
  * @param {Array}  props.audios          voice clips, as attached
  * @param {object} props.durations       url -> measured seconds, where known
+ * @param {Array}  [props.scenes]        scene rows, as `[{ url, retention, spot }]`
  * @param {Function} [props.onRefit]      re-time the shots to fit the clip
  * @param {Function} [props.onWeave]      weave the attached references / cast into the prompt
  * @param {Function} [props.onRefine]     open the helper — for findings only prose can fix
  */
 export function PromptCheckMenu({
-  prompt = '', durationSeconds = 0, images = [], videos = [], audios = [], durations = {}, onRefit, onWeave, onRefine,
+  prompt = '', durationSeconds = 0, images = [], videos = [], audios = [], durations = {}, scenes = [],
+  onRefit, onWeave, onRefine,
 }) {
-  const result = checkH3Prompt({ prompt, durationSeconds, images, videos, audios, durations });
+  const result = checkH3Prompt({ prompt, durationSeconds, images, videos, audios, durations, scenes });
   const nothingYet = result.findings.length === 1 && result.findings[0].code === 'empty';
   // Errors first: a broken cut matters more than a missing soundscape, and a
   // list sorted by where it happened to be found reads as unranked noise.
@@ -50,7 +52,10 @@ export function PromptCheckMenu({
   // door runs, offered here for text that was typed straight in.
   // subject-not-in-scene is deliberately NOT here: the weave can define a
   // subject but cannot write it into prose — that is the helper's job.
-  const WEAVABLE = new Set(['no-sections', 'pictures-unnamed', 'motion-unnamed', 'partial-sections']);
+  // spot-unused is here because the weave is exactly its fix: the scene
+  // member's definition is what says the circle chooses the location and must
+  // not be drawn, and nothing else in the studio writes that sentence.
+  const WEAVABLE = new Set(['no-sections', 'pictures-unnamed', 'motion-unnamed', 'partial-sections', 'spot-unused']);
   const canWeave = typeof onWeave === 'function'
     && findings.some((finding) => WEAVABLE.has(finding.code));
   // A subject defined but never staged needs PROSE — a beat for them to be in.

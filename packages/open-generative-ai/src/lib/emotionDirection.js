@@ -34,8 +34,10 @@
 // and a Seedance paragraph alike: which subject is performing is a fact only
 // the prompt knows, and a picker that guessed a number would address the wrong
 // person in every multi-subject scene.
-import { parseFieldPrompt } from './h3References.js';
-import { formatSixSections, isSixSectionPrompt, parseSixSections } from './castPrompt.js';
+//
+// The two mechanics that put a sentence into an H3 prompt and take it out
+// again are shared with the fight preset, so they live in h3PromptPhrase.js.
+import { stripPhrase, withPhraseInH3Description } from './h3PromptPhrase.js';
 
 /** Menu groupings, in the guide's own order. */
 export const EMOTION_FAMILIES = Object.freeze(['Joy', 'Sadness', 'Anger', 'Fear', 'Surprise', 'Disgust', 'Social', 'Drive', 'Physical']);
@@ -280,57 +282,10 @@ export function emotionDirectionById(id) {
  * reads. `h3` picks the rewrite that names the sound; everything else gets the
  * guide's own text.
  */
-/**
- * Remove `phrase` and the whitespace that joined it, and touch nothing else.
- *
- * Deliberately NOT cameraMotion's stripCameraMotionPhrase, which tidies
- * whitespace across the WHOLE string: H3's formats are whitespace-significant
- * — the fields are separated by blank lines — so that tidy flattens a
- * three-field prompt onto one line, parseFieldPrompt stops recognising it, and
- * the next selection lands past the end in the music field again. Punctuation
- * is left alone so a base that ended in a full stop comes back byte for byte.
- */
-function stripEmotionPhrase(prompt, phrase) {
-  const target = String(phrase || '').trim();
-  if (!target) return String(prompt || '');
-  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return String(prompt || '').replace(new RegExp(`[ \\t]*\\n?[ \\t]*${escaped}`, 'g'), '');
-}
-
 export function emotionPhrase(id, { h3 = false } = {}) {
   const entry = emotionDirectionById(id);
   if (!entry) return '';
   return `Performance: ${h3 ? entry.h3 : entry.prompt}`;
-}
-
-/**
- * Put `phrase` at the end of an H3 prompt's DESCRIPTION, in either native
- * format, or null when the text is not an H3 prompt at all.
- *
- * An H3 prompt ends in `non_diegetic_music:`, so a plain append writes acting
- * direction into the music field — the failure the composer weave was built
- * for. Both formats are handled because both ship: the starters and the helper
- * write three-field, reference mode writes six-section.
- */
-function withPhraseInH3Description(prompt, phrase) {
-  const fields = parseFieldPrompt(prompt);
-  if (fields) {
-    const body = [fields.integrated_multimodal_description, phrase].filter(Boolean).join('\n');
-    return [
-      fields.lead,
-      `integrated_multimodal_description: ${body}`,
-      `overall_soundscape: ${fields.overall_soundscape || ''}`.trim(),
-      `non_diegetic_music: ${fields.non_diegetic_music || ''}`.trim(),
-    ].filter(Boolean).join('\n\n');
-  }
-  if (isSixSectionPrompt(prompt)) {
-    const sections = parseSixSections(prompt);
-    return formatSixSections({
-      ...sections,
-      detailed_description: [sections.detailed_description, phrase].filter(Boolean).join('\n'),
-    });
-  }
-  return null;
 }
 
 /**
@@ -345,8 +300,8 @@ function withPhraseInH3Description(prompt, phrase) {
 export function applyEmotionPrompt(prompt, previousId, nextId, { h3 = false } = {}) {
   let base = String(prompt || '');
   if (previousId) {
-    base = stripEmotionPhrase(base, emotionPhrase(previousId, { h3: false }));
-    base = stripEmotionPhrase(base, emotionPhrase(previousId, { h3: true }));
+    base = stripPhrase(base, emotionPhrase(previousId, { h3: false }));
+    base = stripPhrase(base, emotionPhrase(previousId, { h3: true }));
   }
   base = base.trim();
   const phrase = emotionPhrase(nextId, { h3 });

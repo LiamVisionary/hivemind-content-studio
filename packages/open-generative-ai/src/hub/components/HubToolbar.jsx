@@ -58,7 +58,11 @@ export function HubToolbar({ kicker, title, subtitle, right, refresh, children }
         // Refresh composes with whatever the view already puts here (several
         // pass `right`), and always sits last so it is in the same place on
         // every page that has one.
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        // On a phone the cluster takes the whole second line: `shrink-0` let it
+        // run past the right edge instead of wrapping, so a view with more than
+        // two controls (the Library's search + two filters) lost the tail of the
+        // row with no way to scroll to it.
+        <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">
           {right}
           {children}
           {refresh ? <ToolbarRefresh onRefresh={refresh} /> : null}

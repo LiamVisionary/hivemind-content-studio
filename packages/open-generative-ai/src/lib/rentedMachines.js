@@ -53,9 +53,36 @@ const EMPTY_STATE = { live: [], provisioning: [], idle: [], broken: [], pending:
 // machine you just switched away from back in front until the next poll.
 function publish(promise, started, state, ttl) {
   if (cache.inflight === promise) {
+    const previous = cache.machines;
     cache = { at: Date.now(), machines: state, inflight: null, ttl, generation: started };
+    // A machine that CHANGED without anyone clicking anything. The event above
+    // is fired by the Machines view after an attach or detach, which covers
+    // every change a person makes — but a box goes ready, and then attached,
+    // on the backend's own schedule long after the rent click. Whoever is
+    // polling (a studio's own rented-state sync) discovers it, and before this
+    // nobody else heard: the composer's status line said "1 running" off the
+    // poll while the model picker's Rental tab stayed empty off a machine list
+    // fetched before the box existed. Two copies of the same fact, one stale.
+    // Announcing it here means the discovery reaches every reader whatever
+    // caused the read. Only a real membership change announces, so a settled
+    // poll is silent and this cannot feed itself.
+    if (previous !== null && !sameMachines(previous, state)) {
+      try { window.dispatchEvent(new CustomEvent(RENTED_CHANGED_EVENT)); } catch { /* SSR/tests */ }
+    }
   }
   return state;
+}
+
+/** Membership plus the two flags every picker keys on: a box that became
+ *  attached, or whose tunnel died, is a different world even at the same count. */
+function sameMachines(a, b) {
+  const key = (state) => ['live', 'provisioning', 'idle', 'broken']
+    .map((bucket) => (state?.[bucket] || [])
+      .map((m) => `${m.rental_id}:${m.attached ? 1 : 0}${m.tunnel_alive ? 1 : 0}`)
+      .sort()
+      .join(','))
+    .join('|');
+  return key(a) === key(b);
 }
 
 // Never throws — the empty state when the API is unreachable (locked vault,
@@ -135,10 +162,24 @@ export function routingLeaderFor(machines, model) {
   return attachedOrder(machines).find((machine) => machineServesModel(machine, model)) || null;
 }
 
+// What a rented box IS. Every class in the rental ladder (gpu_rentals.GPU_CLASSES)
+// is an NVIDIA card, so this is a fact about the product, not a guess about one
+// machine — and it is stated here, once, rather than inferred from a GPU name.
+const RENTED_ACCELERATOR = 'cuda';
+
 export function machineServesModel(machine, model) {
   // Normalize both sides (case + separators) so UI model ids match the
   // gateway's file-name needles: "wai-anima-native-06b-turbo" ~ "waianima".
   const norm = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  // A lane that cannot run on this KIND of machine is not served by it however
+  // well the names match. Every tier the studio rents is an NVIDIA card, so a
+  // lane declaring anything else is out: "MiniMax H3 (Apple Silicon)" is
+  // antirez/h3.c, a Metal engine that says so in its own registry row, and its
+  // id still contains "minimax_h3" — which is exactly the needle a rented H3
+  // box advertises. It was listed as runnable on an RTX 5090, and picked as the
+  // model to hand a "Use in Video studio" to, until the preflight refused it.
+  const accelerator = String(model?.accelerator || '').toLowerCase();
+  if (accelerator && accelerator !== RENTED_ACCELERATOR) return false;
   const haystack = norm(`${model?.id || ''} ${model?.name || ''} ${model?.workflowId || ''}`);
   return (machine?.models_served || []).some((needle) => haystack.includes(norm(needle)));
 }

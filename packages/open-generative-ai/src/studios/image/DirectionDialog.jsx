@@ -169,7 +169,7 @@ export function DirectionDialog({ kind, entry, busy, onClose, onSubmit }) {
             <div className="grid gap-5 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <div className="min-w-0">
                     {src ? (
-                        <img src={src} alt="" className="max-h-[42vh] w-auto max-w-full rounded-lg border border-line1" />
+                        <img src={src} alt="" className="max-h-[42dvh] w-auto max-w-full rounded-lg border border-line1" />
                     ) : (
                         <div className="h-40 rounded-lg border border-line1 bg-bg1" />
                     )}

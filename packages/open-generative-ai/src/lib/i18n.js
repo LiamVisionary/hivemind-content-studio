@@ -157,6 +157,7 @@ export const STRINGS = {
     'nav.activity': 'Activity',
     'nav.produce': 'Produce',
     'nav.image': 'Image',
+    'nav.music': 'Music',
     'nav.story': 'Story',
     'nav.restore': 'Restore',
     'nav.sprite': 'Sprite',
@@ -167,6 +168,7 @@ export const STRINGS = {
     'nav.inspo': 'Inspo',
     'nav.models': 'Models',
     'nav.machines': 'Rented GPUs',
+    'nav.rentalBuild': 'Rental build',
     'nav.providers': 'Providers',
     'nav.passbook': 'PassBook',
     'nav.canvas': 'Canvas',
@@ -182,6 +184,7 @@ export const STRINGS = {
     'common.startFreshTitle': 'Start fresh?',
     'common.keepWhatIHave': 'Keep what I have',
     'common.generating': 'Generating…',
+    'common.addToQueue': 'Add to queue',
     'common.download': 'Download',
     'common.cancel': 'Cancel',
     'common.save': 'Save',
@@ -236,6 +239,37 @@ export const STRINGS = {
     'download.shareFailed': 'Sharing did not complete. Use Download instead.',
     'download.allowUnencrypted': 'Allow unencrypted downloads',
     'download.allowUnencryptedHint': 'Off, a saved file is only its pixels. On, anyone you send it to can read how it was made — and you cannot take that back out of their copy.',
+    'sound.audioOnly': 'Sound only (WAV)',
+    'sound.audioOnlyHint': 'The clip’s whole soundtrack, without the picture.',
+    'sound.silentVideo': 'Video without sound',
+    'sound.silentVideoHint': 'The picture exactly as generated — not re-encoded — with the soundtrack removed.',
+    'sound.split': 'Separate voices and sound…',
+    'sound.splitHint': 'Dialogue, effects and music as separate files — and a track for each voice.',
+    'sound.working': 'Taking the clip apart…',
+    'sound.saved': (name) => `Saved ${name}`,
+    'sound.failed': 'That clip could not be taken apart. Download still works.',
+    'sound.dialogIntro': 'Splits this clip’s soundtrack into files you can level on their own. It runs on this machine and nothing is uploaded or kept.',
+    'sound.start': 'Separate the sound',
+    'sound.again': 'Separate again',
+    'sound.stage.preparing': 'Getting the clip ready…',
+    'sound.stage.installing': 'Getting the separation models (20 MB, first time only)…',
+    'sound.stage.restarting': 'Loading the separator into this machine’s engine (first time only)…',
+    'sound.stage.splitting': 'Separating — this takes a few times the clip’s length.',
+    'sound.stop': 'Stop',
+    'sound.stem.dialogue': 'Dialogue',
+    'sound.stem.dialogueHint': 'Everything spoken, without music or effects',
+    'sound.stem.effects': 'Effects',
+    'sound.stem.effectsHint': 'Footsteps, doors, room tone, ambience',
+    'sound.stem.musicHint': 'The score, without anyone speaking over it',
+    'sound.stem.voice_1': 'Voice 1',
+    'sound.stem.voice_2': 'Voice 2',
+    'sound.stem.voiceHint': 'One speaker alone — listen to tell which. Mono, speech quality.',
+    'sound.stem.empty': 'Nothing here in this clip',
+    'sound.saveStem': (name) => `Save ${name}`,
+    'sound.saveAll': (count) => `Save all ${count}`,
+    'sound.oneVoice': 'Only one voice was found, so there is no second voice track.',
+    'sound.splitFailed': 'The sound could not be separated.',
+    'sound.unreachable': 'This machine’s engine is not answering. Start the studio’s local engine, then separate the sound again.',
 
     // ---- Where work runs -------------------------------------------------
     // ONE vocabulary for the three bills. The image/video picker said "This
@@ -284,6 +318,30 @@ export const STRINGS = {
     // what a person is choosing between: the models this machine runs on its own
     // silicon, and the ones it can only run on a box billed by the hour.
     'runOn.rentalBlurb': 'A GPU you rent by the hour. This Mac’s work lands there while it is attached.',
+    // The type chips under the strip. A bill is not a type: which account pays
+    // says nothing about whether a prompt alone reaches the model, and in a
+    // list where half of MUAPI's image rows are editors that take a required
+    // picture and no prompt at all, that is what a reader needs first. Said in
+    // the kind's own words — the same model takes a picture to edit a picture
+    // and to move one, and those are not one thing.
+    'runOn.typesLabel': 'What the model starts from',
+    'runOn.typeTextToImage': 'Text to image',
+    'runOn.typeImageToImage': 'Image to image',
+    'runOn.typeTextToVideo': 'Text to video',
+    'runOn.typeImageToVideo': 'Image to video',
+    // Both doors, one model: a prompt on its own works, and a picture steers
+    // it. The hosted rail's `flux-3` is four endpoints and one row.
+    'runOn.typeHybrid': 'Hybrid',
+    'runOn.typeVideoIn': 'From a clip',
+    // The same four on the row itself, where they sit beside the model's name
+    // and have to lose to it on width. "Image to image" twice as wide as the
+    // name it qualifies is a worse row than no badge at all.
+    'runOn.badgeText': 'Text',
+    'runOn.badgeNeedsPicture': 'Needs a picture',
+    'runOn.badgeNeedsClip': 'Needs a clip',
+    // The two doors a type does not cover, for the hosted rows that have them.
+    'runOn.badgeFromVideo': 'From video',
+    'runOn.badgeFromAudio': 'From audio',
 
     // ---- Setup: the doors out of an empty Model section ------------------
     'setup.comfyNotConnected': 'ComfyUI is not connected.',
@@ -291,6 +349,13 @@ export const STRINGS = {
     'setup.noImageModel': 'No image model installed yet.',
     'setup.noImageModelHint': 'Install one and it shows up here.',
     'setup.discovering': 'Looking at what this machine can run…',
+    // ---- Drop-in workflows the loader could not use ----------------------
+    // A file somebody put in the folder on purpose and never saw again is the
+    // worst thing that loader can do, so each one is named with its reason.
+    'dropIns.title': 'Some workflows in your folder were skipped',
+    'dropIns.titleOne': 'One workflow in your folder was skipped',
+    'dropIns.hint': 'Everything else in the folder loaded. Fix a file and check again.',
+    'dropIns.folder': 'Looking in',
     'setup.engineHint': 'It appears here as soon as it answers — or use the cloud for this one.',
     'setup.comfyAnswering': 'Answering',
     'setup.comfyAttached': 'Attached',
@@ -324,6 +389,7 @@ export const STRINGS = {
     'composer.clearPromptConfirm': 'Press again to clear what you typed (the attached pictures stay)',
     'composer.etaTitle': 'Estimated from your own past runs at these settings',
     'composer.cancelTitle': 'Cancel the current generation and reset',
+    'composer.queueTitle': 'Queue this behind the render already running — it keeps the settings you see now (⌘/Ctrl+Enter)',
     'composer.refine': 'Refine',
     'composer.camera': 'Camera',
     'composer.refineTitle': "Rewrite what is in the box with the prompt helper — it knows this model's prompting guide, the cast, the lane and the clip length",
@@ -1059,6 +1125,7 @@ export const STRINGS = {
     'history.outputs': 'Outputs',
     'history.recoverWithKey': 'Recover with a key',
     'history.favorites': 'Favorites',
+    'history.playTrack': 'Play track',
     'history.loadVideoLabel': 'Load encrypted video preview',
     'history.loadVideo': 'Load video',
     'history.loadInStudio': 'Load in Studio',

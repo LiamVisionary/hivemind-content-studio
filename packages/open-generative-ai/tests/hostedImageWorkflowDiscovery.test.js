@@ -58,6 +58,8 @@ test('hosted image models are derived from launchable image workflow entries', (
             timeoutSeconds: 75,
         },
         requires: { prompt: true, image: true },
+        actionOnly: false,
+        actionLabel: '',
         accepts: ['prompt', 'image_base64'],
         supportsImage: true,
         maxReferenceImages: 1,

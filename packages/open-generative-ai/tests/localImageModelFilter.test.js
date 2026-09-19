@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { visibleLocalImageModels } from '../src/lib/localImageModelFilter.js';
+import { buildRunTargets } from '../src/lib/runTargets.js';
 
 const models = [
     { id: 'z-image', requires: { image: false }, accepts: ['prompt'] },
@@ -85,4 +86,26 @@ test('the registry mapper derives the same reference capability server-side', as
     // reference slots. The mapper and the client filter must not disagree.
     assert.equal(h3.supportsImage, true, 'the API tells the truth about the nine slots');
     assert.equal(localModelSupportsImageInput(h3), true);
+});
+
+// A lane the studio drives from its own button is not a place a generation can
+// be sent. The Klein direction tools (Point eyes, Move sun) steer a picture
+// that already exists, from a dialog opened on that picture — listed as models
+// too, they were two more things to choose between in a picker whose whole job
+// is to stop making you choose. Filtered in buildRunTargets so every picker
+// agrees at once, and asserted here because the picker reads that list, not
+// visibleLocalImageModels.
+test('a lane driven by its own button is never offered as a place to run', () => {
+    const targets = buildRunTargets({
+        kind: 'image',
+        localModels: [
+            { id: 'comfy-bigloves-klein3-edit', name: 'BigLove Klein 3', accepts: ['prompt', 'image_base64'], requires: { prompt: true, image: false } },
+            { id: 'flux2-klein-sun-direction', name: 'Klein Sun Direction', actionOnly: true, requires: { prompt: false, image: true } },
+            { id: 'flux2-klein-eyes-direction', name: 'Klein Eyes Direction', actionOnly: true, requires: { prompt: false, image: true } },
+        ],
+    });
+    assert.deepEqual(
+        targets.filter((target) => target.source === 'local').map((target) => target.id),
+        ['comfy-bigloves-klein3-edit'],
+    );
 });

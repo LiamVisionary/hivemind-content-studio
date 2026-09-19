@@ -99,10 +99,18 @@ function missingWeightFiles(workflowFile, root = comfyModelsRoot()) {
   return wanted.filter((file) => !installed.has(file.toLowerCase()));
 }
 
+// `routing_only` is never inherited. It says THIS row is not a lane — a
+// shared-weights declaration, or a tier reached only by routing — and that is
+// not a property a lane built on those weights takes on. Inherited, it marked
+// every Klein lane that shares the 9B download unpickable, which no picker
+// noticed only because the image path happens not to read the flag.
+const NOT_INHERITED = new Set(['routing_only']);
+
 function mergeWorkflowDefinition(base, override) {
   if (!base || typeof base !== 'object' || Array.isArray(base)) return structuredClone(override);
   if (!override || typeof override !== 'object' || Array.isArray(override)) return structuredClone(override);
   const out = structuredClone(base);
+  NOT_INHERITED.forEach((key) => { delete out[key]; });
   Object.entries(override).forEach(([key, value]) => {
     if (value && typeof value === 'object' && !Array.isArray(value)
         && out[key] && typeof out[key] === 'object' && !Array.isArray(out[key])) {
@@ -169,6 +177,13 @@ function toHostedImageModel(workflow) {
     compatibleBaseModels: Array.isArray(workflow.compatible_base_models) ? workflow.compatible_base_models : [],
     promptHelper: normalizePromptHelper(workflow.prompt_helper),
     requires: workflow.requires || { prompt: true, image: false },
+    // A lane driven by its own button rather than by the model picker — the
+    // Klein direction tools steer a picture that already exists, from a dialog
+    // that opens on that picture. It still has to be LISTED, because that is
+    // how the button finds the lane; it just must not be offered as a model to
+    // generate with, which is what put "Klein Sun Direction" in the picker.
+    actionOnly: Boolean(workflow.action_only),
+    actionLabel: String(workflow.action_label || ''),
     accepts,
     // Two reference grammars, one capability: the single-source image_* fields
     // and `reference_images`, the ordered multi-slot shape H3 speaks. Mirrored
@@ -229,11 +244,114 @@ function loadHostedImageModels(registryPath) {
     });
 }
 
+// Music lanes. Unlike an image lane there is only one shape: a ready
+// API-format graph driven entirely by the registry's `slots` map, because an
+// audio graph has no skeleton to infer from — no dimensions, a duration that
+// lives in two nodes at once, and a "prompt" that is a style-tag list sitting
+// beside a separate lyrics field. Everything the composer needs to render its
+// controls therefore comes from the registry row rather than from the graph.
+// Which music model leads is a PRODUCT decision, not an accident of the order
+// rows were appended to workflow-registry.json. ACE-Step 1.5 goes first because
+// it is the default, it is faster, and its code and weights are both MIT, so a
+// track made with it can be sold; YuE2 follows because its weights are CC BY-NC.
+// Sorting here rather than in the studio means every surface that lists music
+// models agrees, and a third model added later lands in a defined place instead
+// of wherever it happened to be typed.
+function audioModelRank(workflow) {
+  const licence = workflow.license || {};
+  return [
+    workflow.default ? 0 : 1,
+    workflow.featured ? 0 : 1,
+    licence.commercial === false ? 1 : 0,
+    String(workflow.title || workflow.id || ''),
+  ];
+}
+
+function byAudioRank(a, b) {
+  const left = audioModelRank(a);
+  const right = audioModelRank(b);
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] < right[i]) return -1;
+    if (left[i] > right[i]) return 1;
+  }
+  return 0;
+}
+
+function loadHostedAudioModels(registryPath) {
+  const data = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  const workflowsDir = path.join(path.dirname(registryPath), 'workflows');
+  return registryItems(data)
+    .filter((workflow) => workflow && workflow.media_type === 'audio' && workflow.builder === 'comfy-api-audio')
+    .sort(byAudioRank)
+    .map((workflow) => {
+      const defaults = workflow.defaults || {};
+      const accepts = Array.isArray(workflow.accepts) ? workflow.accepts : [];
+      const lyricsFormat = accepts.includes('lyrics') && workflow.lyrics_format === 'section-plan'
+        ? 'section-plan'
+        : 'lyrics';
+      return {
+        id: workflow.id,
+        name: workflow.title || workflow.id,
+        description: workflow.description || '',
+        type: 'audio',
+        family: workflow.family || 'local-audio',
+        provider: 'hosted-media-studio',
+        state: 'downloaded',
+        backend: 'comfy-api-audio',
+        // The gateway resolves the graph from an allowed root, and without an
+        // absolute path it would look relative to its own cwd.
+        workflowFile: path.isAbsolute(String(workflow.workflow_file || ''))
+          ? String(workflow.workflow_file)
+          : path.join(workflowsDir, String(workflow.workflow_file || '')),
+        requires: workflow.requires || { prompt: true, image: false },
+        accepts,
+        // Whether this model actually sings, rather than only playing. It
+        // decides if the composer offers a lyrics box at all. A lane can take
+        // the lyrics FIELD without taking words: the instrumental YuE2 lane
+        // reads a section plan there, and a lyrics box over it would invite
+        // exactly the text its LoRA was never trained on.
+        lyricsFormat,
+        supportsLyrics: accepts.includes('lyrics') && lyricsFormat === 'lyrics',
+        sectionTags: Array.isArray(workflow.section_tags) ? workflow.section_tags.map(String) : [],
+        defaults: {
+          seconds: Number(defaults.seconds || 60),
+          bpm: Number(defaults.bpm || 120),
+          timesignature: String(defaults.timesignature || '4'),
+          language: String(defaults.language || 'en'),
+          keyscale: String(defaults.keyscale || 'C major'),
+          steps: Number(defaults.steps || 8),
+          cfg: Number(defaults.cfg == null ? 1 : defaults.cfg),
+          seed: Number(defaults.seed == null ? -1 : defaults.seed),
+          samplerName: String(defaults.sampler_name || ''),
+          scheduler: String(defaults.scheduler || ''),
+          generateAudioCodes: defaults.generate_audio_codes !== false,
+          mode: String(defaults.mode || ''),
+        },
+        limits: workflow.limits || {},
+        // The choices behind the `mode` token. Without them the composer renders
+        // a token whose menu opens empty - which is what YuE2 shipped with.
+        modes: Array.isArray(workflow.modes)
+          ? workflow.modes.filter((row) => row && row.id).map((row) => ({ id: String(row.id), label: String(row.label || row.id) }))
+          : [],
+        samplers: Array.isArray(workflow.samplers) ? workflow.samplers.map(String) : [],
+        schedulers: Array.isArray(workflow.schedulers) ? workflow.schedulers.map(String) : [],
+        // Surfaced so the studio can say plainly whether a track may be sold,
+        // rather than leaving the user to find out later.
+        license: workflow.license || null,
+        benchmarkSeconds: Number(workflow.benchmark_seconds || 0),
+        tags: Array.isArray(workflow.tags) ? workflow.tags : [],
+        featured: Boolean(workflow.featured),
+        isDefault: Boolean(workflow.default),
+      };
+    });
+}
+
 module.exports = {
   DEFAULT_ASPECT_RATIOS,
   comfyModelsRoot,
   graphWeightFiles,
   missingWeightFiles,
+  loadHostedAudioModels,
   loadHostedImageModels,
   loadHostedWorkflowModels,
   normalizePromptHelper,
