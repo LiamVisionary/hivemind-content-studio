@@ -79,10 +79,13 @@ check the URL or readiness before treating the server as ready.
 
 Tailscale Serve persists across server stops and restarts. Omitting the flag
 means "do not enable at startup", not "disable an existing share". Use the
-`disable` command above to remove it. Keep the same `--tailnet-port` (or
-`CONTENT_STUDIO_TAILNET_PORT`) on subsequent launches so the app's remote-access
-switch tracks that share. Stopping the local server makes its URL unavailable
-until the server starts again.
+`disable` command above to remove it. The app's remote-access switch and
+`zimage-stack status` find an existing share by what it proxies, on whichever
+HTTPS port it is on (a share on 8789 is recognised as the studio's and is the one
+the switch turns off), so `--tailnet-port` and `CONTENT_STUDIO_TAILNET_PORT` only
+say where to publish when nothing is published yet; turning the switch on beside
+an existing share never publishes a second URL. Stopping the local server makes
+its URL unavailable until the server starts again.
 
 ## Configuration
 

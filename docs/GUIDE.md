@@ -130,7 +130,19 @@ Open **Image** (it is the first thing under **Create**, and ⌘1 goes there).
    *"Type an idea below first — the helper refines what is in the box"*.
    **Add style tags** in the same menu is the other route.
 3. Optional — press **Starters** for quick starters, the UGC block, and any
-   prompt you have saved before.
+   prompt you have saved before. Each shipped starter shows a small picture
+   that was made from that exact prompt, so you can see what it draws before
+   you load it.
+
+   **Object → character**, at the top of the same menu, writes the prompt for
+   you from a picture: drop a photo of any *thing* — a lamp, a teapot, a
+   telephone — and a vision model on this Mac designs an original character
+   from its colours, shapes and textures, then adds that design to the end of
+   whatever is in the box. The four cards in the dialog are real results;
+   press one to try its object without finding a picture of your own. It needs
+   a helper model that can see pictures (Swarm Scout 12B works); with none
+   installed, the dialog gives you the one-paragraph instruction to paste into
+   any vision model instead, and a box for its answer.
 4. Check the **Runs on** chip. Leave it on Automatic unless you have a reason.
 5. Press **Generate** (or ⌘↵).
 
@@ -206,10 +218,55 @@ Other things in the video composer, in the order you are likely to want them:
 * **Camera** — camera-motion presets, composed into the prompt.
 * **Prompts** — save the current prompt with every setting, or load one back.
 * On MiniMax H3 only: **UGC** (a ready-made cast and beat plan), **Style**
-  (restyle presets), **Shots** (lay out several shots inside one generation —
-  cuts, camera, timed beats and dialogue) and **Check** (reads the prompt back
-  and offers the one fix it can make). All four write H3's own prompt grammar,
-  which is why they appear on nothing else.
+  (restyle presets), **Fight** (see below), **Shots** (lay out several shots
+  inside one generation — cuts, camera, timed beats and dialogue) and **Check**
+  (reads the prompt back and offers the one fix it can make). All of them write
+  H3's own prompt grammar, which is why they appear on nothing else.
+
+### Tuning MiniMax H3 for a fight
+
+Combat is where H3 shows its seams: fast motion jitters, and the fine detail
+that sells an impact is the first thing its speed shortcuts spend. **Fight**,
+under **More**, moves the settings toward the picture and away from the clock —
+the size to its largest, **Fast high-res** on to pay for it, **Faster, softer
+detail** off, **Motion smoothing** on, and an installed fight LoRA switched on
+— and adds one line of fight direction to the prompt.
+
+It changes only what the lane you are on actually has, and the panel lists
+those before it touches any of them, along with what that lane cannot do. It
+also remembers what every dial held: turning it off puts each one back and
+takes the direction line out again. Expect a slower clip — that is the trade.
+
+Three things it deliberately leaves to you, because only you can do them: keep
+the take short and put the action early (H3 spreads whatever it is given over
+the whole timeline, which is what makes a long fight read as slow motion);
+frame closer or keep one fighter in the shot, because wide shots lose faces;
+and for a hit that has to match the last shot, attach a crop of it as a
+reference picture.
+
+### Taking a clip's sound apart
+
+A finished clip is one file with one soundtrack, and that is rarely how it gets
+used. The arrow beside **Download** on the Video stage has three ways to take
+it apart:
+
+* **Sound only (WAV)** — the whole soundtrack, without the picture.
+* **Video without sound** — the picture exactly as it was generated (it is not
+  re-encoded), with the soundtrack removed.
+* **Separate voices and sound…** — splits the soundtrack into **Dialogue**,
+  **Effects** and **Music**, plus **Voice 1** and **Voice 2** when two people
+  speak — even where they talk over each other. Each comes back with a player,
+  so you can hear which voice is which before you save anything; a part the
+  clip does not have says so instead of offering a silent file.
+
+The first two are instant. Separating runs two small models on this machine and
+takes a few times the clip's length (measured at 36–41 seconds for clips of 6
+and 9 seconds on an M-series Mac). The first time, the studio downloads the models (20 MB) and loads
+them into the local engine by itself; if something is rendering it waits for
+you to try again rather than interrupt it. Nothing is uploaded, nothing is added
+to your library, and the separated files exist only until you close the window.
+The voice tracks are mono at speech quality (16 kHz) — right for levelling or
+re-voicing a line, not a replacement for the full-quality dialogue track.
 
 ### Stitching several shots
 
