@@ -257,6 +257,11 @@ def start_video(
     video_path: str | Path | None = None,
     motion_context_path: str | Path | None = None,
     video_mode: str = "extend",
+    # Hand back only the frames the extension ADDED, not the source it grew.
+    # `video_mode` says how the source clip is used; this says what comes back.
+    # A sequence wants one shot per press; the standalone "extend this clip"
+    # surface wants the grown clip, and is the default.
+    extend_return_tail: bool = False,
     task: str = "generate",
     prompt: str,
     reference_description: str = "",
@@ -303,6 +308,11 @@ def start_video(
     spectrum: bool | None = None,
     fast_high_res: bool | None = None,
     steps: int | None = None,
+    interpolate: int | None = None,
+    # The MiniMax H3 (Apple Silicon) dials, carried as one bag rather than ten
+    # keyword arguments: they belong to one lane, they are meaningless to every
+    # other, and an absent key means "the preset decides" all the way down.
+    h3_native_options: dict[str, Any] | None = None,
     loras: list[dict[str, Any]] | None = None,
     requester_pub: str = "",
     # Resolved by the CALLER, in its request, and carried: the provider behind
@@ -475,6 +485,7 @@ def start_video(
             **({"video_path": uploaded_video_name} if video is not None else {}),
             **({"motion_context_path": uploaded_motion_context_name} if motion_context is not None else {}),
             **({"video_mode": video_mode} if video is not None and not head_swap else {}),
+            **({"extend_return_tail": True} if extend_return_tail and video is not None and not head_swap else {}),
             **({"task": task} if task != "generate" else {}),
             **({"head_swap": True} if head_swap else {}),
             **({"ingredient_images": uploaded_ingredients} if uploaded_ingredients else {}),
@@ -514,9 +525,16 @@ def start_video(
         # Fast high-res (MiniMax H3 two-pass latent upscale). Tri-state for the
         # same reason as spectrum: None leaves the registered graph alone.
         **({"fast_high_res": bool(fast_high_res)} if fast_high_res is not None else {}),
-        # Sampling steps override, forwarded through the MCP's registry-slot
-        # params record. None keeps the workflow's registered default.
-        **({"params": {"steps": int(steps)}} if isinstance(steps, int) and steps > 0 else {}),
+        # Registry-slot overrides, forwarded through the MCP's `params` record
+        # (argOrDefault reads args.params[key] for every mapped slot). An absent
+        # key keeps the workflow's registered default, and an interpolate under
+        # 2 is no interpolation at all — the compiler lifts the node out — so it
+        # is not worth sending.
+        **_slot_params(steps=steps, interpolate=interpolate),
+        # The h3.c lane's dials. Only what the request actually set: the
+        # gateway resolves everything else from the preset and the machine, and
+        # sending a full bag of nulls would defeat that.
+        **_h3_native_arguments(h3_native_options),
             "frames": frames,
             "frame_rate": frame_rate,
             "duration_seconds": duration,
@@ -882,6 +900,11 @@ def generate_video(
     video_path: str | Path | None = None,
     motion_context_path: str | Path | None = None,
     video_mode: str = "extend",
+    # Hand back only the frames the extension ADDED, not the source it grew.
+    # `video_mode` says how the source clip is used; this says what comes back.
+    # A sequence wants one shot per press; the standalone "extend this clip"
+    # surface wants the grown clip, and is the default.
+    extend_return_tail: bool = False,
     task: str = "generate",
     prompt: str,
     reference_description: str = "",
@@ -918,6 +941,7 @@ def generate_video(
     spectrum: bool | None = None,
     fast_high_res: bool | None = None,
     steps: int | None = None,
+    interpolate: int | None = None,
     requester_pub: str = "",
 ) -> dict[str, Any]:
     started = start_video(
@@ -929,6 +953,7 @@ def generate_video(
         video_path=video_path,
         motion_context_path=motion_context_path,
         video_mode=video_mode,
+        extend_return_tail=extend_return_tail,
         prompt=prompt,
         reference_description=reference_description,
         ingredient_images=ingredient_images,
@@ -953,6 +978,7 @@ def generate_video(
         spectrum=spectrum,
         fast_high_res=fast_high_res,
         steps=steps,
+        interpolate=interpolate,
     )
     return finish_video(
         started["job_id"],
@@ -1374,6 +1400,73 @@ def _inpaint_arguments(options: dict[str, Any] | None) -> dict[str, Any]:
             raise ValueError(f"crop_mode must be one of {', '.join(_INPAINT_CROP_MODES)}")
         arguments["crop_mode"] = crop_mode
     return arguments
+
+
+# The h3.c dials and their engine ranges (h3.c: h3_valid_params). Values are
+# clamped rather than refused: every one is a speed/fidelity trade with no
+# cliff, so the nearest legal setting is what the caller meant.
+_H3_NATIVE_NUMERIC_DIALS = {
+    "steps": (int, 2, 1000),
+    "layers": (int, 35, 50),
+    "reuse": (int, 1, 3),
+    "core_reuse": (int, 1, 6),
+    "render_scale": (float, 0.25, 1.0),
+}
+_H3_NATIVE_SWITCHES = ("token_reduction", "ssd_streaming", "int8_row_fc2")
+_H3_NATIVE_PRESETS = ("draft", "fast", "balanced", "reference")
+
+
+def _slot_params(*, steps: int | None = None, interpolate: int | None = None) -> dict[str, Any]:
+    """The registry-slot overrides a request actually set, as the MCP's own
+    `params` record.
+
+    The MCP reads every mapped slot through argOrDefault(args, defaults, key),
+    which looks in args.params before falling back to the workflow's registered
+    default — so this is the one channel a slot override travels on, and an
+    absent key is what leaves the registered graph alone.
+
+    A `params` record with no keys is dropped rather than sent empty: the two
+    mean the same thing to the compiler, and the noisier one shows up in every
+    recorded request.
+    """
+    params: dict[str, Any] = {}
+    if isinstance(steps, int) and steps > 0:
+        params["steps"] = int(steps)
+    # Below 2 there is nothing to interpolate: the compiler bypasses the node
+    # and prunes its model loader, which is exactly what sending nothing does.
+    if isinstance(interpolate, int) and interpolate >= 2:
+        params["interpolate"] = int(interpolate)
+    return {"params": params} if params else {}
+
+
+def _h3_native_arguments(options: dict[str, Any] | None) -> dict[str, Any]:
+    """The MiniMax H3 (Apple Silicon) dials a request actually set.
+
+    Returns at most one key, `h3_native`, so the MCP's schema sees the whole
+    lane's settings as the single object it declares. An empty bag is dropped
+    entirely: "no dials" and "every dial at its default" reach the gateway the
+    same way, which is what lets the machine's own recommendation apply.
+    """
+    if not isinstance(options, dict):
+        return {}
+    dials: dict[str, Any] = {}
+    preset = str(options.get("preset") or "").strip().lower()
+    if preset:
+        if preset not in _H3_NATIVE_PRESETS:
+            raise ValueError(f"preset must be one of {', '.join(_H3_NATIVE_PRESETS)}")
+        dials["preset"] = preset
+    for key, (kind, low, high) in _H3_NATIVE_NUMERIC_DIALS.items():
+        if options.get(key) is None:
+            continue
+        try:
+            value = kind(options[key])
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number") from None
+        dials[key] = max(low, min(high, value))
+    for key in _H3_NATIVE_SWITCHES:
+        if isinstance(options.get(key), bool):
+            dials[key] = options[key]
+    return {"h3_native": dials} if dials else {}
 
 
 def _upload_image(descriptor: MediaStudioDescriptor, image: Path) -> str:

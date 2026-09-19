@@ -331,6 +331,7 @@ def register(app, ctx) -> None:
                 video_path=staged.video,
                 motion_context_path=staged.motion_context,
                 video_mode=body.video_mode,
+                extend_return_tail=body.extend_return_tail,
                 task=body.task,
                 prompt=body.prompt.strip(),
                 reference_description=body.reference_description.strip(),
@@ -424,8 +425,10 @@ def register(app, ctx) -> None:
         entry["record_probed_at"] = now
         record = await asyncio.to_thread(
             cp.run_media_studio_video_record, job_id,
+            # Requester key only. A record read seals nothing: the job's seal
+            # recipients were registered when it was submitted, and the
+            # gateway's /api/job/<id> never reads an owner key.
             requester_pub=str(entry.get("requester_pub") or ""),
-                    owner_pub=str(entry.get("owner_pub") or ""),
         )
         entry["record_misses"] = 0 if record else int(entry.get("record_misses") or 0) + 1
 
@@ -532,7 +535,7 @@ def register(app, ctx) -> None:
                 # only by its own requester, so the key is part of the job's
                 # identity here, not a per-request detail.
                 requester_pub=str(entry.get("requester_pub") or ""),
-                    owner_pub=str(entry.get("owner_pub") or ""),
+                owner_pub=str(entry.get("owner_pub") or ""),
             )
             # A cancel that landed while the finisher was blocked in the thread
             # is terminal — don't resurrect the entry as done or error.
@@ -606,6 +609,7 @@ def register(app, ctx) -> None:
                 video_path=staged.video,
                 motion_context_path=staged.motion_context,
                 video_mode=body.video_mode,
+                extend_return_tail=body.extend_return_tail,
                 task=body.task,
                 prompt=body.prompt.strip(),
                 reference_description=body.reference_description.strip(),
@@ -634,6 +638,8 @@ def register(app, ctx) -> None:
                 spectrum=body.spectrum,
                 fast_high_res=body.fast_high_res,
                 steps=body.steps,
+                interpolate=body.interpolate,
+                h3_native_options=body.h3_native.model_dump() if body.h3_native else None,
                 loras=loras,
                 requester_pub=_requester_pub(request),
                 # Whose vault seals this job's output. Resolved HERE, in the

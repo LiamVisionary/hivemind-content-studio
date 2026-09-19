@@ -28,6 +28,16 @@ dependencies = [
     "uvicorn==0.32.1",
     "openai==2.24.0",
     "faster-whisper==1.1.0",
+    # Transcription on Apple silicon. faster-whisper runs on CTranslate2, which has
+    # no Metal or CoreML backend, so on a Mac it transcribes on CPU cores however
+    # `whisper.device` is set. MEASURED on a 42.3s clip with large-v3: 32.27s on
+    # faster-whisper/int8/CPU against 3.53s on MLX, same language and same text.
+    # Marked to arm64 macOS so no other platform tries to resolve an MLX wheel.
+    # COST, stated because it is not small: mlx-whisper hard-requires torch, which
+    # adds ~526MB to an Apple-silicon install. subtitle.py falls back to
+    # faster-whisper when the import fails, so dropping this line costs speed and
+    # nothing else.
+    "mlx-whisper>=0.4.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "loguru==0.7.3",
     "python-multipart==0.0.27",
     "cryptography==46.0.6",
@@ -100,7 +110,7 @@ dev = [
 [tool.ruff]
 # `ruff check .` is the gate, so the gate has to have an answer for every file
 # in the tree — and the answer for code this repo did not write is "not ours to
-# reformat". These three trees are vendored verbatim and re-synced from their
+# reformat". These trees are vendored and re-synced from their
 # sources, so an edit here is undone by the next sync and shows up as a diff
 # against upstream forever after. Everything else, including every test file, is
 # linted.
@@ -115,6 +125,13 @@ extend-exclude = [
     # commit by scripts/sync_shared_skills.py. See skills/README.md.
     "skills/shared",
     "skills/vendor",
+    # TIGER's model code (JusperLee/TIGER, MIT), vendored with a short, listed
+    # set of changes — see the pack's NOTICE.md. Named file by file rather than
+    # by directory: the __init__ and base_model beside them are ours and linted.
+    "packages/comfyui-custom-nodes/hivemind-audio-split/tiger/tiger.py",
+    "packages/comfyui-custom-nodes/hivemind-audio-split/tiger/tiger_dnr.py",
+    "packages/comfyui-custom-nodes/hivemind-audio-split/tiger/layers/activations.py",
+    "packages/comfyui-custom-nodes/hivemind-audio-split/tiger/layers/normalizations.py",
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -1468,3 +1468,160 @@ def test_the_look_is_capped_at_a_word_boundary() -> None:
     assert not look.endswith(",") and look.endswith(("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"))
     assert look.split()[-1].startswith("word")
 
+
+
+# --- H3 Eros Max: a register layer, not a format ----------------------------
+# The eros lanes run H3's trained format unchanged, so `profile_for` resolves
+# them to the SAME four task profiles as the official weights and cannot tell
+# them apart. Everything here is about the layer that rides in on the lane id.
+
+@pytest.mark.parametrize("model_id, expected", [
+    ("minimax-h3-eros", True),
+    ("minimax-h3-eros-reference", True),
+    ("minimax-h3-eros-inpaint", True),
+    ("minimax-h3", False),
+    ("minimax-h3-turbo", False),
+    ("minimax-h3-image", False),
+    # The LTX 10Eros builds are a different model with their own scene-script
+    # profile and their own author's advice. "eros" alone must not reach for
+    # the H3 card's clause.
+    ("ltx23-eros-v14-comfy", False),
+    ("ltx23-eros-dmd", False),
+    ("", False),
+    (None, False),
+])
+def test_only_the_h3_eros_lanes_take_the_eros_layer(model_id, expected: bool) -> None:
+    assert prompt_profiles.is_h3_eros(model_id) is expected
+
+
+def test_the_eros_lanes_keep_h3s_trained_format_and_its_anchor_lines() -> None:
+    """The point of the layer: it must not become a fifth format.
+
+    An eros lane is H3, so the frame combination still picks the documented
+    task and the reference lane still resolves to the six-section profile.
+    """
+    assert prompt_profiles.profile_for("minimax-h3-eros") == "minimax-h3-t2v"
+    assert prompt_profiles.profile_for("minimax-h3-eros", first_frame=True) == "minimax-h3-i2v"
+    assert prompt_profiles.profile_for(
+        "minimax-h3-eros", first_frame=True, last_frame=True) == "minimax-h3-fl2v"
+    assert prompt_profiles.profile_for("minimax-h3-eros", last_frame=True) == "minimax-h3-l2v"
+    assert prompt_profiles.profile_for("minimax-h3-eros-reference") == "minimax-h3-reference"
+
+
+def test_the_eros_layer_asks_for_literal_sequential_writing() -> None:
+    profile = prompt_profiles.profile_for("minimax-h3-eros")
+    plain = prompt_profiles.system_prompt(profile)
+    eros = prompt_profiles.system_prompt(profile, target_model="minimax-h3-eros")
+
+    assert eros.startswith(plain), "the layer must ADD to the trained format, never replace it"
+    added = eros[len(plain):]
+    # The three things the model's card says decide quality on these weights.
+    assert "shorthand" in added.lower()
+    assert "temporal sequence" in added.lower()
+    assert "longer and more embellished" in added.lower()
+    # The wrong/right pair is the load-bearing part — it is what sets the
+    # register, which no amount of describing it in the abstract does.
+    assert "make hot sex" in added, "the counter-example is what teaches the register"
+    assert "euphemism" in added
+    # The card tells the reader to run their idea through an LLM enhancer
+    # first. Here that enhancer IS this helper, so the instruction is turned
+    # around rather than repeated at a user who cannot act on it.
+    assert "grok" not in added.lower()
+
+
+def test_the_eros_layer_reaches_reference_mode_too() -> None:
+    eros = prompt_profiles.system_prompt(
+        "minimax-h3-reference", target_model="minimax-h3-eros-reference")
+    plain = prompt_profiles.system_prompt("minimax-h3-reference")
+    assert len(eros) > len(plain)
+    assert "subject_definitions" in eros, "six-section format still governs"
+
+
+def test_the_official_h3_lanes_are_untouched_by_it() -> None:
+    for model_id in ("minimax-h3", "minimax-h3-turbo", "minimax-h3-reference"):
+        profile = prompt_profiles.profile_for(model_id)
+        assert prompt_profiles.system_prompt(profile, target_model=model_id) == \
+            prompt_profiles.system_prompt(profile), model_id
+
+
+def test_the_label_says_when_the_eros_layer_is_in_force() -> None:
+    """Same contract as the continuation and UGC suffixes: the dialog names the
+    instruction that actually ran, so a plain 'MiniMax H3' label cannot hide a
+    layer the official lanes do not carry."""
+    profile = prompt_profiles.profile_for("minimax-h3-eros")
+    assert "Eros Max" in prompt_profiles.profile_label(profile, target_model="minimax-h3-eros")
+    assert "Eros Max" not in prompt_profiles.profile_label(profile, target_model="minimax-h3")
+    assert "Eros Max" not in prompt_profiles.profile_label(profile)
+    both = prompt_profiles.profile_label(
+        profile, target_model="minimax-h3-eros", continuation=True, ugc=True)
+    assert "Eros Max" in both and "continuing a scene" in both and "UGC" in both
+
+
+# ---------------------------------------------------------------------------
+# /api/prompt-helper/design-character — an object's picture, read into a person
+# ---------------------------------------------------------------------------
+
+def test_design_character_returns_one_clean_paragraph(tmp_path: Path, monkeypatch) -> None:
+    """The slips a small vision model makes on a longer answer: a bolded label,
+    a fence, and line breaks between sentences. One paragraph comes back."""
+    runtime = _LookRuntime(
+        '```\n**Character design:** A tall woman with a copper-coloured bob.\n\n'
+        'She wears a deep violet silk coat.\nHer stance is slow and amused.\n```')
+    client = _look_client(tmp_path, monkeypatch, runtime)
+
+    response = client.post("/api/prompt-helper/design-character", json={"image": _PNG_URL})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "character": "A tall woman with a copper-coloured bob. She wears a deep violet silk coat. "
+                     "Her stance is slow and amused.",
+    }
+    call = runtime.calls[0]
+    assert call["images"] == [_PNG_URL]
+    system = call["messages"][0]["content"]
+    # The recipe's own sentence is the instruction, verbatim.
+    assert "without turning them into a costume or copying the subject literally" in system
+    assert call["messages"][-1]["role"] == "user"
+
+
+@pytest.mark.parametrize("body", [{"image": ""}, {"image": "https://example.com/a.png"}, {"image": "data:image/png;base64,"}])
+def test_design_character_refuses_a_bad_picture_before_asking_the_model(tmp_path: Path, monkeypatch, body) -> None:
+    runtime = _LookRuntime("a character")
+    client = _look_client(tmp_path, monkeypatch, runtime)
+    response = client.post("/api/prompt-helper/design-character", json=body)
+    assert response.status_code == 422
+    assert runtime.calls == []
+
+
+def test_design_character_needs_a_loaded_model_that_can_see(tmp_path: Path, monkeypatch) -> None:
+    nothing = _look_client(tmp_path, monkeypatch, _LookRuntime("x", loaded=()))
+    assert nothing.post("/api/prompt-helper/design-character", json={"image": _PNG_URL}).status_code == 409
+    blind = _LookRuntime("x", vision=False)
+    client = _look_client(tmp_path, monkeypatch, blind)
+    response = client.post("/api/prompt-helper/design-character", json={"image": _PNG_URL})
+    assert response.status_code == 409
+    assert "cannot see pictures" in response.json()["detail"]
+    assert blind.calls == []
+
+
+def test_design_character_reports_an_empty_answer_as_a_502(tmp_path: Path, monkeypatch) -> None:
+    client = _look_client(tmp_path, monkeypatch, _LookRuntime('"```"'))
+    assert client.post("/api/prompt-helper/design-character", json={"image": _PNG_URL}).status_code == 502
+
+
+def test_design_character_is_owner_gated(tmp_path: Path, monkeypatch) -> None:
+    runtime = _LookRuntime("a character")
+    client = _look_client(tmp_path, monkeypatch, runtime)
+    assert client.post("/api/owner/lock").status_code in (200, 204)
+    response = client.post("/api/prompt-helper/design-character", json={"image": _PNG_URL})
+    assert response.status_code in (401, 403)
+    assert runtime.calls == []
+
+
+def test_a_character_that_runs_on_is_cut_at_a_full_sentence() -> None:
+    sentence = "She wears a long coat of brushed copper thread over violet silk. "
+    long = sentence * 60
+    cut = prompt_profiles.normalize_character(long)
+    assert len(cut) <= prompt_profiles.CHARACTER_MAX_CHARS
+    assert cut.endswith("silk.")

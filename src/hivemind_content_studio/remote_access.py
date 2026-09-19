@@ -20,6 +20,13 @@ Both are replaced by this module:
 * Nothing happens until someone turns it on, and the answer says in plain words
   who can reach the URL once they have.
 
+The door is recognised by what it opens onto, not by the port it is on. A
+machine that kept the retired proxy's URL has its `tailscale serve` entry on
+8789 proxying the studio port; that entry is the studio's, is reported as the
+live URL, and is the one the switch turns off. The configured HTTPS port only
+says where to publish when nothing publishes the studio yet — so turning the
+switch on next to an existing door never opens a second one.
+
 Every shell-out goes through the injected `run` seam so the decision table is
 testable without a tailnet.
 """
@@ -42,11 +49,16 @@ _CLI_CANDIDATES = (
     "/opt/homebrew/bin/tailscale",
 )
 
-# The HTTPS port `tailscale serve` publishes on. Not 443: a machine that already
-# publishes something else there (a dev server, another Hive app) would have its
-# existing share silently replaced, and taking over a port the owner already
-# spent is not this switch's business. Mirroring the studio's own port keeps the
-# address memorable — same number, https instead of http.
+# The HTTPS port `tailscale serve` publishes on when nothing publishes the
+# studio yet. Not 443: a machine that already publishes something else there (a
+# dev server, another Hive app) would have its existing share silently
+# replaced, and taking over a port the owner already spent is not this switch's
+# business. Mirroring the studio's own port keeps the address memorable — same
+# number, https instead of http.
+#
+# A default, not a key: a door that already exists on another port (8789, the
+# retired proxy's number, is the URL the owner's other devices kept) is found by
+# what it proxies and managed as it is.
 DEFAULT_TAILNET_HTTPS_PORT = 8765
 
 _TIMEOUT_SECONDS = 20
@@ -127,15 +139,34 @@ def _tailnet_identity(cli: str, run: Callable[[list[str]], CommandResult]) -> di
     }
 
 
-def _served_target(cli: str, run: Callable[[list[str]], CommandResult], host: str, https_port: int) -> str:
-    """What `tailscale serve` currently proxies for our host:port, if anything."""
+def _loopback_target(port: int) -> str:
+    return f"http://127.0.0.1:{port}"
+
+
+def _served_entries(cli: str, run: Callable[[list[str]], CommandResult], host: str) -> dict[int, str]:
+    """Every `tailscale serve` web entry on this host: HTTPS port → what `/` proxies.
+
+    `Web` is keyed `<dns_name>:<port>`; the port is the one the door is on and
+    the `/` handler's `Proxy` is what it opens onto. A door with no `/` handler
+    maps to '' — it holds the port, but nothing here can claim it.
+    """
     result = run([cli, "serve", "status", "--json"])
     payload = _json_or_none(result.stdout) or {}
     web = payload.get("Web") if isinstance(payload.get("Web"), dict) else {}
-    entry = web.get(f"{host}:{https_port}") if isinstance(web, dict) else None
-    handlers = entry.get("Handlers") if isinstance(entry, dict) else None
-    root = handlers.get("/") if isinstance(handlers, dict) else None
-    return str(root.get("Proxy") or "") if isinstance(root, dict) else ""
+    entries: dict[int, str] = {}
+    for key, entry in web.items():
+        entry_host, _, port_text = str(key).rpartition(":")
+        if entry_host.lower() != host.lower() or not port_text.isdigit():
+            continue
+        handlers = entry.get("Handlers") if isinstance(entry, dict) else None
+        root = handlers.get("/") if isinstance(handlers, dict) else None
+        entries[int(port_text)] = str(root.get("Proxy") or "") if isinstance(root, dict) else ""
+    return entries
+
+
+def _doors(entries: dict[int, str], port: int) -> list[int]:
+    """The HTTPS ports whose door opens onto the studio, lowest first."""
+    return sorted(https for https, target in entries.items() if target == _loopback_target(port))
 
 
 def _audience(identity: dict[str, Any]) -> str:
@@ -161,15 +192,13 @@ def tailnet_hostname() -> str:
     return identity["dns_name"].lower() if identity["state"] == "Running" else ""
 
 
-def remote_access_status(
+def _reading(
     *,
-    port: int | None = None,
-    https_port: int | None = None,
-    run: Callable[[list[str]], CommandResult] = _run,
-) -> dict[str, Any]:
-    """What the toggle should show, including what to do when it cannot work."""
-    port = port or studio_port()
-    https_port = https_port or tailnet_https_port()
+    port: int,
+    https_port: int,
+    run: Callable[[list[str]], CommandResult],
+) -> tuple[dict[str, Any], list[int]]:
+    """The status dict, plus every HTTPS port that currently opens onto the studio."""
     base = {
         "enabled": False,
         "supported": False,
@@ -187,7 +216,7 @@ def remote_access_status(
             **base,
             "detail": "Tailscale is not installed on this Mac.",
             "remedy": "Install Tailscale and sign in, then turn this on. Nothing is published until you do.",
-        }
+        }, []
     try:
         identity = _tailnet_identity(cli, run)
     except (OSError, subprocess.SubprocessError):
@@ -195,23 +224,32 @@ def remote_access_status(
             **base,
             "detail": "Tailscale is installed but did not answer.",
             "remedy": "Open the Tailscale app and sign in, then try again.",
-        }
+        }, []
     if identity["state"] != "Running" or not identity["dns_name"]:
         return {
             **base,
             "detail": "Tailscale is installed but this Mac is not connected to a tailnet.",
             "remedy": "Open the Tailscale app and sign in, then turn this on.",
-        }
+        }, []
     try:
-        proxied = _served_target(cli, run, identity["dns_name"], https_port)
+        entries = _served_entries(cli, run, identity["dns_name"])
     except (OSError, subprocess.SubprocessError):
-        proxied = ""
-    enabled = proxied == f"http://127.0.0.1:{port}"
+        entries = {}
+    doors = _doors(entries, port)
+    enabled = bool(doors)
+    if enabled:
+        # The configured port when it is one of the doors; otherwise whichever
+        # door exists. That is the address the owner's other devices already
+        # open, so that is the one to show and the one to manage.
+        https_port = https_port if https_port in doors else doors[0]
+    # Something else on the port we would publish on: publishing would replace it.
+    held_by_another = bool(entries.get(https_port)) and not enabled
     host = identity["dns_name"] if https_port == 443 else f"{identity['dns_name']}:{https_port}"
     url = f"https://{host}/"
     return {
         **base,
-        "conflict": bool(proxied and not enabled),
+        "https_port": https_port,
+        "conflict": held_by_another,
         "supported": True,
         "enabled": enabled,
         "url": url if enabled else "",
@@ -231,38 +269,20 @@ def remote_access_status(
         # Named so the UI can say what stays behind: the Canvas port is never
         # published, so a tailnet device reaches the studio and nothing else.
         "published_ports": [port] if enabled else [],
-    }
+    }, doors
 
 
-def set_remote_access(
-    enabled: bool,
+def remote_access_status(
     *,
     port: int | None = None,
     https_port: int | None = None,
     run: Callable[[list[str]], CommandResult] = _run,
 ) -> dict[str, Any]:
-    """Publish (or stop publishing) ONLY the control API port on the tailnet."""
-    port = port or studio_port()
-    https_port = https_port or tailnet_https_port()
-    cli = tailscale_cli()
-    if not cli:
-        raise RemoteAccessError(
-            "Tailscale is not installed on this Mac.",
-            "Install Tailscale and sign in, then turn this on.",
-        )
-    status = remote_access_status(port=port, https_port=https_port, run=run)
-    if enabled and not status["supported"]:
-        raise RemoteAccessError(status["detail"], status["remedy"])
-    if status.get("conflict"):
-        raise RemoteAccessError(
-            "Another service is already published on this tailnet port.",
-            "Choose a different --tailnet-port; the existing service was left unchanged.",
-        )
-    argv = (
-        [cli, "serve", "--bg", "--yes", f"--https={https_port}", f"http://127.0.0.1:{port}"]
-        if enabled
-        else [cli, "serve", f"--https={https_port}", "off"]
-    )
+    """What the toggle should show, including what to do when it cannot work."""
+    return _reading(port=port or studio_port(), https_port=https_port or tailnet_https_port(), run=run)[0]
+
+
+def _serve(cli: str, run: Callable[[list[str]], CommandResult], argv: list[str]) -> None:
     try:
         result = run(argv)
     except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - defensive
@@ -285,4 +305,44 @@ def set_remote_access(
             "Tailscale could not publish the studio.",
             "Open the Tailscale app, confirm this Mac is connected, and try again.",
         )
+
+
+def set_remote_access(
+    enabled: bool,
+    *,
+    port: int | None = None,
+    https_port: int | None = None,
+    run: Callable[[list[str]], CommandResult] = _run,
+) -> dict[str, Any]:
+    """Publish (or stop publishing) ONLY the control API port on the tailnet."""
+    port = port or studio_port()
+    https_port = https_port or tailnet_https_port()
+    cli = tailscale_cli()
+    if not cli:
+        raise RemoteAccessError(
+            "Tailscale is not installed on this Mac.",
+            "Install Tailscale and sign in, then turn this on.",
+        )
+    status, doors = _reading(port=port, https_port=https_port, run=run)
+    if enabled and not status["supported"]:
+        raise RemoteAccessError(status["detail"], status["remedy"])
+    if status.get("conflict"):
+        raise RemoteAccessError(
+            "Another service is already published on this tailnet port.",
+            "Choose a different --tailnet-port; the existing service was left unchanged.",
+        )
+    if enabled:
+        if status["enabled"]:
+            # Already published — on the configured port, or on the one the
+            # retired proxy's URL kept. Opening a second door beside it would
+            # hand the owner two addresses for one studio; this door is the one.
+            return status
+        writes = [[cli, "serve", "--bg", "--yes", f"--https={https_port}", _loopback_target(port)]]
+    else:
+        # Every door that opens onto the studio, not just the configured port:
+        # off means no tailnet address reaches it any more. With no door in
+        # sight (or Tailscale unable to say), clear the configured port.
+        writes = [[cli, "serve", f"--https={door}", "off"] for door in (doors or [https_port])]
+    for argv in writes:
+        _serve(cli, run, argv)
     return remote_access_status(port=port, https_port=https_port, run=run)

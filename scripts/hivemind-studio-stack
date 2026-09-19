@@ -28,14 +28,16 @@ KREA2_IDENTITY_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-krea2-i
 SEEDVR2_TRT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-seedvr2-trt"
 PRIVATE_MEDIA_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-private-media"
 PROGRESS_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-progress"
+AUDIO_SPLIT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-audio-split"
 OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
 CONTENT_STUDIO="$STUDIO_ROOT"
 TAILSCALE_CLI="/Applications/Tailscale.app/Contents/MacOS/tailscale"
-# The retired hand-rolled HTTPS proxy's port. Nothing starts it any more; the
-# number stays so `stop` still reaps one left running by an older build.
-TAILSCALE_HTTPS_PORT="8789"
 # What `tailscale serve` publishes on when the studio's remote-access switch is
-# on. Must match DEFAULT_TAILNET_HTTPS_PORT in remote_access.py.
+# turned on and nothing publishes the studio yet. Must match
+# DEFAULT_TAILNET_HTTPS_PORT in remote_access.py. A door that already exists on
+# another HTTPS port (8789 — the retired proxy's number — is the URL the owner's
+# other devices kept) is found by what it proxies and used as it is; nothing
+# here keys on this number.
 TAILNET_HTTPS_PORT="${CONTENT_STUDIO_TAILNET_PORT:-8765}"
 # Parse before touching runtime state. launchd needs explicit environment
 # forwarding; it does not inherit the invoking shell's flags.
@@ -107,7 +109,16 @@ ZIMG_TOKEN_FILE="${ZIMG_TOKEN_FILE:-$MEDIA_STATE_ROOT/secure/zimg-token}"
 # one of those is a key some dependency could read, log, or ship in a crash
 # report. It also means the machine can seal reads and stop trusting this app
 # by name — a grant is proof of how the process started, which a name is not.
-STUDIO_KEYS="CIVITAI_API_KEY GOOGLE_AI_STUDIO_API_KEY HIVEMINDOS_DASHBOARD_DEVICE_TOKEN
+# CLOUDFLARE_*: gpu_rentals.py presigns the weights manifest on R2 itself
+# (_r2_credentials -> _env), and a plain os.environ read never appears in
+# PassBook's access ledger — which is what this list was built from. Without
+# them renting dies at manifest publish with "CLOUDFLARE_API_TOKEN is not
+# configured in the environment", after the prices have already loaded, which
+# reads as a billing fault rather than a missing key. The marketplace keys are
+# deliberately NOT here: with a HivemindOS account connected those calls go
+# through the hosted worker and this machine holds no marketplace key at all.
+STUDIO_KEYS="CIVITAI_API_KEY CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN
+GOOGLE_AI_STUDIO_API_KEY HIVEMINDOS_DASHBOARD_DEVICE_TOKEN
 OPENAI_API_KEY OPENAI_OAUTH_ACCESS_TOKEN OPENAI_OAUTH_ACCOUNT_ID
 OPENAI_OAUTH_EXPIRES_AT OPENAI_OAUTH_REFRESH_TOKEN OPENROUTER_API_KEY
 VENICE_API_KEY XAI_API_KEY"
@@ -342,10 +353,13 @@ tailscale_dns() {
   fi
 }
 
-# The published tailnet URL, or empty when remote access is switched off.
+# The published tailnet URL, or empty when nothing publishes the studio.
 # Read from `tailscale serve`, which is the only thing that publishes anything
 # now — so this reports what is actually true rather than what a boot-time
-# proxy would have made.
+# proxy would have made. The door is found by what it proxies, on whatever
+# HTTPS port it is on: an entry on 8789 (the retired proxy's number, kept as
+# the URL the owner's other devices open) counts the same as one on the
+# default. TAILNET_HTTPS_PORT only breaks a tie between two such doors.
 tailnet_studio_url() {
   local ts_dns
   [ -x "$TAILSCALE_CLI" ] || return 0
@@ -357,11 +371,20 @@ try:
     served = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-host = os.environ["TS_DNS"] + ":" + os.environ["TS_PORT"]
-entry = (served.get("Web") or {}).get(host) or {}
-root = (entry.get("Handlers") or {}).get("/") or {}
-if root.get("Proxy") == os.environ["TS_TARGET"]:
-    print("https://" + host + "/")
+host = os.environ["TS_DNS"]
+doors = []
+for key, entry in (served.get("Web") or {}).items():
+    entry_host, _, port = str(key).rpartition(":")
+    if entry_host.lower() != host.lower() or not port.isdigit():
+        continue
+    root = ((entry or {}).get("Handlers") or {}).get("/") or {}
+    if root.get("Proxy") == os.environ["TS_TARGET"]:
+        doors.append(int(port))
+if not doors:
+    sys.exit(0)
+wanted = int(os.environ["TS_PORT"])
+port = wanted if wanted in doors else min(doors)
+print("https://" + host + ("" if port == 443 else ":%d" % port) + "/")
 ' 2>/dev/null || true
 }
 
@@ -457,6 +480,16 @@ start_children() {
     log "cannot install the progress readout: custom node path is not a symlink"
     return 1
   fi
+  # Splits a finished clip's sound into dialogue, effects, music and a track per
+  # voice (the Video stage's download menu). The gateway links this itself on a
+  # stack that started before the pack existed, but it can only restart an idle
+  # lane to load it - linking here means a fresh start already has it.
+  if [ -L "$COMFY/custom_nodes/hivemind-audio-split" ] || [ ! -e "$COMFY/custom_nodes/hivemind-audio-split" ]; then
+    ln -sfn "$AUDIO_SPLIT_NODE" "$COMFY/custom_nodes/hivemind-audio-split"
+  else
+    log "cannot install the sound splitter: custom node path is not a symlink"
+    return 1
+  fi
   fi
   # Minted with the STUDIO's interpreter, not ComfyUI's: both secrets belong to
   # this app and a machine with no ComfyUI still has to boot with them.
@@ -489,7 +522,6 @@ PY
   kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
-  kill_port "$TAILSCALE_HTTPS_PORT"
   kill_port "$CONTENT_STUDIO_PORT"
   # One process holds all four Node ports now, so a stale listener on any of
   # them costs a whole surface rather than one child. `stop` already reaped
@@ -901,7 +933,6 @@ stop_children() {
   kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
-  kill_port "$TAILSCALE_HTTPS_PORT"
   kill_port "$CONTENT_STUDIO_PORT"
   kill_port "$OPEN_GEN_PORT"
 }
@@ -1073,7 +1104,6 @@ launch_stop() {
   kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
-  kill_port "$TAILSCALE_HTTPS_PORT"
   kill_port "$CONTENT_STUDIO_PORT"
   kill_port "$OPEN_GEN_PORT"
   echo "Hivemind Content Studio stopped."
@@ -1095,7 +1125,7 @@ status() {
 	  echo "Flux2 Swift/MLX server default: $ZIMG_ENABLE_FLUX2_SERVER"
   echo
   echo "Listeners:"
-	  for port in "$CONTENT_STUDIO_PORT" "$NODE_SERVICES_PORT" "$OPEN_GEN_PORT" "$COMFY_DEFAULT_PORT" "$COMFY_LTX_PORT" "$COMFY_ANIMA_PORT" 8787 8788 "$MEDIA_STUDIO_MCP_PORT" "$FLUX2_SERVER_PORT" "$TAILSCALE_HTTPS_PORT"; do
+	  for port in "$CONTENT_STUDIO_PORT" "$NODE_SERVICES_PORT" "$OPEN_GEN_PORT" "$COMFY_DEFAULT_PORT" "$COMFY_LTX_PORT" "$COMFY_ANIMA_PORT" 8787 8788 "$MEDIA_STUDIO_MCP_PORT" "$FLUX2_SERVER_PORT"; do
     pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
     if [ -n "$pids" ]; then echo "  :$port pid(s): $pids"; else echo "  :$port not listening"; fi
   done
@@ -1107,7 +1137,7 @@ status() {
     echo "Tailnet URL: $tailnet_url"
     echo "  Reachable by every device signed in to this tailnet. The Canvas port is NOT published."
   else
-    echo "Tailnet URL: not published (remote access is off)"
+    echo "Tailnet URL: not published (no tailscale serve entry proxies :$CONTENT_STUDIO_PORT). Turn on remote access in the studio to open it on your other devices."
   fi
 }
 

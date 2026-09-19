@@ -43,6 +43,10 @@ from .gate_style import GATE_CSS
 # The PRF salt is fixed per account and derived from a constant label, so the
 # same passkey yields the same secret on every sign-in and on every device that
 # syncs it. Changing this string would strand every PRF-wrapped vault.
+#
+# The value itself lives in the shared vault-unlock-policy block below, which
+# the app bundle owns; this constant exists for Python callers and is pinned to
+# that copy by `test_gate_style.test_the_prf_salt_label_matches_the_shared_block`.
 PRF_SALT_LABEL = "hivemind-content-studio/vault-prf/v1"
 
 # The env var the packaged desktop shell sets (docs/RELEASE.md). It changes two
@@ -57,7 +61,63 @@ def desktop_shell() -> bool:
     return os.environ.get(DESKTOP_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 _SCRIPT = r"""
-const PRF_SALT_LABEL = "__PRF_SALT_LABEL__";
+// The unlock rules and the PRF salt, shared with the in-app modal.
+//
+// Carried VERBATIM from packages/open-generative-ai/src/lib/vaultUnlockPolicy.js
+// — this page cannot import that bundle (/assets is behind the gate it guards),
+// and a mirrored rule that nothing compares is how these two screens drifted in
+// the first place: the gate led with the passkey and the modal never mentioned
+// one. tests/vaultUnlockPolicy.test.js extracts both copies and fails on the
+// first character that differs, so the repair is a copy-paste. Edit the module,
+// not this copy.
+// >>> vault-unlock-policy
+// The rules, in full:
+//
+//   * A passkey the browser can actually run is the PRIMARY way in. It is the
+//     only credential of the three that the authenticator itself protects.
+//   * A workspace holding both shows BOTH — never one instead of the other. A
+//     passkey that will not prompt here (enrolled on another device, a browser
+//     without WebAuthn) must never strand someone who knows their password.
+//   * A workspace with no passkey yet always carries the offer to add one, and
+//     that offer starts OFF. Enrolling is a biometric prompt and a new
+//     credential on this device: it happens because somebody asked for it, not
+//     because a control defaulted to on.
+//   * A workspace with neither usable path says so. A password form on an
+//     account that has no password can only refuse.
+//
+// `account` is the server's own shape (`Account.public()` — snake_case, as it
+// arrives from /api/accounts and /api/owner/session). `webauthn` is whatever
+// the calling screen has for `window.PublicKeyCredential`.
+function vaultUnlockOptions(account, webauthn) {
+    const hasPasskey = Boolean(account && account.has_passkey);
+    const hasPassword = Boolean(account && account.has_password);
+    const supported = Boolean(webauthn);
+    // Registration needs an open session, so a screen can only offer to ADD a
+    // passkey where a password can open one first. The gate's sign-in card and
+    // the in-app modal both qualify; a pre-sign-in button never did.
+    const passkey = hasPasskey && supported;
+    return {
+        passkey,
+        password: hasPassword,
+        // Only earns its place with something on either side of it.
+        divider: passkey && hasPassword,
+        enrol: supported && hasPassword && !hasPasskey,
+        enrolDefault: false,
+        stuck: !passkey && !hasPassword,
+    };
+}
+
+// Fixed per account and derived from a constant label, so the same passkey
+// yields the same secret on every sign-in and on every device that syncs it.
+// Changing this string would strand every PRF-wrapped vault.
+const VAULT_PRF_SALT_LABEL = 'hivemind-content-studio/vault-prf/v1';
+
+async function vaultPrfSalt(accountId) {
+    const material = new TextEncoder().encode(`${VAULT_PRF_SALT_LABEL}:${accountId}`);
+    return new Uint8Array(await crypto.subtle.digest('SHA-256', material));
+}
+// <<< vault-unlock-policy
+
 const HANDOFF_KEY = 'hivemind.ownerPassphrase.once';
 const VAULT_HINT_KEY = 'hivemind.vaultUnlock.once';
 const FIRST_RUN_KEY = 'hivemind.firstRun.once';
@@ -90,14 +150,6 @@ async function api(path, body) {
   return payload;
 }
 
-// The PRF salt has to be identical on every device that unlocks this vault, so
-// it is derived from a constant label plus the account id — never from
-// anything device-local.
-async function prfSalt(accountId) {
-  const material = new TextEncoder().encode(`${PRF_SALT_LABEL}:${accountId}`);
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', material));
-}
-
 function handOff(accountId, { passphrase, prf, credentialId }) {
   const expiresAt = Date.now() + HANDOFF_MS;
   if (passphrase) {
@@ -109,14 +161,6 @@ function handOff(accountId, { passphrase, prf, credentialId }) {
     accountId, method: prf ? 'passkey-prf' : (passphrase ? 'password' : 'passkey'),
     prf: prf || null, credentialId: credentialId || null, expiresAt,
   }));
-}
-
-// "Don't ask again" for the post-sign-in passkey offer. Deliberately
-// localStorage, not the account: passkeys are per-device, so declining on a
-// shared desktop should not silence the offer on a phone.
-const offerHiddenKey = (accountId) => `hivemind.passkeyOffer.hidden.${accountId}`;
-function passkeyOfferHidden(accountId) {
-  try { return localStorage.getItem(offerHiddenKey(accountId)) === '1'; } catch { return false; }
 }
 
 // >>> vault-recovery-crypto
@@ -316,15 +360,23 @@ async function setUpStudio(event) {
   location.reload();
 }
 
-// The post-sign-in passkey offer, shown on the sign-in card with its body
-// swapped out. `fromSetup` hides the way back: on a fresh studio there is no
-// other workspace to choose.
-function offerPasskey(account, password, { fromSetup = false } = {}) {
+// The passkey offer as a whole card, shown on the sign-in card with its body
+// swapped out. Two callers, and neither is "after every password sign-in" any
+// more — that is the toggle's job:
+//
+//   * first run, which has no sign-in card to carry a toggle;
+//   * an enrolment that FAILED, where the message needs somewhere to live and
+//     "Not now" has to stay one click from being in.
+//
+// `fromSetup` hides the way back: on a fresh studio there is no other
+// workspace to choose.
+function offerPasskey(account, password, { fromSetup = false, message = '' } = {}) {
   pendingPassword = password;
   el('who-avatar').className = `avatar c-${tileClass(account.colour)}`;
   el('who-avatar').textContent = initial(account.name);
   el('who-name').textContent = account.name;
   el('error').textContent = '';
+  el('enrol-error').textContent = message;
   el('signin-body').hidden = true;
   el('enrol').hidden = false;
   el('back').hidden = fromSetup;
@@ -344,19 +396,24 @@ function choose(account) {
   el('password').value = '';
   el('enrol').hidden = true;
   el('signin-body').hidden = false;
-  // The passkey button only appears once this workspace HAS one. Registration
-  // needs an open session, so before then the button could only refuse — the
-  // offer to create a passkey comes right after a password sign-in instead,
-  // which is the one moment enrolment can actually succeed.
-  el('passkey').hidden = !account.has_passkey;
-  el('password-form').hidden = !account.has_password;
   el('recover').hidden = true;
+  // Which controls this card may show is not decided here. One rule, shared
+  // with the in-app unlock modal — see the vault-unlock-policy block above.
+  const options = vaultUnlockOptions(account, window.PublicKeyCredential);
+  el('passkey').hidden = !options.passkey;
+  el('password-form').hidden = !options.password;
+  el('divider').hidden = !options.divider;
   // Only offered where there is a password to have forgotten. A passkey-only
   // workspace is opened by the authenticator, and its vault is opened by the
   // wrap that passkey carries.
-  el('forgot').hidden = !account.has_password;
-  el('divider').hidden = !account.has_password || !account.has_passkey;
-  if (account.has_passkey) el('passkey').focus(); else el('password').focus();
+  el('forgot').hidden = !options.password;
+  // The offer to ADD one, which this screen can make because a password
+  // sign-in opens the session registration needs. It starts wherever the
+  // policy says it starts, which is off.
+  el('enrol-offer').hidden = !options.enrol;
+  el('enrol-after').checked = options.enrolDefault;
+  el('stuck').hidden = !options.stuck;
+  if (options.passkey) el('passkey').focus(); else if (options.password) el('password').focus();
 }
 
 function back() {
@@ -509,7 +566,7 @@ async function signInWithPasskey(account) {
   try {
     const { publicKey } = await api('/api/accounts/webauthn/authenticate/options',
       { account_id: account.id });
-    const salt = await prfSalt(account.id);
+    const salt = await vaultPrfSalt(account.id);
     const credential = await navigator.credentials.get({
       publicKey: {
         ...publicKey,
@@ -557,11 +614,14 @@ async function signInWithPassword(event) {
     fail(error.message || 'Wrong password.');
     return;
   }
-  // Signed in. Before handing over, offer to make the NEXT sign-in a passkey —
-  // this is the only moment we hold both a proven session and the passphrase,
-  // which is exactly what enrolling against the vault needs.
-  if (!chosen.has_passkey && window.PublicKeyCredential && !passkeyOfferHidden(chosen.id)) {
-    offerPasskey(chosen, password);
+  // Signed in, and this is the only moment the page holds both a proven session
+  // and the passphrase — exactly what enrolling a passkey against the vault
+  // needs. It happens because the toggle on this card was switched on, never
+  // because an interstitial asked on the way past: a question asked after every
+  // sign-in is a question answered by reflex.
+  if (!el('enrol-offer').hidden && el('enrol-after').checked) {
+    pendingPassword = password;
+    addPasskey();
     return;
   }
   handOff(payload.account.id, { passphrase: password });
@@ -652,7 +712,7 @@ async function addPasskey() {
     // The empty body matters: api() sends GET without one, and a GET here
     // falls through the POST-only route into the static mount's 404.
     const { publicKey } = await api('/api/accounts/webauthn/register/options', {});
-    const salt = await prfSalt(chosen.id);
+    const salt = await vaultPrfSalt(chosen.id);
     const created = await navigator.credentials.create({
       publicKey: {
         ...publicKey,
@@ -704,11 +764,17 @@ async function addPasskey() {
     finishWithPassword({ prf: secret ? b64url(secret) : null, credentialId: created.id });
   } catch (error) {
     el('enrol-add').disabled = false;
-    if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
-      el('enrol-error').textContent = 'Passkey setup was cancelled.';
+    const cancelled = error && (error.name === 'NotAllowedError' || error.name === 'AbortError');
+    const message = cancelled ? 'Passkey setup was cancelled.' : (error.message || 'Could not add a passkey.');
+    // Failing to add a passkey must never cost the sign-in — the password was
+    // already proved. When the toggle brought us here the card is not on
+    // screen, so reveal it: the reason lands somewhere visible and "Not now"
+    // is one click from being in.
+    if (el('enrol').hidden) {
+      offerPasskey(chosen, pendingPassword, { message });
       return;
     }
-    el('enrol-error').textContent = error.message || 'Could not add a passkey.';
+    el('enrol-error').textContent = message;
   }
 }
 
@@ -738,7 +804,7 @@ async function start() {
   // a tile stood between the person and Touch ID on every single launch. Go
   // straight to the prompt; "Choose a different workspace" stays on the card,
   // and a cancelled prompt lands on that card with its password form.
-  if (accounts.length === 1 && accounts[0].has_passkey) {
+  if (accounts.length === 1 && vaultUnlockOptions(accounts[0], window.PublicKeyCredential).passkey) {
     choose(accounts[0]);
     signInWithPasskey(accounts[0]);
   }
@@ -760,12 +826,10 @@ el('unreachable-retry').addEventListener('click', async () => {
   button.disabled = true;
   try { await start(); } finally { button.disabled = false; }
 });
-el('enrol-skip').addEventListener('click', () => {
-  if (el('enrol-hide').checked) {
-    try { localStorage.setItem(offerHiddenKey(chosen.id), '1'); } catch {}
-  }
-  finishWithPassword();
-});
+// Nothing to remember any more: the card is no longer shown after every
+// password sign-in, so there is no recurring question to silence. It appears on
+// a first run and after a failed enrolment, and "Not now" simply goes in.
+el('enrol-skip').addEventListener('click', () => finishWithPassword());
 start();
 """
 
@@ -867,11 +931,28 @@ def account_gate_html(desktop: bool | None = None) -> str:
           <label>Password
             <input id="password" type="password" autocomplete="current-password" required>
           </label>
+          <!-- The offer to add one, on the screen that can actually do it: the
+               sign-in below opens the session registration needs. Off until
+               someone asks for it — enrolling is a biometric prompt and a new
+               credential on this device. -->
+          <label id="enrol-offer" hidden
+                 style="display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.5;color:#6f6f78;cursor:pointer">
+            <input type="checkbox" id="enrol-after"
+                   style="width:auto;height:auto;margin:2px 0 0;accent-color:#f6b21b">
+            <span>Add a passkey after unlocking — Touch ID or Face ID next time</span>
+          </label>
           <button class="secondary" type="submit">Unlock with password</button>
           <div style="display:grid;justify-items:center">
             <button class="back" id="forgot" type="button" hidden>Forgot your password?</button>
           </div>
         </form>
+
+        <!-- A passkey-only workspace in a browser that cannot run one. No form
+             on this card can help, so the card says which browser can rather
+             than showing a field that could only refuse. -->
+        <p class="lede" id="stuck" hidden style="text-align:left;margin:0">This workspace opens with a
+          passkey, and this browser cannot run one. Open the studio in Safari or Chrome on a device
+          that holds the passkey.</p>
       </div>
 
       <div id="enrol" hidden style="display:grid;gap:12px">
@@ -879,10 +960,6 @@ def account_gate_html(desktop: bool | None = None) -> str:
           workspace opens with Touch ID or Face ID instead of a password.</p>
         <button class="primary" id="enrol-add" type="button">{_KEY_GLYPH}<span>Add a passkey</span></button>
         <button class="secondary" id="enrol-skip" type="button">Not now</button>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6f6f78;cursor:pointer">
-          <input type="checkbox" id="enrol-hide" style="width:auto;height:auto;margin:0;accent-color:#f6b21b">
-          Don't ask again on this device
-        </label>
         <p class="error" id="enrol-error" role="alert"></p>
       </div>
 
@@ -953,6 +1030,6 @@ def account_gate_html(desktop: bool | None = None) -> str:
       </div>
     </section>
   </main>
-  <script>{_SCRIPT.replace("__PRF_SALT_LABEL__", PRF_SALT_LABEL)}</script>
+  <script>{_SCRIPT}</script>
 </body>
 </html>"""

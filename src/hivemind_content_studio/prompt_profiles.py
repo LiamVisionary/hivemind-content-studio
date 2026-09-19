@@ -351,6 +351,24 @@ def profile_for(
     return DEFAULT_VIDEO_PROFILE
 
 
+def is_h3_eros(model_id: str | None) -> bool:
+    """Is this one of the H3 Eros Max lanes?
+
+    Not a profile of its own: the eros lanes run H3's trained format unchanged,
+    so they resolve to the same four task profiles as the official weights and
+    `profile_for` cannot tell them apart. The register is what differs, and
+    that rides in as a layer keyed on the workflow id — the same way UGC does.
+
+    Matched on the lane id rather than on "eros" alone, because the LTX 10Eros
+    builds are a different model with their own scene-script profile and their
+    own author's advice; this clause is the H3 Eros Max card's.
+    """
+    ident = (model_id or "").strip().lower()
+    if "eros" not in ident:
+        return False
+    return "minimax" in ident or bool(re.search(r"(^|[-_])h3([-_]|$)", ident))
+
+
 # Scene chaining (MiniMax H3 Motion Context). The previous clip's last frames
 # are pinned to the head of the new one, which carries MOTION and room tone —
 # not the scene. Measured on the rental 2026-08-10: a chained prompt that keeps
@@ -456,6 +474,54 @@ light" or "studio lighting".
 - No text, no captions, no logos, no watermark.
 - Never "cinematic", "professional", "high fashion", "8k" or any other production \
 word. This is a phone photo."""
+
+
+# H3 Eros Max is a LAYER on the H3 profiles, like UGC is: it changes nothing
+# about the trained format (the same three fields, the same <d> tags, the same
+# six sections in reference mode) and everything about the register inside it.
+#
+# Straight from the model's own card. Its author's position is that the prompt
+# is the whole of the quality on these weights — "any issues you'd want to
+# blame on a model or workflow, you can go ahead and take a look at the prompt
+# instead" — and the failure mode they document is not explicitness but
+# SHORTHAND: a line like "make hot sex" names a category and leaves the model
+# to invent the motion, which is what produces the mush people then blame on
+# the merge. The fix is literal, anatomical, sequential description.
+#
+# The card also says to run the idea through an LLM enhancer first. Here that
+# enhancer IS this helper, so the instruction is turned around and addressed to
+# the writer: the embellishing is the job, not a step the user does elsewhere.
+_H3_EROS_CLAUSE = """
+
+These weights are H3 Eros Max, an uncensored H3 finetune, and on this model the \
+prompt IS the quality. Anything you would blame on the model or the workflow is \
+almost always the prompt instead. Two rules carry most of it.
+
+WRITE LITERALLY, NOT IN SHORTHAND. Name what the bodies actually do — which part \
+moves, where it goes, what it touches, what that does to the rest of the body. \
+Never name a category and leave the motion to the model.
+
+  Wrong: "He puts his penis in her pussy, make hot sex"
+
+  Right: "Live-action pornographic explicit sexual and sensual intimate POV \
+recording: The man slowly moves his lower body forward with his finger on the \
+base of his penis shaft. The tip of the penis slowly disappears into her pussy \
+hole and her wet labia open allowing it entry. He keeps swinging his pelvis \
+forward until his crotch touches hers. Then he backstrokes and starts a repeated \
+thrusting sex motion. The sex act makes her whole body recoil into the couch, \
+bouncing her breasts wildly. She stares lustfully into the camera."
+
+Use plain anatomical and explicit words. A euphemism describes nothing the model \
+can render, and coyness reads as vagueness.
+
+WRITE IN TEMPORAL SEQUENCE, on a linear time flow: first this, then this, then \
+this, each beat following the one before it. Do not jump around the timeline or \
+describe the scene as a static tableau.
+
+LENGTH IS QUALITY HERE. Longer and more embellished is reliably better on these \
+weights, so do not economise — this is the enhancement step, and writing the \
+long, specific, fully embellished version is your job rather than something the \
+user does afterwards."""
 
 
 # The system prompt is a token budget, not a dumping ground (same rule as the
@@ -857,6 +923,7 @@ def system_prompt(
     references: dict | None = None,
     persona_gender: str | None = None,
     cast: list | None = None,
+    target_model: str | None = None,
 ) -> str:
     """The instruction, with the clip length folded in when the studio knows it.
 
@@ -901,8 +968,19 @@ def system_prompt(
     (castPrompt.js) allocates. It supersedes ``persona_gender``, which only
     ever knew about one person: with a cast present the per-member genders
     carry, and the single-persona clause is not written. A persona's name is
-    never used (it is vault-sealed); a character's is public and written."""
+    never used (it is vault-sealed); a character's is public and written.
+
+    ``target_model`` is the workflow this prompt is headed for. The profile
+    alone cannot answer every question about it: the H3 Eros Max lanes share
+    the official H3 profiles exactly (same trained format, same anchor lines)
+    and differ only in the register their weights want, so the lane id is what
+    carries that."""
     system = PROFILES.get(profile, PROFILES[DEFAULT_VIDEO_PROFILE])["system"]
+    # Before the situational layers below, because this is a fact about the
+    # WEIGHTS — closer to the format profile than to whether the clip is an ad.
+    # A later layer can then still refine it.
+    if profile.startswith("minimax-h3") and is_h3_eros(target_model):
+        system += _H3_EROS_CLAUSE
     if ugc:
         if profile == DEFAULT_IMAGE_PROFILE:
             system += _UGC_IMAGE_CLAUSE
@@ -1078,8 +1156,16 @@ def changed_lines(before: str, after: str) -> int:
     return sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in opcodes if tag != "equal")
 
 
-def profile_label(profile: str, *, continuation: bool = False, ugc: bool = False) -> str:
+def profile_label(
+    profile: str, *, continuation: bool = False, ugc: bool = False,
+    target_model: str | None = None,
+) -> str:
     label = PROFILES.get(profile, PROFILES[DEFAULT_VIDEO_PROFILE])["label"]
+    # Same reason the two suffixes below exist: the dialog names the instruction
+    # that was actually in force. An eros run carries a layer the official H3
+    # lanes do not, and a label reading plain "MiniMax H3" would hide it.
+    if profile.startswith("minimax-h3") and is_h3_eros(target_model):
+        label = f"{label} · Eros Max"
     if continuation and profile.startswith("minimax-h3"):
         label = f"{label} · continuing a scene"
     if ugc:
@@ -1244,6 +1330,77 @@ def normalize_look(text: str) -> str:
             cut = cut[: cut.rfind(" ")]
         look = cut.rstrip(" ,;:—–-")
     return look
+
+
+# ---------------------------------------------------------------------------
+# Object → character — a picture of a THING, translated into a person
+# ---------------------------------------------------------------------------
+#
+# The image studio's "object to character" workflow: a vision model reads one
+# picture of an inanimate object and writes an original character whose design
+# is that object's colours, shapes and textures carried into a person. The text
+# is then APPENDED to a short framing prompt and rendered — the whole effect
+# rests on the image model following a long, specific paragraph, which is what
+# Krea 2 is good at.
+#
+# The core sentence is the community recipe verbatim (2026-09-18). What is added
+# around it is what a small vision model needs to be told twice: the answer is
+# going straight into an image prompt, so it is one paragraph of visible things
+# and nothing else — no name for the character, no backstory, no mention of the
+# photo — and the object itself must not reappear as a prop or a costume, which
+# is the failure the recipe's last clause exists to prevent.
+CHARACTER_FROM_OBJECT_SYSTEM_PROMPT = """\
+You are an avant-garde character and costume designer. You are shown one image — an object, an animal, a plant, anything — and you design an original character from it for an image model to draw.
+
+Analyze this image's colors, shapes, textures, and distinctive features, then design an original character with face, hair, clothing, accessories, colors, patterns, pose, and personality all creatively translated into a cohesive design without turning them into a costume or copying the subject literally.
+
+Translate, do not dress up. The subject's SURFACE becomes what the garments are built from: overlapping glazed petals, ribbed metal pleats, molten glass beading, lichen-like embroidery — name the construction, not just the colour. Its SILHOUETTE becomes the cut, exaggerated like couture: a cone becomes a towering collar or a flared hem, a curve becomes a sweeping sleeve, a crest becomes a headpiece. Its MARKINGS become the face: a band of colour across the eyes, painted lips, a pattern drawn on the skin. Its most striking feature becomes the hair or what is worn in it. Its posture and mood become the pose. Be bold and strange rather than sensible: this is a runway figure or a spirit of the thing, not a person who happens to own clothes in its colours. No everyday garments — no aprons, overcoats, neckties, tunics, satchels or boots unless the subject truly demands them.
+
+Write ONE paragraph of 160 to 220 words in plain descriptive prose an image model can draw, specific about every colour (use the subject's exact palette, including its accents and any glow) and every texture. Cover the figure at a glance, the face and its makeup or markings, the hair or headpiece, the garment from shoulders to hem and how its surface is built, one or two accessories, and the pose and expression.
+
+Rules:
+- The character is an elegant humanoid figure, never the subject with a face on it, and the subject itself does not appear — not held, not perched nearby, not in the background.
+- Do not name the character, give a backstory, or mention the image, the photo, "inspired by", or the design process. Never write the subject's name or what kind of thing it is anywhere in the paragraph — not even in a comparison.
+- Do not describe the background, the camera or the art style; the prompt this is appended to owns those.
+- Output only the paragraph: no title, no label such as "Character:", no quotes, no markdown, no lists, no explanation."""
+
+# Long on purpose — following a paragraph this size is the point of the
+# workflow — but bounded, so a model that runs on cannot bury the framing
+# prompt it is appended to.
+CHARACTER_MAX_CHARS = 2000
+_CHARACTER_LABEL = re.compile(
+    r"^(?:here(?:'s| is)(?: the| a| your)?(?: original)? )?"
+    r"(?:character(?: design| description| concept)?|design|description|prompt|answer|output|result)"
+    r"\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
+
+
+def normalize_character(text: str) -> str:
+    """The helper's character paragraph as the composer will receive it, or ''.
+
+    The same mechanical slips ``normalize_look`` undoes — a fence, wrapping
+    quotes, a "Character design:" label, markdown bold — plus the one a longer
+    answer adds: line breaks between sentences, which would land in the prompt
+    box as a ragged block. Collapsed to one paragraph and, past the cap, cut at
+    the last full sentence so the prompt never ends mid-clause."""
+    character = _LOOK_FENCE.sub("", (text or "").strip())
+    character = " ".join(character.replace("**", "").split())
+    for _ in range(3):
+        before = character
+        character = character.strip().strip(_LOOK_WRAPPERS).strip()
+        character = character.lstrip("-•·# ").strip()
+        character = _CHARACTER_LABEL.sub("", character, count=1).strip()
+        if character == before:
+            break
+    if len(character) > CHARACTER_MAX_CHARS:
+        cut = character[:CHARACTER_MAX_CHARS]
+        sentence_end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+        if sentence_end > CHARACTER_MAX_CHARS // 2:
+            character = cut[: sentence_end + 1]
+        else:
+            character = cut[: cut.rfind(" ")].rstrip(" ,;:—–-") if " " in cut else cut
+    return character
 
 
 # ---------------------------------------------------------------------------

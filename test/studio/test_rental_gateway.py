@@ -574,11 +574,11 @@ def test_the_sweep_lists_every_few_minutes_while_a_hosted_rental_exists(monkeypa
     _connected(monkeypatch)
     listed = {"n": 0}
 
-    def all_instances():
+    def instances_by_provider():
         listed["n"] += 1
-        return [Instance(provider="vast", native_id="7", label="hivemind-studio-gpur-a", state="stopped")]
+        return {"vast": [Instance(provider="vast", native_id="7", label="hivemind-studio-gpur-a", state="stopped")]}
 
-    monkeypatch.setattr(gpu_rentals, "_all_instances", all_instances)
+    monkeypatch.setattr(gpu_rentals, "_instances_by_provider", instances_by_provider)
     monkeypatch.setattr(gpu_rentals, "_instance_dto", lambda i, probe=False: {
         "rental_id": str(i.ref), "managed": True, "phase": "stopped"})
     monkeypatch.setattr(gpu_rentals, "reap_failed_rentals", lambda dtos: [])
@@ -594,14 +594,14 @@ def test_the_sweep_lists_every_few_minutes_while_a_hosted_rental_exists(monkeypa
 def test_the_sweep_idles_when_nothing_is_rented_and_keeps_its_old_cadence_direct(monkeypatch) -> None:
     _transport(monkeypatch, "gateway")
     _connected(monkeypatch)
-    monkeypatch.setattr(gpu_rentals, "_all_instances", lambda: [])
+    monkeypatch.setattr(gpu_rentals, "_instances_by_provider", lambda: {"vast": []})
     clock = _Clock(sweeps=1)
     gpu_rentals._reaper_loop(clock)
     assert clock.delays[1:] == [gpu_rentals.REAPER_IDLE_INTERVAL_SECONDS]
     # Direct transport, a managed box: the 3-minute reaper cadence as before.
     _transport(monkeypatch, "direct")
-    monkeypatch.setattr(gpu_rentals, "_all_instances", lambda: [
-        Instance(provider="vast", native_id="7", label="hivemind-studio-gpur-a", state="running")])
+    monkeypatch.setattr(gpu_rentals, "_instances_by_provider", lambda: {"vast": [
+        Instance(provider="vast", native_id="7", label="hivemind-studio-gpur-a", state="running")]})
     monkeypatch.setattr(gpu_rentals, "_instance_dto", lambda i, probe=False: {
         "rental_id": str(i.ref), "managed": True, "phase": "running"})
     monkeypatch.setattr(gpu_rentals, "reap_failed_rentals", lambda dtos: [])
@@ -618,14 +618,78 @@ def test_the_keepalive_does_not_depend_on_the_autoreap_switch(monkeypatch) -> No
     _connected(monkeypatch)
     monkeypatch.setattr(gpu_rentals, "RENTAL_AUTOREAP", False)
     listed = {"n": 0}
-    monkeypatch.setattr(gpu_rentals, "_all_instances", lambda: listed.__setitem__("n", listed["n"] + 1) or [
-        Instance(provider="vast", native_id="7", label="hivemind-studio-gpur-a", state="running")])
+    monkeypatch.setattr(gpu_rentals, "_instances_by_provider", lambda: listed.__setitem__("n", listed["n"] + 1) or {
+        "vast": [Instance(provider="vast", native_id="7", label="hivemind-studio-gpur-a", state="running")]})
     monkeypatch.setattr(gpu_rentals, "_instance_dto", lambda *_a, **_k: pytest.fail("must not probe"))
     monkeypatch.setattr(gpu_rentals, "reap_failed_rentals", lambda dtos: pytest.fail("must not reap"))
     clock = _Clock(sweeps=2)
     gpu_rentals._reaper_loop(clock)
     assert listed["n"] == 2
     assert clock.delays[1:] == [gpu_rentals.GATEWAY_KEEPALIVE_SECONDS] * 2
+
+
+@pytest.mark.marketplace_transport
+def test_the_sweep_detaches_a_lane_the_worker_ended_and_says_why(monkeypatch) -> None:
+    """The worker stops a rental on its own — the keepalive lapsed while this
+    Mac slept (Vast 50991951, 2026-09-14) — and the studio's destroy and reap
+    paths, the only callers of detach_rental, never run. The registry kept the
+    lane through two stack restarts and the gateway kept routing MiniMax jobs
+    to a tunnel with nothing behind it. The sweep is what runs unattended, so
+    it drops the lane, and the worker's ledger is the only account of why."""
+    _transport(monkeypatch, "gateway")
+    _connected(monkeypatch)
+    ledger = {"ok": True, "balanceCredits": 0, "balanceUsd": 0.0, "rentals": [{
+        "id": "gpur_x", "provider": "vast", "nativeId": "50991951", "status": "ended",
+        "label": "hivemind-studio-gpur-minimax-rtx5090-abc", "endReason": "keepalive-lapsed",
+        "createdAt": "2026-09-14T08:04:00Z", "startedAt": "2026-09-14T08:05:00Z",
+        "reservedUntil": "2026-09-14T09:44:06Z", "endedAt": "2026-09-14T09:49:13Z",
+        "chargedUsd": 1.23, "rateUsdPerHour": 0.71, "providerCostUsdPerHour": 0.57,
+        "paused": False, "blockMinutes": 10, "reservedBlocks": 10, "settledBlocks": 10,
+    }]}
+    calls = _worker(monkeypatch, _market_and(
+        lambda method, path, body, headers: (200, ledger) if path == "/v1/market/rentals"
+        else _ok({"instances": []})))
+    gpu_rentals._write_attachments({"vast:50991951": {
+        "lane": "rental50991951", "local_port": 18751, "needles": ["minimax_h3"], "tier": "minimax",
+        "studio_pages": [], "attached_at": 1.0, "priority": 1}})
+    killed: list[str] = []
+    monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda ref: killed.append(str(ref)))
+
+    gpu_rentals._reaper_loop(_Clock(sweeps=1))
+
+    assert gpu_rentals._read_attachments() == {}
+    assert killed == ["vast:50991951"]
+    assert sum(1 for call in calls if call["path"] == "/v1/market/rentals") == 1
+    [notice] = gpu_rentals.recent_rental_failures()
+    assert notice["kind"] == "vanished" and notice["rental_id"] == "vast:50991951"
+    assert notice["lane"] == "rental50991951" and notice["end_reason"] == "keepalive-lapsed"
+    assert "keepalive-lapsed" in notice["reason"] and "rental50991951" in notice["reason"]
+    assert "asleep" in notice["reason"]
+    # The ledger's own figures, not a blank: 1h 44m 13s at the charged amount.
+    assert notice["uptime_hours"] == pytest.approx(1.737, abs=1e-3)
+    assert notice["usd_spent"] == 1.23 and notice["usd_per_hour"] == 0.71
+    assert notice["machine_id"] is None
+
+
+@pytest.mark.marketplace_transport
+def test_a_worker_ledger_that_cannot_be_read_still_detaches_the_lane(monkeypatch) -> None:
+    """The reason is a courtesy; the detach is the fix."""
+    _transport(monkeypatch, "gateway")
+    _connected(monkeypatch)
+    _worker(monkeypatch, _market_and(
+        lambda method, path, body, headers: (500, {"ok": False, "error": "ledger unavailable"})
+        if path == "/v1/market/rentals" else _ok({"instances": []})))
+    gpu_rentals._write_attachments({"vast:50991951": {
+        "lane": "rental50991951", "local_port": 18751, "needles": ["minimax_h3"], "tier": "minimax",
+        "studio_pages": [], "attached_at": 1.0, "priority": 1}})
+    monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda ref: None)
+
+    gpu_rentals._reaper_loop(_Clock(sweeps=1))
+
+    assert gpu_rentals._read_attachments() == {}
+    [notice] = gpu_rentals.recent_rental_failures()
+    assert notice["end_reason"] is None and notice["usd_spent"] is None
+    assert "no longer lists rental vast:50991951" in notice["reason"]
 
 
 # --- the shared blocklist ----------------------------------------------------------

@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from hivemind_content_studio import gpu_rentals
 from hivemind_content_studio.approval_ledger import ApprovalLedger
 from hivemind_content_studio.control_api import _write_inline_image, _write_inline_video, build_control_app
 from hivemind_content_studio.orchestrator import ContentOrchestrator
@@ -1514,6 +1515,57 @@ def test_opengen_bridge_down_answers_with_a_sentence_and_a_remedy(tmp_path: Path
     assert body["error"] == body["detail"]
 
 
+def test_the_rental_build_lora_id_survives_the_bridge_allowlist(tmp_path: Path, monkeypatch) -> None:
+    """The Rental build page asks for LoRAs under an id it invents, and that id
+    has to get past THIS proxy before it reaches the bridge.
+
+    The dynamic loras/<id> rule accepts an id that is alphanumeric once -, _ and
+    % are stripped. The page first shipped `rental:<tier>`; the colon survives
+    that strip, so every request was 404'd here and the picker reported the
+    local engine as down — with a healthy engine and a healthy bridge. Reading
+    the literal out of the page is the point: the two halves live in different
+    languages and nothing else makes them agree.
+    """
+    view = (
+        Path(__file__).resolve().parents[2]
+        / "packages/open-generative-ai/src/hub/views/RentalBuildView.jsx"
+    ).read_text()
+    template = re.search(r"localAI\.listLoras\(`([^`]+)`", view)
+    assert template, "RentalBuildView no longer asks listLoras for a catalog"
+
+    client, _, _ = _client(tmp_path, monkeypatch)
+    seen: dict[str, str] = {}
+
+    class _Upstream:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def read(self) -> bytes:
+            return b'{"loras": []}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_urlopen(request, timeout=0):  # noqa: ARG001
+        seen["url"] = request.full_url
+        return _Upstream()
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.urllib.request.urlopen", fake_urlopen)
+
+    # Every tier the studio can draw a card for, through the real route.
+    for tier in gpu_rentals.TIERS:
+        lora_id = template.group(1).replace("${tier.tier}", tier)
+        response = client.get(f"/local-ai/loras/{lora_id}", params={"baseModels": "MiniMax H3"})
+        assert response.status_code == 200, f"the proxy refused '{lora_id}' for tier {tier}"
+        assert seen["url"].startswith(f"http://127.0.0.1:8794/local-ai/loras/{lora_id}?")
+
+    # And the shape that caused it stays refused, so this is a real check.
+    assert client.get("/local-ai/loras/rental:minimaxeros", params={"baseModels": "x"}).status_code == 404
+
+
 def test_opengen_bridge_proxy_forwards_the_query_string(tmp_path: Path, monkeypatch) -> None:
     """LoRA lookups pass ?baseModels=… for workflows the bridge cannot resolve on
     its own. Dropping the query turned those into "Unknown local workflow"."""
@@ -1823,7 +1875,10 @@ def test_video_task_survives_every_hop_unchanged(tmp_path: Path, monkeypatch) ->
 
     seen: dict[str, object] = {}
 
-    def fake_client(_descriptor, _requester_pub=""):
+    # Third positional: start_video calls _client(descriptor, requester_pub,
+    # owner_pub). The stub had two and this test failed on a TypeError before it
+    # could assert anything — the hop it exists to pin was going unchecked.
+    def fake_client(_descriptor, _requester_pub="", _owner_pub=""):
         class _C:
             def call_tool(self, _name, arguments, **_kwargs):
                 seen.update(arguments)
@@ -1854,6 +1909,45 @@ def test_video_task_survives_every_hop_unchanged(tmp_path: Path, monkeypatch) ->
     # variable, so image_path received the video's filename.
     assert seen.get("video_path") == "src.mp4"
     assert seen.get("image_path") == "face.png"
+
+
+def test_extension_tail_request_survives_the_hop_to_the_mcp(tmp_path: Path, monkeypatch) -> None:
+    """An extension can be asked to return only the frames it ADDED.
+
+    `ltx-2-mlx extend` regenerates the source AND the new frames as one file —
+    that is how the soundtrack carries. A sequence asks for the tail so one
+    press makes one shot instead of a clip containing every shot before it.
+    Deliberately its own flag rather than a second `video_mode` value: the mode
+    says how the source is USED, and three layers validate it as the literal
+    "extend".
+    """
+    from hivemind_content_studio import media_studio
+
+    seen: dict[str, object] = {}
+
+    def fake_client(_descriptor, _requester_pub="", _owner_pub=""):
+        class _C:
+            def call_tool(self, _name, arguments, **_kwargs):
+                seen.update(arguments)
+                return {"job_id": "j1"}
+        return _C()
+
+    monkeypatch.setattr(media_studio, "_client", fake_client)
+    monkeypatch.setattr(media_studio, "_upload_video", lambda *_a, **_k: "src.mp4")
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"\x00" * 2048)
+
+    media_studio.start_video(video_path=video, extend_return_tail=True, prompt="the dog runs on")
+    assert seen.get("video_mode") == "extend"
+    assert seen.get("extend_return_tail") is True
+
+    # Off unless asked: the standalone "extend this clip" surface keeps the
+    # grown clip it has always had, so the key must not be sent at all.
+    seen.clear()
+    media_studio.start_video(video_path=video, prompt="the dog runs on")
+    assert seen.get("video_mode") == "extend"
+    assert "extend_return_tail" not in seen
 
 
 def test_media_studio_video_start_stages_and_forwards_the_motion_context_clip(tmp_path: Path, monkeypatch) -> None:

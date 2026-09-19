@@ -531,12 +531,23 @@ def _gateway_that_names_accounts(monkeypatch, tmp_path: Path) -> None:
     key would be written into the developer's real data folder."""
     from hivemind_content_studio import hivemindos_models
 
-    def gateway(path, *, headers=None, **_):
+    from hivemind_content_studio import hivemindos_account
+
+    names: dict[str, dict] = {}
+
+    def gateway(path, *, headers=None, method="GET", body=None, **_):
         token = str((headers or {}).get("X-HivemindOS-Credit-Token") or "")
         if path.endswith("/credits/balance"):
             return {"ok": True, "accountId": f"acct-{token[-4:]}", "balanceCredits": 5}
         if path == "/api/mini-app-account":
             return {"ok": True, "authenticated": True}
+        if path == hivemindos_account.USERNAME_PATH:
+            # The hive username registry: the derived name on first read, a
+            # chosen one once claimed.
+            derived = {"username": hivemindos_account.derive_handle(f"acct-{token[-4:]}"), "custom": False}
+            if method == "POST":
+                names[token] = {"username": body["username"], "custom": True} if body.get("username") else derived
+            return {"ok": True, **names.setdefault(token, derived)}
         if path.startswith("/api/free-models/"):
             return {"ok": True, "model": {"allowance": {"dailyRequests": 1, "dailyTokens": 1}}}
         raise AssertionError(f"the fixture has no answer for {path}")
@@ -565,13 +576,13 @@ def test_each_workspace_holds_its_own_hivemindos_account(client, monkeypatch, tm
     mine = client.get("/api/hivemindos/account").json()["identity"]
     assert mine["connected"] is True and mine["accountId"] == "acct-bbbb"
     assert (tmp_path / "accounts" / str(second) / "hivemindos-account.json").is_file()
-    assert client.post("/api/hivemindos/account/handle", json={"handle": "Second Bee"}).status_code == 200
+    assert client.post("/api/hivemindos/account/handle", json={"handle": "Second_Bee"}).status_code == 200
 
     client.post("/api/accounts/sign-out")
     _sign_in(client, 1, OWNER_PASSWORD)
     owner = client.get("/api/hivemindos/account").json()["identity"]
     assert owner["connected"] is False
-    assert owner["handle"] not in {mine["handle"], "Second Bee"}
+    assert owner["handle"] not in {mine["handle"], "Second_Bee"}
     assert owner["handle"] != before["handle"]
     assert client.post("/api/hivemindos/models/connect", json={"token": TOKEN_A}).status_code == 200
     assert client.get("/api/hivemindos/account").json()["identity"]["accountId"] == "acct-aaaa"
@@ -580,7 +591,7 @@ def test_each_workspace_holds_its_own_hivemindos_account(client, monkeypatch, tm
     client.post("/api/accounts/sign-out")
     _sign_in(client, second, "second-pass")
     again = client.get("/api/hivemindos/account").json()["identity"]
-    assert again["accountId"] == "acct-bbbb" and again["handle"] == "Second Bee"
+    assert again["accountId"] == "acct-bbbb" and again["handle"] == "Second_Bee"
 
 
 def test_a_share_lets_a_sibling_spend_the_owners_credits_over_http(client, monkeypatch, tmp_path):

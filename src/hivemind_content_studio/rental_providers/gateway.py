@@ -184,6 +184,27 @@ def balance_usd() -> float:
     return round(float(market().get("balanceUsd") or 0.0), 4)
 
 
+# --- GET /v1/market/rentals ---------------------------------------------------
+
+def rentals() -> list[dict]:
+    """The worker's ledger of this account's rentals, ended ones included.
+
+    One row per rental the worker ever placed for this token: `provider`,
+    `nativeId`, `status` ("ended" once it is gone), `endReason`, `startedAt`,
+    `endedAt`, `chargedUsd`, `rateUsdPerHour`, `label` (shape read off the
+    live worker 2026-09-15). It is the only account of WHY a box the studio
+    still has attached is no longer listed: the worker's own cron stops a
+    rental — keepalive lapsed, provisioning stalled, lifetime cap — without
+    telling the studio, and the marketplace list simply no longer has it.
+    Not cached: it is asked once per rental that went away, not per poll.
+    """
+    answer = _request("GET", "/v1/market/rentals", token=_token())
+    rows = answer.get("rentals")
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
 # --- POST /v1/market/{provider}/call ------------------------------------------
 
 def call(

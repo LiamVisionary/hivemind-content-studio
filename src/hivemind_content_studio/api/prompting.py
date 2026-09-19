@@ -20,6 +20,7 @@ from .. import (
 from .models import (
     FavoriteBody,
     PromptHelperDescribeLookBody,
+    PromptHelperDesignCharacterBody,
     PromptHelperGenerateBody,
     PromptHelperLoadBody,
     PromptHelperUnloadBody,
@@ -168,7 +169,7 @@ def register(app, ctx) -> None:
                 profile, duration_seconds=body.durationSeconds, character_notes=notes,
                 continuation=body.isContinuation, previous_prompt=body.previousPrompt,
                 ugc=body.ugc, references=body.references, persona_gender=body.personaGender,
-                cast=body.cast)},
+                cast=body.cast, target_model=body.targetModel)},
             {"role": "user", "content": idea},
         ]
         # Revising is the same conversation with the current draft in it, so
@@ -376,7 +377,8 @@ def register(app, ctx) -> None:
             # Say when the continuation rules were in force, so a prompt written
             # for a chained shot is visibly a different job from a fresh one.
             "profileLabel": prompt_profiles.profile_label(
-                profile, continuation=body.isContinuation, ugc=body.ugc),
+                profile, continuation=body.isContinuation, ugc=body.ugc,
+                target_model=body.targetModel),
             "warnings": warnings,
             "sawImage": bool(image),
             # None for a fresh write; a line count for a revision, so the UI can
@@ -384,27 +386,19 @@ def register(app, ctx) -> None:
             "changedLines": edited,
         }
 
-    # A Hive Persona's LOOK (hair, face, build, wardrobe in a line or two) is
-    # what the cast writes into <Subject N>'s definition; written by the loaded
-    # helper from the persona's own pictures so it is not a field owners skip.
-    # Same runtime, same chat call, same owner gate as the prompt helper above —
-    # the pictures go only to the llama-server this process spawned, and
-    # neither they nor the answer are logged.
-    @router.post("/api/prompt-helper/describe-look", dependencies=[Depends(require_owner)])
-    def prompt_helper_describe_look(body: PromptHelperDescribeLookBody) -> dict:
-        images = [str(item or "").strip() for item in (body.images or [])]
-        if not images:
-            raise HTTPException(status_code=422, detail="Attach at least one picture to describe")
-        if len(images) > 3:
-            raise HTTPException(status_code=422, detail="Attach at most three pictures — the clearest ones")
+    # The two checks every picture-reading route makes before it spends a model
+    # call: the pictures are data URLs (refused without echoing them back), and
+    # the model that will be asked is loaded and can actually see.
+    def _require_picture_data_urls(images: list[str]) -> None:
         for item in images:
             _header, separator, payload = item.partition(",")
             if not item.startswith("data:image/") or not separator or not payload.strip():
                 raise HTTPException(
                     status_code=422, detail="Each picture must be an image data URL (data:image/…;base64,…)")
-        runtime = local_llm.runtime()
+
+    def _seeing_model_or_raise(runtime, requested: str | None) -> str:
         loaded = runtime.loaded_model_ids()
-        model_id = (body.modelId or "").strip()
+        model_id = (requested or "").strip()
         if model_id and model_id not in loaded:
             raise HTTPException(status_code=409, detail=f"{model_id} is not loaded. Load it first.")
         if not model_id:
@@ -420,6 +414,24 @@ def register(app, ctx) -> None:
                 detail="The loaded helper model cannot see pictures — load a vision-capable one "
                        "(e.g. Swarm Scout or Qwen3.6)",
             )
+        return model_id
+
+    # A Hive Persona's LOOK (hair, face, build, wardrobe in a line or two) is
+    # what the cast writes into <Subject N>'s definition; written by the loaded
+    # helper from the persona's own pictures so it is not a field owners skip.
+    # Same runtime, same chat call, same owner gate as the prompt helper above —
+    # the pictures go only to the llama-server this process spawned, and
+    # neither they nor the answer are logged.
+    @router.post("/api/prompt-helper/describe-look", dependencies=[Depends(require_owner)])
+    def prompt_helper_describe_look(body: PromptHelperDescribeLookBody) -> dict:
+        images = [str(item or "").strip() for item in (body.images or [])]
+        if not images:
+            raise HTTPException(status_code=422, detail="Attach at least one picture to describe")
+        if len(images) > 3:
+            raise HTTPException(status_code=422, detail="Attach at most three pictures — the clearest ones")
+        _require_picture_data_urls(images)
+        runtime = local_llm.runtime()
+        model_id = _seeing_model_or_raise(runtime, body.modelId)
         count = "one photo" if len(images) == 1 else f"{len(images)} photos"
         messages = [
             {"role": "system", "content": prompt_profiles.look_system_prompt(body.gender)},
@@ -442,6 +454,36 @@ def register(app, ctx) -> None:
             raise HTTPException(
                 status_code=502, detail="The helper returned nothing — try again or load a larger model")
         return {"ok": True, "look": look}
+
+    # Object → character, the image studio's vision workflow: ONE picture of an
+    # inanimate object in, one paragraph describing an original character out.
+    # The studio appends that paragraph to a framing prompt and renders it. Same
+    # runtime, same loopback-only picture, same owner gate as the look above;
+    # warmer than the look because this one is a design, not a reading — but
+    # under the writer's 0.8, where a 12B at Q4 started misspelling (measured).
+    @router.post("/api/prompt-helper/design-character", dependencies=[Depends(require_owner)])
+    def prompt_helper_design_character(body: PromptHelperDesignCharacterBody) -> dict:
+        image = str(body.image or "").strip()
+        if not image:
+            raise HTTPException(status_code=422, detail="Attach a picture of the object to design from")
+        _require_picture_data_urls([image])
+        runtime = local_llm.runtime()
+        model_id = _seeing_model_or_raise(runtime, body.modelId)
+        messages = [
+            {"role": "system", "content": prompt_profiles.CHARACTER_FROM_OBJECT_SYSTEM_PROMPT},
+            {"role": "user", "content": "Here is the image. Design the character."},
+        ]
+        try:
+            answer = runtime.chat(model_id=model_id, messages=messages, images=[image], temperature=0.6)
+        except local_llm.LocalLlmEmptyAnswer:
+            answer = ""
+        except local_llm.LocalLlmError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        character = prompt_profiles.normalize_character(answer)
+        if not character:
+            raise HTTPException(
+                status_code=502, detail="The helper returned nothing — try again or load a larger model")
+        return {"ok": True, "character": character}
 
     @router.get("/api/simple/prompts", dependencies=[Depends(require_owner)])
     def list_prompts(favorites: bool = False, limit: int = 200) -> dict:

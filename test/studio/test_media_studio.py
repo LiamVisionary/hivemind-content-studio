@@ -1038,6 +1038,44 @@ def test_steps_override_rides_the_params_record_to_the_mcp(monkeypatch) -> None:
             assert sent[0]["params"] == expected
 
 
+def test_interpolation_rides_the_same_params_record_and_only_when_it_does_something(monkeypatch) -> None:
+    """Frame interpolation (MiniMax H3's FrameInterpolate node) travels on the
+    same registry-slot channel as steps, and shares the record with it.
+
+    A multiplier under 2 is not interpolation: the MCP's compiler bypasses the
+    node and prunes its model loader, which is exactly what sending nothing
+    does — so 1 must not reach the wire as an override."""
+    from hivemind_content_studio import media_studio
+
+    sent: list[dict] = []
+
+    class Client:
+        def call_tool(self, name, arguments, **_kwargs):
+            sent.append(arguments)
+            return {"content": [{"type": "text", "text": json.dumps({"id": "job-1"})}]}
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor: Client())
+
+    cases = (
+        ({"interpolate": None}, None),
+        ({"interpolate": 1}, None),
+        ({"interpolate": 2}, {"interpolate": 2}),
+        # One record, both slots — the MCP reads each mapped slot out of it.
+        ({"interpolate": 2, "steps": 32}, {"steps": 32, "interpolate": 2}),
+    )
+    for kwargs, expected in cases:
+        sent.clear()
+        with contextlib.suppress(Exception):
+            media_studio.start_video(prompt="a duel", duration_seconds=5, **kwargs)
+        if not sent:
+            continue
+        if expected is None:
+            assert "params" not in sent[0], f"{kwargs} must not reach the wire as an override"
+        else:
+            assert sent[0]["params"] == expected
+
+
 def test_start_video_uploads_and_forwards_the_motion_context_clip(tmp_path: Path, monkeypatch) -> None:
     """Scene chaining: the previous clip uploads like any video input, but its
     gateway name travels as motion_context_path — never video_path, which would

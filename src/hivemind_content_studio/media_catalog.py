@@ -39,6 +39,13 @@ class MediaModel:
     # actually wired (MiniMax H3 Reference mode). The studio sizes its
     # References panel from this instead of hardcoding the counts.
     reference_slots: dict | None = None
+    # The h3.c lane's whole control surface, as its registry row writes it: the
+    # Effort presets and their dial values, the engine's ranges, the note about
+    # token reduction. Carried rather than restated so the Video studio renders
+    # the engine's own table — a second copy in the frontend would drift the
+    # first time upstream remeasured a recipe. None on every other workflow,
+    # which is what keeps the panel unrendered there.
+    h3_native: dict | None = None
     aspect_ratios: tuple[str, ...] = ()
     default_duration_seconds: float | None = None
     # Longest stretch of MOTION REFERENCE each canvas can carry, keyed
@@ -76,6 +83,14 @@ class MediaModel:
     # when references are attached to the family's normal tier, so offering it
     # as its own tier only strands the user on a graph with no frame inputs.
     routing_only: bool = False
+    # What this lane must RUN on ("cuda", "mps"), or "" when it runs wherever
+    # its weights are. Carried because a name is not a capability: the studio
+    # matches a model to a rented machine on lowercase substrings of its id,
+    # and "MiniMax H3 (Apple Silicon)" — antirez/h3.c, a Metal engine — has
+    # "minimax_h3" inside its id, which is exactly the needle a rented H3 box
+    # advertises. Without this the picker offered a Metal lane on an NVIDIA
+    # card and the preflight then refused the run (2026-09-14).
+    accelerator: str = ""
     # What the workflow's own registry entry says it does. The studios used to
     # print "<provider> workflow" under every video model because this field did
     # not exist here, so seventeen models shared one sentence that described none
@@ -344,6 +359,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
             ingredient_inputs=dict(workflow.get("ingredient_inputs")) if isinstance(workflow.get("ingredient_inputs"), dict) else None,
             text_to_video_workflow=str(workflow.get("text_to_video_workflow") or "").strip(),
             reference_slots=dict(workflow.get("reference_slots")) if isinstance(workflow.get("reference_slots"), dict) else None,
+            h3_native=dict(workflow.get("h3_native")) if isinstance(workflow.get("h3_native"), dict) else None,
             aspect_ratios=tuple(str(value) for value in workflow.get("aspect_ratios", []) if str(value).strip()),
             default_duration_seconds=float(defaults["duration_seconds"]) if defaults.get("duration_seconds") is not None else None,
             motion_reference_max_seconds=motion_reference_duration_limits(workflow) or None,
@@ -351,6 +367,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
             default_steps=float(defaults["steps"]) if defaults.get("steps") is not None else None,
             beta=bool(workflow.get("beta")),
             routing_only=bool(workflow.get("routing_only")),
+            accelerator=str((workflow.get("hardware") or {}).get("accelerator") or "").strip(),
             requires_image=bool((workflow.get("requires") or {}).get("image")) if isinstance(workflow.get("requires"), dict) else False,
         )
     _last_live_media_studio_models = tuple(models.values())

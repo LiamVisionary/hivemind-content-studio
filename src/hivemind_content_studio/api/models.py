@@ -511,6 +511,18 @@ class PromptHelperDescribeLookBody(BaseModel):
     modelId: str | None = None
 
 
+class PromptHelperDesignCharacterBody(BaseModel):
+    """Ask the loaded helper to design an original character from a picture of an object."""
+
+    # ONE picture, as a data URL — the object whose colours, shapes and textures
+    # become the character. Like the look's pictures it goes only to the
+    # loopback llama-server and is never written anywhere; checked in the route
+    # so a refusal does not echo it back.
+    image: str
+    # Which loaded helper to ask. Absent → whichever one is loaded.
+    modelId: str | None = None
+
+
 class MediaStudioLoraBody(BaseModel):
     id: str
     strength: float = 1.0
@@ -620,6 +632,31 @@ class MediaStudioInpaintBody(BaseModel):
     paste_edge_feather: int | None = Field(default=None, ge=0, le=256)
 
 
+class MediaStudioH3NativeBody(BaseModel):
+    """The MiniMax H3 (Apple Silicon) dials, as h3.c names them.
+
+    The ranges are the engine's own (h3.c: h3_valid_params), restated here so a
+    nonsense value is a 422 on the way in rather than an engine refusal after
+    the text encoder has spent a minute loading. Everything is optional: an
+    unset dial takes the Effort preset's value, and an unset preset takes what
+    the gateway recommends for this machine.
+    """
+
+    preset: Literal["", "draft", "fast", "balanced", "reference"] = ""
+    steps: int | None = Field(default=None, ge=2, le=1000)
+    layers: int | None = Field(default=None, ge=35, le=50)
+    reuse: int | None = Field(default=None, ge=1, le=3)
+    core_reuse: int | None = Field(default=None, ge=1, le=6)
+    render_scale: float | None = Field(default=None, ge=0.25, le=1.0)
+    # 28% faster and the one dial with a standing artefact report, so it is
+    # never implied — only an explicit true turns it on.
+    token_reduction: bool | None = None
+    # Read off the machine unless set: memory decides streaming, the chip
+    # decides the int8 FC2 kernel.
+    ssd_streaming: bool | None = None
+    int8_row_fc2: bool | None = None
+
+
 class MediaStudioVideoBody(BaseModel):
     prompt: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
     workflow_id: str = Field(default="", max_length=256)
@@ -660,6 +697,11 @@ class MediaStudioVideoBody(BaseModel):
     inpaint: "MediaStudioInpaintBody | None" = None
     motion_context_base64: str | None = None
     video_mode: Literal["extend"] = "extend"
+    # Return only the frames the extension added, not the source it grew.
+    # Separate from video_mode on purpose: the mode says how the source
+    # clip is USED, this says what comes back. Off by default, so the
+    # standalone "extend this clip" surface is unchanged.
+    extend_return_tail: bool = False
     # THE task. Decided once in the studio (src/lib/videoTasks.js) and forwarded
     # verbatim; nothing downstream re-derives the job from which media arrived.
     task: Literal["generate", "extend", "head-swap"] = "generate"
@@ -689,9 +731,20 @@ class MediaStudioVideoBody(BaseModel):
     # Fast high-res: MiniMax H3's two-pass latent upscale (sample small, refine
     # at full size). Same tri-state — None leaves the registered graph alone.
     fast_high_res: bool | None = None
+    # Frame interpolation multiplier for workflows whose registry maps an
+    # interpolate slot (MiniMax H3's FrameInterpolate node). None or 1 is off,
+    # which is the registered default; the fight preset is what normally raises
+    # it. Capped at 4 — past that the interpolator is inventing more frames than
+    # the model rendered.
+    interpolate: int | None = Field(default=None, ge=1, le=4)
     # Sampling-steps override for workflows whose registry maps a steps slot
     # (MiniMax H3's refinement setting). None keeps the workflow default.
     steps: int | None = Field(default=None, ge=1, le=100)
+    # The h3.c lane's own dials, grouped like `inpaint` rather than flattened:
+    # they are one coherent set belonging to one workflow, and every one of them
+    # is optional because an unset dial means "whatever the Effort preset says"
+    # and an unset preset means "whatever this Mac can hold".
+    h3_native: "MediaStudioH3NativeBody | None" = None
     loras: list[MediaStudioLoraBody] = []
 
 

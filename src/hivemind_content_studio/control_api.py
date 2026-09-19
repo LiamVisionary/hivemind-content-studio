@@ -60,6 +60,7 @@ from .api import ingredients as ingredients_routes
 from .api import lanes as lanes_routes
 from .api import media_models as media_models_routes
 from .api import muapi as muapi_routes
+from .api import music as music_routes
 from .api import oauth as oauth_routes
 from .api import passbook as passbook_routes
 from .api import prompting as prompting_routes
@@ -785,6 +786,7 @@ def build_control_app(
         vault_routes,
         video_routes,
         muapi_routes,
+        music_routes,
         image_routes,
         sam3_routes,
         restore_routes,

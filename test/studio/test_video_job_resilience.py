@@ -10,6 +10,7 @@ to its 98% cap and sat there until the client's own wall clock gave up.
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from contextlib import contextmanager
@@ -17,9 +18,23 @@ from pathlib import Path
 
 import pytest
 
-from hivemind_content_studio import comfy_lanes, control_api
+from hivemind_content_studio import comfy_lanes, control_api, media_studio
+from hivemind_content_studio.api.media_common import E2E_REQUESTER_HEADER
 
 RUNNING = {"status": "running", "failed": False, "error": "", "video_url": "", "progress": None}
+# Syntactically valid base64url SPKIs: length is what the validator checks.
+DEVICE_PUB = "D" * 392
+OWNER_PUB = "O" * 392
+GATEWAY = media_studio.MediaStudioDescriptor(
+    app_id="test:media-studio",
+    app_name="Media Studio",
+    mcp_url="http://127.0.0.1:8796/mcp",
+    upload_base="http://127.0.0.1:8787",
+    auth_env_key=None,
+    tool="media_generate_video",
+    job_tool="media_get_job",
+    workflow_id=None,
+)
 
 
 @pytest.fixture()
@@ -189,3 +204,61 @@ def test_a_busy_local_lane_vetoes_the_flip(client, monkeypatch) -> None:
             body = client.get("/api/media-studio/video/job/job-busy").json()
 
     assert body["ok"] is True and body["status"] == "running"
+
+
+def test_a_render_gone_quiet_is_probed_through_the_real_record_lookup(client, monkeypatch) -> None:
+    """Every fake above takes `**_kwargs`, and a fake like that accepts any
+    keyword at all. So when the silence probe started passing `owner_pub=`,
+    which video_job_record has never taken, those tests stayed green while the
+    real poll raised TypeError for each long render that went quiet: 97 times in
+    the studio log by 2026-09-15. Here the record lookup is left real, and only
+    the gateway read beneath it is faked."""
+    _unresponsive_at_once(monkeypatch)
+    monkeypatch.setattr(control_api, "media_studio_owner_spki", lambda: OWNER_PUB)
+    monkeypatch.setattr(
+        control_api, "run_media_studio_video_start",
+        lambda **_kwargs: {"job_id": "job-quiet", "uploaded_names": [], "provider": "Media Studio"},
+    )
+    checks: list[dict] = []
+
+    def check(*args, **kwargs):
+        # Bound to the real signature, so a keyword the real check refuses
+        # fails here as well rather than vanishing into **kwargs.
+        checks.append(dict(inspect.signature(media_studio.check_video).bind(*args, **kwargs).arguments))
+        return dict(RUNNING)
+
+    monkeypatch.setattr(control_api, "run_media_studio_video_check", check)
+    gateway = {"record": {"id": "job-quiet", "status": "running"}}
+    reads: list[tuple[str, str]] = []
+
+    def private_json(_descriptor, path, requester_pub=""):
+        reads.append((path, requester_pub))
+        return dict(gateway["record"])
+
+    monkeypatch.setattr(media_studio, "discover_media_studio", lambda: GATEWAY)
+    monkeypatch.setattr(media_studio, "_private_json", private_json)
+
+    with _finisher_parked(monkeypatch):
+        started = client.post(
+            "/api/media-studio/video/start",
+            json={"prompt": "a long render", "duration_seconds": 2},
+            headers={E2E_REQUESTER_HEADER: DEVICE_PUB},
+        )
+        assert started.status_code == 200, started.text
+
+        # Quiet, but the gateway still has it: one probe, as the job's own
+        # requester, and the job keeps running.
+        assert client.get("/api/media-studio/video/job/job-quiet").json()["status"] == "running"
+        assert reads == [("/api/job/job-quiet", DEVICE_PUB)]
+        # Taking the owner key off the probe must not take it off the status
+        # check, which goes out through the MCP client and presents it.
+        assert checks[-1].get("owner_pub") == OWNER_PUB
+
+        # The gateway forgets the job, and two empty answers end it.
+        gateway["record"] = {}
+        client.get("/api/media-studio/video/job/job-quiet")
+        body = client.get("/api/media-studio/video/job/job-quiet").json()
+
+    assert body["ok"] is False and body["status"] == "error"
+    assert body["detail"] == control_api._VIDEO_BACKEND_GONE
+    assert body["retryable"] is True

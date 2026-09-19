@@ -1,0 +1,1829 @@
+diff --git a/Makefile b/Makefile
+index bb20237..e2325bd 100644
+--- a/Makefile
++++ b/Makefile
+@@ -8,7 +8,7 @@ FRAMEWORKS := -framework Foundation -framework Metal \
+ 	-framework Accelerate
+ LDLIBS := $(FRAMEWORKS) -licucore -lm
+ 
+-LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
++LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_lora.c h3_text_encoder.c \
+ 	h3_dit_schedule.c h3_dit.c
+ 
+ LIB_C += h3_video_vae.c h3_video_encoder.c h3_audio_vae.c h3_ffmpeg.c \
+@@ -36,6 +36,9 @@ h3_metal_tests: tests/test_metal.o $(LIB_OBJ)
+ h3_bf16_tests: tests/test_bf16.o $(LIB_OBJ)
+ 	$(CC) -o $@ $^ $(LDLIBS)
+ 
++h3_lora_tests: tests/test_lora.o $(LIB_OBJ)
++	$(CC) -o $@ $^ $(LDLIBS)
++
+ h3_tokenizer_tests: tests/test_tokenizer.o $(LIB_OBJ)
+ 	$(CC) -o $@ $^ $(LDLIBS)
+ 
+@@ -97,13 +100,14 @@ h3_real_video_vae_test: tests/test_real_video_vae.o $(LIB_OBJ)
+ h3_semantic_vae_test: tests/test_semantic_vae.o $(LIB_OBJ)
+ 	$(CC) -o $@ $^ $(LDLIBS)
+ 
+-test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
++test: h3_tests h3_metal_tests h3_bf16_tests h3_lora_tests h3_tokenizer_tests h3_text_tests \
+ 	h3_audio_gpu_tests h3_real_audio_vae_test h3_real_audio_encoder_test \
+ 	h3_av_mux_test \
+ 	h3_real_video_encoder_test h3_real_qwen_vision_test \
+ 	h3_real_multimodal_text_test h3_real_ref_video_text_test
+ 
+ 	./h3_tests
++	./h3_lora_tests
+ 	@if test -f misc/fixtures/h3_dit.safetensors && \
+ 	         test -f misc/fixtures/h3_dit_bf16.safetensors; then \
+ 		./h3_metal_tests misc/fixtures/h3_dit.safetensors; \
+@@ -203,7 +207,7 @@ linenoise.o: CFLAGS += -Wno-conversion -Wno-variadic-macro-arguments-omitted
+ -include $(wildcard *.d tests/*.d)
+ 
+ clean:
+-	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
++	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_lora_tests h3_tokenizer_tests \
+ 		h3_text_tests h3_real_prompt_test h3_real_dit_block_test \
+ 		h3_audio_gpu_tests h3_real_audio_vae_test h3_real_audio_encoder_test \
+ 		h3_av_mux_test \
+diff --git a/h3.c b/h3.c
+index d5dca25..136ce98 100644
+--- a/h3.c
++++ b/h3.c
+@@ -3,6 +3,7 @@
+ #include "h3_host.h"
+ #include "h3_dit.h"
+ #include "h3_ffmpeg.h"
++#include "h3_lora.h"
+ #include "h3_metal.h"
+ #include "h3_multimodal.h"
+ #include "h3_safetensors.h"
+@@ -188,6 +189,16 @@ static char *h3_prepared_key(const char *conditioning,
+         free(key.text);
+         return NULL;
+     }
++    /* Fused weights are part of the prepared model, so a retained DiT is only
++     * reused for the same adapter files at the same strengths. */
++    for (size_t index = 0; index < params->lora_count; index++) {
++        if (!h3_key_append(&key, "|lora=%.9g",
++                           (double)params->loras[index].strength) ||
++            !h3_key_file(&key, "lora-file", params->loras[index].path)) {
++            free(key.text);
++            return NULL;
++        }
++    }
+     return key.text;
+ }
+ 
+@@ -555,6 +566,31 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
+                          "be combined with int8 row FC2");
+         return 0;
+     }
++    if (params->lora_count && !params->loras) {
++        h3_set_error(ctx, "lora_count is nonzero but loras is NULL");
++        return 0;
++    }
++    if (params->lora_count > H3_MAX_LORAS) {
++        h3_set_error(ctx, "at most %d LoRA adapters can be fused", H3_MAX_LORAS);
++        return 0;
++    }
++    for (size_t index = 0; index < params->lora_count; index++) {
++        const h3_lora *lora = &params->loras[index];
++        if (!lora->path || !*lora->path) {
++            h3_set_error(ctx, "LoRA %zu has no path", index + 1);
++            return 0;
++        }
++        if (!isfinite(lora->strength) || lora->strength < -10.0f ||
++            lora->strength > 10.0f) {
++            h3_set_error(ctx, "LoRA strength must be in [-10, 10]");
++            return 0;
++        }
++    }
++    if (params->lora_count && params->ssd_streaming) {
++        h3_set_error(ctx, "LoRA adapters are fused into resident DiT weights "
++                         "and cannot be combined with SSD streaming");
++        return 0;
++    }
+     if (params->use_int8_row_fc2 && params->use_slower_bf16_mlp) {
+         h3_set_error(ctx, "int8 row FC2 cannot be combined with the BF16 MLP");
+         return 0;
+@@ -918,6 +954,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
+     int conditioned = 0;
+     int dit_is_cached = 0;
+     int decoder_is_cached = 0;
++    h3_lora_set *loras = NULL;
+     char *tokenizer_path = h3_path(ctx->model_dir, ref2va ?
+         "Ref2VA/tokenizer/tokenizer.json" : "FL2VA/tokenizer/tokenizer.json");
+     char *text_path = h3_path(ctx->model_dir, ref2va ?
+@@ -933,6 +970,33 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
+         h3_set_error(ctx, "out of memory resolving generation model paths");
+         goto cleanup;
+     }
++    if (params->lora_count) {
++        /* Every adapter is checked against the transformer's headers before
++         * the tokenizer and the 62 GB text encoder: a LoRA for another model
++         * fails in a second rather than after a minute. */
++        char lora_detail[512];
++        h3_weight_store *lora_store = h3_weight_store_open(
++            dit_path, lora_detail, sizeof(lora_detail));
++        if (lora_store) {
++            loras = h3_lora_set_open(lora_store, params->loras,
++                                     params->lora_count, lora_detail,
++                                     sizeof(lora_detail));
++            h3_weight_store_free(lora_store);
++        }
++        if (!loras) {
++            h3_set_error(ctx, "%s", lora_detail);
++            goto cleanup;
++        }
++        fprintf(stderr, "h3: lora: fusing %zu adapters into %zu DiT tensors "
++                "from %zu files\n", h3_lora_set_adapters(loras),
++                h3_lora_set_tensors(loras), h3_lora_set_files(loras));
++        if (h3_lora_set_skipped(loras)) {
++            fprintf(stderr, "h3: lora warning: skipped %zu adapters that do "
++                    "not fit this checkpoint (%s)\n",
++                    h3_lora_set_skipped(loras),
++                    h3_lora_set_skip_detail(loras));
++        }
++    }
+     conditioning_key = h3_conditioning_key(
+         prompt, params, render_width, render_height, ref2va);
+     if (!conditioning_key) {
+@@ -1494,7 +1558,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
+             params->use_int8_row_fc2,
+             condition_video_rows, condition_video_elements,
+             condition_audio_rows, condition_audio_elements,
+-            h3_dit_progress_bridge, &progress, detail, sizeof(detail));
++            loras, h3_dit_progress_bridge, &progress, detail, sizeof(detail));
+     } else {
+         dit = h3_dit_load_t2va(
+             dit_path, "h3_shaders.metal", &text, &layout, &sigmas,
+@@ -1513,7 +1577,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
+             params->use_slower_dynamic_fc1_k,
+             params->use_slower_grouped_quantizer,
+             params->use_int8_row_fc2,
+-            h3_dit_progress_bridge, &progress, detail, sizeof(detail));
++            loras, h3_dit_progress_bridge, &progress, detail, sizeof(detail));
+     }
+     if (!dit) {
+         h3_set_error(ctx, "%s", detail);
+@@ -1693,6 +1757,7 @@ cleanup:
+     free(conditioning_key);
+     free(prepared_key);
+     free(decoder_key);
++    h3_lora_set_free(loras);
+     free(tokenizer_path); free(text_path); free(dit_path); free(vae_path);
+     free(audio_vae_path);
+     h3_tokenizer_free(tokenizer);
+diff --git a/h3.h b/h3.h
+index 29640b3..cf42a04 100644
+--- a/h3.h
++++ b/h3.h
+@@ -16,6 +16,7 @@ extern "C" {
+ #define H3_DEFAULT_STEPS 20
+ #define H3_DEFAULT_DIT_LAYERS 50
+ #define H3_MIN_DIT_LAYERS 35
++#define H3_MAX_LORAS 20
+ 
+ typedef struct h3_ctx h3_ctx;
+ typedef struct h3_result h3_result;
+@@ -46,6 +47,12 @@ typedef enum {
+     H3_REFERENCE_IMAGE_MAX = 1
+ } h3_reference_image_size;
+ 
++/* A LoRA adapter file and the strength it is fused at. */
++typedef struct {
++    const char *path;
++    float strength;
++} h3_lora;
++
+ typedef struct {
+     int width;
+     int height;
+@@ -123,6 +130,12 @@ typedef struct {
+     int use_slower_grouped_quantizer;
+     /* Decode and deliver one representative frame after every Euler step. */
+     int preview_denoise;
++    /* LoRA adapters fused into the DiT weights as they load, stacked in order:
++     * W + strength * (alpha / rank) * up @ down, or strength alone for an
++     * adapter without an alpha. SSD streaming never loads those weights, so the
++     * two cannot be combined. */
++    const h3_lora *loras;
++    size_t lora_count;
+     h3_frame_callback on_frame;
+     h3_progress_callback on_progress;
+     void *callback_opaque;
+@@ -131,7 +144,7 @@ typedef struct {
+ #define H3_PARAMS_DEFAULT { \
+     H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
+     UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
+-    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
++    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, 0, NULL, NULL, NULL \
+ }
+ 
+ typedef struct {
+diff --git a/h3_dit.c b/h3_dit.c
+index 667e49b..60704c3 100644
+--- a/h3_dit.c
++++ b/h3_dit.c
+@@ -1581,6 +1581,7 @@ static h3_dit *load_dit(const char *weight_directory,
+                         size_t condition_video_elements,
+                         const float *condition_audio_rows,
+                         size_t condition_audio_elements,
++                        const h3_lora_set *loras,
+                         h3_dit_progress progress, void *progress_opaque,
+                         char *error, size_t error_size) {
+     if (error && error_size) error[0] = '\0';
+@@ -1593,6 +1594,13 @@ static h3_dit *load_dit(const char *weight_directory,
+         fail(error, error_size, "invalid DiT load arguments");
+         return NULL;
+     }
++    /* Streamed blocks are read straight from the checkpoint on every forward
++     * pass and never through the weight store, so there is nowhere to fuse. */
++    if (loras && ssd_streaming) {
++        fail(error, error_size,
++             "LoRA adapters cannot be fused into SSD-streamed DiT weights");
++        return NULL;
++    }
+     h3_dit *dit = calloc(1, sizeof(*dit));
+     if (!dit) {
+         fail(error, error_size, "out of memory creating DiT model");
+@@ -1627,6 +1635,10 @@ static h3_dit *load_dit(const char *weight_directory,
+     dit->sigmas = *sigmas;
+     dit->weights = h3_weight_store_open(weight_directory, error, error_size);
+     if (!dit->weights) goto failed;
++    /* Every matrix an adapter can target loads inside this function: the
++     * refiner in refine_text, the AdaLN projections in the schedule, the
++     * blocks in load_core. The set is detached again before returning. */
++    h3_weight_store_attach_loras(dit->weights, loras);
+     dit->gpu = h3_gpu_create(shader_source_path, error, error_size);
+     if (!dit->gpu) goto failed;
+     dit->nax_mlp = dit->fused_mlp && h3_gpu_has_nax_mlp(dit->gpu);
+@@ -1691,6 +1703,8 @@ static h3_dit *load_dit(const char *weight_directory,
+         fail(error, error_size, "cannot write persistent DiT condition rows");
+         goto failed;
+     }
++    /* The set is the caller's, and everything it targets is loaded now. */
++    h3_weight_store_attach_loras(dit->weights, NULL);
+     h3_gpu_profile_mark(dit->gpu, "load");
+     return dit;
+ failed:
+@@ -1719,6 +1733,7 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
+                          int use_slower_dynamic_fc1_k,
+                          int use_slower_grouped_quantizer,
+                          int use_int8_row_fc2,
++                         const h3_lora_set *loras,
+                          h3_dit_progress progress, void *progress_opaque,
+                          char *error, size_t error_size) {
+     return load_dit(weight_directory, shader_source_path, text, layout, sigmas,
+@@ -1735,7 +1750,7 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
+                     use_slower_dynamic_fc1_k,
+                     use_slower_grouped_quantizer,
+                     use_int8_row_fc2,
+-                    NULL, 0, NULL, 0, progress, progress_opaque,
++                    NULL, 0, NULL, 0, loras, progress, progress_opaque,
+                     error, error_size);
+ }
+ 
+@@ -1765,6 +1780,7 @@ h3_dit *h3_dit_load_conditioned(
+                          size_t condition_video_elements,
+                          const float *condition_audio_rows,
+                          size_t condition_audio_elements,
++                         const h3_lora_set *loras,
+                          h3_dit_progress progress, void *progress_opaque,
+                          char *error, size_t error_size) {
+     return load_dit(weight_directory, shader_source_path, text, layout, sigmas,
+@@ -1783,7 +1799,7 @@ h3_dit *h3_dit_load_conditioned(
+                     use_int8_row_fc2,
+                     condition_video_rows, condition_video_elements,
+                     condition_audio_rows, condition_audio_elements,
+-                    progress, progress_opaque, error, error_size);
++                    loras, progress, progress_opaque, error, error_size);
+ }
+ 
+ static int enter_token_reduction(h3_dit *dit, char *error,
+diff --git a/h3_dit.h b/h3_dit.h
+index b38d826..efae98c 100644
+--- a/h3_dit.h
++++ b/h3_dit.h
+@@ -3,6 +3,7 @@
+ 
+ #include "h3_gpu.h"
+ #include "h3_host.h"
++#include "h3_lora.h"
+ #include "h3_text_encoder.h"
+ 
+ #include <stddef.h>
+@@ -19,7 +20,9 @@ typedef int (*h3_dit_preview)(int completed_steps, int total_steps,
+ 
+ /* Load a text-only FL2VA transformer. Text refinement and AdaLN precomputation
+  * happen before the persistent core is loaded. SSD streaming retains only the
+- * small block norms and two alternating BF16 matrix slots. */
++ * small block norms and two alternating BF16 matrix slots. `loras`, when not
++ * NULL, is fused into every matrix it targets as the refiner, AdaLN and core
++ * load; it is borrowed for the call and cannot be combined with SSD streaming. */
+ h3_dit *h3_dit_load_t2va(const char *weight_directory,
+                          const char *shader_source_path,
+                          const h3_text_embedding *text,
+@@ -41,6 +44,7 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
+                          int use_slower_dynamic_fc1_k,
+                          int use_slower_grouped_quantizer,
+                          int use_int8_row_fc2,
++                         const h3_lora_set *loras,
+                          h3_dit_progress progress, void *progress_opaque,
+                          char *error, size_t error_size);
+ 
+@@ -73,6 +77,7 @@ h3_dit *h3_dit_load_conditioned(
+                          size_t condition_video_elements,
+                          const float *condition_audio_rows,
+                          size_t condition_audio_elements,
++                         const h3_lora_set *loras,
+                          h3_dit_progress progress, void *progress_opaque,
+                          char *error, size_t error_size);
+ void h3_dit_free(h3_dit *dit);
+diff --git a/h3_gpu.h b/h3_gpu.h
+index 3a47cc3..1946228 100644
+--- a/h3_gpu.h
++++ b/h3_gpu.h
+@@ -314,6 +314,13 @@ int h3_gpu_quantize_weight_int8(h3_gpu *gpu, h3_gpu_tensor *output,
+                                 h3_gpu_tensor *scales,
+                                 const h3_gpu_tensor *input, uint32_t rows,
+                                 uint32_t columns);
++/* W += up @ down on a BF16 matrix in place, fusing LoRA adapters at load.
++ * `up` is rows x rank with the adapters' scales folded in; `down_columns` is
++ * the down factor stored column-major, columns x rank. */
++int h3_gpu_lora_fuse_bf16(h3_gpu *gpu, h3_gpu_tensor *weight,
++                          const h3_gpu_tensor *up,
++                          const h3_gpu_tensor *down_columns, uint32_t rows,
++                          uint32_t columns, uint32_t rank);
+ int h3_gpu_linear_int8_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
+                             h3_gpu_tensor *quantized_input,
+                             h3_gpu_tensor *input_scales,
+diff --git a/h3_gpu.m b/h3_gpu.m
+index c61d04c..ce7b824 100644
+--- a/h3_gpu.m
++++ b/h3_gpu.m
+@@ -407,6 +407,7 @@ static int h3_gpu_dispatch_rows(H3GPU *gpu, NSString *name, uint32_t rows,
+             @"h3_linear_f32_tiled_bf16_map",
+             @"h3_cast_f32_to_bf16",
+             @"h3_cast_bf16_to_f32",
++            @"h3_lora_fuse_bf16",
+             @"h3_rms_norm_f32",
+             @"h3_scale_add_f32", @"h3_layer_norm_f32",
+             @"h3_video_qkv_rope_f32",
+@@ -2938,6 +2939,47 @@ int h3_gpu_quantize_weight_int8(h3_gpu *opaque, h3_gpu_tensor *output,
+         1.0f, @"BF16 weight to quantize");
+ }
+ 
++typedef struct { uint32_t rows, columns, rank, reserved; } lora_fuse_args;
++
++int h3_gpu_lora_fuse_bf16(h3_gpu *opaque, h3_gpu_tensor *weight,
++                          const h3_gpu_tensor *up,
++                          const h3_gpu_tensor *down_columns, uint32_t rows,
++                          uint32_t columns, uint32_t rank) {
++    H3GPU *gpu = GPU(opaque);
++    if (!rows || !columns || !rank ||
++        (uint64_t)rows * columns > UINT32_MAX ||
++        !h3_gpu_require_bf16(gpu, weight, (size_t)rows * columns,
++                             @"LoRA target weight") ||
++        !h3_gpu_require_f32(gpu, up, (size_t)rows * rank,
++                            @"LoRA up factor") ||
++        !h3_gpu_require_f32(gpu, down_columns, (size_t)columns * rank,
++                            @"LoRA down factor") ||
++        !h3_gpu_require_command(gpu)) return 0;
++    id<MTLComputePipelineState> pipeline =
++        h3_gpu_pipeline(gpu, @"h3_lora_fuse_bf16");
++    if (!pipeline) return 0;
++    lora_fuse_args args = {rows, columns, rank, 0};
++    @autoreleasepool {
++        id<MTLComputeCommandEncoder> encoder =
++            [gpu.command computeCommandEncoder];
++        [encoder setComputePipelineState:pipeline];
++        [encoder setBuffer:TENSOR(weight).buffer offset:0 atIndex:0];
++        [encoder setBuffer:TENSOR(up).buffer offset:0 atIndex:1];
++        [encoder setBuffer:TENSOR(down_columns).buffer offset:0 atIndex:2];
++        [encoder setBytes:&args length:sizeof(args) atIndex:3];
++        NSUInteger width = MAX((NSUInteger)1, pipeline.threadExecutionWidth);
++        NSUInteger height = MAX((NSUInteger)1,
++                                pipeline.maxTotalThreadsPerThreadgroup / width);
++        [encoder dispatchThreads:MTLSizeMake(columns, rows, 1)
++           threadsPerThreadgroup:MTLSizeMake(width, height, 1)];
++        [encoder endEncoding];
++    }
++    h3_gpu_stats stats = gpu.stats;
++    stats.direct_dispatches++;
++    gpu.stats = stats;
++    return 1;
++}
++
+ static int h3_gpu_linear_int8_bf16_layout(
+                             h3_gpu *opaque, h3_gpu_tensor *output,
+                             h3_gpu_tensor *quantized_input,
+diff --git a/h3_lora.c b/h3_lora.c
+new file mode 100644
+index 0000000..cf06e21
+--- /dev/null
++++ b/h3_lora.c
+@@ -0,0 +1,587 @@
++#include "h3_lora.h"
++
++#include <math.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* Published H3 LoRAs are rank 16 to 64. The bound only stops a malformed
++ * header from sizing an absurd factor buffer. */
++enum { MAX_RANK = 4096, NAME_BYTES = 512 };
++
++typedef struct {
++    char *target;
++    size_t file;
++    const h3_st_tensor *up;
++    const h3_st_tensor *down;
++    uint64_t rows;
++    uint64_t columns;
++    uint64_t rank;
++    float scale;
++} h3_lora_adapter;
++
++struct h3_lora_set {
++    h3_st_header *files;
++    size_t file_count;
++    /* Sorted by target, then by file, so one tensor's adapters are adjacent
++     * and stack in the order they were given. */
++    h3_lora_adapter *adapters;
++    size_t adapter_count;
++    size_t adapter_capacity;
++    size_t tensor_count;
++    size_t skipped;
++    char skip_detail[384];
++};
++
++typedef enum { PART_OTHER, PART_DOWN, PART_UP, PART_ALPHA } lora_part;
++
++/* The two pair spellings, ComfyUI/PEFT first and kohya second. */
++static const char *const down_suffix[2] = {".lora_A.weight", ".lora_down.weight"};
++static const char *const up_suffix[2] = {".lora_B.weight", ".lora_up.weight"};
++static const char alpha_suffix[] = ".alpha";
++
++static void fail(char *error, size_t error_size, const char *format, ...) {
++    if (!error || !error_size) return;
++    va_list arguments;
++    va_start(arguments, format);
++    vsnprintf(error, error_size, format, arguments);
++    va_end(arguments);
++}
++
++static const char *base_name(const char *path) {
++    const char *slash = strrchr(path, '/');
++    return slash ? slash + 1 : path;
++}
++
++static int has_suffix(const char *text, const char *suffix, size_t *stem) {
++    size_t length = strlen(text);
++    size_t tail = strlen(suffix);
++    if (length <= tail || strcmp(text + length - tail, suffix) != 0) return 0;
++    *stem = length - tail;
++    return 1;
++}
++
++static lora_part classify(const char *name, int *family, size_t *stem) {
++    for (int spelling = 0; spelling < 2; spelling++) {
++        if (has_suffix(name, down_suffix[spelling], stem)) {
++            *family = spelling;
++            return PART_DOWN;
++        }
++        if (has_suffix(name, up_suffix[spelling], stem)) {
++            *family = spelling;
++            return PART_UP;
++        }
++    }
++    if (has_suffix(name, alpha_suffix, stem)) return PART_ALPHA;
++    return PART_OTHER;
++}
++
++/* The first `stem` bytes of name, then suffix. 0 when it does not fit. */
++static int compose(char *out, size_t size, const char *name, size_t stem,
++                   const char *suffix) {
++    if (stem >= size) return 0;
++    int written = snprintf(out, size, "%.*s%s", (int)stem, name, suffix);
++    return written >= 0 && (size_t)written < size;
++}
++
++static float bf16_value(uint16_t value) {
++    uint32_t bits = (uint32_t)value << 16;
++    float result;
++    memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++static float f16_value(uint16_t value) {
++    uint32_t sign = (uint32_t)(value & 0x8000u) << 16;
++    uint32_t exponent = ((uint32_t)value >> 10) & 0x1fu;
++    uint32_t mantissa = (uint32_t)value & 0x3ffu;
++    uint32_t bits;
++    if (exponent == 0x1fu) {
++        bits = sign | 0x7f800000u | (mantissa << 13);
++    } else if (exponent) {
++        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
++    } else if (mantissa) {
++        /* A subnormal half is a normal single: shift it into place. */
++        exponent = 113u;
++        while (!(mantissa & 0x400u)) {
++            mantissa <<= 1;
++            exponent--;
++        }
++        bits = sign | (exponent << 23) | ((mantissa & 0x3ffu) << 13);
++    } else {
++        bits = sign;
++    }
++    float result;
++    memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++static int factor_dtype(h3_dtype dtype) {
++    return dtype == H3_DTYPE_F32 || dtype == H3_DTYPE_F16 ||
++           dtype == H3_DTYPE_BF16;
++}
++
++/* A factor or a scalar alpha as F32, whatever it is stored as. */
++static int read_values(const h3_st_header *header, const h3_st_tensor *tensor,
++                       float *values, size_t count,
++                       char *error, size_t error_size) {
++    if (h3_st_tensor_elements(tensor) != count || !factor_dtype(tensor->dtype)) {
++        fail(error, error_size, "%s is not a %zu-element F32/F16/BF16 tensor",
++             tensor->name, count);
++        return 0;
++    }
++    if (tensor->dtype == H3_DTYPE_F32)
++        return h3_st_read_data(header, tensor, values, count * sizeof(*values),
++                               error, error_size);
++    uint16_t *raw = malloc(count * sizeof(*raw));
++    if (!raw) {
++        fail(error, error_size, "out of memory reading %s", tensor->name);
++        return 0;
++    }
++    int ok = h3_st_read_data(header, tensor, raw, count * sizeof(*raw),
++                             error, error_size);
++    for (size_t index = 0; ok && index < count; index++) {
++        values[index] = tensor->dtype == H3_DTYPE_BF16 ?
++            bf16_value(raw[index]) : f16_value(raw[index]);
++    }
++    free(raw);
++    return ok;
++}
++
++/* kohya writes a parameter path with every dot as an underscore. */
++static int kohya_equals(const char *checkpoint, size_t length,
++                        const char *kohya, size_t kohya_length) {
++    if (length != kohya_length) return 0;
++    for (size_t index = 0; index < length; index++) {
++        char expected = checkpoint[index] == '.' ? '_' : checkpoint[index];
++        if (expected != kohya[index]) return 0;
++    }
++    return 1;
++}
++
++/* The transformer weight an adapter stem names. *matches is how many do, which
++ * only the kohya spelling can make more than one. */
++static const h3_st_tensor *resolve_target(const h3_weight_store *store,
++                                          const char *name, size_t stem,
++                                          size_t *matches) {
++    static const char comfy_prefix[] = "diffusion_model.";
++    static const char kohya_prefix[] = "lora_unet_";
++    static const char weight_suffix[] = ".weight";
++    *matches = 0;
++    if (stem > sizeof(kohya_prefix) - 1 &&
++        !strncmp(name, kohya_prefix, sizeof(kohya_prefix) - 1)) {
++        const char *kohya = name + sizeof(kohya_prefix) - 1;
++        size_t kohya_length = stem - (sizeof(kohya_prefix) - 1);
++        const h3_st_tensor *found = NULL;
++        for (size_t shard = 0; shard < h3_weight_store_shards(store); shard++) {
++            const h3_st_header *header = h3_weight_store_header(store, shard);
++            for (size_t index = 0; header && index < header->tensor_count;
++                 index++) {
++                const h3_st_tensor *tensor = &header->tensors[index];
++                size_t length = 0;
++                if (has_suffix(tensor->name, weight_suffix, &length) &&
++                    kohya_equals(tensor->name, length, kohya, kohya_length)) {
++                    found = tensor;
++                    (*matches)++;
++                }
++            }
++        }
++        return found;
++    }
++    const char *parameter = name;
++    size_t parameter_length = stem;
++    if (stem > sizeof(comfy_prefix) - 1 &&
++        !strncmp(name, comfy_prefix, sizeof(comfy_prefix) - 1)) {
++        parameter += sizeof(comfy_prefix) - 1;
++        parameter_length -= sizeof(comfy_prefix) - 1;
++    }
++    char candidate[NAME_BYTES];
++    if (!compose(candidate, sizeof(candidate), parameter, parameter_length,
++                 weight_suffix)) return NULL;
++    const h3_st_tensor *tensor = h3_weight_find(store, candidate, NULL);
++    if (tensor) *matches = 1;
++    return tensor;
++}
++
++static int append_adapter(h3_lora_set *set, const h3_lora_adapter *adapter) {
++    if (set->adapter_count == set->adapter_capacity) {
++        size_t next = set->adapter_capacity ? set->adapter_capacity * 2 : 64;
++        h3_lora_adapter *grown = realloc(set->adapters, next * sizeof(*grown));
++        if (!grown) return 0;
++        set->adapters = grown;
++        set->adapter_capacity = next;
++    }
++    set->adapters[set->adapter_count++] = *adapter;
++    return 1;
++}
++
++static int compare_adapters(const void *left, const void *right) {
++    const h3_lora_adapter *a = left;
++    const h3_lora_adapter *b = right;
++    int order = strcmp(a->target, b->target);
++    if (order) return order;
++    return (a->file > b->file) - (a->file < b->file);
++}
++
++h3_lora_set *h3_lora_set_open(const h3_weight_store *store,
++                              const h3_lora *loras, size_t count,
++                              char *error, size_t error_size) {
++    if (error && error_size) error[0] = '\0';
++    if (!store || !count || !loras || count > H3_MAX_LORAS) {
++        fail(error, error_size, "invalid LoRA set arguments");
++        return NULL;
++    }
++    h3_lora_set *set = calloc(1, sizeof(*set));
++    if (set) set->files = calloc(count, sizeof(*set->files));
++    if (!set || !set->files) {
++        free(set);
++        fail(error, error_size, "out of memory opening LoRA adapters");
++        return NULL;
++    }
++    char detail[384];
++    for (size_t file = 0; file < count; file++) {
++        const h3_lora *lora = &loras[file];
++        if (!lora->path || !*lora->path || !isfinite(lora->strength)) {
++            fail(error, error_size,
++                 "LoRA %zu needs a path and a finite strength", file + 1);
++            goto failed;
++        }
++        const char *label = base_name(lora->path);
++        if (!h3_st_read_header(lora->path, &set->files[file], detail,
++                               sizeof(detail))) {
++            fail(error, error_size, "LoRA %s: %s", label, detail);
++            goto failed;
++        }
++        set->file_count = file + 1;
++        const h3_st_header *header = &set->files[file];
++        size_t pairs = 0, fitting = 0;
++        size_t first_adapter = set->adapter_count;
++        char file_skip[320] = "";
++        for (size_t index = 0; index < header->tensor_count; index++) {
++            const h3_st_tensor *tensor = &header->tensors[index];
++            int family = 0;
++            size_t stem = 0;
++            lora_part part = classify(tensor->name, &family, &stem);
++            char partner[NAME_BYTES];
++            if (part == PART_OTHER) {
++                fail(error, error_size,
++                     "LoRA %s: %s is not a factor this engine can fuse "
++                     "(lora_A/lora_B, lora_down/lora_up and alpha only)",
++                     label, tensor->name);
++                goto failed;
++            }
++            if (part != PART_DOWN) {
++                /* Pairs are checked from the down factor; an up factor or an
++                 * alpha only has to have one beside it. */
++                int paired = 0;
++                for (int spelling = 0; spelling < 2 && !paired; spelling++) {
++                    if (part == PART_UP && spelling != family) continue;
++                    paired = compose(partner, sizeof(partner), tensor->name,
++                                     stem, down_suffix[spelling]) &&
++                             h3_st_find(header, partner) != NULL;
++                }
++                if (!paired) {
++                    fail(error, error_size,
++                         "LoRA %s: %s has no down factor beside it",
++                         label, tensor->name);
++                    goto failed;
++                }
++                continue;
++            }
++            pairs++;
++            const h3_st_tensor *down = tensor;
++            const h3_st_tensor *up =
++                compose(partner, sizeof(partner), tensor->name, stem,
++                        up_suffix[family]) ? h3_st_find(header, partner) : NULL;
++            if (!up) {
++                fail(error, error_size,
++                     "LoRA %s: %s has no up factor beside it",
++                     label, tensor->name);
++                goto failed;
++            }
++            if (down->ndim != 2 || up->ndim != 2 ||
++                !factor_dtype(down->dtype) || !factor_dtype(up->dtype)) {
++                fail(error, error_size,
++                     "LoRA %s: %.*s is not a 2-D F32/F16/BF16 linear adapter",
++                     label, (int)stem, tensor->name);
++                goto failed;
++            }
++            uint64_t rank = down->shape[0];
++            if (!rank || rank > MAX_RANK || up->shape[1] != rank) {
++                fail(error, error_size,
++                     "LoRA %s: %.*s has factors of rank %llu and %llu",
++                     label, (int)stem, tensor->name, (unsigned long long)rank,
++                     (unsigned long long)up->shape[1]);
++                goto failed;
++            }
++            size_t matches = 0;
++            const h3_st_tensor *target =
++                resolve_target(store, tensor->name, stem, &matches);
++            if (!target) {
++                fail(error, error_size,
++                     "LoRA %s: %.*s names no MiniMax H3 transformer weight "
++                     "(is it a LoRA for another model?)",
++                     label, (int)stem, tensor->name);
++                goto failed;
++            }
++            if (matches > 1) {
++                fail(error, error_size,
++                     "LoRA %s: %.*s matches %zu transformer weights",
++                     label, (int)stem, tensor->name, matches);
++                goto failed;
++            }
++            if (target->dtype != H3_DTYPE_BF16 || target->ndim != 2) {
++                fail(error, error_size,
++                     "LoRA %s: %.*s targets %s, a %s tensor with %d "
++                     "dimensions; only BF16 matrices are fused",
++                     label, (int)stem, tensor->name, target->name,
++                     h3_dtype_name(target->dtype), target->ndim);
++                goto failed;
++            }
++            if (target->shape[0] != up->shape[0] ||
++                target->shape[1] != down->shape[1]) {
++                set->skipped++;
++                if (!file_skip[0]) {
++                    snprintf(file_skip, sizeof(file_skip),
++                             "%s is %llux%llu, its adapter %llux%llu",
++                             target->name,
++                             (unsigned long long)target->shape[0],
++                             (unsigned long long)target->shape[1],
++                             (unsigned long long)up->shape[0],
++                             (unsigned long long)down->shape[1]);
++                }
++                if (!set->skip_detail[0]) {
++                    snprintf(set->skip_detail, sizeof(set->skip_detail),
++                             "%s: %s", label, file_skip);
++                }
++                continue;
++            }
++            for (size_t other = first_adapter; other < set->adapter_count;
++                 other++) {
++                if (!strcmp(set->adapters[other].target, target->name)) {
++                    fail(error, error_size,
++                         "LoRA %s: two adapters target %s", label,
++                         target->name);
++                    goto failed;
++                }
++            }
++            float alpha_scale = 1.0f;
++            const h3_st_tensor *alpha =
++                compose(partner, sizeof(partner), tensor->name, stem,
++                        alpha_suffix) ? h3_st_find(header, partner) : NULL;
++            if (alpha) {
++                float value = 0.0f;
++                if (!read_values(header, alpha, &value, 1, detail,
++                                 sizeof(detail))) {
++                    fail(error, error_size, "LoRA %s: %s", label, detail);
++                    goto failed;
++                }
++                if (!isfinite(value)) {
++                    fail(error, error_size, "LoRA %s: %s is not finite",
++                         label, alpha->name);
++                    goto failed;
++                }
++                alpha_scale = value / (float)rank;
++            }
++            fitting++;
++            /* ComfyUI loads nothing at strength zero, and nor does this. */
++            if (lora->strength == 0.0f) continue;
++            h3_lora_adapter adapter = {
++                strdup(target->name), file, up, down, target->shape[0],
++                target->shape[1], rank, lora->strength * alpha_scale
++            };
++            if (!adapter.target || !append_adapter(set, &adapter)) {
++                free(adapter.target);
++                fail(error, error_size, "out of memory recording LoRA adapters");
++                goto failed;
++            }
++        }
++        if (!pairs) {
++            fail(error, error_size, "LoRA %s contains no adapters", label);
++            goto failed;
++        }
++        if (!fitting) {
++            fail(error, error_size,
++                 "LoRA %s: none of its %zu adapters fit this checkpoint (%s)",
++                 label, pairs, file_skip);
++            goto failed;
++        }
++    }
++    if (set->adapter_count > 1) {
++        qsort(set->adapters, set->adapter_count, sizeof(*set->adapters),
++              compare_adapters);
++    }
++    for (size_t index = 0; index < set->adapter_count; index++) {
++        if (!index || strcmp(set->adapters[index - 1].target,
++                             set->adapters[index].target))
++            set->tensor_count++;
++    }
++    return set;
++failed:
++    h3_lora_set_free(set);
++    return NULL;
++}
++
++void h3_lora_set_free(h3_lora_set *set) {
++    if (!set) return;
++    for (size_t index = 0; index < set->adapter_count; index++)
++        free(set->adapters[index].target);
++    free(set->adapters);
++    for (size_t index = 0; index < set->file_count; index++)
++        h3_st_free_header(&set->files[index]);
++    free(set->files);
++    free(set);
++}
++
++size_t h3_lora_set_files(const h3_lora_set *set) {
++    return set ? set->file_count : 0;
++}
++
++size_t h3_lora_set_adapters(const h3_lora_set *set) {
++    return set ? set->adapter_count : 0;
++}
++
++size_t h3_lora_set_tensors(const h3_lora_set *set) {
++    return set ? set->tensor_count : 0;
++}
++
++size_t h3_lora_set_skipped(const h3_lora_set *set) {
++    return set ? set->skipped : 0;
++}
++
++const char *h3_lora_set_skip_detail(const h3_lora_set *set) {
++    return set ? set->skip_detail : "";
++}
++
++static size_t first_adapter_for(const h3_lora_set *set, const char *name) {
++    size_t low = 0, high = set->adapter_count;
++    while (low < high) {
++        size_t middle = low + (high - low) / 2;
++        if (strcmp(set->adapters[middle].target, name) < 0) low = middle + 1;
++        else high = middle;
++    }
++    return low;
++}
++
++int h3_lora_set_targets(const h3_lora_set *set, const char *name) {
++    if (!set || !name) return 0;
++    size_t index = first_adapter_for(set, name);
++    return index < set->adapter_count &&
++           !strcmp(set->adapters[index].target, name);
++}
++
++int h3_lora_set_fuse_bf16(const h3_lora_set *set, h3_gpu *gpu,
++                          const char *name, h3_gpu_tensor *weight,
++                          uint64_t rows, uint64_t columns,
++                          char *error, size_t error_size) {
++    if (error && error_size) error[0] = '\0';
++    if (!set || !gpu || !name || !weight) {
++        fail(error, error_size, "invalid LoRA fuse arguments");
++        return 0;
++    }
++    size_t first = first_adapter_for(set, name);
++    size_t last = first;
++    uint64_t rank = 0;
++    for (; last < set->adapter_count &&
++           !strcmp(set->adapters[last].target, name); last++) {
++        const h3_lora_adapter *adapter = &set->adapters[last];
++        if (adapter->rows != rows || adapter->columns != columns) {
++            fail(error, error_size,
++                 "LoRA adapter for %s is %llux%llu but the weight is %llux%llu",
++                 name, (unsigned long long)adapter->rows,
++                 (unsigned long long)adapter->columns,
++                 (unsigned long long)rows, (unsigned long long)columns);
++            return 0;
++        }
++        rank += adapter->rank;
++    }
++    if (first == last) return 1;
++    /* The kernel indexes with 32-bit integers. */
++    if (rows > UINT32_MAX || columns > UINT32_MAX ||
++        rows * columns > UINT32_MAX || rows * rank > UINT32_MAX ||
++        columns * rank > UINT32_MAX) {
++        fail(error, error_size, "LoRA delta for %s is too large to fuse", name);
++        return 0;
++    }
++    size_t up_count = (size_t)(rows * rank);
++    size_t down_count = (size_t)(columns * rank);
++    float *up = calloc(up_count, sizeof(*up));
++    float *down = calloc(down_count, sizeof(*down));
++    float *factor = NULL;
++    size_t factor_capacity = 0;
++    uint64_t offset = 0;
++    h3_gpu_tensor *up_tensor = NULL;
++    h3_gpu_tensor *down_tensor = NULL;
++    char detail[384];
++    int ok = 0;
++    if (!up || !down) {
++        fail(error, error_size, "out of memory fusing LoRA into %s", name);
++        goto done;
++    }
++    /* Stacked adapters concatenate along the rank: sum_i s_i B_i A_i is
++     * [s_1 B_1 | s_2 B_2 ...] @ [A_1; A_2 ...], one product and one rounding.
++     * Down is stored column-major so each weight reads one contiguous run. */
++    for (size_t index = first; index < last; index++) {
++        const h3_lora_adapter *adapter = &set->adapters[index];
++        const h3_st_header *header = &set->files[adapter->file];
++        size_t up_elements = (size_t)(rows * adapter->rank);
++        size_t down_elements = (size_t)(adapter->rank * columns);
++        size_t needed = up_elements > down_elements ? up_elements :
++                                                      down_elements;
++        if (needed > factor_capacity) {
++            float *grown = realloc(factor, needed * sizeof(*grown));
++            if (!grown) {
++                fail(error, error_size, "out of memory fusing LoRA into %s",
++                     name);
++                goto done;
++            }
++            factor = grown;
++            factor_capacity = needed;
++        }
++        if (!read_values(header, adapter->up, factor, up_elements, detail,
++                         sizeof(detail))) {
++            fail(error, error_size, "LoRA %s: %s", base_name(header->path),
++                 detail);
++            goto done;
++        }
++        for (uint64_t row = 0; row < rows; row++) {
++            for (uint64_t k = 0; k < adapter->rank; k++) {
++                up[row * rank + offset + k] =
++                    adapter->scale * factor[row * adapter->rank + k];
++            }
++        }
++        if (!read_values(header, adapter->down, factor, down_elements, detail,
++                         sizeof(detail))) {
++            fail(error, error_size, "LoRA %s: %s", base_name(header->path),
++                 detail);
++            goto done;
++        }
++        for (uint64_t k = 0; k < adapter->rank; k++) {
++            for (uint64_t column = 0; column < columns; column++) {
++                down[column * rank + offset + k] =
++                    factor[k * columns + column];
++            }
++        }
++        offset += adapter->rank;
++    }
++    up_tensor = h3_gpu_tensor_from_f32(gpu, up, up_count);
++    down_tensor = h3_gpu_tensor_from_f32(gpu, down, down_count);
++    if (!up_tensor || !down_tensor || !h3_gpu_begin(gpu) ||
++        !h3_gpu_lora_fuse_bf16(gpu, weight, up_tensor, down_tensor,
++                               (uint32_t)rows, (uint32_t)columns,
++                               (uint32_t)rank) ||
++        !h3_gpu_submit(gpu)) {
++        fail(error, error_size, "cannot fuse LoRA into %s: %s", name,
++             h3_gpu_error(gpu));
++        goto done;
++    }
++    ok = 1;
++done:
++    h3_gpu_tensor_free(up_tensor);
++    h3_gpu_tensor_free(down_tensor);
++    free(factor);
++    free(up);
++    free(down);
++    return ok;
++}
+diff --git a/h3_lora.h b/h3_lora.h
+new file mode 100644
+index 0000000..13f25bb
+--- /dev/null
++++ b/h3_lora.h
+@@ -0,0 +1,64 @@
++#ifndef H3_LORA_H
++#define H3_LORA_H
++
++#include "h3.h"
++#include "h3_gpu.h"
++#include "h3_weights.h"
++
++#include <stddef.h>
++#include <stdint.h>
++
++/* LoRA adapters, fused into the DiT's BF16 weights as they load.
++ *
++ * A LoRA is W' = W + scale * (up @ down). h3 needs no LoRA runtime for that:
++ * every DiT matrix is read exactly once, so the delta is added to the weight
++ * on its way in and every kernel after it, the int8 quantizers included, sees
++ * an ordinary checkpoint.
++ *
++ * The accepted layouts are the ones ComfyUI loads for MiniMax H3:
++ *
++ *   diffusion_model.<param>.lora_A.weight / .lora_B.weight
++ *   <param>.lora_A.weight / .lora_B.weight
++ *   lora_unet_<param, dots as underscores>.lora_down.weight / .lora_up.weight
++ *
++ * each with an optional .alpha, which makes the scale strength * alpha / rank
++ * (strength alone without one). A tensor outside those layouts refuses the
++ * whole file, as does an adapter that names no transformer weight.
++ *
++ * An adapter whose target exists but whose shape does not fit is skipped and
++ * counted, which is ComfyUI's rule too: some published H3 LoRAs carry AdaLN
++ * adapters trained against a pruned transformer with a narrower AdaLN input,
++ * and the rest of such a file still applies. A file where nothing fits is
++ * refused rather than applied as nothing. */
++
++typedef struct h3_lora_set h3_lora_set;
++
++/* Read every adapter file's header, map each pair onto a tensor in `store`
++ * and check it, reading no factor payloads beyond the scalar alphas. */
++h3_lora_set *h3_lora_set_open(const h3_weight_store *store,
++                              const h3_lora *loras, size_t count,
++                              char *error, size_t error_size);
++void h3_lora_set_free(h3_lora_set *set);
++
++size_t h3_lora_set_files(const h3_lora_set *set);
++/* Adapters that will be fused (zero-strength files contribute none). */
++size_t h3_lora_set_adapters(const h3_lora_set *set);
++/* Distinct transformer tensors those adapters change. */
++size_t h3_lora_set_tensors(const h3_lora_set *set);
++/* Adapters skipped because their shape does not fit this checkpoint, and the
++ * first of them in words ("" when none were). */
++size_t h3_lora_set_skipped(const h3_lora_set *set);
++const char *h3_lora_set_skip_detail(const h3_lora_set *set);
++
++int h3_lora_set_targets(const h3_lora_set *set, const char *name);
++
++/* Add every adapter aimed at `name` to `weight`, a writable BF16 matrix of
++ * rows x columns. Stacked adapters are concatenated along their rank, so each
++ * BF16 value is rounded once however many there are. Opens and submits its
++ * own Metal command, so no other command may be open. */
++int h3_lora_set_fuse_bf16(const h3_lora_set *set, h3_gpu *gpu,
++                          const char *name, h3_gpu_tensor *weight,
++                          uint64_t rows, uint64_t columns,
++                          char *error, size_t error_size);
++
++#endif
+diff --git a/h3_shaders.metal b/h3_shaders.metal
+index 36316f5..8cf1d96 100644
+--- a/h3_shaders.metal
++++ b/h3_shaders.metal
+@@ -199,6 +199,33 @@ kernel void h3_cast_bf16_to_f32(device const ushort *input [[buffer(0)]],
+     if (gid < count) output[gid] = h3_bf16_to_f32(input[gid]);
+ }
+ 
++struct lora_fuse_args {
++    uint rows;
++    uint columns;
++    uint rank;
++    uint reserved;
++};
++
++/* W += up @ down on one BF16 matrix, in place, while a LoRA is fused at load.
++ * `up` is rows x rank with the adapters' scales already folded in, and `down`
++ * arrives column-major (columns x rank) so each weight reads one contiguous
++ * run. Stacked adapters are concatenated along the rank, so every value is
++ * rounded back to BF16 exactly once. */
++kernel void h3_lora_fuse_bf16(device ushort *weight [[buffer(0)]],
++                              device const float *up [[buffer(1)]],
++                              device const float *down [[buffer(2)]],
++                              constant lora_fuse_args &args [[buffer(3)]],
++                              uint2 gid [[thread_position_in_grid]]) {
++    if (gid.x >= args.columns || gid.y >= args.rows) return;
++    uint up_base = gid.y * args.rank;
++    uint down_base = gid.x * args.rank;
++    float delta = 0.0f;
++    for (uint k = 0; k < args.rank; k++)
++        delta += up[up_base + k] * down[down_base + k];
++    uint index = gid.y * args.columns + gid.x;
++    weight[index] = h3_f32_to_bf16(h3_bf16_to_f32(weight[index]) + delta);
++}
++
+ struct norm_args {
+     uint rows;
+     uint width;
+diff --git a/h3_weights.c b/h3_weights.c
+index 9a0224d..e511e01 100644
+--- a/h3_weights.c
++++ b/h3_weights.c
+@@ -1,5 +1,7 @@
+ #include "h3_weights.h"
+ 
++#include "h3_lora.h"
++
+ #include <dirent.h>
+ #include <stdarg.h>
+ #include <stdio.h>
+@@ -9,6 +11,7 @@
+ struct h3_weight_store {
+     h3_st_header *headers;
+     size_t count;
++    const h3_lora_set *loras;
+ };
+ 
+ static void fail(char *error, size_t error_size, const char *format, ...) {
+@@ -126,6 +129,16 @@ size_t h3_weight_store_shards(const h3_weight_store *store) {
+     return store ? store->count : 0;
+ }
+ 
++const h3_st_header *h3_weight_store_header(const h3_weight_store *store,
++                                           size_t index) {
++    return store && index < store->count ? &store->headers[index] : NULL;
++}
++
++void h3_weight_store_attach_loras(h3_weight_store *store,
++                                  const h3_lora_set *loras) {
++    if (store) store->loras = loras;
++}
++
+ const h3_st_tensor *h3_weight_find(const h3_weight_store *store,
+                                    const char *name,
+                                    const h3_st_header **header) {
+@@ -174,6 +187,36 @@ static h3_gpu_tensor *load_tensor(const h3_weight_store *store, h3_gpu *gpu,
+         fail(error, error_size, "weight %s is too large for this process", name);
+         return NULL;
+     }
++    if (dtype == H3_DTYPE_BF16 && store->loras &&
++        h3_lora_set_targets(store->loras, name)) {
++        /* An adapter is added to this matrix in place, so it cannot be a view
++         * of the checkpoint file: read it into a buffer of its own. */
++        if (ndim != 2) {
++            fail(error, error_size, "LoRA target %s is not a matrix", name);
++            return NULL;
++        }
++        char detail[384];
++        h3_gpu_tensor *fused = h3_gpu_tensor_new_bf16(gpu, (size_t)elements);
++        if (!fused) {
++            fail(error, error_size, "cannot allocate %s for LoRA fusion: %s",
++                 name, h3_gpu_error(gpu));
++            return NULL;
++        }
++        if (!h3_gpu_tensor_read_file_bf16(fused, header->path,
++                                          tensor->file_offset,
++                                          (size_t)elements, detail,
++                                          sizeof(detail))) {
++            fail(error, error_size, "cannot load %s: %s", name, detail);
++            h3_gpu_tensor_free(fused);
++            return NULL;
++        }
++        if (!h3_lora_set_fuse_bf16(store->loras, gpu, name, fused, shape[0],
++                                   shape[1], error, error_size)) {
++            h3_gpu_tensor_free(fused);
++            return NULL;
++        }
++        return fused;
++    }
+     h3_gpu_tensor *result = dtype == H3_DTYPE_BF16 ?
+         h3_gpu_tensor_load_bf16(gpu, header->path, tensor->file_offset,
+                                 (size_t)elements) :
+diff --git a/h3_weights.h b/h3_weights.h
+index 89fbecc..53a0305 100644
+--- a/h3_weights.h
++++ b/h3_weights.h
+@@ -8,6 +8,7 @@
+ #include <stdint.h>
+ 
+ typedef struct h3_weight_store h3_weight_store;
++typedef struct h3_lora_set h3_lora_set;
+ 
+ /* Open every safetensors header in a component directory without reading
+  * tensor payloads. */
+@@ -15,6 +16,14 @@ h3_weight_store *h3_weight_store_open(const char *directory,
+                                       char *error, size_t error_size);
+ void h3_weight_store_free(h3_weight_store *store);
+ size_t h3_weight_store_shards(const h3_weight_store *store);
++/* One shard's parsed header, in path order; NULL past the last. */
++const h3_st_header *h3_weight_store_header(const h3_weight_store *store,
++                                           size_t index);
++
++/* Fuse `loras` into each BF16 matrix they target as it loads; NULL detaches.
++ * The set is borrowed, so it must outlive every load made while attached. */
++void h3_weight_store_attach_loras(h3_weight_store *store,
++                                  const h3_lora_set *loras);
+ 
+ const h3_st_tensor *h3_weight_find(const h3_weight_store *store,
+                                    const char *name,
+diff --git a/main.c b/main.c
+index 7f11e47..25ed5d3 100644
+--- a/main.c
++++ b/main.c
+@@ -46,6 +46,8 @@ static void usage(const char *program) {
+         "      --use-slower-dynamic-fc1-k  Use runtime-bound FC1 K loop\n"
+         "      --use-slower-grouped-quantizer  Force 256-thread FC2 quantizer\n"
+         "      --seed N           Random seed (default: 42)\n"
++        "      --lora PATH        Fuse a LoRA into the DiT as it loads (repeatable)\n"
++        "      --lora-strength N  Strength of the preceding --lora (default: 1)\n"
+         "      --first-frame PATH First-frame conditioning image\n"
+         "      --last-frame PATH  Last-frame conditioning image\n"
+         "      --ref-image PATH    Append an ordered Ref2VA image\n"
+@@ -103,6 +105,19 @@ static uint64_t parse_u64(const char *value, const char *label) {
+     return (uint64_t)parsed;
+ }
+ 
++static float parse_strength(const char *value) {
++    char *end = NULL;
++    errno = 0;
++    float parsed = strtof(value, &end);
++    if (errno || !end || *end || !isfinite(parsed) || parsed < -10.0f ||
++        parsed > 10.0f) {
++        fprintf(stderr, "h3: invalid LoRA strength (want -10..10): %s\n",
++                value);
++        exit(2);
++    }
++    return parsed;
++}
++
+ static h3_reference *append_reference(h3_reference references[12],
+                                       size_t *count) {
+     if (*count >= 12) {
+@@ -247,7 +262,7 @@ int main(int argc, char **argv) {
+            OPT_USE_SLOWER_UNCACHED_INT8_SCALES,
+            OPT_USE_SLOWER_DYNAMIC_FC1_K,
+            OPT_USE_SLOWER_GROUPED_QUANTIZER,
+-           OPT_SEED,
++           OPT_SEED, OPT_LORA, OPT_LORA_STRENGTH,
+            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
+            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
+            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
+@@ -291,6 +306,8 @@ int main(int argc, char **argv) {
+         {"use-slower-grouped-quantizer", no_argument, NULL,
+          OPT_USE_SLOWER_GROUPED_QUANTIZER},
+         {"seed", required_argument, NULL, OPT_SEED},
++        {"lora", required_argument, NULL, OPT_LORA},
++        {"lora-strength", required_argument, NULL, OPT_LORA_STRENGTH},
+         {"first-frame", required_argument, NULL, OPT_FIRST},
+         {"last-frame", required_argument, NULL, OPT_LAST},
+         {"ref-image", required_argument, NULL, OPT_REF_IMAGE},
+@@ -313,6 +330,8 @@ int main(int argc, char **argv) {
+     h3_params params = H3_PARAMS_DEFAULT;
+     h3_reference references[12];
+     size_t reference_count = 0;
++    h3_lora loras[H3_MAX_LORAS];
++    size_t lora_count = 0;
+     cli_state cli = {{0}, 0, -1, -1, H3_TERM_NONE, 0, NULL, 0};
+     int show = 0;
+     int profile = 0;
+@@ -395,6 +414,23 @@ int main(int argc, char **argv) {
+                 params.seed = parse_u64(optarg, "seed");
+                 seed_given = 1;
+                 break;
++            case OPT_LORA:
++                if (lora_count >= H3_MAX_LORAS) {
++                    fprintf(stderr, "h3: at most %d --lora adapters\n",
++                            H3_MAX_LORAS);
++                    return 2;
++                }
++                loras[lora_count].path = optarg;
++                loras[lora_count].strength = 1.0f;
++                lora_count++;
++                break;
++            case OPT_LORA_STRENGTH:
++                if (!lora_count) {
++                    fprintf(stderr, "h3: --lora-strength must follow a --lora\n");
++                    return 2;
++                }
++                loras[lora_count - 1].strength = parse_strength(optarg);
++                break;
+             case OPT_FIRST: params.first_frame = optarg; break;
+             case OPT_LAST: params.last_frame = optarg; break;
+             case OPT_REF_IMAGE: {
+@@ -480,6 +516,8 @@ int main(int argc, char **argv) {
+     }
+     params.references = references;
+     params.reference_count = reference_count;
++    params.loras = loras;
++    params.lora_count = lora_count;
+     if (cli.frames_dir && mkdir(cli.frames_dir, 0755) != 0 &&
+         errno != EEXIST) {
+         fprintf(stderr, "h3: cannot create frames directory %s: %s\n",
+diff --git a/tests/bench_dit.c b/tests/bench_dit.c
+index 7a1d444..7712d8d 100644
+--- a/tests/bench_dit.c
++++ b/tests/bench_dit.c
+@@ -1641,7 +1641,7 @@ int main(int argc, char **argv) {
+             use_slower_grouped_quantizer, use_int8_row_fc2,
+             video_condition,
+             video_condition_elements, audio_condition,
+-            audio_condition_elements, NULL, NULL, error, sizeof(error));
++            audio_condition_elements, NULL, NULL, NULL, error, sizeof(error));
+         free(video_condition);
+         free(audio_condition);
+     } else {
+@@ -1650,7 +1650,7 @@ int main(int argc, char **argv) {
+             active_blocks, 1, enable_token_reduction, ssd_streaming, 1.0f,
+             all_bf16, all_bf16, all_bf16, 0, 0, 0, 0, 0, 0,
+             use_slower_grouped_quantizer, use_int8_row_fc2,
+-            NULL, NULL, error,
++            NULL, NULL, NULL, error,
+             sizeof(error));
+     }
+     if (!dit) die(error);
+diff --git a/tests/test_lora.c b/tests/test_lora.c
+new file mode 100644
+index 0000000..4688ad2
+--- /dev/null
++++ b/tests/test_lora.c
+@@ -0,0 +1,459 @@
++/* LoRA fusion against a synthetic checkpoint small enough to check by hand:
++ *
++ *   ./h3_lora_tests
++ *
++ * and against one real matrix, for comparison with an independent
++ * implementation:
++ *
++ *   ./h3_lora_tests --dump TRANSFORMER_DIR TENSOR ROWS COLUMNS OUT \
++ *       LORA STRENGTH [LORA STRENGTH ...]
++ *
++ * which writes TENSOR's fused BF16 bytes to OUT. */
++#include "h3_gpu.h"
++#include "h3_lora.h"
++#include "h3_weights.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <time.h>
++#include <unistd.h>
++
++enum { MAX_FILES = 16 };
++
++typedef struct {
++    const char *name;
++    const char *dtype;
++    int ndim;
++    uint64_t shape[2];
++    const float *values;
++} fixture;
++
++typedef struct {
++    const float *up;
++    const float *down;
++    uint64_t rank;
++    float scale;
++} reference_adapter;
++
++static char root[1024];
++static char created[MAX_FILES][1100];
++static size_t created_count;
++
++static void die(const char *message) {
++    fprintf(stderr, "FAIL tests/test_lora.c: %s\n", message);
++    exit(1);
++}
++
++static size_t elements_of(const fixture *tensor) {
++    size_t count = 1;
++    for (int dimension = 0; dimension < tensor->ndim; dimension++)
++        count *= (size_t)tensor->shape[dimension];
++    return count;
++}
++
++static uint16_t bf16_round(float value) {
++    uint32_t bits;
++    memcpy(&bits, &value, sizeof(bits));
++    bits += 0x7fffu + ((bits >> 16) & 1u);
++    return (uint16_t)(bits >> 16);
++}
++
++static float bf16_float(uint16_t value) {
++    uint32_t bits = (uint32_t)value << 16;
++    float result;
++    memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++/* Fixtures only hold values a half represents exactly. */
++static uint16_t f16_exact(float value) {
++    uint32_t bits;
++    memcpy(&bits, &value, sizeof(bits));
++    uint32_t sign = (bits >> 16) & 0x8000u;
++    uint32_t biased = (bits >> 23) & 0xffu;
++    if (!biased && !(bits & 0x7fffffu)) return (uint16_t)sign;
++    int exponent = (int)biased - 127 + 15;
++    if (exponent <= 0 || exponent >= 31 || (bits & 0x1fffu))
++        die("F16 fixture value is not exactly representable");
++    return (uint16_t)(sign | ((uint32_t)exponent << 10) |
++                      ((bits >> 13) & 0x3ffu));
++}
++
++static const char *write_safetensors(const char *name, const fixture *tensors,
++                                     size_t count) {
++    if (created_count == MAX_FILES) die("too many fixture files");
++    char *path = created[created_count++];
++    snprintf(path, sizeof(created[0]), "%s/%s", root, name);
++    char header[4096];
++    int used = snprintf(header, sizeof(header), "{");
++    size_t offset = 0;
++    for (size_t index = 0; index < count; index++) {
++        const fixture *tensor = &tensors[index];
++        size_t bytes = elements_of(tensor) *
++                       (strcmp(tensor->dtype, "F32") ? 2u : 4u);
++        char shape[64];
++        if (tensor->ndim == 2) {
++            snprintf(shape, sizeof(shape), "[%llu,%llu]",
++                     (unsigned long long)tensor->shape[0],
++                     (unsigned long long)tensor->shape[1]);
++        } else if (tensor->ndim == 1) {
++            snprintf(shape, sizeof(shape), "[%llu]",
++                     (unsigned long long)tensor->shape[0]);
++        } else {
++            snprintf(shape, sizeof(shape), "[]");
++        }
++        used += snprintf(header + used, sizeof(header) - (size_t)used,
++                         "%s\"%s\":{\"dtype\":\"%s\",\"shape\":%s,"
++                         "\"data_offsets\":[%zu,%zu]}",
++                         index ? "," : "", tensor->name, tensor->dtype, shape,
++                         offset, offset + bytes);
++        offset += bytes;
++    }
++    used += snprintf(header + used, sizeof(header) - (size_t)used, "}");
++    while ((8 + used) % 8) header[used++] = ' ';
++    if ((size_t)used >= sizeof(header)) die("fixture header overflow");
++    FILE *file = fopen(path, "wb");
++    if (!file) die("cannot create a fixture file");
++    uint64_t length = (uint64_t)used;
++    fwrite(&length, sizeof(length), 1, file);
++    fwrite(header, 1, (size_t)used, file);
++    for (size_t index = 0; index < count; index++) {
++        const fixture *tensor = &tensors[index];
++        for (size_t element = 0; element < elements_of(tensor); element++) {
++            float value = tensor->values[element];
++            if (!strcmp(tensor->dtype, "F32")) {
++                fwrite(&value, sizeof(value), 1, file);
++            } else {
++                uint16_t half = !strcmp(tensor->dtype, "BF16") ?
++                    bf16_round(value) : f16_exact(value);
++                fwrite(&half, sizeof(half), 1, file);
++            }
++        }
++    }
++    if (fclose(file) != 0) die("cannot write a fixture file");
++    return path;
++}
++
++/* Weights are multiples of 1/8 and factors multiples of 1/4, so every product
++ * and sum is exact in F32 and the only rounding is the final one to BF16 —
++ * which the expected values reproduce bit for bit, ties included. */
++static void fill_weight(float *values, size_t count, size_t seed) {
++    for (size_t index = 0; index < count; index++)
++        values[index] = (float)((int)((index * 37u + seed * 11u) % 61u) - 30) /
++                        8.0f;
++}
++
++static void fill_factor(float *values, size_t count, size_t seed) {
++    for (size_t index = 0; index < count; index++)
++        values[index] = (float)((int)((index * 13u + seed * 7u) % 25u) - 12) /
++                        4.0f;
++}
++
++static h3_gpu_tensor *load(const h3_weight_store *store, h3_gpu *gpu,
++                           const char *name, uint64_t rows, uint64_t columns) {
++    uint64_t shape[] = {rows, columns};
++    char error[512];
++    h3_gpu_tensor *tensor = h3_weight_load_bf16(store, gpu, name, 2, shape,
++                                                error, sizeof(error));
++    if (!tensor) die(error);
++    return tensor;
++}
++
++static void expect_fused(const h3_weight_store *store, h3_gpu *gpu,
++                         const char *name, const float *weight, uint64_t rows,
++                         uint64_t columns, const reference_adapter *adapters,
++                         size_t count) {
++    h3_gpu_tensor *tensor = load(store, gpu, name, rows, columns);
++    size_t elements = (size_t)(rows * columns);
++    uint16_t *got = malloc(elements * sizeof(*got));
++    if (!got || !h3_gpu_tensor_read_bf16(tensor, got, elements))
++        die("cannot read a loaded matrix back");
++    for (uint64_t row = 0; row < rows; row++) {
++        for (uint64_t column = 0; column < columns; column++) {
++            float delta = 0.0f;
++            for (size_t index = 0; index < count; index++) {
++                const reference_adapter *adapter = &adapters[index];
++                for (uint64_t k = 0; k < adapter->rank; k++) {
++                    delta += adapter->scale *
++                             adapter->up[row * adapter->rank + k] *
++                             adapter->down[k * columns + column];
++                }
++            }
++            uint16_t base = bf16_round(weight[row * columns + column]);
++            uint16_t want = bf16_round(bf16_float(base) + delta);
++            uint16_t have = got[row * columns + column];
++            if (have != want) {
++                fprintf(stderr, "%s[%llu,%llu]: got %#06x (%g), want %#06x (%g)\n",
++                        name, (unsigned long long)row,
++                        (unsigned long long)column, have,
++                        (double)bf16_float(have), want,
++                        (double)bf16_float(want));
++                die("fused value mismatch");
++            }
++        }
++    }
++    printf("lora %-40s %llux%llu, %zu adapters, bit-exact\n", name,
++           (unsigned long long)rows, (unsigned long long)columns, count);
++    free(got);
++    h3_gpu_tensor_free(tensor);
++}
++
++static void expect_refused(const h3_weight_store *store, const char *path,
++                           const char *needle) {
++    h3_lora lora = {path, 1.0f};
++    char error[512];
++    h3_lora_set *set = h3_lora_set_open(store, &lora, 1, error, sizeof(error));
++    if (set) {
++        h3_lora_set_free(set);
++        fprintf(stderr, "expected a refusal containing \"%s\"\n", needle);
++        die("a LoRA that should be refused was accepted");
++    }
++    if (!strstr(error, needle)) {
++        fprintf(stderr, "refused with: %s\n", error);
++        die("a LoRA was refused for the wrong reason");
++    }
++    printf("lora refused %-18s %s\n", strrchr(path, '/') + 1, error);
++}
++
++static double now_seconds(void) {
++    struct timespec value;
++    clock_gettime(CLOCK_MONOTONIC, &value);
++    return (double)value.tv_sec + (double)value.tv_nsec * 1e-9;
++}
++
++static int dump(int argc, char **argv) {
++    if (argc < 9 || (argc - 7) % 2) {
++        fprintf(stderr,
++                "usage: %s --dump TRANSFORMER_DIR TENSOR ROWS COLUMNS OUT "
++                "LORA STRENGTH [LORA STRENGTH ...]\n", argv[0]);
++        return 2;
++    }
++    size_t count = (size_t)(argc - 7) / 2;
++    if (count > H3_MAX_LORAS) die("too many LoRAs");
++    h3_lora loras[H3_MAX_LORAS];
++    for (size_t index = 0; index < count; index++) {
++        loras[index].path = argv[7 + 2 * index];
++        loras[index].strength = strtof(argv[8 + 2 * index], NULL);
++    }
++    uint64_t rows = strtoull(argv[4], NULL, 10);
++    uint64_t columns = strtoull(argv[5], NULL, 10);
++    char error[512];
++    h3_weight_store *store = h3_weight_store_open(argv[2], error, sizeof(error));
++    if (!store) die(error);
++    h3_lora_set *set = h3_lora_set_open(store, loras, count, error,
++                                        sizeof(error));
++    if (!set) die(error);
++    h3_gpu *gpu = h3_gpu_create("h3_shaders.metal", error, sizeof(error));
++    if (!gpu) die(error);
++    h3_weight_store_attach_loras(store, set);
++    double started = now_seconds();
++    h3_gpu_tensor *tensor = load(store, gpu, argv[3], rows, columns);
++    double seconds = now_seconds() - started;
++    size_t elements = (size_t)(rows * columns);
++    uint16_t *values = malloc(elements * sizeof(*values));
++    if (!values || !h3_gpu_tensor_read_bf16(tensor, values, elements))
++        die("cannot read the fused matrix back");
++    FILE *output = fopen(argv[6], "wb");
++    if (!output || fwrite(values, sizeof(*values), elements, output) != elements ||
++        fclose(output) != 0) die("cannot write the dump");
++    printf("%s: %zu adapters on %zu tensors, %zu skipped%s%s; "
++           "loaded and fused in %.3fs\n", argv[3], h3_lora_set_adapters(set),
++           h3_lora_set_tensors(set), h3_lora_set_skipped(set),
++           h3_lora_set_skipped(set) ? ": " : "", h3_lora_set_skip_detail(set),
++           seconds);
++    free(values);
++    h3_gpu_tensor_free(tensor);
++    h3_gpu_free(gpu);
++    h3_weight_store_attach_loras(store, NULL);
++    h3_lora_set_free(set);
++    h3_weight_store_free(store);
++    return 0;
++}
++
++int main(int argc, char **argv) {
++    if (argc > 1 && !strcmp(argv[1], "--dump")) return dump(argc, argv);
++
++    const char *temporary = getenv("TMPDIR");
++    snprintf(root, sizeof(root), "%s/h3_lora_testXXXXXX",
++             temporary && *temporary ? temporary : "/tmp");
++    if (!mkdtemp(root)) die("cannot create a temporary directory");
++    char transformer[1100];
++    snprintf(transformer, sizeof(transformer), "%s/transformer", root);
++    if (mkdir(transformer, 0700) != 0) die("cannot create a transformer directory");
++
++    float qkv[24], fc2[20], fc1[12], adaln[24], norm[4], time_w[4];
++    fill_weight(qkv, 24, 1);
++    fill_weight(fc2, 20, 2);
++    fill_weight(fc1, 12, 3);
++    fill_weight(adaln, 24, 4);
++    fill_weight(norm, 4, 5);
++    fill_weight(time_w, 4, 6);
++    const fixture checkpoint[] = {
++        {"time_embedder.proj_in.weight", "F32", 2, {2, 2}, time_w},
++        {"blocks.0.attn.qkv_proj.weight", "BF16", 2, {6, 4}, qkv},
++        {"blocks.0.mlp.fc2.weight", "BF16", 2, {4, 5}, fc2},
++        {"token_refiner.blocks.1.mlp.fc1.weight", "BF16", 2, {3, 4}, fc1},
++        {"blocks.0.adaln_proj.linear.weight", "BF16", 2, {8, 3}, adaln},
++        {"blocks.0.norm1.weight", "BF16", 1, {4, 0}, norm},
++    };
++    write_safetensors("transformer/model.safetensors", checkpoint, 6);
++
++    float peft_down[8], peft_up[12], misfit_down[10], misfit_up[16];
++    fill_factor(peft_down, 8, 1);
++    fill_factor(peft_up, 12, 2);
++    fill_factor(misfit_down, 10, 3);
++    fill_factor(misfit_up, 16, 4);
++    /* ComfyUI's spelling, no alpha, plus an AdaLN adapter trained for a
++     * narrower AdaLN input: the pruned-transformer case. */
++    const fixture peft[] = {
++        {"diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight", "F32", 2, {2, 4}, peft_down},
++        {"diffusion_model.blocks.0.adaln_proj.linear.lora_A.weight", "F32", 2, {2, 5}, misfit_down},
++        {"diffusion_model.blocks.0.attn.qkv_proj.lora_B.weight", "BF16", 2, {6, 2}, peft_up},
++        {"diffusion_model.blocks.0.adaln_proj.linear.lora_B.weight", "BF16", 2, {8, 2}, misfit_up},
++    };
++    float kohya_down[8], kohya_up[6], kohya_qkv_down[4], kohya_qkv_up[6];
++    float alpha_one = 1.0f, alpha_two = 2.0f;
++    fill_factor(kohya_down, 8, 5);
++    fill_factor(kohya_up, 6, 6);
++    fill_factor(kohya_qkv_down, 4, 7);
++    fill_factor(kohya_qkv_up, 6, 8);
++    /* kohya's spelling, F32 and BF16 scalar alphas, an F16 factor, and a second
++     * adapter on the matrix the file above also changes. */
++    const fixture kohya[] = {
++        {"lora_unet_token_refiner_blocks_1_mlp_fc1.alpha", "F32", 0, {0, 0}, &alpha_one},
++        {"lora_unet_token_refiner_blocks_1_mlp_fc1.lora_up.weight", "F32", 2, {3, 2}, kohya_up},
++        {"lora_unet_blocks_0_attn_qkv_proj.lora_down.weight", "F32", 2, {1, 4}, kohya_qkv_down},
++        {"lora_unet_token_refiner_blocks_1_mlp_fc1.lora_down.weight", "F16", 2, {2, 4}, kohya_down},
++        {"lora_unet_blocks_0_attn_qkv_proj.alpha", "BF16", 0, {0, 0}, &alpha_two},
++        {"lora_unet_blocks_0_attn_qkv_proj.lora_up.weight", "F32", 2, {6, 1}, kohya_qkv_up},
++    };
++    float bare_down[10], bare_up[8];
++    fill_factor(bare_down, 10, 9);
++    fill_factor(bare_up, 8, 10);
++    const fixture bare[] = {
++        {"blocks.0.mlp.fc2.lora_A.weight", "BF16", 2, {2, 5}, bare_down},
++        {"blocks.0.mlp.fc2.lora_B.weight", "F16", 2, {4, 2}, bare_up},
++    };
++    const char *peft_path = write_safetensors("peft.safetensors", peft, 4);
++    const char *kohya_path = write_safetensors("kohya.safetensors", kohya, 6);
++    const char *bare_path = write_safetensors("bare.safetensors", bare, 2);
++
++    char error[512];
++    h3_weight_store *store = h3_weight_store_open(transformer, error,
++                                                  sizeof(error));
++    if (!store) die(error);
++    h3_gpu *gpu = h3_gpu_create("h3_shaders.metal", error, sizeof(error));
++    if (!gpu) die(error);
++
++    h3_lora loras[] = {{peft_path, 0.5f}, {kohya_path, -0.5f}, {bare_path, 0.75f}};
++    h3_lora_set *set = h3_lora_set_open(store, loras, 3, error, sizeof(error));
++    if (!set) die(error);
++    if (h3_lora_set_files(set) != 3 || h3_lora_set_adapters(set) != 4 ||
++        h3_lora_set_tensors(set) != 3 || h3_lora_set_skipped(set) != 1)
++        die("adapter accounting is wrong");
++    if (!strstr(h3_lora_set_skip_detail(set), "blocks.0.adaln_proj.linear.weight"))
++        die("the skipped adapter is not named");
++    if (!h3_lora_set_targets(set, "blocks.0.attn.qkv_proj.weight") ||
++        h3_lora_set_targets(set, "blocks.0.adaln_proj.linear.weight") ||
++        h3_lora_set_targets(set, "blocks.0.norm1.weight"))
++        die("target lookup is wrong");
++
++    h3_weight_store_attach_loras(store, set);
++    /* Two files on one matrix, stacked; alpha / rank scales the kohya one. */
++    const reference_adapter qkv_adapters[] = {
++        {peft_up, peft_down, 2, 0.5f},
++        {kohya_qkv_up, kohya_qkv_down, 1, -0.5f * 2.0f / 1.0f},
++    };
++    expect_fused(store, gpu, "blocks.0.attn.qkv_proj.weight", qkv, 6, 4,
++                 qkv_adapters, 2);
++    const reference_adapter fc1_adapters[] = {
++        {kohya_up, kohya_down, 2, -0.5f * 1.0f / 2.0f},
++    };
++    expect_fused(store, gpu, "token_refiner.blocks.1.mlp.fc1.weight", fc1, 3, 4,
++                 fc1_adapters, 1);
++    const reference_adapter fc2_adapters[] = {{bare_up, bare_down, 2, 0.75f}};
++    expect_fused(store, gpu, "blocks.0.mlp.fc2.weight", fc2, 4, 5,
++                 fc2_adapters, 1);
++    /* The skipped adapter's matrix loads exactly as written. */
++    expect_fused(store, gpu, "blocks.0.adaln_proj.linear.weight", adaln, 8, 3,
++                 NULL, 0);
++    uint64_t norm_shape[] = {4};
++    h3_gpu_tensor *norm_tensor = h3_weight_load_bf16(
++        store, gpu, "blocks.0.norm1.weight", 1, norm_shape, error, sizeof(error));
++    uint16_t norm_got[4];
++    if (!norm_tensor || !h3_gpu_tensor_read_bf16(norm_tensor, norm_got, 4))
++        die("an untargeted vector did not load");
++    for (size_t index = 0; index < 4; index++)
++        if (norm_got[index] != bf16_round(norm[index]))
++            die("an untargeted vector changed");
++    h3_gpu_tensor_free(norm_tensor);
++    /* Detached, the store is the plain checkpoint again. */
++    h3_weight_store_attach_loras(store, NULL);
++    expect_fused(store, gpu, "blocks.0.attn.qkv_proj.weight", qkv, 6, 4,
++                 NULL, 0);
++
++    h3_lora silent = {bare_path, 0.0f};
++    h3_lora_set *zero = h3_lora_set_open(store, &silent, 1, error, sizeof(error));
++    if (!zero || h3_lora_set_adapters(zero) ||
++        h3_lora_set_targets(zero, "blocks.0.mlp.fc2.weight"))
++        die("a zero-strength LoRA must fuse nothing");
++    h3_lora_set_free(zero);
++    printf("lora zero strength fuses nothing\n");
++
++    const fixture stranger[] = {
++        {"diffusion_model.blocks.9.attn.qkv_proj.lora_A.weight", "F32", 2, {2, 4}, peft_down},
++        {"diffusion_model.blocks.9.attn.qkv_proj.lora_B.weight", "F32", 2, {6, 2}, peft_up},
++    };
++    const fixture unknown[] = {
++        {"blocks.0.attn.qkv_proj.lora_A.weight", "F32", 2, {2, 4}, peft_down},
++        {"blocks.0.attn.qkv_proj.lora_B.weight", "F32", 2, {6, 2}, peft_up},
++        {"blocks.0.attn.qkv_proj.dora_scale", "F32", 2, {6, 1}, kohya_qkv_up},
++    };
++    const fixture f32_target[] = {
++        {"time_embedder.proj_in.lora_A.weight", "F32", 2, {1, 2}, kohya_qkv_down},
++        {"time_embedder.proj_in.lora_B.weight", "F32", 2, {2, 1}, kohya_qkv_down},
++    };
++    const fixture misfit[] = {
++        {"blocks.0.adaln_proj.linear.lora_A.weight", "F32", 2, {2, 5}, misfit_down},
++        {"blocks.0.adaln_proj.linear.lora_B.weight", "F32", 2, {8, 2}, misfit_up},
++    };
++    const fixture unpaired[] = {
++        {"blocks.0.mlp.fc2.lora_A.weight", "F32", 2, {2, 5}, bare_down},
++    };
++    const fixture ranks[] = {
++        {"blocks.0.mlp.fc2.lora_A.weight", "F32", 2, {2, 5}, bare_down},
++        {"blocks.0.mlp.fc2.lora_B.weight", "F32", 2, {4, 1}, bare_up},
++    };
++    const fixture twice[] = {
++        {"blocks.0.mlp.fc2.lora_A.weight", "F32", 2, {2, 5}, bare_down},
++        {"blocks.0.mlp.fc2.lora_B.weight", "F32", 2, {4, 2}, bare_up},
++        {"diffusion_model.blocks.0.mlp.fc2.lora_A.weight", "F32", 2, {2, 5}, bare_down},
++        {"diffusion_model.blocks.0.mlp.fc2.lora_B.weight", "F32", 2, {4, 2}, bare_up},
++    };
++    expect_refused(store, write_safetensors("stranger.safetensors", stranger, 2),
++                   "names no MiniMax H3 transformer weight");
++    expect_refused(store, write_safetensors("unknown.safetensors", unknown, 3),
++                   "dora_scale is not a factor");
++    expect_refused(store, write_safetensors("f32.safetensors", f32_target, 2),
++                   "only BF16 matrices");
++    expect_refused(store, write_safetensors("misfit.safetensors", misfit, 2),
++                   "fit this checkpoint");
++    expect_refused(store, write_safetensors("unpaired.safetensors", unpaired, 1),
++                   "no up factor");
++    expect_refused(store, write_safetensors("ranks.safetensors", ranks, 2),
++                   "rank");
++    expect_refused(store, write_safetensors("twice.safetensors", twice, 4),
++                   "two adapters target");
++
++    h3_lora_set_free(set);
++    h3_gpu_free(gpu);
++    h3_weight_store_free(store);
++    for (size_t index = created_count; index-- > 0;) unlink(created[index]);
++    rmdir(transformer);
++    rmdir(root);
++    printf("lora fusion tests passed\n");
++    return 0;
++}
+diff --git a/tests/test_real_dit.c b/tests/test_real_dit.c
+index 1bd2c11..f5477ea 100644
+--- a/tests/test_real_dit.c
++++ b/tests/test_real_dit.c
+@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
+     snprintf(weights, sizeof(weights), "%s/FL2VA/transformer", model_root);
+     h3_dit *dit = h3_dit_load_t2va(weights, "h3_shaders.metal", &text,
+                                     &layout, &sigmas, 50, 1, 0, 0, 1.0f, 0, 1, 1, 1,
+-                                    1, 1, 1, 1, 0, 0, 0,
++                                    1, 1, 1, 1, 0, 0, 0, NULL,
+                                     progress, NULL,
+                                     error, sizeof(error));
+     if (!dit) die(error);
+diff --git a/tests/test_semantic_dit.c b/tests/test_semantic_dit.c
+index 762bf3b..3bc9fbf 100644
+--- a/tests/test_semantic_dit.c
++++ b/tests/test_semantic_dit.c
+@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
+     snprintf(weights, sizeof(weights), "%s/FL2VA/transformer", model_root);
+     h3_dit *dit = h3_dit_load_t2va(weights, "h3_shaders.metal", &text,
+                                     &layout, &sigmas, 50, 1, 0, 0, 1.0f, 0, 1, 1, 1,
+-                                    1, 1, 1, 1, 0, 0, 0,
++                                    1, 1, 1, 1, 0, 0, 0, NULL,
+                                     progress, NULL,
+                                     error, sizeof(error));
+     if (!dit) die(error);

@@ -36,6 +36,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,14 +77,28 @@ COMFY_IMAGE = "vastai/comfy:@vastai-automatic-tag"
 # (/opt/instance-tools/bin/entrypoint.sh, Vast's own bootstrap), which is why
 # the RunPod provider replaces it — see rental_providers/runpod.bootstrap_command.
 #
-# cuda-12.9 (torch cu128) rather than the cuda-13.2 build: it is the lower
-# driver requirement of the two, and our int8_convrot and nvfp4 paths have
-# only ever been measured on Vast hosts. Which build is FASTER on Blackwell is
-# an open question here — the one measurement we have confounds it with
-# different hardware — so this is the conservative pick, not an informed one,
-# and it is overridable without a deploy for exactly that reason.
+# cuda-13.2, and this is now MEASURED rather than assumed. It used to be
+# cuda-12.9 (torch cu128) on the reasoning that it was the lower driver
+# requirement and that the faster build was an open question. It is not an open
+# question: comfy/quant_ops.py disables comfy-kitchen's CUDA backend outright
+# below CUDA 13 —
+#     if tuple(map(int, str(torch.version.cuda).split('.'))) < (13,):
+#         ck.registry.disable("cuda")
+# — which drops int8_linear, dequantize_int8_convrot_weight, scaled_mm_nvfp4
+# and sol_attn, so this tier's int8_convrot DiT, nvfp4 text encoder and
+# int8_convrot video VAE every one of them fall back to dequantize-then-compute.
+#
+# Measured 2026-09-18 on ONE rented 5090 (vast:51438645) with the confound
+# removed — same box, same seeds, same graph, warm, only torch swapped — for a
+# 5s 960x544 H3 clip end to end:
+#
+#     torch 2.10.0+cu128   int8 VAE 123.5s   fp16 VAE 113.0s
+#     torch 2.14.0+cu130   int8 VAE  48.4s   fp16 VAE  48.5s
+#
+# ~2.3x on every H3 render. The ComfyUI version is deliberately unchanged at
+# v0.32.0: this swaps ONE variable. Still overridable without a deploy.
 RUNPOD_COMFY_IMAGE = os.environ.get(
-    "HIVEMIND_RUNPOD_COMFY_IMAGE", "vastai/comfy:v0.32.0-cuda-12.9-py312"
+    "HIVEMIND_RUNPOD_COMFY_IMAGE", "vastai/comfy:v0.32.0-cuda-13.2-py312"
 )
 
 
@@ -199,7 +214,9 @@ _VIDEO_MODELS = [
 _MINIMAX_MODELS = [
     ("diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "diffusion_models"),
     ("text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "text_encoders"),
-    ("vae/minimax_h3_video_vae_fp16.safetensors", "vae"),
+    # The VIDEO VAE is not here: it moved to the public set when we swapped the
+    # fp16 decoder for Kijai's int8_convrot one, which Comfy-Org mirrors. Only
+    # the audio VAE still comes from our bucket.
     ("vae/minimax_h3_audio_vae_fp32.safetensors", "vae"),
 ]
 # The turbo LoRA and its loader come from upstream, not R2: the weights are
@@ -274,6 +291,34 @@ _MINIMAX_PUBLIC_FILES = [
         "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
         11.0,
     ),
+    # THE video decoder for every H3 lane, video and still alike: Kijai's
+    # int8_convrot quantisation of H3's video VAE, taken from Comfy-Org's
+    # mirror rather than his experimental repo (same quantisation, 2.81GB
+    # against 3.17GB because the unquantised tensors stay fp16, and it is the
+    # repo every other official H3 artifact here already comes from).
+    #
+    # Only the DECODER is quantised. All 116 encoder tensors keep the same keys
+    # and shapes and carry no int8 at all (83 are simply stored widened to fp32,
+    # which is lossless from fp16), so the reference and inpaint lanes — the
+    # ones that ENCODE — are numerically unchanged. Measured by the author on an
+    # RTX 5070: VAE decode peaks at 2,677MB against fp16's 4,965MB, ~1.5x faster.
+    #
+    # HARD FLOOR: ComfyUI >= v0.31.0 (comfyanonymous/ComfyUI#15334, bbda8364,
+    # 2026-08-06) or this file DECODES TO BLACK FRAMES rather than failing. That
+    # is later than the e377e263 H3 contract pinned elsewhere in this package,
+    # so v0.31.0 is now the real floor; both images we rent (RunPod's pinned
+    # v0.32.0 and Vast's automatic tag) clear it.
+    #
+    # Public, so it comes straight from HuggingFace instead of through R2 —
+    # which also drops 5.2GB of relayed bytes off every H3 box for 2.8GB of
+    # upstream ones.
+    (
+        "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/"
+        "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+        "vae",
+        "minimax_h3_video_vae_int8_convrot.safetensors",
+        2.81,
+    ),
     # Weights for the "Fast high-res" latent upscaler (bf16 build: same network
     # as the fp16/fp32 files, and bf16 is the numerically forgiving one on the
     # Blackwell cards this tier rents). Public, so it comes straight from
@@ -281,11 +326,47 @@ _MINIMAX_PUBLIC_FILES = [
     # model_name combo by scanning this directory at schema time, so a box that
     # downloaded it late would advertise an empty list and reject the graph.
     (
+        # Upstream moved this into a per-version folder on 2026-09-17 and the old
+        # flat path now 404s, which failed provisioning at 18/19. Same weights,
+        # same 0.69GB. The DESTINATION filename below is deliberately left at the
+        # old flat name: every graph pins model_name to it.
         "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/"
-        "minimax_h3_latent_upscaler_3d_bf16.safetensors",
+        "minimax_h3_latent_upscaler_3d_conv_v1/"
+        "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
         "latent_upscale_models",
         "minimax_h3_latent_upscaler_3d_bf16.safetensors",
         0.69,
+    ),
+]
+
+# H3 Eros Max beta5 — the NSFW tier's transformer, and the ONLY thing that tier
+# serves beyond the set above. It is an H3 finetune in the same int8_convrot
+# quantisation as our official DiT and loads through the same plain UNETLoader,
+# so every H3 lane runs against it by swapping one unet_name; the eros tier
+# therefore carries the official serving set too and is a strict superset of
+# `minimax`.
+#
+# TURBO-hybrid: the ref/fl turbo deltas are FUSED into these weights (the
+# author's own reason for the build — it saves loading both turbo LoRAs), so
+# the eros graphs do NOT stack larryvrh's turbo LoRA on top. It also keeps the
+# AdaLN pair our official base has pruned away (adaln_basis / adaln_mean /
+# adaln_t_table are all present — read out of the safetensors header
+# 2026-09-14), which is why plain LoraLoaderModelOnly can apply concept LoRAs
+# to it where the official base needs MiniMaxH3TurboLoRA to re-inject the time
+# conditioning first.
+#
+# Pulled from the author's own HuggingFace mirror rather than Civitai. Same
+# bytes — sha256 4dd96549… is Civitai model 2851079 version 3294059 file
+# 3178732 — but HF is public and ungated, where a Civitai download needs an
+# account token that would then have to ride inside the rental manifest (which
+# lives in the private bucket but is handed to every box we rent).
+_H3_EROS_DIT = "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors"
+_H3_EROS_PUBLIC_FILES = _MINIMAX_PUBLIC_FILES + [
+    (
+        f"https://huggingface.co/TenStrip/10Eros-Max/resolve/main/{_H3_EROS_DIT}",
+        "diffusion_models",
+        _H3_EROS_DIT,
+        20.97,
     ),
 ]
 # Pinned like every other node on the box. 2026-08-07 HEAD; ships
@@ -420,7 +501,6 @@ MODEL_SIZE_GB = {
     "vae/taeltx2_3.safetensors": 0.02,
     "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors": 21.0,
     "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors": 15.7,
-    "vae/minimax_h3_video_vae_fp16.safetensors": 5.2,
     "vae/minimax_h3_audio_vae_fp32.safetensors": 0.6,
 }
 # Target: models land within this many seconds of billed provisioning time.
@@ -612,12 +692,58 @@ TIERS: dict[str, dict[str, Any]] = {
         # See tier_installs_seedvr2_trt for why restoration lives on the video
         # tier — briefly, this onstart has no room for a second model stack.
         "lane_needles": ["minimax_h3"],
+        # The lane this tier is RENTED FOR. Both H3 tiers serve several lanes —
+        # the eros box carries the official weights too — so "the first model it
+        # serves" is a coin toss, and it landed on plain MiniMax H3 for someone
+        # who had deliberately rented the Eros Max box. Named here because the
+        # tier is the only thing that knows why the machine was bought.
+        "primary_workflow": "minimax-h3",
         "studio_pages": ["video", "image"],
         # Civitai's base-model category for H3 add-on LoRAs (style/character/
         # motion — distinct from the turbo LoRA baked into the serving set) is
         # exactly "MiniMax H3".
         "lora_base_models": ["MiniMax H3"],
     },
+}
+
+# The NSFW H3 box. Spelled out as the `minimax` spec plus its differences
+# rather than copied, because the two are the SAME machine — same cards, same
+# VRAM and RAM floors, same Blackwell-only encoder, same node stack, same
+# studio pages — and every one of those numbers was measured once, for both.
+# What differs is one file in the serving set and the price of carrying it.
+#
+# A tier key may not contain a hyphen: `_tier_from_label` reads the tier back
+# out of a machine label by splitting on "-", so "minimax-eros" would come
+# back as "minimax" and the box would be provisioned as the wrong workload.
+TIERS["minimaxeros"] = {
+    **TIERS["minimax"],
+    "label": "Video · MiniMax H3 Eros (NSFW)",
+    "family": "Video · H3 Eros (NSFW)",
+    "family_detail": (
+        "MiniMax H3 with the Eros Max beta5 transformer — everything the H3 box "
+        "does, uncensored, and at 8 steps instead of 15"
+    ),
+    # +21GB for the eros transformer on top of the H3 set.
+    "disk_gb": 145,
+    "public_models": _H3_EROS_PUBLIC_FILES,
+    # Both, because this box carries both transformers: an official-H3 job runs
+    # here unchanged, and the eros graphs are the only ones that name the eros
+    # file. The reverse is not true — a plain `minimax` box has no eros weights
+    # — and routing is first-match by attachment priority over the whole graph
+    # text, which an eros graph shares with the official one through the
+    # encoder and VAE filenames. So with both kinds of box attached at once,
+    # pin the eros run to this machine with "Run on" rather than trusting the
+    # match; a misroute fails loudly on the far end (ComfyUI 400, unknown
+    # unet_name) rather than rendering the wrong thing.
+    "lane_needles": ["minimax_h3", "10eros_max"],
+    "primary_workflow": "minimax-h3-eros",
+    # Deliberately NOT in RENTAL_BENCHMARKS: nothing has been timed on this
+    # tier yet, and that table is measurements only. Until a row lands the UI
+    # draws "—" for seconds per generation, which is the truth.
+    "expected": (
+        "5s 960×544 video+audio at 8 steps — fewer steps than the official H3 "
+        "lane, but not yet timed on a rented card"
+    ),
 }
 
 
@@ -674,11 +800,20 @@ class GpuRentalError(ProviderError):
     `remedy` names the button that repairs it ("connect-account", "passbook")
     so the Machines view can offer the action instead of matching the
     sentence — the same contract hivemindos_models.HivemindosModelsError keeps.
+
+    `payload` is for a refusal the UI is expected to ACT on rather than print.
+    A price that moved between the quote and the order is the case it exists
+    for: the numbers ride along so the view can re-price its card and ask
+    whether to go ahead, instead of parsing two dollar figures back out of an
+    English sentence. The sentence stays for callers with no UI (agents, the
+    MCP), which is why both are sent.
     """
 
-    def __init__(self, message: str, status_code: int = 502, *, remedy: str = "") -> None:
+    def __init__(self, message: str, status_code: int = 502, *, remedy: str = "",
+                 payload: dict | None = None) -> None:
         super().__init__(message, status_code)
         self.remedy = remedy
+        self.payload = payload or {}
 
 
 def _env(name: str) -> str:
@@ -825,23 +960,47 @@ def _patch_rental_lora(lora_id: str, **fields: Any) -> dict | None:
 
 
 def rental_loras_for_tier(tier: str) -> list[dict]:
-    """Entries this tier must download: uploaded (ready) and family-matched."""
-    return [
-        entry for entry in read_rental_loras().values()
-        if entry.get("status") == "ready" and tier in (entry.get("tiers") or [])
-    ]
+    """Entries this tier must download: reachable (ready), and chosen for it.
+
+    "Chosen" has two forms and the committed one wins. With pins in
+    rental-build.json the tier downloads exactly those and nothing else — an
+    explicit decision, reviewed in a diff. With no pins the original rule
+    stands: every ready LoRA whose base-model family this tier's serving set
+    accepts, which is what every existing rental was provisioned under."""
+    # "ready" means a box can GET it — in the bucket, or servable by Civitai.
+    ready = [entry for entry in read_rental_loras().values() if entry.get("status") == "ready"]
+    pins = pinned_rental_loras(tier)
+    if pins is None:
+        return [entry for entry in ready if tier in (entry.get("tiers") or [])]
+    wanted = set(pins)
+    return [entry for entry in ready if str(entry.get("id") or "") in wanted]
 
 
-def _rental_lora_downloads(tier: str) -> list[tuple[str, str]]:
-    """(R2 key, models/ subpath) per registered LoRA, preserving the LOCAL
-    relative path on the box: the studios put installed-LoRA ids like
-    "ltx/foo.safetensors" straight into the graph as lora_name, so the rented
-    ComfyUI must resolve exactly the same name under models/loras."""
+def _rental_lora_downloads(tier: str) -> list[dict]:
+    """One row per registered LoRA: where it lands, and where it comes from.
+
+    The destination preserves the LOCAL relative path — the studios put
+    installed-LoRA ids like "ltx/foo.safetensors" straight into the graph as
+    lora_name, so the rented ComfyUI must resolve exactly that name under
+    models/loras. It is OUR filename, not the source's: a file renamed after
+    download still has to land under the name the graph asks for.
+
+    The source is either our bucket or Civitai, decided once when the LoRA was
+    registered (add_rental_lora) and recorded per entry.
+    """
     out = []
     for entry in rental_loras_for_tier(tier):
         rel = str(entry.get("id") or "")
-        subdir = "loras" if "/" not in rel else f"loras/{rel.rsplit('/', 1)[0]}"
-        out.append((str(entry.get("r2_key") or f"{RENTAL_LORA_R2_PREFIX}{rel}"), subdir))
+        if not rel:
+            continue
+        civitai = entry.get("civitai") if isinstance(entry.get("civitai"), dict) else {}
+        use_civitai = entry.get("source") == "civitai" and bool(civitai.get("version_id"))
+        out.append({
+            "dest": f"loras/{rel}",
+            "key": "" if use_civitai else str(entry.get("r2_key") or f"{RENTAL_LORA_R2_PREFIX}{rel}"),
+            "civitai": dict(civitai) if use_civitai else {},
+            "size_gb": float(entry.get("size_gb") or 2.0),
+        })
     return out
 
 
@@ -874,6 +1033,27 @@ def list_rental_loras() -> dict:
         if progress and entry.get("status") == "uploading":
             entry["uploaded_bytes"] = int(progress.get("done") or 0)
     return {"loras": entries}
+
+
+def _lora_civitai_source(path: Path) -> dict:
+    """Civitai ids for an installed LoRA, but only if this account can FETCH it.
+
+    Returns {} for anything that has to ride the bucket instead — no sidecar, an
+    ambiguous version, or a file Civitai will not serve us (Early Access answers
+    403). Never raises: the bytes are on disk, so the answer to "can we skip the
+    upload" is only ever yes or no, never an error the caller has to handle.
+    """
+    source = installed_cloud_source(path)
+    civitai = source.get("civitai") or {}
+    if source.get("source") != "civitai" or not civitai.get("version_id"):
+        return {}
+    try:
+        _civitai_signed_url(str(civitai["version_id"]), str(civitai.get("file_id") or ""))
+    except GpuRentalError:
+        return {}
+    except Exception:  # noqa: BLE001 - a transient network fault is also a "no"
+        return {}
+    return {"version_id": str(civitai["version_id"]), "file_id": str(civitai.get("file_id") or "")}
 
 
 def add_rental_lora(
@@ -912,6 +1092,14 @@ def add_rental_lora(
         )
     size_bytes = path.stat().st_size
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # A LoRA Civitai will serve needs no upload and no bucket object at all:
+    # the box fetches it the same way a swapped-in checkpoint does, from a
+    # signed URL resolved here at rent time. Checked ONCE, now, because the
+    # answer decides whether to spend a transfer — and because a file this
+    # account cannot fetch (Early Access answers 403) must fall back to the
+    # upload rather than fail, since the bytes are right here on disk.
+    civitai = _lora_civitai_source(path)
+    entry_source = "civitai" if civitai else "r2"
     with _rental_lora_lock:
         entries = read_rental_loras()
         existing = entries.get(lora_id)
@@ -920,8 +1108,10 @@ def add_rental_lora(
         already_uploaded = bool(
             existing
             and existing.get("status") == "ready"
+            and existing.get("source") != "civitai"
             and int(existing.get("size_bytes") or 0) == size_bytes
         )
+        needs_upload = entry_source == "r2" and not already_uploaded
         entry = {
             "id": lora_id,
             "filename": path.name,
@@ -929,16 +1119,32 @@ def add_rental_lora(
             "baseModel": base,
             "rating": rating,
             "tiers": tiers,
+            "source": entry_source,
+            # Kept for both: withdrawing a LoRA that was once uploaded still has
+            # an object to delete, and a Civitai entry that later falls back to
+            # the bucket reuses the same key.
             "r2_key": f"{RENTAL_LORA_R2_PREFIX}{lora_id}",
+            "civitai": civitai,
             "size_bytes": size_bytes,
             "size_gb": round(size_bytes / 1e9, 3),
             "added_at": str((existing or {}).get("added_at") or now),
-            "status": "ready" if already_uploaded else "uploading",
+            "status": "uploading" if needs_upload else "ready",
             "error": "",
         }
         entries[lora_id] = entry
         _write_rental_loras(entries)
-    if not already_uploaded:
+        # Switching an already-uploaded LoRA to Civitai leaves its object in the
+        # bucket referenced by nothing. Dropped here rather than at withdrawal,
+        # which no longer asks R2 about a Civitai entry at all.
+        orphan = (
+            str(existing.get("r2_key") or "")
+            if existing and existing.get("source") != "civitai" and entry_source == "civitai"
+            else ""
+        )
+    if orphan:
+        with contextlib.suppress(Exception):
+            requests.delete(_presign_r2("DELETE", orphan), timeout=_REQUEST_TIMEOUT)
+    if needs_upload:
         _rental_lora_progress[lora_id] = {"done": 0, "total": size_bytes}
         _start_rental_lora_upload(lora_id, path, entry["r2_key"])
     return entry
@@ -952,9 +1158,11 @@ def remove_rental_lora(lora_id: str) -> dict:
             raise GpuRentalError(f"'{lora_id}' is not registered for rentals", status_code=404)
         _write_rental_loras(entries)
     # Bucket hygiene, not correctness: a stale object costs pennies and a
-    # re-add with the same id simply overwrites it.
-    with contextlib.suppress(Exception):
-        requests.delete(_presign_r2("DELETE", str(entry.get("r2_key") or "")), timeout=_REQUEST_TIMEOUT)
+    # re-add with the same id simply overwrites it. A Civitai-sourced entry
+    # never had an object, so there is nothing to ask R2 about.
+    if entry.get("source") != "civitai":
+        with contextlib.suppress(Exception):
+            requests.delete(_presign_r2("DELETE", str(entry.get("r2_key") or "")), timeout=_REQUEST_TIMEOUT)
     return {"removed": lora_id}
 
 
@@ -1006,6 +1214,589 @@ def _start_rental_lora_upload(lora_id: str, path: Path, r2_key: str) -> None:
         daemon=True,
     ).start()
 
+
+# --- the project rental build: what a rented box is provisioned WITH ---------
+#
+# Two things a person can change per tier, and both belong in the repository
+# rather than under ~/.hivemindos: which of their LoRAs ride along on that
+# tier's boxes, and which checkpoint stands in for one of its default weights.
+# Those are decisions about the product — the same on every machine that checks
+# this repo out — so they live in a committed file, reviewed in a diff.
+#
+# The split from the rental-LoRA registry above is the whole reason both exist:
+#
+#   rental-build.json (git)    what SHOULD be on a tier's boxes — intent
+#   rental-loras.json (local)  what is uploaded and reachable — transport state
+#
+# A pinned LoRA still has to be in the local registry with status "ready"
+# before a box downloads it: the pin says which tier wants it, the registry
+# says whether the bytes are in the bucket yet. A tier with no pins keeps the
+# original rule unchanged — every ready LoRA whose base-model family it serves.
+RENTAL_BUILD_PATH = Path(__file__).resolve().parents[2] / "packages/gpu-rentals/rental-build.json"
+COMFY_MODELS_ROOT = COMFY_LORAS_ROOT.parent
+# The models/ subdirectories a graph names a base weight from (unet_name,
+# ckpt_name). A swap may only replace a weight landing in one of these: text
+# encoders and VAEs are not interchangeable and are never offered.
+RENTAL_CHECKPOINT_SUBDIRS = ("diffusion_models", "checkpoints", "unet")
+# A Hugging Face URL that serves the FILE rather than a page about it. Public
+# HF repos need no credential, so this one goes into the manifest verbatim.
+_HF_FILE_URL = re.compile(r"^https://huggingface\.co/[\w.-]+/[\w.-]+/resolve/\S+$")
+# Civitai needs one hop, and the hop happens HERE rather than on the box.
+#
+# An unauthenticated Civitai download answers 401, and the weights manifest is
+# handed to every box we rent, so a token can never go in it. But the token is
+# not what the box needs: `/api/download/models/<v>?token=…` answers 302 to an
+# AWS SigV4 presigned URL on Civitai's own R2 — the same shape as the presigns
+# this module already mints for our bucket, carrying no token and fetchable by
+# anyone holding it. Measured 2026-09-14 against version 3208482: the redirect
+# lands on civitai-delivery-worker-prod.<acct>.r2.cloudflarestorage.com with
+# X-Amz-Expires=86400 (ours are 3h), the token appears nowhere in it, and an
+# anonymous range GET answers 206.
+#
+# So the committed config stores the STABLE ids, never a signed URL — one
+# expires and the other is a capability, and neither belongs in a commit — and
+# the redirect is followed once per rental, here, where the token already is.
+_CIVITAI_DOWNLOAD_URL = "https://civitai.com/api/download/models/{version}"
+_CIVITAI_TOKEN_ENV_KEYS = (
+    "CIVITAI_TOKEN", "CIVITAI_API_TOKEN", "CIVITAI_API_KEY",
+    "CIVITAI_KEY", "CIVITAI_ACCESS_TOKEN", "CIVITAI_BEARER_TOKEN", "CIVITAI_PAT",
+)
+_CIVITAI_TOKEN_FILE = MEDIA_STATE_ROOT / "secure/civitai-token"
+# Answers that mean "ask again", not "no": a rate limit and a bad moment on
+# their side. Everything else (401 bad token, 403 Early Access, 404 gone) is a
+# decision, and re-asking only wastes the caller's time.
+_CIVITAI_TRANSIENT_CODES = {408, 429, 500, 502, 503, 504}
+_CIVITAI_ATTEMPTS = 3
+_CIVITAI_RETRY_SECONDS = 2.0
+_CIVITAI_RETRY_CAP_SECONDS = 15.0
+# How many signed URLs to ask Civitai for at once at rent time. Serial was the
+# problem: ten pinned LoRAs each able to spend three 30s timeouts meant one slow
+# answer held the rental ~96s and two ran past the 190s proxy leg. Four at a
+# time bounds the wait by the slowest single file without bursting a rate
+# limit that already answers ten registrations in a row with a 429.
+_CIVITAI_PARALLEL = 4
+
+_rental_build_lock = threading.Lock()
+
+
+def read_rental_build() -> dict:
+    """The committed build config, or an empty one.
+
+    Never raises: a hand-edited file with a typo in it must not take the
+    Machines view — or a rental already paid for — down with it."""
+    try:
+        data = json.loads(RENTAL_BUILD_PATH.read_text())
+    except Exception:
+        return {"version": 1, "tiers": {}}
+    if not isinstance(data, dict):
+        return {"version": 1, "tiers": {}}
+    tiers = data.get("tiers")
+    data["tiers"] = tiers if isinstance(tiers, dict) else {}
+    return data
+
+
+def _tier_build(tier: str) -> dict:
+    entry = read_rental_build()["tiers"].get(tier)
+    return entry if isinstance(entry, dict) else {}
+
+
+def rental_build_is_editable() -> bool:
+    """Whether this install can write the committed config at all.
+
+    A git checkout can; a packaged app unpacked into its own bundle cannot, and
+    would have nothing to commit even if it could. This is the gate the studio
+    hides the whole page behind — the honest form of "dev only" for a surface
+    whose entire output is a file in this repository."""
+    root = RENTAL_BUILD_PATH.parents[2]
+    return (
+        (root / ".git").exists()
+        and RENTAL_BUILD_PATH.parent.is_dir()
+        and os.access(RENTAL_BUILD_PATH.parent, os.W_OK)
+    )
+
+
+def _write_rental_build(data: dict) -> None:
+    if not rental_build_is_editable():
+        raise GpuRentalError(
+            "this install has no project checkout to write the rental build into",
+            status_code=409,
+        )
+    # Two spaces and a trailing newline, like every other committed JSON here:
+    # this lands in a commit, and a diff nobody can read is one nobody reviews.
+    RENTAL_BUILD_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def pinned_rental_loras(tier: str) -> list[str] | None:
+    """This tier's LoRA pins, or None when it has none and the family rule stands."""
+    pins = _tier_build(tier).get("loras")
+    if not isinstance(pins, list):
+        return None
+    return [str(value) for value in pins if str(value or "").strip()]
+
+
+def _civitai_token() -> str:
+    """The same resolution order the media gateway uses, so one machine has one
+    Civitai identity. CIVITAI_API_KEY is already in the stack's STUDIO_KEYS
+    allowlist, which is what puts it in this process at all."""
+    for key in _CIVITAI_TOKEN_ENV_KEYS:
+        value = os.environ.get(key)
+        if value and value.strip():
+            return value.strip()
+    try:
+        return _CIVITAI_TOKEN_FILE.read_text().strip()
+    except Exception:
+        return ""
+
+
+def _civitai_signed_url(version_id: str, file_id: str = "") -> str:
+    """Follow Civitai's download redirect and return the signed URL it lands on.
+
+    Called once per rental, from manifest assembly only — never from anything
+    the studio renders, which would put a third-party request behind a page
+    load. The token rides in the QUERY and never in a header: requests carries
+    Authorization across the redirect, and R2 then reads it as AWS auth and
+    refuses with "Missing x-amz-content-sha256" (the gateway learned this one
+    the hard way, see civitai_download_headers).
+    """
+    token = _civitai_token()
+    if not token:
+        raise GpuRentalError(
+            "This machine has no Civitai token, so the swapped-in checkpoint cannot be "
+            "fetched for the box. Add CIVITAI_API_KEY to PassBook and restart the stack.",
+            status_code=503,
+        )
+    params = {"token": token}
+    if file_id:
+        params["fileId"] = file_id
+    url = _CIVITAI_DOWNLOAD_URL.format(version=quote(str(version_id), safe=""))
+    # A rate limit is not an answer. Registering ten pinned LoRAs asks Civitai
+    # ten times in a burst, and one 429 in that burst used to read as "Civitai
+    # will not serve this" — costing a needless upload (measured 2026-09-14,
+    # minimax-jav-voice fell back to the bucket and then resolved fine on its
+    # own). At RENT time the same 429 would abort a rental outright. So the
+    # transient answers are retried and only a definite refusal is returned.
+    response = None
+    for attempt in range(_CIVITAI_ATTEMPTS):
+        try:
+            response = requests.get(
+                url, params=params,
+                headers={"User-Agent": "Hivemind-Studio-Rentals/1.0"},
+                allow_redirects=False,
+                timeout=_REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            if attempt == _CIVITAI_ATTEMPTS - 1:
+                # Context-free on purpose: this is asked at registration, at
+                # rental-build save and at rent time, and each caller says what
+                # it means there. The pool's own repr stays on the chain for the
+                # log ("HTTPSConnectionPool(host='civitai.com'…) Read timed out"),
+                # which is a diagnosis, not a sentence anyone can act on.
+                raise GpuRentalError(
+                    f"Civitai did not answer in time ({_CIVITAI_ATTEMPTS} tries); "
+                    "it is usually back within a minute",
+                    status_code=503,
+                ) from exc
+            time.sleep(_CIVITAI_RETRY_SECONDS * (attempt + 1))
+            continue
+        if response.status_code not in _CIVITAI_TRANSIENT_CODES or attempt == _CIVITAI_ATTEMPTS - 1:
+            break
+        # Civitai names the wait on a 429; honour it rather than guessing, but
+        # never let it hold a rental open for longer than the ladder would.
+        try:
+            wait = float(response.headers.get("Retry-After") or 0)
+        except ValueError:
+            wait = 0.0
+        time.sleep(min(max(wait, _CIVITAI_RETRY_SECONDS * (attempt + 1)), _CIVITAI_RETRY_CAP_SECONDS))
+    location = response.headers.get("Location") or ""
+    if response.status_code not in {301, 302, 303, 307, 308} or not location.startswith("https://"):
+        # Civitai writes a readable reason for the refusals that matter — Early
+        # Access is the common one, and "HTTP 403" tells nobody they need Buzz.
+        # Its own sentence first, ours only when it wrote none.
+        reason = ""
+        try:
+            body = response.json()
+            reason = str(body.get("message") or body.get("error") or "").strip()
+        except Exception:  # noqa: BLE001 - an HTML error page is not a reason
+            reason = ""
+        raise GpuRentalError(
+            f"Civitai will not serve that file: {reason[:120]}"
+            if reason else
+            f"Civitai refused that file (HTTP {response.status_code}). Check the Civitai "
+            "token in PassBook, or pick one with a Hugging Face mirror.",
+            status_code=503,
+        )
+    # The one thing that must never reach a rented box. Measured: it does not,
+    # but a manifest is handed to a third party and this costs nothing.
+    if token in location:
+        raise GpuRentalError("refusing to publish a Civitai URL that carries the token", status_code=500)
+    return location
+
+
+def rental_checkpoint_swaps(tier: str) -> dict[str, dict]:
+    """models/ destination -> the swap standing in for it, already validated.
+
+    A row that names no source we can fetch is DROPPED rather than raised on:
+    one bad hand-edit must not block every rental of the tier. Nothing here
+    touches the network — resolution is manifest-time, and this is read on
+    every page render.
+    """
+    raw = _tier_build(tier).get("checkpoints")
+    if not isinstance(raw, dict):
+        return {}
+    swaps = {}
+    for dest, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or "").strip()
+        civitai = entry.get("civitai") if isinstance(entry.get("civitai"), dict) else {}
+        if _HF_FILE_URL.match(url):
+            swaps[str(dest)] = {**entry, "url": url, "civitai": {}}
+        elif str(civitai.get("version_id") or "").strip():
+            # No URL in the committed file on purpose: a signed one expires, and
+            # it is a capability anyone reading the repo could spend.
+            swaps[str(dest)] = {**entry, "url": "", "civitai": civitai}
+    return swaps
+
+
+def _resolve_local_checkpoint(model_id: str) -> Path:
+    """Absolute path for an installed checkpoint id ("checkpoints/x.safetensors"),
+    with the same traversal guard the LoRA path uses."""
+    root = COMFY_MODELS_ROOT.resolve()
+    candidate = (root / str(model_id or "")).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise GpuRentalError("refusing to touch a model outside the ComfyUI models directory", status_code=400)
+    # The FIRST segment, not the parent directory: the picker lists these trees
+    # recursively (a file dropped in checkpoints/ltx/ is a checkpoint), and a
+    # guard that only accepted the top level would list files it then refused.
+    if candidate.relative_to(root).parts[0] not in RENTAL_CHECKPOINT_SUBDIRS:
+        raise GpuRentalError(
+            "only a diffusion_models, checkpoints or unet file can stand in for a base weight",
+            status_code=400,
+        )
+    if not candidate.is_file():
+        raise GpuRentalError(f"no installed checkpoint named '{model_id}'", status_code=404)
+    return candidate
+
+
+def _read_sidecars(path: Path) -> list[dict]:
+    """Both sidecar shapes the media gateway writes, newest convention first."""
+    out = []
+    for side in (Path(str(path) + ".civitai.json"), path.with_suffix(".metadata.json")):
+        try:
+            data = json.loads(side.read_text())
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def _civitai_file_id(blob: dict, version: dict, path: Path) -> str | None:
+    """WHICH file of a Civitai version this local file is, by SHA-256.
+
+    Not optional, and not by name. Civitai version 2961411 ships SIX files all
+    called bigLove_klein3.safetensors — the quantisations differ and the names
+    do not — so a download without a file id serves the version's primary,
+    which on this machine is neither of the two installed builds. The same
+    lesson the H3 Eros sourcing ran into: through the API the hashes are the
+    only thing that tells two builds of one release apart.
+
+    Returns None when the version has more than one candidate and nothing pins
+    this file to one of them — the caller then offers no source at all, rather
+    than a confident wrong one. "" means the opposite and is the ordinary case:
+    nothing to disambiguate, so the download needs no file id.
+    """
+    files = version.get("files") if isinstance(version.get("files"), list) else []
+    # The .civitai.json shape records the one file it downloaded, directly.
+    direct = blob.get("file") if isinstance(blob.get("file"), dict) else {}
+    if direct.get("id"):
+        return str(direct["id"])
+    digest = str(blob.get("sha256") or "").strip().lower()
+    if digest:
+        for entry in files:
+            hashes = entry.get("hashes") if isinstance(entry, dict) else None
+            if isinstance(hashes, dict) and str(hashes.get("SHA256") or "").strip().lower() == digest:
+                return str(entry.get("id") or "")
+    candidates = [entry for entry in files if isinstance(entry, dict) and entry.get("id")]
+    if len(candidates) == 1:
+        return str(candidates[0]["id"])
+    # Last resort: an unambiguous filename match. Useless on the version above,
+    # decisive on a version that ships a safetensors and a gguf.
+    named = [entry for entry in candidates if str(entry.get("name") or "") == path.name]
+    if len(named) == 1:
+        return str(named[0]["id"])
+    # No file list at all is the older sidecar shape, which only ever recorded
+    # one download — there is nothing for it to be ambiguous about.
+    return None if candidates else ""
+
+
+def installed_cloud_source(path: Path) -> dict:
+    """Where a rented box could fetch this installed file from.
+
+    Checkpoints and LoRAs are the same question: both are downloaded by the
+    media gateway, both get the same two sidecar shapes beside them, and a box
+    fetches both the same way.
+
+    Two sources, preferred in this order.
+
+    A Hugging Face URL naming THIS EXACT FILE is best: public, verbatim in the
+    manifest, nothing to resolve per rental. The filename check is what makes
+    scanning the whole sidecar safe — a description is full of links to other
+    weights in the same family, and one of those would land the wrong 20GB file
+    under the right name, which no beacon or checksum here would catch.
+
+    Otherwise a Civitai version id, which is resolved to a signed URL at rent
+    time (see _civitai_signed_url). `modelUrl` is the page a person reads; the
+    ids are what a box is actually fetched with."""
+    blobs = _read_sidecars(path)
+    for blob in blobs:
+        # Searched over the whole sidecar, because the URL can be anywhere in
+        # it — a description, a note, a field nobody has seen. The filename
+        # check below is what makes that safe; the character class just stops
+        # the match at the markup the description is written in.
+        for url in re.findall(r"https://huggingface\.co/[^\s\"'<>\\)]+", json.dumps(blob)):
+            if _HF_FILE_URL.match(url) and url.rsplit("/", 1)[-1].split("?")[0] == path.name:
+                return {"source": "huggingface", "url": url, "modelUrl": "", "civitai": {}}
+    for blob in blobs:
+        version = blob.get("modelVersion") if isinstance(blob.get("modelVersion"), dict) else blob.get("civitai")
+        version = version if isinstance(version, dict) else {}
+        model_id = version.get("modelId") or (version.get("model") or {}).get("id")
+        if version.get("id"):
+            page = f"https://civitai.com/models/{model_id}" if model_id else ""
+            if page:
+                page = f"{page}?modelVersionId={version['id']}"
+            file_id = _civitai_file_id(blob, version, path)
+            if file_id is None:
+                # A version that ships several files and no way to say which is
+                # this one: Civitai would serve its PRIMARY, and the box would
+                # get 13GB of the wrong quantisation under the right name. No
+                # source at all is better than a confident wrong one.
+                return {"source": "", "url": "", "modelUrl": page, "civitai": {}}
+            return {
+                "source": "civitai",
+                "url": "",
+                "modelUrl": page,
+                "civitai": {"version_id": str(version["id"]), "file_id": file_id},
+            }
+    return {"source": "", "url": "", "modelUrl": "", "civitai": {}}
+
+
+def _checkpoint_record(path: Path) -> dict:
+    size_bytes = path.stat().st_size
+    rel = str(path.relative_to(COMFY_MODELS_ROOT.resolve()))
+    return {
+        "id": rel,
+        "name": path.name,
+        "subdir": path.parent.name,
+        "size_gb": round(size_bytes / 1e9, 2),
+        "size_bytes": size_bytes,
+        **installed_cloud_source(path),
+    }
+
+
+def list_installed_checkpoints() -> dict:
+    """Every installed base weight, each with the cloud source a rented box
+    would have to fetch it from. Files with no source are listed too — the
+    swap picker says why one cannot be used rather than hiding it."""
+    root = COMFY_MODELS_ROOT.resolve()
+    records = []
+    for subdir in RENTAL_CHECKPOINT_SUBDIRS:
+        folder = root / subdir
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.rglob("*.safetensors")):
+            if path.is_file():
+                records.append(_checkpoint_record(path))
+    records.sort(key=lambda item: (item["subdir"], item["name"].lower()))
+    return {"checkpoints": records}
+
+
+def tier_base_weights(tier: str) -> list[dict]:
+    """The tier's swappable default weights, in the order it downloads them."""
+    spec = TIERS[tier]
+    swaps = rental_checkpoint_swaps(tier)
+    rows = []
+    for object_key, subdir in spec["models"]:
+        filename = object_key.rsplit("/", 1)[-1]
+        rows.append((subdir, filename, MODEL_SIZE_GB.get(object_key, 2.0), "bucket"))
+    for _url, subdir, filename, size_gb in spec.get("public_models") or []:
+        rows.append((subdir, filename, size_gb, "upstream"))
+    out = []
+    for subdir, filename, size_gb, origin in rows:
+        if subdir not in RENTAL_CHECKPOINT_SUBDIRS:
+            continue
+        dest = f"{subdir}/{filename}"
+        out.append({
+            "dest": dest,
+            "filename": filename,
+            "subdir": subdir,
+            "size_gb": size_gb,
+            "origin": origin,
+            "swap": swaps.get(dest),
+        })
+    return out
+
+
+def rental_build_payload() -> dict:
+    """Everything the studio's rental-build page draws, in one call."""
+    tiers = []
+    for tier, spec in TIERS.items():
+        tiers.append({
+            "tier": tier,
+            "label": spec["label"],
+            "family": spec["family"],
+            "family_detail": spec["family_detail"],
+            "lora_base_models": list(spec.get("lora_base_models") or []),
+            "pinned_loras": pinned_rental_loras(tier),
+            "weights": tier_base_weights(tier),
+            "download_gb": tier_download_gb(tier),
+            "disk_gb": tier_disk_gb(tier),
+        })
+    return {
+        "editable": rental_build_is_editable(),
+        "path": str(RENTAL_BUILD_PATH),
+        "tiers": tiers,
+    }
+
+
+def _rental_build_tier_row(tier: str) -> dict:
+    payload = rental_build_payload()
+    row = next((entry for entry in payload["tiers"] if entry["tier"] == tier), None)
+    return {"editable": payload["editable"], "path": payload["path"], "tier": row}
+
+
+def _mutate_rental_build(tier: str, mutate) -> dict:
+    """Read-modify-write one tier under the lock, pruning what it emptied.
+
+    An entry that ends up with neither pins nor swaps is REMOVED rather than
+    left as `{}` — an empty object in a committed file reads like a decision
+    and is not one."""
+    if tier not in TIERS:
+        raise GpuRentalError(f"unknown rental tier '{tier}'", status_code=404)
+    with _rental_build_lock:
+        data = read_rental_build()
+        entry = data["tiers"].get(tier)
+        entry = dict(entry) if isinstance(entry, dict) else {}
+        mutate(entry)
+        for key in ("loras", "checkpoints"):
+            if key in entry and not entry[key]:
+                entry.pop(key)
+        if entry:
+            data["tiers"][tier] = entry
+        else:
+            data["tiers"].pop(tier, None)
+        data.setdefault("version", 1)
+        _write_rental_build(data)
+    return _rental_build_tier_row(tier)
+
+
+def set_rental_build_loras(tier: str, lora_ids: list[str]) -> dict:
+    """Pin exactly these installed LoRAs to a tier, and make sure they can land.
+
+    A pin is intent; the bytes still have to be in the bucket. So anything
+    pinned here that is not already registered is registered and uploaded on
+    the spot — a pin that silently never ships would be the worst of both
+    files. The rating the registry asks for is categorisation only today, so it
+    is taken from the tier rather than from a second question per card: the
+    NSFW tier's adapters are nsfw, everything else sfw. Un-pinning leaves the
+    registry (and the uploaded object) alone: another tier may still want it,
+    and re-pinning is then free."""
+    if tier not in TIERS:
+        raise GpuRentalError(f"unknown rental tier '{tier}'", status_code=404)
+    wanted = []
+    for value in lora_ids or []:
+        lora_id = str(value or "").strip()
+        if lora_id and lora_id not in wanted:
+            wanted.append(lora_id)
+    registry = read_rental_loras()
+    rating = "nsfw" if "nsfw" in str(TIERS[tier]["label"]).lower() else "sfw"
+    for lora_id in wanted:
+        entry = registry.get(lora_id)
+        if entry and entry.get("status") in {"ready", "uploading"}:
+            continue
+        path = _resolve_local_lora(lora_id)
+        add_rental_lora(
+            lora_id,
+            str((entry or {}).get("rating") or rating),
+            _sidecar_base_model(path),
+            path.stem,
+            list(TIERS[tier].get("lora_base_models") or []),
+        )
+    return _mutate_rental_build(tier, lambda entry: entry.__setitem__("loras", wanted))
+
+
+def set_rental_build_checkpoint(tier: str, dest: str, model_id: str, url: str = "") -> dict:
+    """Stand an installed checkpoint in for one of a tier's default weights.
+
+    It lands on the box under the DEFAULT's filename, so every graph that names
+    that weight keeps working untouched — the swap is one file, not a second
+    lane. An empty model id clears the swap.
+
+    The checkpoint has to name a source a box can reach: a public Hugging Face
+    file URL (used verbatim), or a Civitai version (resolved to a signed URL at
+    rent time). `url` overrides both — the mirror for a file whose sidecar
+    names none."""
+    if tier not in TIERS:
+        raise GpuRentalError(f"unknown rental tier '{tier}'", status_code=404)
+    dest = str(dest or "").strip()
+    if dest not in {row["dest"] for row in tier_base_weights(tier)}:
+        raise GpuRentalError(f"'{dest}' is not a base weight this tier serves", status_code=400)
+    if not str(model_id or "").strip():
+        return _mutate_rental_build(
+            tier,
+            lambda entry: entry.__setitem__(
+                "checkpoints", {k: v for k, v in (entry.get("checkpoints") or {}).items() if k != dest},
+            ),
+        )
+    path = _resolve_local_checkpoint(model_id)
+    record = _checkpoint_record(path)
+    swap = {
+        "id": record["id"],
+        "filename": path.name,
+        "size_gb": record["size_gb"],
+        "added_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    pasted = str(url or "").strip()
+    if pasted and not _HF_FILE_URL.match(pasted):
+        # Under 220 characters and free of paths, braces and newlines ON PURPOSE:
+        # describeFailure demotes anything longer or more technical to "…failed"
+        # and hides the rest behind Details, which is exactly where the fix
+        # would stop being read. The file it refers to is on screen beside it.
+        raise GpuRentalError(
+            "That is not a Hugging Face file URL. It has to name the file itself — "
+            ".../resolve/main/<name>.safetensors — not the page the model lives on.",
+            status_code=400,
+        )
+    if pasted or record["source"] == "huggingface":
+        swap["source"] = "huggingface"
+        swap["url"] = pasted or record["url"]
+    elif record["civitai"].get("version_id"):
+        # Resolve it ONCE here, and throw the answer away. Not every file on
+        # Civitai is servable to this account — Early Access ones answer 403
+        # with "you can use Buzz to access it now" — and finding that out at
+        # rent time means a box that is already billing. The refusal carries
+        # Civitai's own sentence. Access can still change between now and the
+        # next rental, so the rent-time resolution stays too; this only makes
+        # the common failure land where the decision is made.
+        _civitai_signed_url(
+            str(record["civitai"]["version_id"]),
+            str(record["civitai"].get("file_id") or ""),
+        )
+        # Stable ids, never a signed URL: one expires, and both are things a
+        # commit should not carry. The redirect is followed again per rental.
+        swap["source"] = "civitai"
+        swap["civitai"] = record["civitai"]
+    else:
+        raise GpuRentalError(
+            "That checkpoint has no Civitai or Hugging Face metadata, so a rented box has "
+            "nowhere to fetch it from. Paste the Hugging Face URL that serves this exact file.",
+            status_code=400,
+        )
+
+    def apply(entry: dict) -> None:
+        entry["checkpoints"] = {**(entry.get("checkpoints") or {}), dest: swap}
+
+    return _mutate_rental_build(tier, apply)
 
 # --- provisioning ----------------------------------------------------------
 
@@ -1106,6 +1897,68 @@ def tier_installs_seedvr2_trt(tier: str) -> bool:
     three together, so they cannot drift apart again.
     """
     return "restore" in (TIERS[tier].get("studio_pages") or [])
+
+
+def _torch_cu130_lines(total: int) -> list[str]:
+    """Put the box on a CUDA 13 torch, because below it EVERY quantized model
+    on this stack runs on an unoptimized fallback.
+
+    comfy/quant_ops.py does exactly this at import:
+
+        if tuple(map(int, str(torch.version.cuda).split('.'))) < (13,):
+            ck.registry.disable("cuda")
+
+    That one line turns off comfy-kitchen's CUDA backend, which is what
+    supplies int8_linear, dequantize_int8_convrot_weight, scaled_mm_nvfp4 and
+    sol_attn. So the H3 tier's int8_convrot DiT, its nvfp4 text encoder and the
+    int8_convrot video VAE all fall back to dequantize-then-compute.
+
+    MEASURED 2026-09-18 on one rented 5090 (vast:51438645), same seeds, same
+    graph, warm, only torch changed — a 5s 960x544 clip end to end:
+
+        torch 2.10.0+cu128   int8 VAE 123.5s   fp16 VAE 113.0s
+        torch 2.14.0+cu130   int8 VAE  48.4s   fp16 VAE  48.5s
+
+    i.e. ~2.3x on every H3 render. Isolated, the VAE decode alone goes 12.10s ->
+    2.38s and its working set 1.55GiB -> 0.52GiB. Both images we rent ship below
+    the line (Vast's automatic tag gave cu128; the RunPod pin names cuda-12.9),
+    so this has been costing every H3 rental since the tier existed.
+
+    Nothing here is fatal. A box that cannot reach the torch index is slow, not
+    broken, and a slow box still renders — so a failure logs and carries on with
+    whatever torch the image shipped.
+
+    torchvision and torchaudio are upgraded WITH torch, never after: they pin an
+    exact torch build, and a lone torch bump leaves `import torchvision` raising
+    "operator torchvision::nms does not exist", which ComfyUI cannot start past.
+
+    Kept deliberately terse: Vast caps the onstart at 16KB and the headroom
+    guard in the test suite pins the slack, so the reasoning lives up here
+    (free) rather than in emitted bash (not free).
+    """
+    return [
+        # torch.version.cuda is None on a CPU build; "0" makes that read as too
+        # old and lets the install decide, instead of indexing into None.
+        "C=$(python -c \"import torch;print((torch.version.cuda or '0').split('.')[0])\""
+        " 2>/dev/null||echo 0)",
+        # All three in ONE pip command, never torch alone: they pin each other,
+        # and a half-applied upgrade leaves `import torchvision` raising
+        # "operator torchvision::nms does not exist", which ComfyUI cannot start
+        # past. `||true` because a box that could not reach the index is slow,
+        # not broken, and a slow box still renders.
+        # One f-string for the whole command. Written as an f-prefixed head and
+        # plain concatenated tails it emitted `; }}` — the f prefix applies PER
+        # LITERAL, so the closing `}}` in a non-f tail stays two characters and
+        # the onstart dies with "syntax error: unexpected end of file".
+        # -U is load-bearing, not tidiness. Without it pip reads the bare
+        # requirement `torch` as already satisfied by the cu128 build the image
+        # ships, prints nothing under -q, exits 0, and the whole upgrade is a
+        # SILENT no-op — measured on vast:51471250, where the beacon announced
+        # the upgrade and the box stayed on 2.10.0+cu128.
+        f'[ "${{C:-0}}" -lt 13 ] && {{ beacon torch {total} "Upgrading torch to CUDA 13";'
+        f" pip install -qU --index-url https://download.pytorch.org/whl/cu130"
+        f" torch torchvision torchaudio >/root/torch.log 2>&1||true; }}",
+    ]
 
 
 def _seedvr2_trt_install_lines(tier: str) -> list[str]:
@@ -1377,7 +2230,76 @@ RENTAL_MANIFEST_PREFIX = "rental-manifests/"
 RENTAL_MANIFEST_TTL_SECONDS = 24 * 3600
 
 
-def _rental_manifest(tier: str) -> tuple[str, int]:
+def tier_download_rows(tier: str) -> list[dict]:
+    """Every weight a fresh box pulls for this tier, ONCE per destination.
+
+    One list behind both the manifest and the size math. Two reasons it is a
+    function rather than two loops that happen to agree:
+
+    * A LoRA pinned to a tier that ALREADY serves it from its curated set (the
+      Anima turbo LoRA is in the image set AND installed locally) would
+      otherwise be two rows landing on the same path — the same bytes fetched
+      twice, counted twice in the beacon total, and charged twice to the disk
+      the box is rented with. First row wins: the curated copy is the one the
+      tier was tuned against, and the file is the same either way.
+    * A checkpoint swap replaces a row IN PLACE, under the default weight's
+      filename, so every graph naming that weight keeps resolving on the box.
+
+    Each row is {dest, key, url, civitai, size_gb, optional} and names exactly one source:
+    `key` (an object in our bucket, presigned at manifest time), `url` (fetched
+    from upstream verbatim) or `civitai` (ids whose signed URL is resolved at
+    manifest time). Nothing here touches the network — this is read on every
+    render of the rental-build page.
+    """
+    spec = TIERS[tier]
+    swaps = rental_checkpoint_swaps(tier)
+    rows: list[dict] = []
+    seen: set[str] = set()
+
+    def add(dest: str, *, key: str = "", url: str = "", civitai: dict | None = None,
+            size_gb: float = 2.0, optional: bool = False) -> None:
+        if dest in seen:
+            return
+        seen.add(dest)
+        swap = swaps.get(dest)
+        if swap:
+            rows.append({
+                "dest": dest, "key": "", "url": swap.get("url") or "",
+                "civitai": swap.get("civitai") or {},
+                "size_gb": float(swap.get("size_gb") or 2.0),
+                # A swap stands in for a DEFAULT weight every graph names, so it
+                # is never optional: a box without it cannot run the tier.
+                "optional": False,
+            })
+        else:
+            rows.append({
+                "dest": dest, "key": key, "url": url,
+                "civitai": dict(civitai or {}), "size_gb": float(size_gb),
+                "optional": bool(optional),
+            })
+
+    for object_key, subdir in spec["models"]:
+        add(
+            f"{subdir}/{object_key.rsplit('/', 1)[-1]}",
+            key=object_key,
+            size_gb=MODEL_SIZE_GB.get(object_key, 2.0),
+        )
+    # Registered user LoRAs shape the bandwidth floor exactly like the curated
+    # set does, and land at the same relative path the graph names them by.
+    for lora in _rental_lora_downloads(tier):
+        # Optional: a LoRA is an add-on a generation asks for by name. A box
+        # without one still runs the tier — unlike a base weight, whose absence
+        # breaks every graph — so a miss is named in the rent notice instead of
+        # refusing the rental.
+        add(lora["dest"], key=lora["key"], civitai=lora["civitai"], size_gb=lora["size_gb"],
+            optional=True)
+    for url, subdir, filename, size_gb in spec.get("public_models") or []:
+        add(f"{subdir}/{filename}", url=url, size_gb=size_gb)
+    return rows
+
+
+def _rental_manifest(tier: str, *, skipped: list | None = None,
+                     strict: bool = False) -> tuple[str, int]:
     """The tab-separated manifest for a tier, and how many weights it names.
 
     The tier's curated serving set plus every user LoRA registered for it,
@@ -1385,12 +2307,54 @@ def _rental_manifest(tier: str) -> tuple[str, int]:
     weights verbatim — all counted in the same beacon total and landed by the
     same pget (verified length, atomic move, never a partial counted).
     """
-    spec = TIERS[tier]
+    download_rows = tier_download_rows(tier)
+    # The one hop that leaves this machine at rent time: Civitai's redirect,
+    # followed here so the box receives a signed URL and never a token. Asked
+    # for every Civitai row AT ONCE, then applied in manifest order.
+    #
+    # It used to be one row at a time with each able to raise, which made the
+    # rental only as reliable as its least reliable add-on: measured 2026-09-14,
+    # ten LoRAs pinned to minimaxeros, ONE read timeout, and the whole rental
+    # refused with "Civitai did not answer: HTTPSConnectionPool(…) Read timed
+    # out" while the box, the base model and the other nine were all fine.
+    pending = [(index, row) for index, row in enumerate(download_rows) if not row["url"] and row["civitai"]]
+    answers: dict[int, Any] = {}
+    if pending:
+        with ThreadPoolExecutor(max_workers=min(_CIVITAI_PARALLEL, len(pending))) as pool:
+            futures = {
+                index: pool.submit(
+                    _civitai_signed_url,
+                    str(row["civitai"].get("version_id") or ""),
+                    str(row["civitai"].get("file_id") or ""),
+                )
+                for index, row in pending
+            }
+            for index, future in futures.items():
+                try:
+                    answers[index] = future.result()
+                except GpuRentalError as exc:
+                    answers[index] = exc
     rows: list[tuple[str, str]] = []
-    for object_key, subdir in list(spec["models"]) + _rental_lora_downloads(tier):
-        rows.append((_presign_r2_get(object_key), f"{subdir}/{object_key.rsplit('/', 1)[-1]}"))
-    for url, subdir, filename, _size_gb in spec.get("public_models") or []:
-        rows.append((url, f"{subdir}/{filename}"))
+    for index, row in enumerate(download_rows):
+        if row["url"]:
+            source = row["url"]
+        elif row["civitai"]:
+            answer = answers[index]
+            if isinstance(answer, GpuRentalError):
+                # An add-on is left off THIS box and the rental goes ahead; the
+                # caller names it. A required weight still refuses — before a
+                # box is paid for — and so does anything while `strict`, which
+                # is warm-volume stocking: a volume stocked without a file hands
+                # that gap to every warm box after it, and none re-download.
+                if row.get("optional") and not strict:
+                    if skipped is not None:
+                        skipped.append({"lora": row["dest"].removeprefix("loras/"), "reason": str(answer)})
+                    continue
+                raise answer
+            source = answer
+        else:
+            source = _presign_r2_get(row["key"])
+        rows.append((source, row["dest"]))
     if tier_installs_seedvr2_trt(tier):
         # Not a weight, but a file the box must have before ComfyUI starts, and
         # the manifest is the one channel that costs the onstart nothing per
@@ -1488,9 +2452,9 @@ def _publish_rental_manifest(text: str) -> str:
     )
 
 
-def _onstart_script(tier: str) -> str:
+def _onstart_script(tier: str, *, skipped: list | None = None, strict: bool = False) -> str:
     spec = TIERS[tier]
-    manifest, total = _rental_manifest(tier)
+    manifest, total = _rental_manifest(tier, skipped=skipped, strict=strict)
     manifest_url = _publish_rental_manifest(manifest)
     lines = [
         "#!/bin/bash",
@@ -1565,10 +2529,10 @@ def _onstart_script(tier: str) -> str:
             # read 30.5 against a real 29.2GiB limit on one box and 63 against
             # 171GiB on another. This runs on the box itself, so it is the
             # authoritative check; the listing filter only saves the rental fee.
-            f'if [ "$RAM_GB" -lt {TIERS["minimax"]["min_ram_gb"]} ]; then',
+            f'if [ "$RAM_GB" -lt {spec["min_ram_gb"]} ]; then',
             '  beacon error 0 "this box gives the container only ${RAM_GB}GB of system RAM;'
             f' MiniMax H3 stages a 20GB transformer and a 15GB encoder through it and needs'
-            f' {TIERS["minimax"]["min_ram_gb"]}GB — destroy this machine and rent another"',
+            f' {spec["min_ram_gb"]}GB — destroy this machine and rent another"',
             "  exit 1",
             "fi",
             'if [ "$RAM_GB" -lt 48 ];'
@@ -1720,8 +2684,12 @@ def _onstart_script(tier: str) -> str:
         # After the downloads (the archive is one of them), before the launch
         # (custom nodes are scanned once, at startup).
         *_seedvr2_trt_install_lines(tier),
-        f'beacon starting-comfy {total} "Launching ComfyUI"',
         ". /venv/main/bin/activate",
+        # Inside the venv, before the launch: comfy_kitchen picks its backend at
+        # import time, so a torch swapped underneath a running ComfyUI changes
+        # nothing.
+        *_torch_cu130_lines(total),
+        f'beacon starting-comfy {total} "Launching ComfyUI"',
         "cd /workspace/ComfyUI",
         # Stock memory flags on purpose: --highvram OOMs the convrot loader
         # (tuning sweep 2026-07-31). Bound to localhost — reach it over SSH.
@@ -1764,13 +2732,10 @@ def _onstart_script(tier: str) -> str:
 
 def tier_download_gb(tier: str) -> float:
     """Total bytes a fresh box must pull for this tier (unknown files ~2GB)."""
-    spec = TIERS[tier]
-    total = sum(MODEL_SIZE_GB.get(key, 2.0) for key, _ in spec["models"])
-    total += sum(size for _url, _sub, _name, size in spec.get("public_models") or [])
-    # Registered user LoRAs count too: they shape the bandwidth floor exactly
-    # like the curated set does.
-    total += sum(float(entry.get("size_gb") or 2.0) for entry in rental_loras_for_tier(tier))
-    return round(total, 1)
+    # The same rows the manifest is built from, so the bytes a box downloads and
+    # the volume it is rented with can never disagree — and a swapped weight is
+    # counted at the swap's size, not the default's.
+    return round(sum(row["size_gb"] for row in tier_download_rows(tier)), 1)
 
 
 def tier_min_down_mbps(tier: str) -> int:
@@ -2402,6 +3367,9 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
         # (0.0 = launched without it, None = unknown or not attached). The H3
         # motion-reference budget needs the tier's comfy_vram_headroom_gb.
         "vram_headroom_gb": (attachment or {}).get("vram_headroom_gb"),
+        # What this box was rented for, so a studio handed the machine lands on
+        # the lane it was bought for rather than the first one that matches.
+        "primary_workflow": TIERS.get(_tier_from_label(label), {}).get("primary_workflow", ""),
         "studio_pages": (attachment or {}).get("studio_pages")
         or TIERS.get(_tier_from_label(label), {}).get("studio_pages", []),
         "gpu": instance.gpu_name,
@@ -2443,6 +3411,54 @@ RENT_PRICE_TOLERANCE_FRACTION = 0.03
 def rent_price_cap(quoted_usd_per_hour: float) -> float:
     return round(quoted_usd_per_hour + max(RENT_PRICE_TOLERANCE_USD,
                                            RENT_PRICE_TOLERANCE_FRACTION * quoted_usd_per_hour), 4)
+
+
+def _price_moved(
+    tier: str, gpu_class: str, count: int, quoted: float, now: float | None,
+    *, because: Exception | None = None,
+) -> GpuRentalError:
+    """The order could not be filled at the quoted price — as a QUESTION.
+
+    This used to be a dead end. The card quoted the cheapest ask, the ask was
+    gone by the time the order landed, and the refusal said "rent again to take
+    the new price" — while the refreshed card re-quoted the SAME dead ask, so
+    renting again reproduced it exactly. Seen live 2026-09-14: a stale Vast ask
+    at $0.8185/hr sat at the top of the market, was the only offer inside its
+    own tolerance, and failed every attempt; the owner was told the price had
+    moved to $0.863 and then handed the $0.819 button again.
+
+    So the numbers ride on the error and the view asks whether to go ahead at
+    the new one. Renting at a HIGHER price than the person agreed to is the
+    only case that needs asking: `cap` is an upper bound, so an ask that got
+    CHEAPER is inside it already and is taken without a word — the quote is
+    what they agreed to pay, and paying less than it needs no permission.
+
+    `now` is None when the market went empty rather than dearer; there is no
+    new price to offer, so that stays a plain refusal.
+    """
+    label = GPU_CLASSES.get(gpu_class, {}).get("label", gpu_class)
+    if now is None:
+        return GpuRentalError(
+            f"the ${quoted:.3f}/hr {label} was taken before the order landed and nothing has "
+            "replaced it yet. Nothing was rented; try again in a moment",
+            status_code=409,
+        )
+    # The sentence is for callers with no UI (agents, the MCP). A view reads
+    # `priceChanged` and asks instead of printing this.
+    reason = f" ({because})" if because else ""
+    return GpuRentalError(
+        f"the ${quoted:.3f}/hr {label} was taken before the order landed{reason}; the cheapest "
+        f"now is ${now:.3f}/hr. Nothing was rented — rent again to take it at ${now:.3f}/hr",
+        status_code=409,
+        payload={"priceChanged": {
+            "quoted": round(float(quoted), 4),
+            "now": round(float(now), 4),
+            "tier": tier,
+            "gpuClass": gpu_class,
+            "gpuLabel": label,
+            "count": int(count),
+        }},
+    )
 
 
 def _forget_offers(tier: str) -> None:
@@ -2917,6 +3933,31 @@ def _running_burn(instances: list[Instance]) -> float:
     return round(sum(i.usd_per_hour for i in instances if i.state != "stopped"), 4)
 
 
+def _instances_by_provider() -> dict[str, list[Instance] | None]:
+    """Every configured marketplace's rentals, keyed by provider — or None for
+    a marketplace whose list call failed.
+
+    The None is the point. _all_instances flattens this and skips the failed
+    provider, which is right for a machine LIST (one broken key must not hide
+    the boxes billing on the other marketplace) and wrong for anything that
+    acts on a machine being ABSENT: a failed call and an empty account both
+    flatten to "no instances", and detach_vanished_rentals would tear down a
+    live lane on a Vast 429. Callers that act on absence read this form and
+    act only where the answer is a list.
+    """
+    listed: dict[str, list[Instance] | None] = {}
+    for provider in _require_a_marketplace():
+        try:
+            listed[provider.key] = list(provider.list_instances())
+        except ProviderError:
+            listed[provider.key] = None
+    return listed
+
+
+def _flatten_instances(listed: dict[str, list[Instance] | None]) -> list[Instance]:
+    return [instance for instances in listed.values() if instances is not None for instance in instances]
+
+
 def _all_instances() -> list[Instance]:
     """Every rental on every configured marketplace.
 
@@ -2924,15 +3965,10 @@ def _all_instances() -> list[Instance]:
     _provider_offers: one broken key must not hide the machines that ARE
     running and billing on the other provider. That is the one place where
     swallowing an error is safer than raising it — an unlisted machine is an
-    unkillable machine.
+    unkillable machine. _instances_by_provider is the same listing in the form
+    that still says which marketplace did not answer.
     """
-    instances: list[Instance] = []
-    for provider in _require_a_marketplace():
-        try:
-            instances.extend(provider.list_instances())
-        except ProviderError:
-            continue
-    return instances
+    return _flatten_instances(_instances_by_provider())
 
 
 def account_state(instances: list[Instance] | None = None) -> dict:
@@ -3022,15 +4058,22 @@ def list_rentals(*, settle: bool = True) -> dict:
     """The Machines view's payload.
 
     `settle` carries the BOOKKEEPING half — destroying a box that failed to
-    provision, and marking a warm volume stocked. Both destroy machines, and
-    both used to run inside the GET that every mounted studio polls. They now
-    belong to the snapshot refresher (register_gpu_rental_routes), which is a
+    provision, marking a warm volume stocked, and dropping the lane of a rental
+    its marketplace no longer lists. The first two destroy machines, and all of
+    it used to run inside the GET that every mounted studio polls. It now
+    belongs to the snapshot refresher (register_gpu_rental_routes), which is a
     background thread: a read stays a read, and a request that has to build its
     own snapshot cold does not reap on the way past.
     """
-    raw = _all_instances()
+    listed = _instances_by_provider()
+    raw = _flatten_instances(listed)
     instances = _probe_instances(raw)
     if settle:
+        # A lane whose rental is gone comes down first: the gateway routes by
+        # the registry per request, so every poll this waits is another
+        # MiniMax job sent to a tunnel with nothing behind it.
+        for entry in detach_vanished_rentals(listed):
+            print(f"[gpu-rentals] detached lane {entry['lane']}: {entry['reason']}", file=sys.stderr)
         # A stocking box that reports ready has filled its warm volume: mark the
         # volume stocked and destroy the box. Free — the DTOs are in hand.
         try:
@@ -3106,23 +4149,13 @@ def _assert_affordable(provider_key: str, count: int, usd_per_hour: float) -> No
     )
 
 
-def create_rental(
-    tier: str,
-    offer_id: str | int | None = None,
-    prefer: str = "balanced",
-    gpu_class: str | None = None,
-    count: int = 1,
-    max_usd_per_hour: float | None = None,
-    *,
-    warm: bool = True,
-    _warm_volume: dict | None = None,
-    _label_note: str | None = None,
-) -> dict:
-    """... `warm`: mount the tier's stocked warm volume on providers that have
-    one (RunPod), so the box skips every weight download; False rents a cold
-    box even when a volume exists. `_warm_volume`/`_label_note` are how
-    create_warm_volume() rents the stocking box: the volume to fill, and a
-    label marker the settle step recognises."""
+def rental_gpu_class(tier: str, gpu_class: str | None = None) -> str:
+    """The card a rental of `tier` goes out on — the one asked for, else the
+    tier's reference card — refused when the tier cannot run on it.
+
+    Asks no marketplace, so a background order runs it before answering: a
+    request that could never succeed is refused at the click, not reported a
+    second later as an order that failed."""
     if tier not in TIERS:
         raise GpuRentalError(f"unknown tier: {tier}", status_code=400)
     ladder = tier_gpu_classes(tier)
@@ -3136,10 +4169,36 @@ def create_rental(
             + ")",
             status_code=400,
         )
+    return gpu_class
+
+
+def create_rental(
+    tier: str,
+    offer_id: str | int | None = None,
+    prefer: str = "balanced",
+    gpu_class: str | None = None,
+    count: int = 1,
+    max_usd_per_hour: float | None = None,
+    *,
+    warm: bool = True,
+    _warm_volume: dict | None = None,
+    _label_note: str | None = None,
+    _on_stage: Callable[[str], None] | None = None,
+) -> dict:
+    """... `warm`: mount the tier's stocked warm volume on providers that have
+    one (RunPod), so the box skips every weight download; False rents a cold
+    box even when a volume exists. `_warm_volume`/`_label_note` are how
+    create_warm_volume() rents the stocking box: the volume to fill, and a
+    label marker the settle step recognises. `_on_stage` hears each step of
+    placing the order as it begins — "searching", "preparing", "renting" —
+    which is how a background order says where it is."""
+    gpu_class = rental_gpu_class(tier, gpu_class)
+    stage = _on_stage or (lambda _name: None)
     count = max(1, min(int(count), MAX_BATCH_MACHINES))
     # Renting a box we could never log into bills by the hour for nothing, so
     # prove the key exists BEFORE the money starts (the onstart below embeds it).
     rental_public_key()
+    stage("searching")
 
     # Always search, even when the caller pinned an offer. Marketplace asks go
     # stale within SECONDS, so a UI-supplied offer_id is by definition older
@@ -3179,13 +4238,7 @@ def create_rental(
         cheapest_now = ranked[0]["usd_per_hour"] if ranked else None
         if cap is not None and cheapest_now is not None:
             _forget_offers(tier)
-            raise GpuRentalError(
-                f"the ${max_usd_per_hour:.3f}/hr quote is gone — the cheapest "
-                f"{GPU_CLASSES.get(gpu_class, {}).get('label', gpu_class)} now is "
-                f"${cheapest_now:.3f}/hr. Nothing was rented; the quote has been refreshed, "
-                "rent again to take it at that price",
-                status_code=409,
-            )
+            raise _price_moved(tier, gpu_class, count, max_usd_per_hour, cheapest_now)
         if search_failures:
             # Not a sold-out market: nobody was asked successfully. Renting is
             # where this matters most — "no offers match the tier filters" sent
@@ -3204,8 +4257,12 @@ def create_rental(
     if quote is not None:
         _assert_affordable(quote["provider"], count, quote["usd_per_hour"])
 
-    onstart = _onstart_script(tier)
+    # Stocking a warm volume is strict: see _rental_manifest.
+    stage("preparing")
+    skipped_loras: list[dict] = []
+    onstart = _onstart_script(tier, skipped=skipped_loras, strict=bool(_warm_volume))
 
+    stage("renting")
     state: dict[str, Any] = {"tried": 0, "last_error": None}
     # One offer per machine: a marketplace ask is a slot, so renting the same
     # one twice in a batch is how you ask for N machines and get one.
@@ -3279,13 +4336,9 @@ def create_rental(
             # Everything within tolerance evaporated; name what is left so the
             # refreshed card and this message agree.
             over = [dto["usd_per_hour"] for dto in ranked if dto["usd_per_hour"] > cap]
-            tail = f" — the cheapest left is ${min(over):.3f}/hr" if over else ""
-            raise GpuRentalError(
-                f"the ${max_usd_per_hour:.3f}/hr quote was taken before the order landed, and "
-                f"nothing within a few cents of it is left{tail}. Nothing was rented; the quote "
-                "has been refreshed, rent again to take the new price",
-                status_code=409,
-            ) from state["last_error"]
+            raise _price_moved(tier, gpu_class, count, max_usd_per_hour,
+                               min(over) if over else None,
+                               because=state["last_error"]) from state["last_error"]
         raise GpuRentalError(
             f"all {state['tried']} candidate offers were taken before we could rent them — "
             "the market moved; try again",
@@ -3302,6 +4355,18 @@ def create_rental(
             f"rented {len(created)} of {count} — the rest of the matching offers were "
             "taken while the batch was going out"
         )
+    if skipped_loras:
+        # Said where the rent result is read, naming the files: "some LoRAs are
+        # missing" would send someone checking all ten by hand.
+        names = ", ".join(Path(item["lora"]).name for item in skipped_loras)
+        plural = len(skipped_loras) != 1
+        note = (
+            f"rented without {len(skipped_loras)} pinned LoRA{'s' if plural else ''} Civitai did not "
+            f"hand over in time ({names}). The machine and every other LoRA are there — rent again "
+            f"later to bring {'them' if plural else 'it'} in"
+        )
+        result["partial"] = "; ".join(filter(None, [result.get("partial"), note]))
+        result["skipped_loras"] = [item["lora"] for item in skipped_loras]
     return result
 
 
@@ -3913,6 +4978,152 @@ def recent_rental_failures(within_seconds: float = 6 * 3600) -> list[dict]:
     ]
 
 
+# What the worker's ledger says when it ended a rental on its own, in the
+# user's terms. Only the codes seen on the live worker are translated; any
+# other code is shown as the worker wrote it.
+_END_REASON_HINTS = {
+    "keepalive-lapsed": (
+        "this studio stopped checking in for longer than the hosted marketplace allows "
+        "(the Mac was asleep or offline), so the worker released the box as abandoned"
+    ),
+    "provisioning-failed": "the box never finished provisioning, so the worker released it",
+}
+
+
+def _ledger_row(ref: RentalRef) -> dict | None:
+    """The worker's ledger entry for this rental — hosted transport only.
+
+    Never raises: the reason is a courtesy on top of the detach, and a worker
+    that cannot be reached must not keep a dead lane routing.
+    """
+    if rental_gateway.transport() != rental_gateway.TRANSPORT_GATEWAY:
+        return None
+    try:
+        rows = rental_gateway.rentals()
+    except Exception:  # noqa: BLE001 — ProviderError, and anything under it
+        return None
+    matches = [
+        row for row in rows
+        if str(row.get("provider") or "").lower() == ref.provider
+        and str(row.get("nativeId") or "") == ref.native
+    ]
+    ended = [row for row in matches if str(row.get("status") or "").lower() == "ended"]
+    return (ended or matches)[-1] if matches else None
+
+
+def _ledger_hours(row: dict) -> float | None:
+    """How long the box ran by the ledger's own clock; None when it is not there."""
+    try:
+        started = datetime.fromisoformat(str(row["startedAt"]).replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(str(row["endedAt"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return max(0.0, (ended - started).total_seconds() / 3600)
+
+
+def detach_vanished_rentals(listed: dict[str, list[Instance] | None]) -> list[dict]:
+    """Drop every attachment whose rental its marketplace no longer lists.
+
+    The studio's own destroy and reap paths detach before a box goes away,
+    but a rental can end WITHOUT the studio: the hosted worker stops one whose
+    keepalive lapsed (this Mac asleep — 2026-09-14, Vast 50991951), whose
+    provisioning stalled or whose lifetime cap passed, and a marketplace
+    reclaims a box when the account runs dry. None of that ran detach_rental,
+    so the registry kept naming the lane, the gateway kept routing MiniMax
+    jobs to a tunnel with nothing behind it, and the Machines list — where
+    the error said to re-attach from — was empty.
+
+    `listed` is _instances_by_provider(): a lane is dropped only when ITS
+    provider's list call succeeded and came back without the rental. A
+    failed call (None) keeps every attachment it covers — an empty answer
+    from a broken key is not an empty account, and detaching on it would
+    take a live machine out of routing for a Vast 429. A provider missing
+    from `listed` is not configured here, and its lanes are left alone for
+    the same reason.
+
+    Recorded in the failure log like a reaped box, with the worker's own end
+    reason when its ledger has one, so the Machines view can say what
+    happened to a machine that has simply stopped being there. Never raises:
+    this runs inside the snapshot refresher and the reaper sweep.
+    """
+    attachments = _read_attachments()
+    if not attachments:
+        return []
+    present = {
+        provider: {instance.native_id for instance in instances}
+        for provider, instances in listed.items() if instances is not None
+    }
+    recorded: list[dict] = []
+    state: dict | None = None
+    now = time.time()
+    for key, attachment in list(attachments.items()):
+        try:
+            ref = RentalRef.parse(key)
+        except ProviderError:
+            continue
+        if str(ref) != key or ref.provider not in present or ref.native in present[ref.provider]:
+            # A key detach_rental could not remove anyway (pre-RentalRef, bare
+            # int), a marketplace that did not answer, or a box still there.
+            continue
+        lane = attachment.get("lane") or _lane_name(ref)
+        row = _ledger_row(ref) or {}
+        end_reason = str(row.get("endReason") or "").strip() or None
+        if end_reason:
+            hint = _END_REASON_HINTS.get(end_reason)
+            reason = (
+                f"the hosted marketplace ended rental {ref} ({end_reason})"
+                + (f": {hint}" if hint else "")
+                + f". Its lane {lane} was detached so jobs stop routing to the dead tunnel."
+            )
+        else:
+            reason = (
+                f"{rental_providers.get(ref.provider).label} no longer lists rental {ref}; it "
+                f"ended outside the studio. Its lane {lane} was detached so jobs stop routing "
+                f"to the dead tunnel."
+            )
+        tier = attachment.get("tier")
+        hours = _ledger_hours(row) if row else None
+        rate = row.get("rateUsdPerHour")
+        spent = row.get("chargedUsd")
+        entry = {
+            "kind": "vanished",
+            "rental_id": str(ref),
+            "provider": ref.provider,
+            "label": row.get("label"),
+            "tier": tier,
+            "tier_label": TIERS[tier]["label"] if tier in TIERS else None,
+            "lane": lane,
+            "gpu_class": None,
+            "gpu": None,
+            # No host is indicted: the box went away, it did not fail us.
+            "machine_id": None,
+            "reason": reason,
+            "end_reason": end_reason,
+            "progress": None,
+            "uptime_hours": round(hours, 3) if hours is not None else None,
+            "usd_per_hour": float(rate) if isinstance(rate, (int, float)) else None,
+            "usd_spent": round(float(spent), 4) if isinstance(spent, (int, float)) else None,
+            # The recency clock recent_rental_failures reads: the box is as
+            # gone as a destroyed one.
+            "destroyed_at": now,
+            "detached_at": now,
+        }
+        try:
+            detach_rental(ref)
+        except Exception as exc:  # noqa: BLE001 — a failed detach must not break the sweep
+            entry["detach_error"] = str(exc)[:200]
+        else:
+            # The remembered beacon reading described a box that is gone.
+            _forget_beacon(str(ref))
+        if state is None:
+            state = _read_failure_state()
+        state["log"].append(entry)
+        recorded.append(entry)
+    if state is not None:
+        _write_failure_state(state)
+    return recorded
+
+
 def _same_rental(left: Any, right: Any) -> bool:
     """Older log entries carry a bare Vast int; the view sends "vast:31"."""
     try:
@@ -4321,8 +5532,19 @@ def _reaper_loop(stopping: threading.Event | None = None) -> None:
     delay = REAPER_INTERVAL_SECONDS
     while not stopping.wait(delay):
         try:
-            instances = _all_instances()
+            listed = _instances_by_provider()
+            instances = _flatten_instances(listed)
             managed = [i for i in instances if i.label.startswith(STUDIO_LABEL_PREFIX)]
+            # A rental that ended without the studio (the worker stopped it,
+            # the account ran dry) leaves its lane routing to nothing until
+            # somebody detaches it. This sweep is what runs while nobody has
+            # the Machines view open, so it is done here as well — and not
+            # behind the autoreap switch: that keeps a FAILED box alive for a
+            # hand recovery, and a box that no longer exists has nothing to
+            # recover.
+            for entry in detach_vanished_rentals(listed):
+                print(f"[gpu-rentals] detached lane {entry['lane']} — rental {entry['rental_id']} "
+                      f"is gone: {entry['reason']}", flush=True)
             if RENTAL_AUTOREAP:
                 # Probe the beacon only for studio boxes: the phase this turns
                 # on is the whole reason for the sweep. With autoreap off the
@@ -4371,6 +5593,64 @@ def _remember_rental(request_id: str, result: dict) -> None:
         _rental_requests[request_id] = (time.monotonic(), dict(result))
 
 
+# POST /api/gpu-rentals {"background": true} places the rent as an ORDER and
+# answers at once; the list reports the order until it resolves. The click used
+# to hold one request open for the whole placement — offer search 4.7s, credit
+# check 3.2s, the Civitai links 1.6s (96s on a slow day), the manifest upload,
+# then the marketplace's own order, measured on the Eros tier 2026-09-15 —
+# behind a spinner that had nothing to say. An order names the step it is on,
+# and a finished one is kept for the replay window so a view that missed the
+# moment still reads how it ended.
+_rental_orders: dict[str, dict] = {}
+_rental_orders_lock = threading.Lock()
+
+
+def _open_rental_order(order_id: str, tier: str, gpu_class: str, count: int,
+                       quoted_usd_per_hour: float | None) -> dict:
+    order = {
+        "order_id": order_id,
+        "tier": tier,
+        "tier_label": TIERS[tier]["label"],
+        "gpu_class": gpu_class,
+        "gpu_label": GPU_CLASSES.get(gpu_class, {}).get("label", gpu_class),
+        "count": count,
+        "quoted_usd_per_hour": quoted_usd_per_hour,
+        # searching → preparing → renting → placed | failed
+        "stage": "searching",
+        "started_at": time.time(),
+        "finished_at": None,
+        "rental_ids": [],
+        "usd_per_hour": None,
+        "partial": None,
+        "error": None,
+    }
+    with _rental_orders_lock:
+        _rental_orders[order_id] = order
+        return dict(order)
+
+
+def _update_rental_order(order_id: str, **fields: Any) -> None:
+    with _rental_orders_lock:
+        if order_id in _rental_orders:
+            _rental_orders[order_id].update(fields)
+
+
+def rental_order(order_id: str) -> dict | None:
+    with _rental_orders_lock:
+        order = _rental_orders.get(order_id)
+        return dict(order) if order else None
+
+
+def rental_orders() -> list[dict]:
+    """Every open order, and the finished ones still inside the replay window."""
+    now = time.time()
+    with _rental_orders_lock:
+        for key in [key for key, order in _rental_orders.items()
+                    if order["finished_at"] and now - order["finished_at"] > RENTAL_REQUEST_TTL_SECONDS]:
+            _rental_orders.pop(key, None)
+        return sorted((dict(order) for order in _rental_orders.values()), key=lambda order: order["started_at"])
+
+
 # How long one machine-list snapshot serves every poller. Each mounted studio
 # asks every 30s (8s while a box provisions) and the Machines view asks too, and
 # a build lists every configured marketplace and probes every box (1.5s beacon +
@@ -4406,6 +5686,7 @@ def _rental_state_fingerprint() -> tuple:
 def register_gpu_rental_routes(app, require_owner) -> None:
     """Attach the owner-gated rental routes to the control API app."""
     from fastapi import Body, Depends, HTTPException
+    from fastapi.responses import JSONResponse
 
     def _guard(fn, *args, **kwargs):
         try:
@@ -4414,6 +5695,15 @@ def register_gpu_rental_routes(app, require_owner) -> None:
             # ProviderError, not GpuRentalError: a marketplace failure raised
             # inside rental_providers/ is the base class, and catching only the
             # subclass would turn a Vast 429 into an unhandled 500.
+            payload = getattr(exc, "payload", None)
+            if payload:
+                # A refusal the view is meant to act on. hubData's api() already
+                # reads `message`/`remedy` off an object detail, so the extra
+                # keys ride alongside without changing what a plain client sees.
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={"message": str(exc), "remedy": getattr(exc, "remedy", ""), **payload},
+                ) from exc
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except requests.RequestException as exc:
             # A ConnectionError/Timeout out of the provider session is not a
@@ -4470,16 +5760,32 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     # bookkeeping rides that thread rather than the GET. Kicked BY a request
     # rather than run on a timer: nobody watching means nothing to refresh, and
     # the standing reaper thread already covers the money side on its own clock.
-    rentals_snapshot: dict[str, Any] = {"payload": None, "at": 0.0, "state": ()}
+    rentals_snapshot: dict[str, Any] = {"payload": None, "at": 0.0, "state": (), "generation": 0}
     rentals_refreshing = threading.Event()
 
-    def _store_rentals_snapshot(payload: dict) -> dict:
-        rentals_snapshot.update(payload=payload, at=time.monotonic(), state=_rental_state_fingerprint())
+    def _store_rentals_snapshot(payload: dict, generation: int | None = None) -> dict:
+        # A build that began before a rent landed must not put back the list
+        # the rent just retired (see _forget_rentals_snapshot).
+        if generation is None or generation == rentals_snapshot["generation"]:
+            rentals_snapshot.update(payload=payload, at=time.monotonic(), state=_rental_state_fingerprint())
         return payload
 
+    def _forget_rentals_snapshot() -> None:
+        """A machine was just rented, so every snapshot so far predates it.
+
+        The view re-reads the list the moment a rent returns, and that read was
+        served the pre-order snapshot for up to RENTALS_SNAPSHOT_TTL_SECONDS:
+        the spinner stopped over a list with no trace of a machine that was
+        already billing (seen live 2026-09-15). Dropping the payload makes the
+        next read build its own; the generation stops a refresh that was already
+        under way from storing the old list over it."""
+        rentals_snapshot["generation"] += 1
+        rentals_snapshot["payload"] = None
+
     def _refresh_rentals_snapshot() -> None:
+        generation = rentals_snapshot["generation"]
         try:
-            _store_rentals_snapshot(list_rentals())
+            _store_rentals_snapshot(list_rentals(), generation)
         except Exception as exc:  # noqa: BLE001 — a stale list beats no Machines view
             print(f"[gpu-rentals] snapshot refresh failed: {exc}", file=sys.stderr)
             rentals_snapshot["at"] = time.monotonic()
@@ -4501,7 +5807,8 @@ def register_gpu_rental_routes(app, require_owner) -> None:
         # bookkeeping though — a page load must never be the thing that destroys
         # a machine.
         if cached is None or rentals_snapshot["state"] != _rental_state_fingerprint():
-            return _store_rentals_snapshot(list_rentals(settle=False))
+            generation = rentals_snapshot["generation"]
+            return _store_rentals_snapshot(list_rentals(settle=False), generation)
         if time.monotonic() - rentals_snapshot["at"] > RENTALS_SNAPSHOT_TTL_SECONDS:
             # Only the marketplace's own view can have gone stale. Serve the
             # previous answer and rebuild behind it, on the thread that also
@@ -4527,10 +5834,12 @@ def register_gpu_rental_routes(app, require_owner) -> None:
                 "failures": [],
                 "account": None,
                 "marketplace": marketplace,
+                "orders": rental_orders(),
             }
         # ok:true like the rest of the studio API (additive; the list is
-        # under its own keys).
-        return {"ok": True, **_guard(_rentals_payload)}
+        # under its own keys). Orders ride OUTSIDE the snapshot: a stage that
+        # is ten seconds stale is a progress bar that does not move.
+        return {"ok": True, **_guard(_rentals_payload), "orders": rental_orders()}
 
     # The rental-LoRA routes come before the {rental_id} ones: Starlette
     # matches in registration order, and a literal "loras" segment must never
@@ -4556,6 +5865,36 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     def gpu_rental_loras_remove(lora_id: str) -> dict:
         return _guard(remove_rental_lora, lora_id)
 
+    # The rental build: which LoRAs and which checkpoint a tier's NEXT boxes
+    # are provisioned with. Literal segments again, ahead of {rental_id}, and
+    # "build/checkpoints" ahead of the {tier} routes for the same reason.
+    @app.get("/api/gpu-rentals/build", dependencies=[Depends(require_owner)])
+    def gpu_rental_build_index() -> dict:
+        return _guard(rental_build_payload)
+
+    @app.get("/api/gpu-rentals/build/checkpoints", dependencies=[Depends(require_owner)])
+    def gpu_rental_build_checkpoints() -> dict:
+        return _guard(list_installed_checkpoints)
+
+    @app.put("/api/gpu-rentals/build/{tier}/loras", dependencies=[Depends(require_owner)])
+    def gpu_rental_build_set_loras(tier: str, payload: dict = Body(default={})) -> dict:
+        ids = payload.get("ids")
+        return _guard(
+            set_rental_build_loras,
+            tier,
+            [str(value) for value in ids] if isinstance(ids, list) else [],
+        )
+
+    @app.put("/api/gpu-rentals/build/{tier}/checkpoint", dependencies=[Depends(require_owner)])
+    def gpu_rental_build_set_checkpoint(tier: str, payload: dict = Body(default={})) -> dict:
+        return _guard(
+            set_rental_build_checkpoint,
+            tier,
+            str(payload.get("dest") or ""),
+            str(payload.get("id") or ""),
+            str(payload.get("url") or ""),
+        )
+
     # Same ordering rule: "failures" is a literal segment, and a DELETE on it
     # must dismiss notices, never reach gpu_rentals_destroy as a rental id.
     @app.delete("/api/gpu-rentals/failures", dependencies=[Depends(require_owner)])
@@ -4565,6 +5904,67 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     @app.delete("/api/gpu-rentals/failures/{rental_id}", dependencies=[Depends(require_owner)])
     def gpu_rental_failures_dismiss(rental_id: str) -> dict:
         return _guard(dismiss_rental_failures, rental_id)
+
+    def _place_rental_order(tier: str, offer_id: str | None, prefer: str, gpu_class: str | None,
+                            count: int, max_usd_per_hour: float | None, request_id: str) -> dict:
+        """Open an order for this rent, place it on a thread, and hand it back."""
+        # Refused here, at the click, whatever needs no marketplace to refuse.
+        gpu_class = _guard(rental_gpu_class, tier, gpu_class)
+        _guard(rental_public_key)
+        with _rentals_in_flight_lock:
+            if tier in _rentals_in_flight:
+                raise HTTPException(status_code=409, detail=RENTAL_IN_FLIGHT_DETAIL)
+            _rentals_in_flight.add(tier)
+        order_id = request_id or uuid.uuid4().hex
+        order = _open_rental_order(order_id, tier, gpu_class, count, max_usd_per_hour)
+
+        def _place() -> None:
+            outcome: dict[str, Any] = {"stage": "failed"}
+            try:
+                result = create_rental(
+                    tier, offer_id, prefer, gpu_class, count, max_usd_per_hour=max_usd_per_hour,
+                    _on_stage=lambda stage: _update_rental_order(order_id, stage=stage),
+                )
+            except ProviderError as exc:
+                # What _guard would have put in the 4xx, so the view reads a
+                # failed order exactly as it read the refusal.
+                outcome["error"] = {
+                    "message": str(exc), "status": exc.status_code, "remedy": getattr(exc, "remedy", ""),
+                    **(getattr(exc, "payload", None) or {}),
+                }
+            except requests.RequestException:
+                outcome["error"] = {"message": "The GPU marketplace is unreachable", "status": 503}
+            except Exception as exc:  # noqa: BLE001 — a thread has no 500 handler to fall back on
+                from .observability import record_incident, remedy_text
+
+                outcome["error"] = {
+                    "message": remedy_text("unexpected"), "status": 500, "unexpected": True,
+                    "incident": record_incident(exc, method="POST", route="/api/gpu-rentals"),
+                }
+            else:
+                result = {"ok": True, **result}
+                outcome = {
+                    "stage": "placed", "rental_ids": [row["rental_id"] for row in result["rentals"]],
+                    "usd_per_hour": result.get("usd_per_hour"), "partial": result.get("partial"),
+                }
+                if request_id:
+                    _remember_rental(request_id, result)
+                # The machine bills from here. Rebuild the list BEFORE saying
+                # so, so the read that learns the order is placed has the machine
+                # in it as well and the view hands one row straight to the other.
+                _forget_rentals_snapshot()
+                generation = rentals_snapshot["generation"]
+                try:
+                    _store_rentals_snapshot(list_rentals(settle=False), generation)
+                except Exception as exc:  # noqa: BLE001 — the next read builds it instead
+                    print(f"[gpu-rentals] list after order {order_id} failed: {exc}", file=sys.stderr)
+            finally:
+                _update_rental_order(order_id, finished_at=time.time(), **outcome)
+                with _rentals_in_flight_lock:
+                    _rentals_in_flight.discard(tier)
+
+        threading.Thread(target=_place, name="gpu-rental-order", daemon=True).start()
+        return order
 
     @app.post("/api/gpu-rentals", status_code=201, dependencies=[Depends(require_owner)])
     def gpu_rentals_create(payload: dict = Body(default={})) -> dict:
@@ -4595,29 +5995,34 @@ def register_gpu_rental_routes(app, require_owner) -> None:
         # RENTAL_REQUEST_TTL_SECONDS answers with the same result and rents
         # nothing new.
         request_id = str(payload.get("request_id") or "").strip()[:128]
+        # {"background": true} is the Machines view: answer with an ORDER now and
+        # place it on a thread (see _rental_orders). Without it the request holds
+        # until the machine is rented, which agents and scripts rely on.
+        background = payload.get("background") is True
         if request_id:
+            order = rental_order(request_id) if background else None
+            if order is not None:
+                return JSONResponse({"ok": True, "order": order}, status_code=202)
             replayed = _replayed_rental(request_id)
             if replayed is not None:
                 return replayed
+        offer = str(offer_id) if offer_id is not None else None
+        card = str(gpu_class) if gpu_class else None
+        if background:
+            order = _place_rental_order(tier, offer, prefer, card, count, max_usd_per_hour, request_id)
+            return JSONResponse({"ok": True, "order": order}, status_code=202)
         with _rentals_in_flight_lock:
             if tier in _rentals_in_flight:
                 raise HTTPException(status_code=409, detail=RENTAL_IN_FLIGHT_DETAIL)
             _rentals_in_flight.add(tier)
         try:
-            result = _guard(
-                create_rental,
-                tier,
-                str(offer_id) if offer_id is not None else None,
-                prefer,
-                str(gpu_class) if gpu_class else None,
-                count,
-                max_usd_per_hour=max_usd_per_hour,
-            )
+            result = _guard(create_rental, tier, offer, prefer, card, count, max_usd_per_hour=max_usd_per_hour)
         finally:
             with _rentals_in_flight_lock:
                 _rentals_in_flight.discard(tier)
         if isinstance(result, dict):
             result = {"ok": True, **result}
+            _forget_rentals_snapshot()
         if request_id and isinstance(result, dict):
             _remember_rental(request_id, result)
         return result

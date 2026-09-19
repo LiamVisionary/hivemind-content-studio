@@ -131,6 +131,53 @@ def test_a_failed_job_reports_a_sanitized_detail_to_the_owner(tmp_path: Path, mo
     assert "/Users" not in payload["detail"] and "progress" not in payload["detail"]
 
 
+def test_the_interpolation_multiplier_reaches_the_runner_from_the_wire(tmp_path: Path, monkeypatch) -> None:
+    """MiniMax H3's frame interpolation is a registry slot, so it travels the
+    whole way as its own field: body -> route -> start_video. It had no wire
+    field at all until the fight preset needed one, and a field the body model
+    does not declare is dropped by pydantic without a word."""
+    seen: list[dict] = []
+
+    def capture(**kwargs):
+        seen.append(kwargs)
+        return {"job_id": "job-interp-1", "uploaded_names": [], "provider": "Media Studio"}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", capture)
+    # The route hands the job to a background finisher the moment start
+    # returns. Left real, it polls the gateway for three hours; stubbed, the
+    # job completes immediately and the test is about the wire field.
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_check",
+        lambda job_id, **_: {"status": "completed", "failed": False, "error": "", "video_url": "x.mp4", "progress": 1.0},
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_finish",
+        lambda job_id, **_: {"video_url": "x.mp4", "output_path": ""},
+    )
+    client = _client(tmp_path, monkeypatch)
+
+    queued = client.post(
+        "/api/media-studio/video/start",
+        json={"prompt": "a duel", "duration_seconds": 5, "interpolate": 2},
+    )
+    assert queued.status_code == 200, queued.text
+    assert seen[-1]["interpolate"] == 2
+
+    # Silence stays silence: no field means the workflow's registered default,
+    # which for every H3 graph is a multiplier of 1 (no interpolation).
+    seen.clear()
+    client.post("/api/media-studio/video/start", json={"prompt": "a duel", "duration_seconds": 5})
+    assert seen[-1]["interpolate"] is None
+
+    # And the cap is the body model's, not the caller's: past 4x the
+    # interpolator is inventing more frames than the model rendered.
+    refused = client.post(
+        "/api/media-studio/video/start",
+        json={"prompt": "a duel", "duration_seconds": 5, "interpolate": 9},
+    )
+    assert refused.status_code == 422, refused.text
+
+
 def test_start_failures_separate_client_mistakes_from_an_unavailable_lane(tmp_path: Path, monkeypatch) -> None:
     """A ValueError/FileNotFoundError out of start is the caller's input → 400
     (a 5xx used to make backoff logic retry something that can never succeed);
@@ -494,6 +541,7 @@ def _fake_vast(monkeypatch, handler):
     gpu_rentals._offer_cache.clear()
     gpu_rentals._rental_requests.clear()
     gpu_rentals._rentals_in_flight.clear()
+    gpu_rentals._rental_orders.clear()
 
 
 def test_a_rental_request_id_is_replayed_not_re_rented(tmp_path: Path, monkeypatch, rental_manifest) -> None:
@@ -547,6 +595,128 @@ def test_one_rental_in_flight_per_tier(tmp_path: Path, monkeypatch, rental_manif
     assert outcome["first"].status_code == 201
     # The lock is released once the rent lands.
     assert client.post("/api/gpu-rentals", json={"tier": "image"}).status_code == 201
+
+
+def _vast_market_that_lists_what_it_rents(monkeypatch, *, before_create=None):
+    """A Vast whose instance list grows by each contract it hands out."""
+    rented: list[dict] = []
+
+    def handler(method, path, payload=None):
+        if path == "/v0/bundles/":
+            return {"offers": [{"id": 77, "dph_total": 0.4}]}
+        if method == "GET" and path == "/v1/instances/":
+            return {"instances": list(rented)}
+        if before_create:
+            before_create()
+        rented.append({"id": 4242 + len(rented), "label": (payload or {}).get("label"), "actual_status": "loading"})
+        return {"new_contract": rented[-1]["id"], "success": True}
+
+    _fake_vast(monkeypatch, handler)
+    return rented
+
+
+def test_a_rented_machine_is_in_the_very_next_list_read(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """Rent landed, spinner stopped, and the list the view re-read right after
+    still said nothing was running — it was the snapshot from before the order,
+    served for up to RENTALS_SNAPSHOT_TTL_SECONDS. Seen live 2026-09-15: a
+    RunPod box was provisioning while the Machines view showed no trace of it."""
+    _vast_market_that_lists_what_it_rents(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    assert client.get("/api/gpu-rentals").json()["rentals"] == []
+    rented = client.post("/api/gpu-rentals", json={"tier": "image"})
+    assert rented.status_code == 201, rented.text
+    listed = [row["rental_id"] for row in client.get("/api/gpu-rentals").json()["rentals"]]
+    assert listed == [rented.json()["rental_id"]]
+
+
+def _await_order(client: TestClient, stage: str, timeout: float = 10.0) -> dict:
+    """Poll the list the way the view does until an order reaches `stage`."""
+    deadline = time.monotonic() + timeout
+    body: dict = {}
+    while time.monotonic() < deadline:
+        body = client.get("/api/gpu-rentals").json()
+        for order in body["orders"]:
+            if order["stage"] == stage:
+                return {**order, "listed": [row["rental_id"] for row in body["rentals"]]}
+        time.sleep(0.02)
+    raise AssertionError(f"no order reached {stage!r}: {body.get('orders')}")
+
+
+def test_a_background_rent_answers_before_the_marketplace_does(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """Rent held one request open for the whole placement — search, credit,
+    Civitai links, upload, the marketplace's order — behind a spinner. With
+    `background` the click gets its order back at once and the list says which
+    step it is on, so the view can draw the progress bar from the first frame."""
+    gate = threading.Event()
+    _vast_market_that_lists_what_it_rents(monkeypatch, before_create=lambda: gate.wait(timeout=10))
+    client = _client(tmp_path, monkeypatch)
+    started = time.monotonic()
+    response = client.post("/api/gpu-rentals", json={"tier": "image", "request_id": "click-bg", "background": True})
+    assert response.status_code == 202, response.text
+    assert time.monotonic() - started < 2, "the answer must not wait on the marketplace"
+    order = response.json()["order"]
+    assert order["order_id"] == "click-bg"
+    assert order["tier_label"] and order["gpu_label"]
+    held = _await_order(client, "renting")
+    assert held["rental_ids"] == [] and held["finished_at"] is None
+    gate.set()
+    placed = _await_order(client, "placed")
+    assert placed["rental_ids"] == ["vast:4242"]
+    # The read that learns the order is placed has the machine in it too, so
+    # the order's row hands straight over to the machine's.
+    assert placed["listed"] == ["vast:4242"]
+
+
+def test_a_background_rent_that_cannot_be_filled_says_why_in_the_list(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    def handler(method, path, payload=None):
+        if path == "/v0/bundles/":
+            return {"offers": [{"id": 77, "dph_total": 0.9}]}
+        if method == "GET":
+            return {"instances": []}
+        raise AssertionError("nothing may be rented above the quoted price")
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/api/gpu-rentals", json={"tier": "image", "background": True, "max_usd_per_hour": 0.4})
+    assert response.status_code == 202, response.text
+    failed = _await_order(client, "failed")
+    # The shape a refusal had as a 409, so the view asks the same question.
+    assert failed["error"]["status"] == 409
+    moved = failed["error"]["priceChanged"]
+    assert moved["quoted"] == 0.4 and moved["now"] > moved["quoted"]
+    # The tier is free again for the rent that takes the new price.
+    assert gpu_rentals._rentals_in_flight == set()
+
+
+def test_a_background_order_is_one_order_per_click_and_per_tier(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    gate = threading.Event()
+    rented = _vast_market_that_lists_what_it_rents(monkeypatch, before_create=lambda: gate.wait(timeout=10))
+    client = _client(tmp_path, monkeypatch)
+    first = client.post("/api/gpu-rentals", json={"tier": "image", "request_id": "click-3", "background": True})
+    assert first.status_code == 202
+    _await_order(client, "renting")
+    # The same click again — a retry, a second tab — is the same order...
+    again = client.post("/api/gpu-rentals", json={"tier": "image", "request_id": "click-3", "background": True})
+    assert again.status_code == 202 and again.json()["order"]["order_id"] == "click-3"
+    # ...and a different click for the same tier waits its turn.
+    other = client.post("/api/gpu-rentals", json={"tier": "image", "request_id": "click-4", "background": True})
+    assert other.status_code == 409
+    gate.set()
+    _await_order(client, "placed")
+    assert len(rented) == 1
+
+
+def test_a_background_rent_refuses_at_the_click_what_needs_no_marketplace(tmp_path: Path, monkeypatch) -> None:
+    def handler(method, path, payload=None):
+        if method == "GET":
+            return {"instances": []}
+        raise AssertionError("a request that can never succeed must not reach a marketplace")
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/api/gpu-rentals", json={"tier": "minimax", "gpu_class": "rtx4090", "background": True})
+    assert response.status_code == 400
+    assert client.get("/api/gpu-rentals").json()["orders"] == []
 
 
 def test_rental_count_and_marketplace_outages_are_not_500s(tmp_path: Path, monkeypatch) -> None:

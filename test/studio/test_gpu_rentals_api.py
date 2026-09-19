@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import socket
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -39,8 +40,14 @@ def _isolate_offer_cache():
 def _isolated_media_state(tmp_path: Path, monkeypatch):
     """_onstart_script and tier_download_gb read the rental-LoRA registry under
     MEDIA_STATE_ROOT; no test may see the developer machine's real one (or
-    another test's). Tests that care about the path still override it."""
+    another test's). Tests that care about the path still override it.
+
+    rental-build.json gets the same treatment for a sharper reason: that one is
+    COMMITTED, so without this every assertion about a manifest would quietly
+    depend on whichever LoRAs and checkpoint swaps happen to be pinned in the
+    working tree — green here, red on the next person's branch."""
     monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "media-state-default")
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "rental-build" / "rental-build.json")
     gpu_rentals._rental_lora_progress.clear()
     yield
     gpu_rentals._rental_lora_progress.clear()
@@ -797,7 +804,7 @@ def test_minimax_tier_provisions_h3_stack(tmp_path: Path, monkeypatch, rental_ma
     # The full manifest minimax-h3-video serving set (DiT + TE + both VAEs).
     assert "minimax_h3_fl2va_pruned_int8_convrot.safetensors" in manifest
     assert "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" in manifest
-    assert "minimax_h3_video_vae_fp16.safetensors" in manifest
+    assert "minimax_h3_video_vae_int8_convrot.safetensors" in manifest
     assert "minimax_h3_audio_vae_fp32.safetensors" in manifest
     # The turbo LoRA and its loader come from upstream, not R2: the loader is
     # REQUIRED to apply the LoRA to our pruned base, and both are pinned.
@@ -822,7 +829,49 @@ def test_minimax_tier_provisions_h3_stack(tmp_path: Path, monkeypatch, rental_ma
     assert "ComfyUI-INT8-Fast" not in script
 
 
-@pytest.mark.parametrize("tier", ["image", "video", "minimax"])
+def test_the_eros_tier_is_the_h3_box_plus_one_transformer(
+    tmp_path: Path, monkeypatch, rental_manifest,
+) -> None:
+    """The NSFW tier's whole claim: same machine, same stack, one extra file.
+
+    It is a SUPERSET on purpose — it carries the official DiT as well, so an
+    official-H3 job runs on this box unchanged and only the eros graphs name
+    the eros file. Anything that drifts here (a node pin the eros box does not
+    get, the official set dropped from its manifest) breaks that claim
+    silently, because both kinds of box answer to the same `minimax_h3` needle.
+    """
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
+    script = gpu_rentals._onstart_script("minimaxeros")
+    manifest = rental_manifest["text"]
+    assert gpu_rentals._H3_EROS_DIT in manifest
+    # …on top of, not instead of, the official serving set.
+    for shared in ("minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+                   "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                   "minimax_h3_video_vae_int8_convrot.safetensors",
+                   "minimax_h3_audio_vae_fp32.safetensors"):
+        assert shared in manifest, shared
+    # Same node stack, same pins, same RAM guard as `minimax` — this tier is
+    # that tier's spec with a file added, and these are what prove it.
+    for pinned in ("ComfyUI-Spectrum-MiniMax-H3", "comfyui-kjnodes",
+                   "ComfyUI-H3-Motion-Context", gpu_rentals._H3_COMFY_COMMIT):
+        assert pinned in script, pinned
+    assert f'-lt {gpu_rentals.TIERS["minimaxeros"]["min_ram_gb"]} ]' in script
+    # Nothing has been timed on this tier, so it must not claim a number.
+    assert gpu_rentals.estimate_generation_seconds("minimaxeros", "rtx5090") == (0.0, "unknown")
+
+
+def test_no_tier_key_contains_a_hyphen() -> None:
+    """`_tier_from_label` reads the tier back off a machine label by splitting
+    on "-", so a hyphenated key round-trips as its own prefix: "minimax-eros"
+    would come back "minimax" and the box would be treated as the wrong
+    workload — wrong serving set, wrong needles, wrong page list."""
+    for tier in gpu_rentals.TIERS:
+        assert "-" not in tier, tier
+        label = f"{gpu_rentals.STUDIO_LABEL_PREFIX}{tier}-rtx5090-abc123"
+        assert gpu_rentals._tier_from_label(label) == tier
+
+
+@pytest.mark.parametrize("tier", ["image", "video", "minimax", "minimaxeros"])
 def test_a_degraded_download_gives_up_instead_of_crawling(tier: str, monkeypatch) -> None:
     """Both ways a stuck download used to burn a billed box indefinitely.
 
@@ -882,7 +931,7 @@ def _realistic_presign(key: str, now=None) -> str:
 
 
 def test_the_realistic_presign_is_the_real_length() -> None:
-    assert abs(len(_realistic_presign("vae/minimax_h3_video_vae_fp16.safetensors")) - 405) <= 12
+    assert abs(len(_realistic_presign("vae/minimax_h3_audio_vae_fp32.safetensors")) - 405) <= 12
 
 
 def test_the_shipped_tensorrt_node_archive_is_valid_python(tmp_path: Path) -> None:
@@ -1059,6 +1108,28 @@ def test_the_rank_safe_rewrite_ships_with_the_node(monkeypatch) -> None:
             assert required in names, required
 
 
+@pytest.mark.parametrize("tier", ["image", "video", "minimax", "minimaxeros"])
+def test_every_tier_onstart_is_valid_bash(tier: str, monkeypatch) -> None:
+    """Parse the generated onstart with bash itself.
+
+    The onstart is built by string concatenation in Python, so a quoting or
+    brace mistake is invisible until a rented box runs it — and the box reports
+    it as one line in a log nobody reads until provisioning has already been
+    paid for. Caught exactly that way 2026-09-18: the torch upgrade emitted
+    `; }}` because an f-prefixed head was concatenated with plain tails (the f
+    applies PER LITERAL), and every minimax rental died with
+    "/root/onstart.sh: line 124: syntax error: unexpected end of file" AFTER
+    downloading 66GB of weights.
+
+    `bash -n` parses without executing, so this costs nothing and needs no box.
+    """
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    script = gpu_rentals._onstart_script(tier)
+    result = subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
+    assert result.returncode == 0, f"{tier}: generated onstart is not valid bash\n{result.stderr}"
+
+
 @pytest.mark.parametrize("tier", ["image", "video", "minimax"])
 def test_every_tier_onstart_keeps_headroom_under_vasts_limit(tier: str, monkeypatch) -> None:
     """Vast rejects an onstart over 16KB with an error that names nothing, and
@@ -1104,7 +1175,12 @@ def test_registered_loras_do_not_change_the_onstart_size(monkeypatch, rental_man
     rows_before = rental_manifest["text"].count("\n")
     monkeypatch.setattr(
         gpu_rentals, "_rental_lora_downloads",
-        lambda tier: [(f"user-loras/h3/lora{i:02d}.safetensors", "loras/h3") for i in range(40)],
+        lambda tier: [{
+            "dest": f"loras/h3/lora{i:02d}.safetensors",
+            "key": f"user-loras/h3/lora{i:02d}.safetensors",
+            "civitai": {},
+            "size_gb": 0.2,
+        } for i in range(40)],
     )
     loaded = gpu_rentals._onstart_script("minimax")
     assert rental_manifest["text"].count("\n") == rows_before + 40
@@ -1253,7 +1329,7 @@ def test_oversized_onstart_is_refused_before_vast_sees_it(monkeypatch) -> None:
     # The manifest now goes to R2 first, and the suite has no Cloudflare token —
     # without this the script builder fails there and never reaches the size
     # guard this test is about.
-    monkeypatch.setattr(gpu_rentals, "_rental_manifest", lambda tier: ("weights.safetensors\tmodels/x", 1))
+    monkeypatch.setattr(gpu_rentals, "_rental_manifest", lambda tier, **_kw: ("weights.safetensors\tmodels/x", 1))
     monkeypatch.setattr(gpu_rentals, "_publish_rental_manifest", lambda text: "https://r2.example/manifest.tsv")
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 " + "A" * 8000)
     with pytest.raises(gpu_rentals.GpuRentalError) as excinfo:
@@ -1404,7 +1480,7 @@ def test_list_marks_managed_vs_foreign(tmp_path: Path, monkeypatch) -> None:
     _fake_vast(monkeypatch, handler)
     client = _client(tmp_path, monkeypatch)
     body = client.get("/api/gpu-rentals").json()
-    assert body["tiers"] == ["image", "video", "minimax"]
+    assert body["tiers"] == ["image", "video", "minimax", "minimaxeros"]
     rentals = body["rentals"]
     assert rentals[0]["managed"] is True
     assert "ssh -p 1111 root@1.2.3.4" in rentals[0]["ssh_command"]
@@ -2082,8 +2158,14 @@ def test_create_does_not_retry_the_pinned_offer_in_the_fresh_list(tmp_path: Path
 
 def test_create_refuses_a_fallback_priced_past_the_quote(tmp_path: Path, monkeypatch) -> None:
     """The button shows one number. When that ask is gone and the next host is
-    more than a few cents dearer, stop and re-quote — do not rent it quietly
-    (2026-08-22: quoted $0.596/hr, silently rented $0.640/hr)."""
+    more than a few cents dearer, stop and ASK — do not rent it quietly
+    (2026-08-22: quoted $0.596/hr, silently rented $0.640/hr).
+
+    Since 2026-09-14 the refusal carries the two figures as data rather than
+    only in a sentence, because the sentence was a dead end: it said "rent
+    again to take the new price" while the refreshed card re-quoted the same
+    dead ask, so renting again reproduced it exactly. The view reads
+    `priceChanged` and asks; the sentence stays for callers with no UI."""
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
 
     def handler(method, path, payload):
@@ -2101,7 +2183,17 @@ def test_create_refuses_a_fallback_priced_past_the_quote(tmp_path: Path, monkeyp
         "max_usd_per_hour": 0.596})
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
-    assert "0.596" in detail and "0.640" in detail and "Nothing was rented" in detail
+    # The numbers the view re-prices and asks with.
+    assert detail["priceChanged"] == {
+        "quoted": 0.596, "now": 0.64, "tier": "minimax",
+        "gpuClass": "rtx5090", "gpuLabel": "RTX 5090", "count": 1,
+    }
+    # …and the sentence still stands on its own for an agent or the MCP, with
+    # the provider's OWN reason in it rather than a price story invented over
+    # the top of it.
+    assert "0.596" in detail["message"] and "0.640" in detail["message"]
+    assert "Nothing was rented" in detail["message"]
+    assert "no_such_ask" in detail["message"]
     assert [c[1] for c in calls] == ["/v0/bundles/", "/v0/asks/41/"]
     # And the stale snapshot is gone, so the next plan poll re-prices the card.
     assert not [k for k in gpu_rentals._offer_cache if k.startswith("minimax:")]
@@ -2405,6 +2497,110 @@ def test_a_failed_destroy_is_recorded_and_does_not_break_the_list(
     assert "vast:31" in gpu_rentals._read_failure_state()["seen"]
 
 
+# ---------------------------------------------------------------------------
+# A rental that ended WITHOUT the studio. 2026-09-14: this Mac slept at 1%
+# battery, the hosted worker ended Vast 50991951 as keepalive-lapsed, and
+# nothing on the studio side ran detach_rental — the registry named lane
+# rental50991951 through two stack restarts, the gateway kept routing MiniMax
+# jobs to 127.0.0.1:18751, and the Machines list (where the error said to
+# re-attach from) was empty.
+
+
+def _attach_a_ready_box(tmp_path: Path, monkeypatch, rid: int = 7) -> TestClient:
+    """A box attached the way the button attaches it: through the route, so
+    the registry and the overlay hold what attach_rental itself writes."""
+    _fake_vast(monkeypatch, lambda m, p, b: {"instances": [_ready_instance(rid)]})
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda url: {"step": "ready", "done": 6, "total": 6, "detail": ""})
+    _attach_env(monkeypatch, tmp_path)
+    client = _client(tmp_path, monkeypatch)
+    assert client.post(f"/api/gpu-rentals/{rid}/attach").status_code == 200
+    assert f"vast:{rid}" in gpu_rentals._read_attachments()
+    return client
+
+
+def test_a_lane_whose_rental_the_marketplace_no_longer_lists_is_detached(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    _attach_a_ready_box(tmp_path, monkeypatch)
+    killed = []
+    monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda ref: killed.append(ref))
+    # The next list comes back without it: the box no longer exists.
+    _fake_vast(monkeypatch, lambda m, p, b: {"instances": []})
+
+    payload = gpu_rentals.list_rentals(settle=True)
+
+    # Tunnel killed, registry and overlay rewritten — the same door destroy uses.
+    assert killed == [RentalRef("vast", "7")]
+    assert gpu_rentals._read_attachments() == {}
+    assert 'RENTAL_COMFY_LANES=""' in (tmp_path / "media-state/rental-lanes.env").read_text()
+    # And the Machines view is told what happened, in the same place a reaped
+    # box is reported.
+    [notice] = payload["failures"]
+    assert notice["kind"] == "vanished" and notice["rental_id"] == "vast:7"
+    assert notice["lane"] == "rental7" and notice["tier"] == "image"
+    assert "no longer lists rental vast:7" in notice["reason"] and "rental7" in notice["reason"]
+    # The host is not blamed: it did not fail us, the rental ended.
+    assert notice["machine_id"] is None
+    # Direct transport: no worker ledger, so no end reason and no invented cost.
+    assert notice["end_reason"] is None and notice["usd_spent"] is None
+    assert gpu_rentals.recent_rental_failures() == [notice]
+
+
+def test_a_marketplace_that_cannot_be_asked_keeps_its_lanes(tmp_path: Path, monkeypatch) -> None:
+    """A failed list and an empty account both flatten to "no instances", and
+    only one of them means the machine is gone. A Vast 429 on the sweep must
+    not take a live lane out of routing."""
+    _attach_a_ready_box(tmp_path, monkeypatch)
+    monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda ref: pytest.fail("must not detach"))
+
+    def rate_limited(m, p, b):
+        raise gpu_rentals.GpuRentalError("vast answered HTTP 429: too many requests", status_code=429)
+
+    _fake_vast(monkeypatch, rate_limited)
+    payload = gpu_rentals.list_rentals(settle=True)
+
+    assert payload["rentals"] == [] and payload["failures"] == []
+    assert "vast:7" in gpu_rentals._read_attachments()
+    assert "rental7=http://127.0.0.1:" in (tmp_path / "media-state/rental-lanes.env").read_text()
+
+
+def test_a_lane_whose_rental_is_still_listed_stays_attached(tmp_path: Path, monkeypatch) -> None:
+    _attach_a_ready_box(tmp_path, monkeypatch)
+    monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda ref: pytest.fail("must not detach"))
+
+    payload = gpu_rentals.list_rentals(settle=True)
+
+    assert payload["failures"] == []
+    assert "vast:7" in gpu_rentals._read_attachments()
+    [machine] = payload["rentals"]
+    assert machine["rental_id"] == "vast:7" and machine["attached"] is True
+
+
+def test_only_the_marketplace_that_answered_can_vanish_a_lane(tmp_path: Path, monkeypatch) -> None:
+    """Per provider, not per sweep: RunPod being down says nothing about a
+    Vast box, and a marketplace not configured here (absent from the listing)
+    has not been asked at all."""
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda ref: None)
+    record = {"lane": "rental9", "local_port": 18309, "needles": ["z_image"], "tier": "image",
+              "studio_pages": [], "attached_at": 1.0, "priority": 0}
+    gpu_rentals._write_attachments({
+        "vast:9": record,
+        "runpod:abc": {**record, "lane": "rentalrunpod-abc"},
+    })
+    # RunPod did not answer and Vast was not asked: nothing moves.
+    assert gpu_rentals.detach_vanished_rentals({"runpod": None}) == []
+    assert set(gpu_rentals._read_attachments()) == {"vast:9", "runpod:abc"}
+    # Vast answered without 9: that lane goes; RunPod's is still unasked.
+    [entry] = gpu_rentals.detach_vanished_rentals({"vast": [], "runpod": None})
+    assert entry["rental_id"] == "vast:9"
+    assert set(gpu_rentals._read_attachments()) == {"runpod:abc"}
+    # Nothing to do is nothing written: no notice, no second entry.
+    assert gpu_rentals.detach_vanished_rentals({"vast": [], "runpod": None}) == []
+    assert len(gpu_rentals.recent_rental_failures()) == 1
+
+
 def test_a_dismissed_failure_leaves_the_view_but_its_host_stays_barred(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -2593,7 +2789,11 @@ def test_minimax_tier_ships_the_turbo_lora(tmp_path: Path, monkeypatch, rental_m
     # 66.7 -> 68.3 when head replacement landed: SAM3.1 (1.63GB) for its SAM3
     # masking branch. The manual-mask branch never loads it, but a box that could
     # not track a subject is a box the studio has to refuse work to.
-    assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(68.3, abs=0.2)
+    # 68.3 -> 65.9 when the video decoder became int8_convrot: the fp16 VAE left
+    # the R2 set (-5.2GB) and the quantised one joined the public set (+2.81GB).
+    # The only entry here that made a tier SMALLER — it is the same decoder at
+    # roughly half the bytes, on disk and in VRAM alike.
+    assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(65.9, abs=0.2)
     assert "\tlatent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors\n" in manifest
     assert "Comfyui_Minimax_h3_latent_Upscaler" in script
 
@@ -2674,23 +2874,33 @@ def test_rental_lora_keeps_nested_relative_path(tmp_path: Path, monkeypatch, ren
     _sync_uploads(monkeypatch)
     client = _client(tmp_path, monkeypatch)
     assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
-    assert gpu_rentals._rental_lora_downloads("video") == [(f"user-loras/{rel}", "loras/ltx")]
+    assert gpu_rentals._rental_lora_downloads("video") == [{
+        # The destination IS the local relative path — that is the whole point:
+        # the graph's lora_name is this id, so the box must resolve the same one.
+        "dest": f"loras/{rel}",
+        "key": f"user-loras/{rel}",
+        "civitai": {},
+        "size_gb": 2.0,
+    }]
     gpu_rentals._onstart_script("video")
     assert "\tloras/ltx/glow lora.safetensors\n" in rental_manifest["text"]
 
 
-def test_rental_lora_minimax_h3_maps_to_the_minimax_tier(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+def test_rental_lora_minimax_h3_maps_to_both_h3_tiers(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     """Civitai's H3 category is "MiniMax H3" (character/style LoRAs exist there,
-    not just the turbo distill). They ride the H3 tier only — nothing on the
-    LTX or image boxes can load them."""
+    not just the turbo distill). They ride the H3 tiers only — nothing on the
+    LTX or image boxes can load them — and BOTH H3 tiers take them: the eros box
+    runs the same architecture, and its transformer keeps the AdaLN pair the
+    official pruned one lost, so if anything it takes them more readily."""
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
     rel = _install_lora(tmp_path, monkeypatch, rel="h3/lain.safetensors", base="MiniMax H3")
     _sync_uploads(monkeypatch)
     client = _client(tmp_path, monkeypatch)
     body = client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).json()
-    assert body["tiers"] == ["minimax"]
-    gpu_rentals._onstart_script("minimax")
-    assert "\tloras/h3/lain.safetensors\n" in rental_manifest["text"]
+    assert body["tiers"] == ["minimax", "minimaxeros"]
+    for tier in ("minimax", "minimaxeros"):
+        gpu_rentals._onstart_script(tier)
+        assert "\tloras/h3/lain.safetensors\n" in rental_manifest["text"], tier
     gpu_rentals._onstart_script("video")
     assert rel not in rental_manifest["text"]
 
@@ -3202,7 +3412,7 @@ def test_a_new_rental_mounts_the_stocked_volume_and_a_cold_one_does_not(tmp_path
 
     monkeypatch.setattr(gpu_rentals.rental_providers, "get", lambda key: _Provider())
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAA test")
-    monkeypatch.setattr(gpu_rentals, "_onstart_script", lambda tier: "#!/bin/bash\ntrue\n")
+    monkeypatch.setattr(gpu_rentals, "_onstart_script", lambda tier, **_kw: "#!/bin/bash\ntrue\n")
     monkeypatch.setattr(gpu_rentals, "_assert_affordable", lambda *a, **k: None)
     monkeypatch.setattr(gpu_rentals, "_forget_offers", lambda tier: None)
     offer = {"provider": "runpod", "offer_id": "NVIDIA GeForce RTX 5090", "usd_per_hour": 0.89, "warm": True}
@@ -3260,7 +3470,7 @@ def test_a_stocking_rental_only_considers_the_volume_providers_offers(tmp_path: 
 
     monkeypatch.setattr(gpu_rentals.rental_providers, "get", lambda key: _Provider(key))
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAA test")
-    monkeypatch.setattr(gpu_rentals, "_onstart_script", lambda tier: "#!/bin/bash\ntrue\n")
+    monkeypatch.setattr(gpu_rentals, "_onstart_script", lambda tier, **_kw: "#!/bin/bash\ntrue\n")
     monkeypatch.setattr(gpu_rentals, "_assert_affordable", lambda *a, **k: None)
     monkeypatch.setattr(gpu_rentals, "_forget_offers", lambda tier: None)
     monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], 500, []))
@@ -3532,3 +3742,749 @@ def test_the_machine_list_is_one_snapshot_and_a_read_never_reaps(tmp_path: Path,
     # And neither read destroyed anything.
     assert reaped == []
     assert settled == []
+
+
+# ---------------------------------------------------------------------------
+# The project rental build (packages/gpu-rentals/rental-build.json).
+#
+# A COMMITTED decision about what a tier's next boxes carry: which LoRAs ride
+# along, and which checkpoint stands in for one of its default weights. The
+# two things worth pinning are that a pin actually reaches the manifest, and
+# that an install with nothing pinned behaves exactly as it did before.
+
+
+# Captured at import, before the autouse fixture redirects it per test.
+_MODULE_BUILD_PATH = gpu_rentals.RENTAL_BUILD_PATH
+
+
+def _install_checkpoint(tmp_path: Path, monkeypatch, name: str = "diffusion_models/mine.safetensors",
+                        *, hf: str | None = None, civitai: bool = False, size: int = 4096) -> str:
+    root = tmp_path / "comfy-models"
+    target = root / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"x" * size)
+    if hf is not None:
+        Path(str(target) + ".civitai.json").write_text(json.dumps({
+            "modelVersion": {"description": f'<p>Get it from <a href="{hf}">here</a></p>'},
+        }))
+    elif civitai:
+        Path(str(target) + ".civitai.json").write_text(json.dumps({
+            "modelVersion": {"id": 3208482, "modelId": 2842144, "baseModel": "Krea 2"},
+        }))
+    monkeypatch.setattr(gpu_rentals, "COMFY_MODELS_ROOT", root)
+    monkeypatch.setattr(gpu_rentals, "COMFY_LORAS_ROOT", root / "loras")
+    return name
+
+
+def test_a_lora_civitai_will_serve_is_never_uploaded(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """The bytes are already on Civitai. Uploading a copy to our bucket so a box
+    can download it from us is a transfer nobody needs — the box fetches it the
+    same way a swapped-in checkpoint does."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    rel = _install_lora(tmp_path, monkeypatch, rel="h3/lain.safetensors", base="MiniMax H3")
+    # The sidecar _install_lora writes carries only a baseModel; give it ids.
+    side = tmp_path / "comfy-loras" / (rel + ".civitai.json")
+    side.write_text(json.dumps({
+        "modelVersion": {"id": 12345, "modelId": 999, "baseModel": "MiniMax H3"},
+        "file": {"id": 678},
+    }))
+    uploads = _sync_uploads(monkeypatch)
+    asked: list[tuple] = []
+    signed = "https://civitai-delivery-worker-prod.example/x?X-Amz-Signature=abc"
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url",
+                        lambda version, file_id="": asked.append((version, file_id)) or signed)
+    client = _client(tmp_path, monkeypatch)
+
+    body = client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).json()
+    assert body["source"] == "civitai"
+    assert body["civitai"] == {"version_id": "12345", "file_id": "678"}
+    assert body["status"] == "ready", "nothing to wait for — there is no transfer"
+    assert uploads == [], "a LoRA Civitai serves must not be uploaded"
+    # Checked ONCE at registration, so a file this account cannot fetch is
+    # found out now rather than when a box is already billing.
+    assert asked == [("12345", "678")]
+
+    # …and the manifest resolves it fresh, landing under OUR relative path,
+    # because that is the name the graph asks for.
+    gpu_rentals._onstart_script("minimaxeros")
+    rows = {dest: url for url, dest in (line.split("\t") for line in rental_manifest["text"].splitlines())}
+    assert rows[f"loras/{rel}"] == signed
+    assert not any("user-loras" in url for url in rows.values())
+
+
+def test_a_rate_limit_is_retried_and_a_refusal_is_not(monkeypatch) -> None:
+    """A 429 is not an answer. Registering ten pinned LoRAs asks Civitai ten
+    times in a burst — measured 2026-09-14, one of them fell back to a needless
+    upload and then resolved fine on its own. At RENT time the same 429 would
+    abort a rental. A 403 is a decision, though, and re-asking only burns time.
+    """
+    monkeypatch.setenv("CIVITAI_API_KEY", "tok")
+    monkeypatch.setattr(gpu_rentals.time, "sleep", lambda _s: None)
+
+    class Answer:
+        def __init__(self, status, location="", retry_after=None):
+            self.status_code = status
+            self.headers = {"Location": location} if location else {}
+            if retry_after is not None:
+                self.headers["Retry-After"] = str(retry_after)
+
+        @staticmethod
+        def json():
+            return {}
+
+    signed = "https://cdn.example/f?X-Amz-Signature=a"
+    answers = [Answer(429, retry_after=1), Answer(503), Answer(302, signed)]
+    calls: list[int] = []
+
+    def flaky(*_a, **_kw):
+        calls.append(1)
+        return answers[len(calls) - 1]
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", flaky)
+    assert gpu_rentals._civitai_signed_url("1") == signed
+    assert len(calls) == 3, "the rate limit and the bad gateway were both retried"
+
+    # A refusal is taken at its word: one call, no ladder.
+    refusals: list[int] = []
+    monkeypatch.setattr(gpu_rentals.requests, "get",
+                        lambda *a, **k: refusals.append(1) or Answer(403))
+    with pytest.raises(gpu_rentals.GpuRentalError):
+        gpu_rentals._civitai_signed_url("1")
+    assert len(refusals) == 1
+
+
+def test_a_lora_civitai_refuses_falls_back_to_the_bucket(tmp_path: Path, monkeypatch) -> None:
+    """Early Access answers 403, and a transient fault answers nothing. Either
+    way the bytes are on disk, so the upload is still there to fall back on —
+    a pin must never fail because a third party said no."""
+    rel = _install_lora(tmp_path, monkeypatch, rel="h3/lain.safetensors", base="MiniMax H3")
+    (tmp_path / "comfy-loras" / (rel + ".civitai.json")).write_text(json.dumps({
+        "modelVersion": {"id": 12345, "modelId": 999, "baseModel": "MiniMax H3"}, "file": {"id": 678},
+    }))
+    uploads = _sync_uploads(monkeypatch)
+
+    def refuse(version, file_id=""):
+        raise gpu_rentals.GpuRentalError("Civitai will not serve that: Early Access", status_code=503)
+
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url", refuse)
+    client = _client(tmp_path, monkeypatch)
+    body = client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).json()
+    assert body["source"] == "r2" and body["civitai"] == {}
+    assert [call[0] for call in uploads] == [rel]
+    # The POST answers while the transfer is still in flight; the registry is
+    # where it lands. (A Civitai entry has no in-flight state at all.)
+    assert body["status"] == "uploading"
+    assert gpu_rentals.read_rental_loras()[rel]["status"] == "ready"
+
+
+def test_a_hand_placed_lora_still_rides_the_bucket(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """No sidecar means no ids means nothing to resolve — the upload is the only
+    way those bytes reach a box, and it must still happen."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    rel = _install_lora(tmp_path, monkeypatch, rel="hand.safetensors", base=None)
+    uploads = _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    body = client.post(
+        "/api/gpu-rentals/loras",
+        json={"id": rel, "rating": "sfw", "contextBaseModels": ["MiniMax H3"]},
+    ).json()
+    assert body["source"] == "r2"
+    assert [call[0] for call in uploads] == [rel]
+    gpu_rentals._onstart_script("minimax")
+    assert f"https://r2.example/user-loras/{rel}\tloras/{rel}\n" in rental_manifest["text"]
+
+
+def test_switching_an_uploaded_lora_to_civitai_drops_its_orphan(tmp_path: Path, monkeypatch) -> None:
+    """Re-picking a LoRA that was uploaded before this path existed moves it to
+    Civitai. Its bucket object is then referenced by nothing, and withdrawal no
+    longer asks R2 about a Civitai entry — so it goes now or never."""
+    rel = _install_lora(tmp_path, monkeypatch, rel="h3/lain.safetensors", base="MiniMax H3")
+    _sync_uploads(monkeypatch)
+    deletes: list[str] = []
+    monkeypatch.setattr(gpu_rentals, "_presign_r2",
+                        lambda method, key, **_kw: deletes.append(f"{method} {key}") or "https://r2.example/x")
+    client = _client(tmp_path, monkeypatch)
+
+    # First registration: no ids in the sidecar, so it rides the bucket.
+    assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
+    assert gpu_rentals.read_rental_loras()[rel]["source"] == "r2"
+    assert deletes == []
+
+    # Now the sidecar names a version Civitai will serve, and it is re-picked.
+    (tmp_path / "comfy-loras" / (rel + ".civitai.json")).write_text(json.dumps({
+        "modelVersion": {"id": 12345, "modelId": 999, "baseModel": "MiniMax H3"}, "file": {"id": 678},
+    }))
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url", lambda *a, **k: "https://cdn.example/x")
+    assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
+    assert gpu_rentals.read_rental_loras()[rel]["source"] == "civitai"
+    assert deletes == [f"DELETE user-loras/{rel}"]
+
+
+def test_withdrawing_a_civitai_lora_asks_r2_for_nothing(tmp_path: Path, monkeypatch) -> None:
+    rel = _install_lora(tmp_path, monkeypatch, rel="h3/lain.safetensors", base="MiniMax H3")
+    (tmp_path / "comfy-loras" / (rel + ".civitai.json")).write_text(json.dumps({
+        "modelVersion": {"id": 12345, "modelId": 999, "baseModel": "MiniMax H3"}, "file": {"id": 678},
+    }))
+    _sync_uploads(monkeypatch)
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url", lambda *a, **k: "https://cdn.example/x")
+    deletes: list[str] = []
+    monkeypatch.setattr(gpu_rentals, "_presign_r2",
+                        lambda method, key, **_kw: deletes.append(f"{method} {key}") or "https://r2.example/x")
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
+    assert client.delete(f"/api/gpu-rentals/loras/{rel}").status_code == 200
+    assert deletes == [], "there was never an object to delete"
+
+
+def test_rental_build_routes_require_owner(tmp_path: Path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, unlock=False)
+    assert client.get("/api/gpu-rentals/build").status_code == 401
+    assert client.get("/api/gpu-rentals/build/checkpoints").status_code == 401
+    assert client.put("/api/gpu-rentals/build/minimax/loras", json={"ids": []}).status_code == 401
+    assert client.put("/api/gpu-rentals/build/minimax/checkpoint", json={}).status_code == 401
+
+
+def test_rental_build_literal_segments_beat_the_rental_id_route(tmp_path: Path, monkeypatch) -> None:
+    """Starlette matches in registration order, so "build" must never be read
+    as a rental id — the same rule the loras routes are registered under."""
+    client = _client(tmp_path, monkeypatch)
+    payload = client.get("/api/gpu-rentals/build").json()
+    assert [row["tier"] for row in payload["tiers"]] == list(gpu_rentals.TIERS)
+    # The path is isolated per test; the shipped constant is what has to point
+    # at the file a commit would pick up.
+    assert str(_MODULE_BUILD_PATH).endswith("packages/gpu-rentals/rental-build.json")
+    assert _MODULE_BUILD_PATH.is_file(), "the committed rental build is missing from the checkout"
+
+
+def test_rental_build_pins_exactly_the_loras_a_tier_downloads(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """With pins, the tier downloads those and nothing else — including a LoRA
+    the family rule would otherwise have put on the same box."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "repo" / "packages/gpu-rentals/rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    kept = _install_lora(tmp_path, monkeypatch, rel="h3/lain.safetensors", base="MiniMax H3")
+    dropped = _install_lora(tmp_path, monkeypatch, rel="h3/furry.safetensors", base="MiniMax H3")
+    _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    for rel in (kept, dropped):
+        assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
+
+    # No pins yet: the family rule stands and both ride along, as they always have.
+    gpu_rentals._onstart_script("minimax")
+    assert kept in rental_manifest["text"] and dropped in rental_manifest["text"]
+
+    response = client.put("/api/gpu-rentals/build/minimax/loras", json={"ids": [kept]})
+    assert response.status_code == 200
+    assert response.json()["tier"]["pinned_loras"] == [kept]
+    gpu_rentals._onstart_script("minimax")
+    assert kept in rental_manifest["text"] and dropped not in rental_manifest["text"]
+    # The OTHER H3 tier is untouched: a pin is per tier, and minimaxeros has none.
+    gpu_rentals._onstart_script("minimaxeros")
+    assert kept in rental_manifest["text"] and dropped in rental_manifest["text"]
+
+    # Written where a commit can see it, and readable as a diff.
+    on_disk = json.loads(gpu_rentals.RENTAL_BUILD_PATH.read_text())
+    assert on_disk["tiers"]["minimax"]["loras"] == [kept]
+
+
+def test_rental_build_pinning_uploads_a_lora_that_was_never_registered(tmp_path: Path, monkeypatch) -> None:
+    """A pin is intent; the bytes still have to be in the bucket. Pinning an
+    unregistered LoRA registers and uploads it rather than silently never
+    shipping it."""
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "repo" / "packages/gpu-rentals/rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    rel = _install_lora(tmp_path, monkeypatch, rel="h3/lain.safetensors", base="MiniMax H3")
+    uploads = _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+
+    assert client.put("/api/gpu-rentals/build/minimaxeros/loras", json={"ids": [rel]}).status_code == 200
+    assert [call[0] for call in uploads] == [rel]
+    entry = gpu_rentals.read_rental_loras()[rel]
+    assert entry["status"] == "ready"
+    # The rating is categorisation only today, so it comes from the tier rather
+    # than from a second question per card.
+    assert entry["rating"] == "nsfw"
+
+    # Un-pinning leaves the registry and the uploaded object alone: another tier
+    # may still want it, and re-pinning is then free.
+    assert client.put("/api/gpu-rentals/build/minimaxeros/loras", json={"ids": []}).status_code == 200
+    assert rel in gpu_rentals.read_rental_loras()
+    assert json.loads(gpu_rentals.RENTAL_BUILD_PATH.read_text())["tiers"] == {}
+
+
+def test_rental_build_checkpoint_swap_replaces_the_default_in_place(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """The stand-in lands under the DEFAULT's filename, so every graph that
+    names that weight keeps resolving — one row of the manifest changes, not
+    the lane."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "repo" / "packages/gpu-rentals/rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    mirror = "https://huggingface.co/TenStrip/10Eros-Max/resolve/main/mine.safetensors"
+    rel = _install_checkpoint(tmp_path, monkeypatch, hf=mirror)
+    client = _client(tmp_path, monkeypatch)
+
+    default = "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+    before = gpu_rentals.tier_download_gb("minimax")
+    response = client.put(
+        "/api/gpu-rentals/build/minimax/checkpoint",
+        json={"dest": default, "id": rel},
+    )
+    assert response.status_code == 200, response.text
+    swapped = next(row for row in response.json()["tier"]["weights"] if row["dest"] == default)
+    assert swapped["swap"]["url"] == mirror
+
+    gpu_rentals._onstart_script("minimax")
+    # The manifest is "url<TAB>destination" per line.
+    rows = {dest: url for url, dest in (line.split("\t") for line in rental_manifest["text"].splitlines())}
+    # Same destination, new source — and the bucket copy of the default is gone.
+    assert rows[default] == mirror
+    assert not any("r2.example" in url and default in url for url in rows.values())
+    # The size the box is rented for follows the swap, not the weight it replaced.
+    assert gpu_rentals.tier_download_gb("minimax") < before
+
+    # Clearing it puts the default back.
+    assert client.put(
+        "/api/gpu-rentals/build/minimax/checkpoint", json={"dest": default, "id": ""},
+    ).status_code == 200
+    gpu_rentals._onstart_script("minimax")
+    assert mirror not in rental_manifest["text"]
+
+
+def test_rental_build_takes_a_civitai_checkpoint_and_resolves_it_per_rental(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """Civitai needs one hop, and the hop happens HERE.
+
+    An unauthenticated Civitai download answers 401 and the manifest is handed
+    to every box we rent, so a token can never go in it — but the token is not
+    what the box needs. `/api/download/models/<v>?token=…` answers 302 to an
+    AWS SigV4 presigned URL on Civitai's own R2, carrying no token and valid to
+    anyone holding it: the same shape as the presigns we already mint. Measured
+    2026-09-14 against version 3208482 — X-Amz-Expires=86400, eight times ours,
+    and an anonymous range GET answers 206.
+    """
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "repo" / "packages/gpu-rentals/rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    rel = _install_checkpoint(tmp_path, monkeypatch, civitai=True)
+    client = _client(tmp_path, monkeypatch)
+    default = "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+
+    # The picker offers it with the ids a box is fetched by and the page a
+    # person reads.
+    mine = next(row for row in client.get("/api/gpu-rentals/build/checkpoints").json()["checkpoints"]
+                if row["id"] == rel)
+    assert mine["source"] == "civitai" and mine["url"] == ""
+    assert mine["civitai"] == {"version_id": "3208482", "file_id": ""}
+    assert mine["modelUrl"] == "https://civitai.com/models/2842144?modelVersionId=3208482"
+
+    # Saving resolves it once, to find out now whether this account can fetch it
+    # at all, and throws the answer away: a signed URL expires and is a
+    # capability, and neither belongs in a file that gets committed.
+    checked: list[tuple] = []
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url",
+                        lambda version, file_id="": checked.append((version, file_id)) or "https://cdn.example/ok")
+    assert client.put(
+        "/api/gpu-rentals/build/minimax/checkpoint", json={"dest": default, "id": rel},
+    ).status_code == 200
+    assert checked == [("3208482", "")]
+    committed = json.loads(gpu_rentals.RENTAL_BUILD_PATH.read_text())["tiers"]["minimax"]["checkpoints"][default]
+    assert committed["source"] == "civitai"
+    assert committed["civitai"] == {"version_id": "3208482", "file_id": ""}
+    assert "url" not in committed and "token" not in json.dumps(committed).lower()
+
+    # Renting follows the redirect once, here, and the box gets what it landed on.
+    asked: list[tuple] = []
+    signed = "https://civitai-delivery-worker-prod.example.r2.cloudflarestorage.com/x?X-Amz-Signature=abc"
+    checked.clear()
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url",
+                        lambda version, file_id="": asked.append((version, file_id)) or signed)
+    gpu_rentals._onstart_script("minimax")
+    rows = {dest: url for url, dest in (line.split("\t") for line in rental_manifest["text"].splitlines())}
+    assert rows[default] == signed
+    assert asked == [("3208482", "")]
+    # …and nothing about Civitai reaches the onstart itself.
+    assert "civitai.com" not in gpu_rentals._onstart_script("minimax")
+
+
+def test_rental_build_pins_the_civitai_file_by_sha256_not_by_name(tmp_path: Path, monkeypatch) -> None:
+    """Civitai version 2961411 ships SIX files all called bigLove_klein3.safetensors.
+
+    A download with no file id serves the version's PRIMARY, which on this
+    machine is neither of the two installed builds — 13GB of the wrong
+    quantisation under the right name, which no beacon or checksum here would
+    catch. The hashes are the only thing that tells them apart."""
+    root = tmp_path / "comfy-models"
+    monkeypatch.setattr(gpu_rentals, "COMFY_MODELS_ROOT", root)
+    files = [
+        {"id": 2842568, "name": "bigLove_klein3.safetensors", "primary": True, "hashes": {"SHA256": "6E084F1E"}},
+        {"id": 2841992, "name": "bigLove_klein3.safetensors", "hashes": {"SHA256": "6EDBD967"}},
+        {"id": 2842675, "name": "bigLove_klein3.safetensors", "hashes": {"SHA256": "78DA9D65"}},
+    ]
+
+    def install(name: str, digest: str) -> Path:
+        target = root / "diffusion_models" / f"{name}.safetensors"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x")
+        target.with_suffix(".metadata.json").write_text(json.dumps({
+            "sha256": digest, "civitai": {"id": 2961411, "modelId": 897413, "files": files},
+        }))
+        return target
+
+    # Lower-case on disk, upper-case from the API: compared case-insensitively.
+    assert gpu_rentals.installed_cloud_source(install("bf16", "6edbd967"))["civitai"]["file_id"] == "2841992"
+    assert gpu_rentals.installed_cloud_source(install("mxfp8", "78da9d65"))["civitai"]["file_id"] == "2842675"
+
+    # No hash and no unambiguous name: no source at all, rather than a
+    # confident wrong one. The model page survives so it can still be found.
+    blind = gpu_rentals.installed_cloud_source(install("mystery", ""))
+    assert blind["source"] == "" and blind["civitai"] == {}
+    assert blind["modelUrl"].startswith("https://civitai.com/models/897413")
+
+
+def test_the_civitai_resolver_carries_civitais_own_refusal(monkeypatch) -> None:
+    """Not every file is servable to this account. Early Access answers 403 with
+    a sentence worth reading, and "HTTP 403" tells nobody they need Buzz."""
+    monkeypatch.setenv("CIVITAI_API_KEY", "tok")
+
+    class Refusal:
+        status_code, headers = 403, {}
+
+        @staticmethod
+        def json():
+            return {"error": "Early Access", "message": "This asset is in Early Access. You can use Buzz access it now!"}
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", lambda *a, **k: Refusal())
+    with pytest.raises(gpu_rentals.GpuRentalError) as refused:
+        gpu_rentals._civitai_signed_url("2961411", "2841992")
+    assert "Early Access" in str(refused.value) and "Buzz" in str(refused.value)
+    assert len(str(refused.value)) <= 220
+
+    # An HTML error page is not a reason: fall back to our own sentence.
+    class Html:
+        status_code, headers, text = 502, {}, "<html>bad gateway</html>"
+
+        @staticmethod
+        def json():
+            raise ValueError("not json")
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", lambda *a, **k: Html())
+    with pytest.raises(gpu_rentals.GpuRentalError, match="HTTP 502"):
+        gpu_rentals._civitai_signed_url("2961411")
+
+
+def test_rental_build_refuses_a_checkpoint_with_no_metadata_at_all(tmp_path: Path, monkeypatch) -> None:
+    """A hand-placed file has no source of any kind, so a box has nowhere to
+    fetch it from. The refusal names the fix rather than just saying no."""
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "repo" / "packages/gpu-rentals/rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    rel = _install_checkpoint(tmp_path, monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    default = "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+
+    refused = client.put("/api/gpu-rentals/build/minimax/checkpoint", json={"dest": default, "id": rel})
+    assert refused.status_code == 400
+    detail = refused.json()["detail"]
+    assert "Hugging Face" in detail
+    # Short and plain enough to survive describeFailure: over 220 characters, or
+    # carrying a path/brace/newline, and the studio replaces the whole sentence
+    # with "…failed" and hides the fix behind Details.
+    assert len(detail) <= 220 and "\n" not in detail, detail
+
+    # A pasted mirror is accepted; a page about the model is not.
+    page = "https://huggingface.co/TenStrip/10Eros-Max"
+    bad = client.put(
+        "/api/gpu-rentals/build/minimax/checkpoint", json={"dest": default, "id": rel, "url": page},
+    )
+    assert bad.status_code == 400 and len(bad.json()["detail"]) <= 220
+    assert client.put(
+        "/api/gpu-rentals/build/minimax/checkpoint",
+        json={"dest": default, "id": rel, "url": f"{page}/resolve/main/mine.safetensors"},
+    ).status_code == 200
+
+
+def test_the_civitai_resolver_never_publishes_the_token(tmp_path: Path, monkeypatch) -> None:
+    """The one thing that must never reach a rented box. Cheap to check, and a
+    manifest goes to a third party."""
+    monkeypatch.setenv("CIVITAI_API_KEY", "tok-secret")
+    monkeypatch.setattr(gpu_rentals, "_CIVITAI_TOKEN_FILE", tmp_path / "absent")
+
+    class Answer:
+        def __init__(self, status, location):
+            self.status_code, self.headers = status, {"Location": location}
+
+    calls: list[dict] = []
+
+    def fake_get(url, params=None, headers=None, **_kw):
+        calls.append({"url": url, "params": params, "headers": headers})
+        return Answer(302, "https://cdn.example/file?X-Amz-Signature=abc")
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", fake_get)
+    assert gpu_rentals._civitai_signed_url("3208482", "3090280") == "https://cdn.example/file?X-Amz-Signature=abc"
+    # Token in the QUERY, never in a header: requests carries Authorization
+    # across the redirect and R2 then reads it as AWS auth and refuses.
+    assert calls[0]["params"] == {"token": "tok-secret", "fileId": "3090280"}
+    assert not any("auth" in key.lower() for key in (calls[0]["headers"] or {}))
+
+    # A redirect that somehow echoed the token back is refused, not published.
+    monkeypatch.setattr(gpu_rentals.requests, "get",
+                        lambda *a, **k: Answer(302, "https://cdn.example/f?token=tok-secret"))
+    with pytest.raises(gpu_rentals.GpuRentalError, match="carries the token"):
+        gpu_rentals._civitai_signed_url("3208482")
+
+    # No token on the machine, or Civitai refusing: renting stops here rather
+    # than paying for a box that cannot fetch what it was rented to run.
+    monkeypatch.setattr(gpu_rentals.requests, "get", lambda *a, **k: Answer(401, ""))
+    with pytest.raises(gpu_rentals.GpuRentalError) as refused:
+        gpu_rentals._civitai_signed_url("3208482")
+    assert refused.value.status_code == 503
+    monkeypatch.delenv("CIVITAI_API_KEY", raising=False)
+    with pytest.raises(gpu_rentals.GpuRentalError, match="PassBook"):
+        gpu_rentals._civitai_signed_url("3208482")
+
+
+def test_rental_build_takes_a_checkpoint_from_a_subdirectory(tmp_path: Path, monkeypatch) -> None:
+    """The picker lists these trees recursively, so a file dropped in
+    checkpoints/ltx/ is offered — and a guard that only accepted the top level
+    would list files it then refused."""
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "repo" / "packages/gpu-rentals/rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    mirror = "https://huggingface.co/a/b/resolve/main/nested.safetensors"
+    rel = _install_checkpoint(tmp_path, monkeypatch, name="checkpoints/ltx/nested.safetensors", hf=mirror)
+    client = _client(tmp_path, monkeypatch)
+    assert rel in {row["id"] for row in client.get("/api/gpu-rentals/build/checkpoints").json()["checkpoints"]}
+    assert client.put(
+        "/api/gpu-rentals/build/minimax/checkpoint",
+        json={"dest": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", "id": rel},
+    ).status_code == 200
+    # …and a text encoder still is not a checkpoint, whatever its depth.
+    _install_checkpoint(tmp_path, monkeypatch, name="text_encoders/deep/enc.safetensors", hf=mirror)
+    with pytest.raises(gpu_rentals.GpuRentalError):
+        gpu_rentals._resolve_local_checkpoint("text_encoders/deep/enc.safetensors")
+
+
+def test_rental_build_only_offers_a_url_that_names_this_exact_file(tmp_path: Path, monkeypatch) -> None:
+    """A sidecar's description links to every other weight in the family. One
+    of those resolved automatically would land the wrong 20GB file under the
+    right name, which no beacon or checksum here would catch."""
+    other = "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors"
+    rel = _install_checkpoint(tmp_path, monkeypatch, hf=other)
+    path = tmp_path / "comfy-models" / rel
+    assert gpu_rentals.installed_cloud_source(path)["url"] == ""
+
+
+def test_rental_build_refuses_to_write_outside_a_checkout(tmp_path: Path, monkeypatch) -> None:
+    """A packaged app has no repository to commit into, which is exactly why
+    the studio hides the page: the API says so rather than writing into a
+    bundle nobody will ever read back."""
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "bundle" / "packages/gpu-rentals/rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    client = _client(tmp_path, monkeypatch)
+    assert client.get("/api/gpu-rentals/build").json()["editable"] is False
+    refused = client.put("/api/gpu-rentals/build/minimax/loras", json={"ids": []})
+    assert refused.status_code == 409
+    assert "checkout" in refused.json()["detail"]
+
+
+def test_rental_build_survives_a_malformed_file(tmp_path: Path, monkeypatch) -> None:
+    """A typo in a hand-edited committed file must not take a rental down."""
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "repo" / "rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    gpu_rentals.RENTAL_BUILD_PATH.write_text("{ not json")
+    assert gpu_rentals.pinned_rental_loras("minimax") is None
+    assert gpu_rentals.rental_checkpoint_swaps("minimax") == {}
+    # And a swap whose URL cannot be fetched is dropped, not raised on.
+    gpu_rentals.RENTAL_BUILD_PATH.write_text(json.dumps({
+        "tiers": {"minimax": {"checkpoints": {"diffusion_models/x.safetensors": {"url": "ftp://nope"}}}},
+    }))
+    assert gpu_rentals.rental_checkpoint_swaps("minimax") == {}
+
+
+def test_rental_build_only_offers_weights_a_graph_can_name(tmp_path: Path, monkeypatch) -> None:
+    """Text encoders and VAEs are not interchangeable, so they are never listed
+    as swappable — and the swap route refuses a destination outside the list."""
+    client = _client(tmp_path, monkeypatch)
+    row = next(r for r in client.get("/api/gpu-rentals/build").json()["tiers"] if r["tier"] == "minimax")
+    subdirs = {weight["subdir"] for weight in row["weights"]}
+    assert subdirs <= set(gpu_rentals.RENTAL_CHECKPOINT_SUBDIRS)
+    assert "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors" in {w["dest"] for w in row["weights"]}
+    rel = _install_checkpoint(tmp_path, monkeypatch, hf="https://huggingface.co/a/b/resolve/main/mine.safetensors")
+    refused = client.put(
+        "/api/gpu-rentals/build/minimax/checkpoint",
+        json={"dest": "vae/minimax_h3_video_vae_int8_convrot.safetensors", "id": rel},
+    )
+    assert refused.status_code == 400
+
+
+def test_a_pinned_lora_the_tier_already_serves_is_downloaded_once(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """The Anima turbo LoRA is in the image tier's curated set AND installed
+    locally, so pinning it used to put two rows on the same destination: the
+    same bytes fetched twice, counted twice in the beacon total, and charged
+    twice to the disk the box is rented with."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    monkeypatch.setattr(gpu_rentals, "RENTAL_BUILD_PATH", tmp_path / "repo" / "packages/gpu-rentals/rental-build.json")
+    gpu_rentals.RENTAL_BUILD_PATH.parent.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    rel = _install_lora(tmp_path, monkeypatch, rel="anima-turbo-lora-v0.2.safetensors", base="Anima")
+    _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+
+    before = gpu_rentals.tier_download_gb("image")
+    assert client.put("/api/gpu-rentals/build/image/loras", json={"ids": [rel]}).status_code == 200
+
+    gpu_rentals._onstart_script("image")
+    dests = [line.split("\t")[1] for line in rental_manifest["text"].splitlines()]
+    assert dests.count(f"loras/{rel}") == 1
+    assert len(dests) == len(set(dests)), "two manifest rows land on one path"
+    # The curated copy wins — it is the one the tier was tuned against — and the
+    # size math is the same list, so it cannot disagree with what lands.
+    assert gpu_rentals.tier_download_gb("image") == before
+
+
+def test_a_replacement_that_got_CHEAPER_is_taken_without_asking(tmp_path: Path, monkeypatch) -> None:
+    """Only a price RISE is a question. A quote is what the renter agreed to
+    pay, so an ask that replaced it for LESS needs no permission — asking
+    would be a confirmation dialog whose only possible answer is yes.
+
+    Mechanically this is already true, because the cap is an upper bound and
+    nothing below it is filtered out. Pinned because it is a product rule now,
+    not an accident of the arithmetic: a future tolerance that became a band
+    rather than a ceiling would start prompting on good news."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
+
+    def handler(method, path, payload):
+        if path == "/v0/asks/41/":  # the quoted ask, gone by the click
+            raise gpu_rentals.GpuRentalError("no_such_ask", status_code=502)
+        if path == "/v0/bundles/":
+            return {"offers": [{"id": 41, "gpu_name": "RTX 5090", "dph_total": 0.596},
+                               {"id": 44, "gpu_name": "RTX 5090", "dph_total": 0.410}]}
+        assert path == "/v0/asks/44/", path
+        return {"new_contract": 7004, "success": True}
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/api/gpu-rentals", json={
+        "tier": "minimax", "gpu_class": "rtx5090", "offer_id": 41, "provider": "vast",
+        "max_usd_per_hour": 0.596})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["offer_id"] == "44"
+    assert body["usd_per_hour"] == 0.410 < body["quoted_usd_per_hour"] == 0.596
+
+
+# --- one slow add-on must not refuse a whole rental --------------------------
+# Measured 2026-09-14: ten LoRAs pinned to minimaxeros, all sourced from
+# Civitai, resolved ONE AT A TIME at rent time with each able to raise. A single
+# read timeout refused the entire rental ("Civitai did not answer:
+# HTTPSConnectionPool(host='civitai.com', port=443): Read timed out") while the
+# box, the base model and the other nine LoRAs were all fine — and Civitai's
+# API was answering in 0.15s a minute later.
+
+def _pin_civitai_lora(tmp_path: Path, monkeypatch, rel: str = "h3/lain.safetensors"):
+    """A LoRA registered for the H3 tiers with Civitai as its source."""
+    rel = _install_lora(tmp_path, monkeypatch, rel=rel, base="MiniMax H3")
+    (tmp_path / "comfy-loras" / (rel + ".civitai.json")).write_text(json.dumps({
+        "modelVersion": {"id": 12345, "modelId": 999, "baseModel": "MiniMax H3"}, "file": {"id": 678},
+    }))
+    _sync_uploads(monkeypatch)
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url", lambda *a, **k: "https://cdn.example/ok")
+    client = _client(tmp_path, monkeypatch)
+    body = client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).json()
+    assert body["source"] == "civitai"
+    return client, rel
+
+
+def _civitai_times_out(*_a, **_k):
+    raise gpu_rentals.GpuRentalError("Civitai did not answer in time (3 tries)", status_code=503)
+
+
+def test_a_lora_civitai_will_not_hand_over_is_left_off_not_fatal(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    _client_unused, rel = _pin_civitai_lora(tmp_path, monkeypatch)
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url", _civitai_times_out)
+
+    skipped: list[dict] = []
+    gpu_rentals._onstart_script("minimaxeros", skipped=skipped)  # must not raise
+
+    text = rental_manifest["text"]
+    assert f"loras/{rel}" not in text, "a file the box cannot fetch must not be promised to it"
+    # …and everything the tier actually needs is still there.
+    assert gpu_rentals._H3_EROS_DIT in text
+    assert "minimax_h3_fl2va_pruned_int8_convrot.safetensors" in text
+    assert [item["lora"] for item in skipped] == [rel]
+
+
+def test_stocking_a_warm_volume_is_strict_about_a_missing_lora(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    """A volume stocked without a file hands that gap to every warm box after
+    it, and a warm box skips the downloads — so nothing would ever fetch it."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    _pin_civitai_lora(tmp_path, monkeypatch)
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url", _civitai_times_out)
+
+    skipped: list[dict] = []
+    with pytest.raises(gpu_rentals.GpuRentalError):
+        gpu_rentals._onstart_script("minimaxeros", skipped=skipped, strict=True)
+    assert skipped == []
+
+
+def test_a_required_weight_civitai_will_not_hand_over_still_stops_the_rent(monkeypatch) -> None:
+    """A checkpoint swap stands in for a DEFAULT weight every graph names. A box
+    without it cannot run the tier, so this still refuses — before a box is paid
+    for — rather than renting something that is guaranteed to fail."""
+    rows = [{
+        "dest": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "key": "", "url": "", "civitai": {"version_id": "3208482", "file_id": ""},
+        "size_gb": 21.0, "optional": False,
+    }]
+    monkeypatch.setattr(gpu_rentals, "tier_download_rows", lambda tier: rows)
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url", _civitai_times_out)
+
+    skipped: list[dict] = []
+    with pytest.raises(gpu_rentals.GpuRentalError):
+        gpu_rentals._rental_manifest("minimax", skipped=skipped)
+    assert skipped == [], "a required weight is never quietly skipped"
+
+
+def test_a_civitai_timeout_reads_as_a_sentence(monkeypatch) -> None:
+    monkeypatch.setenv("CIVITAI_API_KEY", "tok")
+    monkeypatch.setattr(gpu_rentals.time, "sleep", lambda _s: None)
+
+    def boom(*_a, **_k):
+        raise gpu_rentals.requests.ReadTimeout(
+            "HTTPSConnectionPool(host='civitai.com', port=443): Read timed out. (read timeout=30)")
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", boom)
+    with pytest.raises(gpu_rentals.GpuRentalError) as caught:
+        gpu_rentals._civitai_signed_url("1")
+    message = str(caught.value)
+    assert "HTTPSConnectionPool" not in message and "read timeout" not in message.lower()
+    assert "Civitai" in message and "in time" in message
+    # The pool's own words are kept for the log, on the exception chain.
+    assert isinstance(caught.value.__cause__, gpu_rentals.requests.ReadTimeout)
+
+
+def test_a_rental_without_one_lora_rents_and_says_which(tmp_path: Path, monkeypatch) -> None:
+    client, rel = _pin_civitai_lora(tmp_path, monkeypatch)
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
+    monkeypatch.setattr(gpu_rentals, "_civitai_signed_url", _civitai_times_out)
+
+    def handler(method, path, payload):
+        if path == "/v0/bundles/":
+            return {"offers": [{"id": 51, "gpu_name": "RTX 5090", "dph_total": 0.62}]}
+        if path == "/v0/asks/51/":
+            return {"new_contract": 7051, "success": True}
+        raise AssertionError(f"unexpected marketplace call: {path}")
+
+    _fake_vast(monkeypatch, handler)
+    response = client.post("/api/gpu-rentals", json={
+        "tier": "minimaxeros", "gpu_class": "rtx5090", "offer_id": 51, "provider": "vast",
+        "max_usd_per_hour": 0.62})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["skipped_loras"] == [rel]
+    # Named by file, in the notice the Machines view already shows.
+    assert "lain.safetensors" in body["partial"]

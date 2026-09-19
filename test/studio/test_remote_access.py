@@ -10,8 +10,10 @@ Tailscale's real one, and every state this can be in names its own fix.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hivemind_content_studio import remote_access
@@ -20,6 +22,7 @@ from hivemind_content_studio.control_api import build_control_app
 from hivemind_content_studio.orchestrator import ContentOrchestrator
 from hivemind_content_studio.private_access import OwnerAccess, PrivateFieldCipher
 from hivemind_content_studio.remote_access import (
+    DEFAULT_TAILNET_HTTPS_PORT,
     CommandResult,
     RemoteAccessError,
     remote_access_status,
@@ -41,10 +44,28 @@ def _status_json(state: str = "Running", dns: str = DNS_NAME) -> str:
     })
 
 
+def _serve_json_entries(entries: dict[int, str], dns: str = DNS_NAME) -> str:
+    """`tailscale serve status --json` with one door per HTTPS port."""
+    return json.dumps({"Web": {
+        f"{dns}:{https_port}": {"Handlers": {"/": {"Proxy": target}}} for https_port, target in entries.items()
+    }})
+
+
 def _serve_json(target: str | None, https_port: int = 8765, dns: str = DNS_NAME) -> str:
     if target is None:
         return json.dumps({})
-    return json.dumps({"Web": {f"{dns}:{https_port}": {"Handlers": {"/": {"Proxy": target}}}}})
+    return _serve_json_entries({https_port: target}, dns=dns)
+
+
+# This Mac's `tailscale serve status --json` on 2026-09-15, minus the studio's
+# own door: three shares that are somebody else's, on ports the studio never
+# asked for. They sit beside the studio's door and must never be read as it —
+# nor as an obstacle to it.
+_THIS_MACS_OTHER_SHARES = {
+    443: "http://127.0.0.1:3010",
+    8081: "http://127.0.0.1:8081",
+    8443: "http://127.0.0.1:8081",
+}
 
 
 class FakeTailscale:
@@ -61,11 +82,17 @@ class FakeTailscale:
             return CommandResult(0, self.status, "")
         if argv[1:4] == ["serve", "status", "--json"]:
             return CommandResult(0, self.serve, "")
-        # A write. Reflect it into what the next read reports.
-        if "off" in argv:
-            self.serve = _serve_json(None)
+        # A write. Reflect it into what the next read reports, door by door:
+        # `--https=N off` closes door N and `--https=N <target>` opens it, and
+        # every other door on the host is left exactly as it was.
+        https_port = next(part for part in argv if part.startswith("--https=")).split("=", 1)[1]
+        web = json.loads(self.serve).get("Web") or {}
+        key = f"{DNS_NAME}:{https_port}"
+        if argv[-1] == "off":
+            web.pop(key, None)
         else:
-            self.serve = _serve_json("http://127.0.0.1:8765")
+            web[key] = {"Handlers": {"/": {"Proxy": argv[-1]}}}
+        self.serve = json.dumps({"Web": web})
         return CommandResult(0, "", "")
 
 
@@ -140,6 +167,99 @@ def test_someone_elses_share_on_the_same_port_is_not_read_as_ours(monkeypatch) -
     run = FakeTailscale(status=_status_json(), serve=_serve_json("http://127.0.0.1:3010"))
 
     assert remote_access_status(port=8765, https_port=8765, run=run)["enabled"] is False
+
+
+# ── the door is found by what it opens onto, not by the port it is on ────────
+#
+# Verified 2026-09-15 on the owner's Mac: `tailscale serve` had the studio on
+# https://<mac>.ts.net:8789 — the retired proxy's number, the URL every other
+# device kept — while CONTENT_STUDIO_TAILNET_PORT said 8765. The reading keyed
+# on the env's port, so the card said OFF over a door the owner's phone opened
+# every day, and turning it ON would have published a second URL beside it.
+
+_DOOR_ON_8789 = {**_THIS_MACS_OTHER_SHARES, 8789: "http://127.0.0.1:8765"}
+
+
+def test_a_door_on_the_old_proxy_port_is_reported_as_the_live_url(monkeypatch) -> None:
+    _installed(monkeypatch)
+    run = FakeTailscale(status=_status_json(), serve=_serve_json_entries(_DOOR_ON_8789))
+
+    reading = remote_access_status(port=8765, https_port=8765, run=run)
+
+    assert reading["enabled"] is True
+    assert reading["url"] == f"https://{DNS_NAME}:8789/"
+    assert reading["https_port"] == 8789            # the door that exists, not the env's number
+    assert reading["published_ports"] == [8765]     # still only the control API's port
+    assert reading["conflict"] is False
+    assert f"{DNS_NAME}:8789" in reading["detail"]
+
+
+def test_turning_on_beside_an_existing_door_opens_no_second_one(monkeypatch) -> None:
+    _installed(monkeypatch)
+    run = FakeTailscale(status=_status_json(), serve=_serve_json_entries(_DOOR_ON_8789))
+
+    reading = set_remote_access(True, port=8765, https_port=8765, run=run)
+
+    # Reads only: no `serve --https=8765 …` beside the 8789 door.
+    assert all(argv[1:2] == ["status"] or argv[1:3] == ["serve", "status"] for argv in run.calls), run.calls
+    assert reading["enabled"] is True and reading["url"] == f"https://{DNS_NAME}:8789/"
+
+
+def test_turning_off_closes_the_door_that_exists_not_the_configured_port(monkeypatch) -> None:
+    _installed(monkeypatch)
+    run = FakeTailscale(status=_status_json(), serve=_serve_json_entries(_DOOR_ON_8789))
+
+    reading = set_remote_access(False, port=8765, https_port=8765, run=run)
+
+    writes = [argv for argv in run.calls if argv[1] == "serve" and argv[2] != "status"]
+    assert writes == [["/usr/bin/tailscale", "serve", "--https=8789", "off"]]
+    assert reading["enabled"] is False and reading["url"] == ""
+    # The other shares on this host were never ours to touch.
+    assert set(json.loads(run.serve)["Web"]) == {f"{DNS_NAME}:{p}" for p in _THIS_MACS_OTHER_SHARES}
+
+
+def test_off_closes_every_door_onto_the_studio(monkeypatch) -> None:
+    """The state the old switch would have left behind — a second door on the
+    env's port beside the 8789 one. Off means no tailnet address reaches it."""
+    _installed(monkeypatch)
+    run = FakeTailscale(status=_status_json(), serve=_serve_json_entries({**_DOOR_ON_8789, 8765: "http://127.0.0.1:8765"}))
+    assert remote_access_status(port=8765, https_port=8765, run=run)["url"] == f"https://{DNS_NAME}:8765/"
+
+    reading = set_remote_access(False, port=8765, https_port=8765, run=run)
+
+    writes = [argv for argv in run.calls if argv[1] == "serve" and argv[2] != "status"]
+    assert writes == [
+        ["/usr/bin/tailscale", "serve", "--https=8765", "off"],
+        ["/usr/bin/tailscale", "serve", "--https=8789", "off"],
+    ]
+    assert reading["enabled"] is False
+
+
+def test_no_door_reads_off_at_the_default_port(monkeypatch) -> None:
+    _installed(monkeypatch)
+    monkeypatch.delenv("CONTENT_STUDIO_TAILNET_PORT", raising=False)
+    monkeypatch.delenv("CONTENT_STUDIO_CONTROL_PORT", raising=False)
+    run = FakeTailscale(status=_status_json(), serve=_serve_json_entries(_THIS_MACS_OTHER_SHARES))
+
+    reading = remote_access_status(run=run)
+
+    assert reading["enabled"] is False and reading["url"] == "" and reading["published_ports"] == []
+    assert reading["https_port"] == DEFAULT_TAILNET_HTTPS_PORT == 8765
+    # Shares on other ports are somebody else's and no obstacle: 8765 is free.
+    assert reading["conflict"] is False
+
+
+def test_someone_elses_share_on_the_port_we_would_take_is_a_conflict(monkeypatch) -> None:
+    _installed(monkeypatch)
+    run = FakeTailscale(status=_status_json(), serve=_serve_json_entries({**_THIS_MACS_OTHER_SHARES, 8765: "http://127.0.0.1:3010"}))
+
+    reading = remote_access_status(port=8765, https_port=8765, run=run)
+
+    assert reading["enabled"] is False and reading["conflict"] is True
+    with pytest.raises(RemoteAccessError, match="Another service"):
+        set_remote_access(True, port=8765, https_port=8765, run=run)
+    # The existing share was left exactly as it was: reads only.
+    assert all(argv[1:2] == ["status"] or argv[1:3] == ["serve", "status"] for argv in run.calls)
 
 
 # ── every unusable state carries its own fix ─────────────────────────────────
@@ -261,6 +381,61 @@ def test_a_cold_start_spawns_no_proxy_and_generates_no_certificate() -> None:
 
     # The Canvas port is not published anywhere in the boot path.
     assert "http://$ts_ip:8788" not in stack
+
+
+_TAILNET_BLOCK_START = "# tailscale_ip() lived here"
+_TAILNET_BLOCK_END = "# The tailnet URL is not made here any more."
+
+
+def _stack_tailnet_url(tmp_path: Path, *, serve: str, https_port: int = 8765) -> str:
+    """Run the supervisor's real tailnet_studio_url with a scripted CLI standing in for Tailscale."""
+    lines = _STACK.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(_TAILNET_BLOCK_START))
+    end = next(i for i, line in enumerate(lines) if line.startswith(_TAILNET_BLOCK_END))
+    (tmp_path / "status.json").write_text(_status_json(), encoding="utf-8")
+    (tmp_path / "serve.json").write_text(serve, encoding="utf-8")
+    fake = tmp_path / "tailscale"
+    fake.write_text(
+        '#!/bin/sh\ncase "$1 $2" in\n'
+        f'  "status --json") cat "{tmp_path}/status.json" ;;\n'
+        f'  "serve status") cat "{tmp_path}/serve.json" ;;\n'
+        '  *) exit 1 ;;\nesac\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    script = "\n".join([
+        "set -u",
+        # The PATH the supervisor exports on its first line, so python3 is the one it runs with.
+        'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"',
+        f'TAILSCALE_CLI="{fake}"',
+        'CONTENT_STUDIO_PORT="8765"',
+        f'TAILNET_HTTPS_PORT="{https_port}"',
+        *lines[start:end],
+        "tailnet_studio_url",
+    ])
+    completed = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=30, check=False)
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout.strip()
+
+
+def test_the_supervisor_reads_the_url_from_serve_on_whatever_port_the_door_is(tmp_path: Path) -> None:
+    """`zimage-stack status` said ":8789 not listening" and "not published
+    (remote access is off)" on a Mac whose 8789 door was open all along: serve
+    binds no local port, and the reader keyed on the env's 8765."""
+    door = _serve_json_entries(_DOOR_ON_8789)
+    assert _stack_tailnet_url(tmp_path, serve=door) == f"https://{DNS_NAME}:8789/"
+    assert _stack_tailnet_url(tmp_path, serve=door, https_port=8789) == f"https://{DNS_NAME}:8789/"
+    # Somebody else's shares are not the studio's door, and no door is no URL.
+    assert _stack_tailnet_url(tmp_path, serve=_serve_json_entries(_THIS_MACS_OTHER_SHARES)) == ""
+    assert _stack_tailnet_url(tmp_path, serve=_serve_json(None)) == ""
+
+    stack = _STACK.read_text(encoding="utf-8")
+    # Nothing keys on the retired proxy's port any more: not a listener probe
+    # (serve never listens locally, so ":8789 not listening" was never news)
+    # and not a reaper.
+    assert "TAILSCALE_HTTPS_PORT" not in stack
+    # And "off" is what serve says, not what the boot flag said.
+    assert "remote access is off" not in stack
 
 
 def test_headless_publish_does_not_replace_another_service(monkeypatch):

@@ -179,7 +179,12 @@ def test_video_loras_have_native_mlx_and_comfy_graph_parity():
     registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
     # Civitai's base-model category per family — what the studio's LoRA panel
     # filters the installed catalog by.
-    expected_bases = {"ltx-2.3": ["LTXV"], "minimax": ["MiniMax H3"]}
+    # `minimax-eros` is its own family only so the reference/head-replacement
+    # siblings resolve within it (both families' lanes are matched by prefix
+    # everywhere else). Its LoRAs are the SAME Civitai category: Eros Max is
+    # itself published there under base model "MiniMax H3".
+    expected_bases = {"ltx-2.3": ["LTXV"], "minimax": ["MiniMax H3"],
+                      "minimax-eros": ["MiniMax H3"], "minimax-h3-native": ["MiniMax H3"]}
     checked = 0
     for workflow in (item for item in _resolved_registry_workflows(registry) if item["media_type"] == "video"):
         if not workflow.get("supports_loras"):
@@ -190,6 +195,12 @@ def test_video_loras_have_native_mlx_and_comfy_graph_parity():
         assert workflow["supports_loras"] is True
         assert workflow["compatible_base_models"] == expected_bases[workflow["family"]]
         assert "loras" in workflow["accepts"]
+        if workflow["builder"] == "h3-native":
+            # h3.c fuses LoRAs into its own weights as they load: there is no
+            # graph here, so no injection seam, and the engine patch is the seam.
+            assert "lora_injection" not in workflow
+            assert "patches/h3c-lora.patch" in workflow["h3_native"]["patches"]
+            continue
         injection = workflow["lora_injection"]
         graph = _graph_or_skip(workflow["api_workflow"])
         sources = [graph[target["node"]]["inputs"][target["input"]] for target in injection["targets"]]
@@ -304,6 +315,84 @@ def test_minimax_h3_registry_entry_matches_its_comfy_graph():
         if isinstance(value, list) and value and str(value[0]) == image_node
     ]
     assert consumers == [("104", "first_frame")]
+
+
+def test_the_eros_lanes_are_the_h3_lanes_with_one_transformer_swapped():
+    """H3 Eros Max is a finetune, so its lanes are copies — and the value of a
+    copy is that it stayed a copy. Three things have to hold.
+
+    ONE: each eros graph loads the eros transformer and NOTHING ELSE changes
+    hands — same encoder, same two VAEs, same model chain as the lane it was
+    copied from. A stray official filename left in one of them would route and
+    render on the wrong weights with no error anywhere.
+
+    TWO: no turbo LoRA. This is the TURBO-hybrid build, with the ref/fl turbo
+    deltas already fused into the weights; MiniMaxH3TurboLoRA on top would be a
+    second distillation over a distilled model.
+
+    THREE: each row DECLARES the eros transformer. These lanes only ever run on
+    a rented box, and the preflight compares that list against the box's
+    inventory — inheriting the parent's list unnoticed would have it check for
+    the official DiT on a lane that never loads it.
+    """
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    resolved = {item["id"]: item for item in _resolved_registry_workflows(registry)}
+    eros_dit = "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors"
+    pairs = [
+        ("minimax-h3-eros", "minimax-h3"),
+        ("minimax-h3-eros-reference", "minimax-h3-reference"),
+        ("minimax-h3-eros-inpaint", "minimax-h3-inpaint"),
+    ]
+    for eros_id, parent_id in pairs:
+        eros, parent = resolved[eros_id], resolved[parent_id]
+        graph = _graph_or_skip(eros["api_workflow"])
+        parent_graph = _graph_or_skip(parent["api_workflow"])
+
+        assert graph["6"]["inputs"]["unet_name"] == eros_dit, eros_id
+        assert "minimax_h3_fl2va" not in json.dumps(graph), (
+            f"{eros_id} still names the official transformer somewhere"
+        )
+        assert "MiniMaxH3TurboLoRA" not in json.dumps(graph), eros_id
+        # Same graph, node for node — only the three tuned inputs may differ.
+        assert set(graph) == set(parent_graph), eros_id
+        assert _model_chain(graph) == _model_chain(parent_graph), eros_id
+        for node_id, node in graph.items():
+            assert node["class_type"] == parent_graph[node_id]["class_type"], (eros_id, node_id)
+        assert graph["17"]["inputs"]["sampler_name"] == "res_multistep", eros_id
+        assert graph["9"]["inputs"]["steps"] == eros["defaults"]["steps"] == 8, eros_id
+        # Spectrum costs accuracy on this model and has no history to forecast
+        # from at 8 steps, so it ships off — and the registry must agree with
+        # the graph, or the composer's toggle starts out lying.
+        assert graph["30"]["inputs"]["enabled"] is False, eros_id
+        assert eros["defaults"]["spectrum"] is False, eros_id
+
+        declared = {Path(dep["relativePath"]).name for dep in eros["model_dependencies"]}
+        assert eros_dit in declared, eros_id
+
+        # The swap is the ONLY difference in what gets loaded. Stated against
+        # the parent rather than against the declared list, because the parent
+        # leaves some on-demand weights out too (rife, sam3) and this lane is
+        # not the place to change that contract — it is the place to prove it
+        # was copied.
+        def weights(g):
+            return {v for node in g.values() for v in node["inputs"].values()
+                    if isinstance(v, str) and v.endswith(".safetensors")}
+        assert weights(graph) == (
+            weights(parent_graph) - {"minimax_h3_fl2va_pruned_int8_convrot.safetensors"}
+        ) | {eros_dit}, eros_id
+
+    # Its own family, and that is load-bearing rather than cosmetic: reference
+    # and head-replacement siblings resolve as "first lane of the same family
+    # with reference slots", so sharing `minimax` would have sent an eros run
+    # with references onto the OFFICIAL weights.
+    assert {resolved[i]["family"] for i, _ in pairs} == {"minimax-eros"}
+    assert resolved["minimax-h3-eros-reference"]["routing_only"] is True
+    assert resolved["minimax-h3-eros-inpaint"]["routing_only"] is True
+    assert "routing_only" not in resolved["minimax-h3-eros"]
+    # Prefix, not equality, is what every capability check uses (H3's duration
+    # ceiling, its prompt grammar, its quality controls) — so the new family
+    # keeps all of them.
+    assert resolved["minimax-h3-eros"]["family"].startswith("minimax")
 
 
 def test_minimax_h3_turbo_inherits_and_bakes_the_distill_contract():
@@ -742,6 +831,135 @@ def test_video_mcp_compiles_shared_keyframes_into_comfy_cuda_graph(tmp_path, wor
     assert [item["strength"] for item in metadata] == [1, 0.65, 1, 1]
     native_loras = captures[0]["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["nativeMlxLtx"]["loras"]
     assert native_loras == [{"name": "ltx/test-style.safetensors", "strength": 0.7}]
+
+
+def test_native_h3_mcp_sends_the_lora_selection_to_the_gateway(tmp_path):
+    """h3.c fuses LoRAs itself, so MiniMax H3 (Apple Silicon) takes the studio's
+    LoRA selection like every other LoRA lane: checked in the MCP before any
+    media is staged, then carried by name and strength under
+    extra_pnginfo.nativeH3 for the gateway to resolve against its library."""
+    source = json.loads(WORKFLOW_REGISTRY.read_text())
+    lane = next(w for w in source["workflows"] if w["id"] == "minimax-h3-native")
+    assert lane["supports_loras"] is True
+    registry = tmp_path / "workflow-registry.json"
+    registry.write_text(json.dumps({"workflows": [lane]}), encoding="utf-8")
+    captures = []
+
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("content-length", "0")))
+            if self.path == "/comfy/api/prompt":
+                captures.append(json.loads(body))
+                payload = json.dumps({"prompt_id": "h3-native-lora-test"}).encode()
+                self.send_response(200)
+            else:
+                payload = json.dumps({"error": "not found"}).encode()
+                self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            payload = json.dumps({"error": "not found"}).encode()
+            self.send_response(404)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    threading.Thread(target=backend.serve_forever, daemon=True).start()
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "0",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
+        "COMFY_INPUT_DIR": str(tmp_path / "input"),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    responses = []
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("Media Studio MCP did not start")
+
+        def generate(arguments):
+            request = Request(
+                f"http://127.0.0.1:{mcp_port}/mcp",
+                data=json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "media_generate_video", "arguments": arguments},
+                }).encode(),
+                headers={
+                    "authorization": "Bearer test-token",
+                    "content-type": "application/json",
+                    "accept": "application/json, text/event-stream",
+                },
+                method="POST",
+            )
+            with urlopen(request, timeout=10) as response:
+                assert response.status == 200
+                return response.read().decode("utf-8")
+
+        responses.append(generate({
+            "workflow_id": "minimax-h3-native",
+            "prompt": "a red balloon drifting over a harbour at dawn",
+            "duration_seconds": 1,
+            "loras": [
+                {"id": "H3_Deeper.safetensors", "strength": 0.6},
+                {"id": "styles/minimax-jav-voice.safetensors", "strength": -0.5},
+            ],
+            "wait": False,
+        }))
+        # An id that climbs out of the LoRA library never reaches the gateway.
+        responses.append(generate({
+            "workflow_id": "minimax-h3-native",
+            "prompt": "a red balloon",
+            "loras": [{"id": "../outside.safetensors", "strength": 1}],
+            "wait": False,
+        }))
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+
+    assert len(captures) == 1, responses
+    native = captures[0]["extra_data"]["extra_pnginfo"]["nativeH3"]
+    assert native["prompt"] == "a red balloon drifting over a harbour at dawn"
+    assert native["loras"] == [
+        {"name": "H3_Deeper.safetensors", "strength": 0.6},
+        {"name": "styles/minimax-jav-voice.safetensors", "strength": -0.5},
+    ]
+    assert "invalid LoRA id" in responses[1]
 
 
 def test_video_mcp_stages_inline_video_and_compiles_ltx_extension_graph(tmp_path):
@@ -2849,6 +3067,33 @@ def test_autogrow_reference_slots_are_zero_indexed_like_comfyui_names_them() -> 
 # The motion-reference ceiling exists in two places on purpose: the registry is
 # the source of truth, and media_catalog mirrors it so a DEGRADED catalog still
 # refuses a length the card cannot render. Two copies can drift, so pin them.
+# Every H3 video lane that runs on a rented NVIDIA card, and is therefore held
+# to a measured VRAM budget for motion references. Named in full rather than
+# matched by prefix: `minimax-h3-native` shares the prefix and is a Metal engine
+# in unified memory with SSD streaming as its relief valve, so a 5090's packed-row
+# ceiling is not a fact about it — and copying one over would be the same
+# interpolation the budget's own note warns against.
+_H3_CUDA_VIDEO_LANE_IDS = [
+    "minimax-h3-turbo",
+    "minimax-h3-reference",
+    "minimax-h3-inpaint",
+    "minimax-h3",
+    "minimax-h3-eros",
+    "minimax-h3-eros-reference",
+    "minimax-h3-eros-inpaint",
+]
+
+
+def _h3_cuda_video_lanes(registry):
+    """The resolved H3 lanes that declare a CUDA accelerator, in registry order."""
+    return [
+        workflow for workflow in _resolved_registry_workflows(registry)
+        if workflow["id"].startswith("minimax-h3")
+        and workflow.get("media_type") == "video"
+        and str((workflow.get("hardware") or {}).get("accelerator") or "").lower() == "cuda"
+    ]
+
+
 def test_motion_reference_budget_mirror_matches_the_registry():
     from hivemind_content_studio.media_catalog import (
         _H3_FRAME_GRID,
@@ -2866,16 +3111,18 @@ def test_motion_reference_budget_mirror_matches_the_registry():
     # Reference mode is a SEPARATE workflow reached by routing, and it is the
     # one that actually stages motion clips — the budget has to reach it, which
     # it does by inheritance. A tier that lost it would offer 15s again.
-    for workflow in _resolved_registry_workflows(registry):
-        # VIDEO lanes only: minimax-h3-image shares the id prefix but is a still
-        # lane with no motion references, so it carries no budget by design.
-        if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
-            assert workflow["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
+    covered = []
+    for workflow in _h3_cuda_video_lanes(registry):
+        covered.append(workflow["id"])
+        assert workflow["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
             # And the per-card table: the base on the 32 GB card, more on a
             # 96 GB RTX PRO 6000. The degraded catalog must carry the same.
-            from hivemind_content_studio.media_catalog import _H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB
-            assert workflow["motion_reference_budget"]["max_packed_rows_by_vram_gb"] == _H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB
-            assert workflow["motion_reference_budget"]["max_packed_rows_by_vram_gb"]["32"] == _H3_MOTION_REFERENCE_PACKED_ROWS
+        from hivemind_content_studio.media_catalog import _H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB
+        assert workflow["motion_reference_budget"]["max_packed_rows_by_vram_gb"] == _H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB
+        assert workflow["motion_reference_budget"]["max_packed_rows_by_vram_gb"]["32"] == _H3_MOTION_REFERENCE_PACKED_ROWS
+    # What this guard actually walked, named rather than counted: a filter that
+    # silently stopped matching would otherwise pass by covering nothing.
+    assert covered == _H3_CUDA_VIDEO_LANE_IDS, covered
 
     # And the fallback list the studio gets when the registry cannot be read
     # carries the ceiling rather than silently restoring the full range.
@@ -2898,16 +3145,16 @@ def test_the_no_headroom_ceiling_reaches_every_h3_video_lane():
     from hivemind_content_studio.gpu_rentals import TIERS
 
     registry = json.loads(WORKFLOW_REGISTRY.read_text())
-    checked = 0
-    for workflow in _resolved_registry_workflows(registry):
-        if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
-            budget = workflow["motion_reference_budget"]
-            assert budget["vram_headroom_gb"] == TIERS["minimax"]["comfy_vram_headroom_gb"] == 12
-            # The flag was measured inert (identical OOM at 12 and 20), so a
-            # lane without it is held to the SAME ceiling — never a looser one.
-            assert budget["max_packed_rows_without_vram_headroom"] == budget["max_packed_rows"] == 76000
-            checked += 1
-    assert checked >= 2, "reference mode must inherit the budget"
+    covered = []
+    for workflow in _h3_cuda_video_lanes(registry):
+        budget = workflow["motion_reference_budget"]
+        assert budget["vram_headroom_gb"] == TIERS["minimax"]["comfy_vram_headroom_gb"] == 12
+        # The flag was measured inert (identical OOM at 12 and 20), so a
+        # lane without it is held to the SAME ceiling — never a looser one.
+        assert budget["max_packed_rows_without_vram_headroom"] == budget["max_packed_rows"] == 76000
+        covered.append(workflow["id"])
+    assert covered == _H3_CUDA_VIDEO_LANE_IDS, covered
+    assert "minimax-h3-reference" in covered, "reference mode must inherit the budget"
     # The rule since 2026-08-23, and the reason this assertion changed shape:
     # a ceiling is AT OR BELOW the largest run PROVEN clean, never BETWEEN a
     # success and a failure. This used to read `82000 < 85000 < 104000` — a

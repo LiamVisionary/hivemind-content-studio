@@ -94,7 +94,10 @@ def test_status_polls_present_the_same_key_the_job_was_started_with(monkeypatch)
         def call_tool(self, *_args, **_kwargs):
             return None
 
-    def fake_client(_descriptor, requester_pub=""):
+    # Third positional: start_video calls _client(descriptor, requester_pub,
+    # owner_pub). With two, this failed on a TypeError before it could assert
+    # anything — the key-forwarding contract it exists to pin went unchecked.
+    def fake_client(_descriptor, requester_pub="", _owner_pub=""):
         seen.append(requester_pub)
         return Client()
 

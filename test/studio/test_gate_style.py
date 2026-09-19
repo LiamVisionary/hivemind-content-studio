@@ -154,3 +154,42 @@ def test_a_gate_that_cannot_reach_the_studio_still_offers_a_way_forward():
     assert "el('unreachable').hidden = false;" in html, "the failure path reveals it"
     assert "el('unreachable-retry').addEventListener" in html, "and the button runs start() again"
     assert "el('lede').textContent = OPENING_LEDE;" in html, "a recovery restores the opening lede"
+
+
+def test_the_prf_salt_label_matches_the_shared_block():
+    """One label, not two.
+
+    `PRF_SALT_LABEL` exists for Python callers; the value that actually derives
+    a salt lives in the vault-unlock-policy block the gate carries verbatim from
+    the app bundle. Two copies of a constant whose change would strand every
+    PRF-wrapped vault is exactly the drift worth a test.
+    """
+    from hivemind_content_studio.account_gate import PRF_SALT_LABEL, account_gate_html
+
+    html = account_gate_html(desktop=False)
+    assert f"const VAULT_PRF_SALT_LABEL = '{PRF_SALT_LABEL}';" in html
+    assert "__PRF_SALT_LABEL__" not in html, "the placeholder substitution is gone, not merely unused"
+
+
+def test_the_signin_card_offers_a_passkey_it_can_actually_add():
+    """No passkey yet means an offer on the card, off until someone asks.
+
+    Registration needs an open session, which is why there is no pre-sign-in
+    "set up a passkey" button — but the sign-in below the toggle opens exactly
+    that session, so ticking it enrols the moment the password is proved. The
+    interstitial that used to ask after EVERY password sign-in is gone with its
+    "don't ask again" flag: a question asked every time is answered by reflex.
+    """
+    from hivemind_content_studio.account_gate import account_gate_html
+
+    html = account_gate_html(desktop=False)
+    assert 'id="enrol-offer"' in html
+    assert 'id="enrol-after"' in html
+    assert "el('enrol-after').checked = options.enrolDefault;" in html, "the policy sets the default"
+    assert "if (!el('enrol-offer').hidden && el('enrol-after').checked) {" in html
+    assert "enrol-hide" not in html, "the don't-ask-again checkbox went with the interstitial"
+    assert "passkeyOfferHidden" not in html
+    # A passkey-only workspace in a browser that cannot run one gets a sentence,
+    # not a password field that could only refuse.
+    assert 'id="stuck"' in html
+    assert "el('stuck').hidden = !options.stuck;" in html

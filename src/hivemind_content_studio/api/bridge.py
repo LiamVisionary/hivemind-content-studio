@@ -21,7 +21,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from .. import civitai_post
+from .. import civitai_post, media_tracks
 from ..media_studio import local_gateway_token, normalized_requester_pub, sanitize_error_detail
 from ..settings import settings as studio_settings
 
@@ -125,11 +125,21 @@ def register(app, ctx) -> None:
             "healthz",
             "local-ai/binary-status",
             "local-ai/models",
+            # The music catalogue. Separate from local-ai/models because that one
+            # lists image workflows only; without this line the Music studio's
+            # same-origin GET is answered by the bridge with a 404 and the page
+            # has no model to render at all.
+            "local-ai/audio-models",
             "local-ai/generate",
             "local-ai/upscale",
             "local-ai/interpolate",
             "local-ai/episode",
             "local-ai/smart-mask",
+            # Splitting a finished clip's sound into stems. NOT in
+            # JOB_STARTING_ROUTES: the stems ride back inline on the job record
+            # and are never gateway outputs, so there is nothing to claim for a
+            # workspace and no vault key for the job to be sealed to.
+            "local-ai/audio-split",
             "local-ai/ltx-director",
             "local-ai/prompt-helper",
             "local-ai/civitai-download",
@@ -455,6 +465,48 @@ def register(app, ctx) -> None:
                 # did not make.
                 "X-Settings-Embedded": "1" if embedded else "0",
             },
+        )
+
+    # --- one half of a clip: its sound, or its picture ---------------------
+    #
+    # Same shape and same promises as the stamp above, for the same reason: the
+    # browser holds the vault key, so the bytes arrive decrypted, live in a
+    # temporary directory for exactly as long as ffmpeg needs them, and go
+    # straight back to the tab that asked. Nothing is listed, sealed or kept —
+    # this is a person saving part of their own file, not a new creation.
+    @router.post("/api/media/track", dependencies=[Depends(require_owner)])
+    async def media_track(
+        file: UploadFile = File(...),
+        mode: Annotated[str, Form()] = "audio",
+    ) -> Response:
+        """`mode=audio`: the soundtrack as WAV. `mode=silent`: the video, stream-copied, with no sound."""
+        if mode not in media_tracks.MODES:
+            raise HTTPException(status_code=400, detail="mode must be 'audio' or 'silent'.")
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="That file is empty.")
+
+        def _extracted() -> tuple[bytes, str, str]:
+            with tempfile.TemporaryDirectory(prefix="hive-track-") as tmp:
+                suffix = pathlib.Path(file.filename or "").suffix.lower() or ".mp4"
+                # A fixed name: the upload's own name is somebody's title, and
+                # nothing about this step needs it on disk.
+                source = pathlib.Path(tmp) / f"source{suffix}"
+                source.write_bytes(data)
+                return media_tracks.extract(source, mode)
+
+        try:
+            content, media_type, extension = await asyncio.to_thread(_extracted)
+        except media_tracks.TrackError as exc:
+            # 422, not 500: "this clip has no sound" is an answer about the
+            # file, and the studio shows the sentence as it is.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not take that clip apart.") from exc
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Cache-Control": "no-store", "X-Track-Extension": extension},
         )
 
     app.include_router(router)
